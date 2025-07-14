@@ -12,6 +12,8 @@ pub struct FileItem {
     pub is_binary: bool,
     pub size: u64,
     pub depth: usize,
+    pub parent: Option<PathBuf>,
+    pub children: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]

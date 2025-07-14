@@ -1,13 +1,14 @@
 use eframe::egui;
 use std::path::PathBuf;
+use std::collections::HashSet;
 use tokio::sync::mpsc;
 use std::sync::Arc;
 
 use super::ContextFileConcatApp;
-use crate::core::{DirectoryScanner, FileHandler, SearchEngine, TreeGenerator, SearchFilter};
+use crate::core::{DirectoryScanner, FileHandler, SearchEngine, TreeGenerator, SearchFilter, FileItem};
 
 impl ContextFileConcatApp {
-    pub fn render_main_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn render_main_ui(&mut self, _ui: &mut egui::Ui, ctx: &egui::Context) {
         // Top toolbar panel
         egui::TopBottomPanel::top("toolbar")
             .default_height(60.0)
@@ -184,6 +185,12 @@ impl ContextFileConcatApp {
             if ui.button("Deselect All").clicked() {
                 self.selected_files.clear();
             }
+            if ui.button("Expand All").clicked() {
+                self.expand_all_directories();
+            }
+            if ui.button("Collapse All").clicked() {
+                self.expanded_dirs.clear();
+            }
             
             ui.separator();
             ui.label(format!("{} files found, {} selected", 
@@ -194,57 +201,195 @@ impl ContextFileConcatApp {
         
         ui.separator();
         
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .auto_shrink([false, false])
             .max_height(300.0)
             .show(ui, |ui| {
-                for file_item in &self.filtered_files.clone() {
-                    self.render_file_item(ui, file_item);
-                }
+                self.render_file_tree_recursive(ui);
             });
     }
     
-    fn render_file_item(&mut self, ui: &mut egui::Ui, file_item: &crate::core::FileItem) {
-        ui.horizontal(|ui| {
-            // Checkbox
-            let mut is_selected = self.selected_files.contains(&file_item.path);
-            if ui.checkbox(&mut is_selected, "").changed() {
-                if is_selected {
-                    self.selected_files.insert(file_item.path.clone());
-                } else {
-                    self.selected_files.remove(&file_item.path);
+    fn render_file_tree_recursive(&mut self, ui: &mut egui::Ui) {
+        // Build a hierarchical structure from flat file list
+        let mut root_items = Vec::new();
+        let current_root = PathBuf::from(&self.current_path);
+        
+        // Find direct children of the current root
+        for item in &self.filtered_files {
+            if let Ok(relative) = item.path.strip_prefix(&current_root) {
+                if relative.components().count() == 1 {
+                    root_items.push(item.clone());
                 }
             }
-            
-            // File icon
-            let icon = if file_item.is_directory {
-                "📁"
-            } else if file_item.is_binary {
-                "🔧"
-            } else {
-                "📄"
-            };
-            ui.label(icon);
-            
-            // File name (clickable for preview)
-            let name = file_item.path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-                
-            if ui.selectable_label(
-                self.preview_file.as_ref() == Some(&file_item.path),
-                name.as_ref()
-            ).clicked() && !file_item.is_directory {
-                self.load_file_preview(&file_item.path);
+        }
+        
+        // Sort: directories first, then files
+        root_items.sort_by(|a, b| {
+            match (a.is_directory, b.is_directory) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.path.file_name().cmp(&b.path.file_name()),
+            }
+        });
+        
+        // Render each root item
+        for item in root_items {
+            self.render_tree_item(ui, &item, 0);
+        }
+    }
+    
+    fn render_tree_item(&mut self, ui: &mut egui::Ui, item: &FileItem, indent_level: usize) {
+        ui.horizontal(|ui| {
+            // Indentation
+            for _ in 0..indent_level {
+                ui.add_space(20.0);
             }
             
-            // File size
-            if !file_item.is_directory {
+            if item.is_directory {
+                // Expand/collapse button for directories
+                let is_expanded = self.expanded_dirs.contains(&item.path);
+                let expand_symbol = if is_expanded { "▼" } else { "▶" };
+                
+                if ui.small_button(expand_symbol).clicked() {
+                    if is_expanded {
+                        self.expanded_dirs.remove(&item.path);
+                    } else {
+                        self.expanded_dirs.insert(item.path.clone());
+                    }
+                }
+                
+                // Directory checkbox
+                let mut dir_selected = self.is_directory_selected(&item.path);
+                let mut should_toggle = false;
+                
+                if ui.checkbox(&mut dir_selected.0, "").changed() {
+                    should_toggle = true;
+                }
+                
+                if should_toggle {
+                    self.toggle_directory_selection(&item.path);
+                }
+                
+                // Directory icon and name
+                ui.label("📁");
+                ui.label(item.path.file_name().unwrap_or_default().to_string_lossy());
+            } else {
+                // File checkbox
+                let mut is_selected = self.selected_files.contains(&item.path);
+                if ui.checkbox(&mut is_selected, "").changed() {
+                    if is_selected {
+                        self.selected_files.insert(item.path.clone());
+                    } else {
+                        self.selected_files.remove(&item.path);
+                    }
+                }
+                
+                // File icon
+                let icon = if item.is_binary { "🔧" } else { "📄" };
+                ui.label(icon);
+                
+                // File name (clickable for preview)
+                let name = item.path.file_name().unwrap_or_default().to_string_lossy();
+                if ui.selectable_label(
+                    self.preview_file.as_ref() == Some(&item.path),
+                    name.as_ref()
+                ).clicked() {
+                    self.load_file_preview(&item.path);
+                }
+                
+                // File size
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format_file_size(file_item.size));
+                    ui.label(format_file_size(item.size));
                 });
             }
         });
+        
+        // Render children if directory is expanded
+        if item.is_directory && self.expanded_dirs.contains(&item.path) {
+            let children = self.get_directory_children(&item.path);
+            for child in children {
+                self.render_tree_item(ui, &child, indent_level + 1);
+            }
+        }
+    }
+    
+    fn get_directory_children(&self, dir_path: &PathBuf) -> Vec<FileItem> {
+        let mut children = Vec::new();
+        
+        for item in &self.filtered_files {
+            if let Some(parent) = item.path.parent() {
+                if parent == dir_path {
+                    children.push(item.clone());
+                }
+            }
+        }
+        
+        // Sort: directories first, then files
+        children.sort_by(|a, b| {
+            match (a.is_directory, b.is_directory) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.path.file_name().cmp(&b.path.file_name()),
+            }
+        });
+        
+        children
+    }
+    
+    fn is_directory_selected(&self, dir_path: &PathBuf) -> (bool, bool) {
+        let children = self.get_all_files_in_directory(dir_path);
+        if children.is_empty() {
+            return (false, false);
+        }
+        
+        let selected_count = children.iter()
+            .filter(|path| self.selected_files.contains(*path))
+            .count();
+            
+        if selected_count == 0 {
+            (false, false) // None selected
+        } else if selected_count == children.len() {
+            (true, false) // All selected
+        } else {
+            (true, true) // Partially selected (indeterminate)
+        }
+    }
+    
+    fn get_all_files_in_directory(&self, dir_path: &PathBuf) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        
+        for item in &self.filtered_files {
+            if !item.is_directory && item.path.starts_with(dir_path) {
+                files.push(item.path.clone());
+            }
+        }
+        
+        files
+    }
+    
+    fn toggle_directory_selection(&mut self, dir_path: &PathBuf) {
+        let files_in_dir = self.get_all_files_in_directory(dir_path);
+        let (is_selected, _) = self.is_directory_selected(dir_path);
+        
+        if is_selected {
+            // Deselect all files in directory
+            for file_path in files_in_dir {
+                self.selected_files.remove(&file_path);
+            }
+        } else {
+            // Select all files in directory
+            for file_path in files_in_dir {
+                self.selected_files.insert(file_path);
+            }
+        }
+    }
+    
+    fn expand_all_directories(&mut self) {
+        for item in &self.filtered_files {
+            if item.is_directory {
+                self.expanded_dirs.insert(item.path.clone());
+            }
+        }
     }
     
     fn render_file_preview(&mut self, ui: &mut egui::Ui) {
@@ -281,7 +426,7 @@ impl ContextFileConcatApp {
             ui.label("Output Directory:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.output_path)
-                    .desired_width(300.0)
+                    .desired_width(200.0)
             );
             
             if ui.button("Browse").clicked() {
@@ -295,12 +440,66 @@ impl ContextFileConcatApp {
             ui.label("Filename:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.output_filename)
-                    .desired_width(200.0)
+                    .desired_width(150.0)
             );
             
             ui.separator();
             
-            ui.checkbox(&mut self.include_tree, "Include directory tree");
+            // Tree options
+            ui.vertical(|ui| {
+                ui.checkbox(&mut self.include_tree, "Include directory tree");
+                
+                if self.include_tree {
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        if ui.checkbox(&mut self.tree_full_mode, "Full tree mode").changed() {
+                            // Reset tree ignore patterns when switching modes
+                            if !self.tree_full_mode {
+                                self.tree_ignore_patterns.clear();
+                            }
+                        }
+                    });
+                    
+                    if self.tree_full_mode {
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            ui.label("Tree ignore patterns:");
+                        });
+                        
+                        // Tree-specific ignore patterns
+                        ui.horizontal(|ui| {
+                            ui.add_space(40.0);
+                            let mut new_tree_pattern = String::new();
+                            ui.add(
+                                egui::TextEdit::singleline(&mut new_tree_pattern)
+                                    .hint_text("Add tree ignore pattern...")
+                                    .desired_width(150.0)
+                            );
+                            if ui.button("Add").clicked() && !new_tree_pattern.is_empty() {
+                                self.tree_ignore_patterns.insert(new_tree_pattern);
+                            }
+                        });
+                        
+                        // Show current tree ignore patterns
+                        if !self.tree_ignore_patterns.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(40.0);
+                                ui.vertical(|ui| {
+                                    let patterns: Vec<String> = self.tree_ignore_patterns.iter().cloned().collect();
+                                    for pattern in patterns {
+                                        ui.horizontal(|ui| {
+                                            ui.label(&pattern);
+                                            if ui.small_button("❌").clicked() {
+                                                self.tree_ignore_patterns.remove(&pattern);
+                                            }
+                                        });
+                                    }
+                                });
+                            });
+                        }
+                    }
+                }
+            });
             
             ui.separator();
             
@@ -489,11 +688,35 @@ impl ContextFileConcatApp {
         // Generate tree if needed
         let tree_content = if include_tree {
             let root_path = PathBuf::from(&self.current_path);
-            Some(TreeGenerator::generate_tree(
-                &self.file_tree,
-                &root_path,
-                &self.config.ignore_patterns
-            ))
+            
+            if self.tree_full_mode {
+                // Full tree mode with separate ignore patterns
+                Some(TreeGenerator::generate_tree(
+                    &self.file_tree,
+                    &root_path,
+                    &self.tree_ignore_patterns
+                ))
+            } else {
+                // Selected files only mode
+                let selected_items: Vec<_> = self.file_tree.iter()
+                    .filter(|item| {
+                        if item.is_directory {
+                            // Include directory if any selected file is inside it
+                            selected_files.iter().any(|f| f.starts_with(&item.path))
+                        } else {
+                            // Include file if it's selected
+                            selected_files.contains(&item.path)
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                    
+                Some(TreeGenerator::generate_tree(
+                    &selected_items,
+                    &root_path,
+                    &HashSet::new() // No additional ignores for selected files mode
+                ))
+            }
         } else {
             None
         };

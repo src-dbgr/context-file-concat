@@ -15,6 +15,7 @@ pub struct ContextFileConcatApp {
     selected_files: HashSet<PathBuf>,
     file_tree: Vec<FileItem>,
     filtered_files: Vec<FileItem>,
+    expanded_dirs: HashSet<PathBuf>,  // Track which directories are expanded
     
     // Search and Filter
     search_query: String,
@@ -33,6 +34,8 @@ pub struct ContextFileConcatApp {
     output_path: String,
     output_filename: String,
     include_tree: bool,
+    tree_full_mode: bool,  // New: Full tree vs selected files only
+    tree_ignore_patterns: HashSet<String>,  // New: Separate ignore patterns for tree
     
     // File preview
     preview_content: String,
@@ -57,6 +60,7 @@ impl ContextFileConcatApp {
             selected_files: HashSet::new(),
             file_tree: Vec::new(),
             filtered_files: Vec::new(),
+            expanded_dirs: HashSet::new(),
             search_query: String::new(),
             file_extension_filter: String::new(),
             case_sensitive: false,
@@ -70,6 +74,8 @@ impl ContextFileConcatApp {
                 .to_string(),
             output_filename,
             include_tree: false,
+            tree_full_mode: false,
+            tree_ignore_patterns: HashSet::new(),
             preview_content: String::new(),
             preview_file: None,
             progress_receiver: None,

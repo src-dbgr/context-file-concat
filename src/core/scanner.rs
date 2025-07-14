@@ -83,6 +83,8 @@ impl DirectoryScanner {
                 is_binary,
                 size,
                 depth,
+                parent: path.parent().map(|p| p.to_path_buf()),
+                children: Vec::new(),
             };
             
             files.push(file_item);
