@@ -13,7 +13,7 @@ Eine performante Rust-Anwendung zum Zusammenfassen von Dateien in ein einziges T
 ✅ **ASCII Directory Tree** - Optionale Verzeichnisstruktur-Ausgabe  
 ✅ **Cross-Platform Config** - Automatische Konfigurationsspeicherung  
 ✅ **Progress Tracking** - Echtzeit-Fortschrittsanzeige  
-✅ **Large File Handling** - 100MB Limit mit Warning-System
+✅ **Large File Handling** - 20MB Limit mit Warning-System
 
 ## Installation & Setup
 

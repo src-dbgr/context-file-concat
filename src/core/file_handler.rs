@@ -10,13 +10,14 @@ use crate::utils::file_detection::is_text_file;
 pub struct FileHandler;
 
 impl FileHandler {
-    pub async fn generate_concatenated_file(
+    // MODIFIED: This function now generates content in-memory and returns it, instead of writing to a file.
+    pub async fn generate_concatenated_content(
         selected_files: &[PathBuf],
-        output_path: &Path,
         include_tree: bool,
         tree_content: Option<String>,
         progress_sender: mpsc::UnboundedSender<ScanProgress>,
-    ) -> Result<()> {
+    // MODIFIED: Returns the content string, its size, and line count
+    ) -> Result<(String, u64, usize)> {
         let mut content = String::new();
         let total_files = selected_files.len();
         
@@ -33,6 +34,8 @@ impl FileHandler {
                 processed: i,
                 total: total_files,
                 status: format!("Processing file {}/{}", i + 1, total_files),
+                file_size: None,
+                line_count: None,
             })?;
             
             // Skip directories
@@ -84,31 +87,37 @@ impl FileHandler {
             }
         }
         
-        // Write final file
+        // Final progress update before returning
         progress_sender.send(ScanProgress {
-            current_file: output_path.to_path_buf(),
+            current_file: PathBuf::from("Finalizing..."),
             processed: total_files,
             total: total_files,
-            status: "Writing output file...".to_string(),
+            status: "Finalizing content...".to_string(),
+            file_size: None,
+            line_count: None,
         })?;
         
-        fs::write(output_path, content)?;
-        
+        // Calculate file statistics from the generated string
+        let file_size = content.len() as u64;
+        let line_count = content.lines().count();
+
         progress_sender.send(ScanProgress {
-            current_file: output_path.to_path_buf(),
+            current_file: PathBuf::from("Generated Preview"),
             processed: total_files,
             total: total_files,
             status: "Complete!".to_string(),
+            file_size: Some(file_size),
+            line_count: Some(line_count),
         })?;
         
-        tracing::info!("Successfully generated concatenated file: {}", output_path.display());
-        Ok(())
+        tracing::info!("Successfully generated concatenated content in memory.");
+        Ok((content, file_size, line_count))
     }
     
     fn read_file_content(file_path: &Path) -> Result<String> {
-        // Check file size first (100MB limit)
+        // Check file size first (20MB limit)
         let metadata = fs::metadata(file_path)?;
-        if metadata.len() > 100 * 1024 * 1024 {
+        if metadata.len() > 20 * 1024 * 1024 {
             return Ok(format!("[FILE TOO LARGE: {} bytes - CONTENT SKIPPED]", metadata.len()));
         }
         
@@ -163,21 +172,5 @@ impl FileHandler {
         
         Ok(preview)
     }
-    
-    pub fn calculate_total_size(files: &[PathBuf]) -> u64 {
-        files
-            .iter()
-            .filter_map(|path| fs::metadata(path).ok())
-            .filter(|metadata| metadata.is_file())
-            .map(|metadata| metadata.len())
-            .sum()
-    }
-    
-    pub fn estimate_output_size(files: &[PathBuf]) -> u64 {
-        let content_size = Self::calculate_total_size(files);
-        let overhead_per_file = 100; // Estimated overhead for headers and separators
-        let total_overhead = files.len() as u64 * overhead_per_file;
-        
-        content_size + total_overhead
-    }
+
 }

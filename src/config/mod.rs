@@ -13,6 +13,7 @@ pub struct AppConfig {
     pub case_sensitive_search: bool,
     pub show_binary_files: bool,
     pub include_tree_by_default: bool,
+    pub remove_empty_directories: bool,
     pub window_size: (f32, f32),
     pub window_position: Option<(f32, f32)>,
 }
@@ -20,14 +21,6 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn load() -> Result<Self> {
         settings::load_config()
-    }
-    
-    pub fn save(&self) -> Result<()> {
-        settings::save_config(self)
-    }
-    
-    pub fn config_dir() -> Option<PathBuf> {
-        settings::get_config_directory()
     }
 }
 
@@ -51,6 +44,7 @@ impl Default for AppConfig {
             case_sensitive_search: false,
             show_binary_files: true,
             include_tree_by_default: false,
+            remove_empty_directories: false,
             window_size: (1200.0, 800.0),
             window_position: None,
         }

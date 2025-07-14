@@ -1,4 +1,3 @@
-use regex::Regex;
 use std::path::Path;
 
 use super::{FileItem, SearchFilter};
@@ -40,6 +39,9 @@ impl SearchEngine {
     
     fn matches_ignore_patterns(path: &Path, ignore_patterns: &std::collections::HashSet<String>) -> bool {
         let path_str = path.to_string_lossy();
+        let file_name = path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         
         for pattern in ignore_patterns {
             if pattern.ends_with('/') {
@@ -48,8 +50,17 @@ impl SearchEngine {
                 if path_str.contains(dir_pattern) {
                     return true;
                 }
+            } else if pattern.contains('*') || pattern.contains('?') {
+                // Wildcard pattern - check against filename
+                if Self::wildcard_match(file_name, pattern) {
+                    return true;
+                }
+                // Also check against full path for directory patterns
+                if Self::wildcard_match(&path_str, pattern) {
+                    return true;
+                }
             } else if pattern.starts_with('*') {
-                // Extension pattern
+                // Simple extension pattern (legacy support)
                 let ext = &pattern[1..];
                 if path_str.ends_with(ext) {
                     return true;
@@ -64,20 +75,63 @@ impl SearchEngine {
         
         false
     }
+
+    // NEW: Wildcard matching function
+    fn wildcard_match(text: &str, pattern: &str) -> bool {
+        let mut text_chars = text.chars().peekable();
+        let mut pattern_chars = pattern.chars().peekable();
+        
+        while let Some(&pattern_char) = pattern_chars.peek() {
+            match pattern_char {
+                '*' => {
+                    pattern_chars.next(); // consume '*'
+                    
+                    // If * is the last character, match everything remaining
+                    if pattern_chars.peek().is_none() {
+                        return true;
+                    }
+                    
+                    // Try to match the rest of the pattern at each position
+                    let remaining_pattern: String = pattern_chars.collect();
+                    while text_chars.peek().is_some() {
+                        let remaining_text: String = text_chars.clone().collect();
+                        if Self::wildcard_match(&remaining_text, &remaining_pattern) {
+                            return true;
+                        }
+                        text_chars.next();
+                    }
+                    return false;
+                }
+                '?' => {
+                    pattern_chars.next(); // consume '?'
+                    if text_chars.next().is_none() {
+                        return false; // ? must match exactly one character
+                    }
+                }
+                _ => {
+                    pattern_chars.next(); // consume pattern char
+                    if text_chars.next() != Some(pattern_char) {
+                        return false;
+                    }
+                }
+            }
+        }
+        
+        // Both should be exhausted for a complete match
+        text_chars.next().is_none()
+    }
     
     fn matches_search_query(path: &Path, query: &str, case_sensitive: bool) -> bool {
+        // Only check the actual filename, not the full path
         let file_name = path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("");
         
-        let path_str = path.to_string_lossy();
-        
         if case_sensitive {
-            file_name.contains(query) || path_str.contains(query)
+            file_name.contains(query)
         } else {
             let query_lower = query.to_lowercase();
-            file_name.to_lowercase().contains(&query_lower) || 
-            path_str.to_lowercase().contains(&query_lower)
+            file_name.to_lowercase().contains(&query_lower)
         }
     }
     
@@ -95,39 +149,5 @@ impl SearchEngine {
             extension_filter.is_empty() || extension_filter == "no extension"
         }
     }
-    
-    pub fn build_regex_filter(pattern: &str, case_sensitive: bool) -> Result<Regex, regex::Error> {
-        let flags = if case_sensitive { "" } else { "(?i)" };
-        let full_pattern = format!("{}{}", flags, pattern);
-        Regex::new(&full_pattern)
-    }
-    
-    pub fn filter_with_regex(files: &[FileItem], regex: &Regex) -> Vec<FileItem> {
-        files
-            .iter()
-            .filter(|file| {
-                let file_name = file.path.file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("");
-                regex.is_match(file_name)
-            })
-            .cloned()
-            .collect()
-    }
-    
-    pub fn get_file_extensions(files: &[FileItem]) -> Vec<String> {
-        let mut extensions = std::collections::HashSet::new();
-        
-        for file in files {
-            if !file.is_directory {
-                if let Some(ext) = file.path.extension().and_then(|ext| ext.to_str()) {
-                    extensions.insert(format!(".{}", ext));
-                }
-            }
-        }
-        
-        let mut ext_vec: Vec<String> = extensions.into_iter().collect();
-        ext_vec.sort();
-        ext_vec
-    }
+
 }

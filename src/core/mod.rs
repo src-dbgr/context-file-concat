@@ -22,6 +22,8 @@ pub struct ScanProgress {
     pub processed: usize,
     pub total: usize,
     pub status: String,
+    pub file_size: Option<u64>,
+    pub line_count: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
