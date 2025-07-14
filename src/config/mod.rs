@@ -1,0 +1,58 @@
+pub mod settings;
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use anyhow::Result;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub ignore_patterns: HashSet<String>,
+    pub last_directory: Option<PathBuf>,
+    pub output_directory: Option<PathBuf>,
+    pub case_sensitive_search: bool,
+    pub show_binary_files: bool,
+    pub include_tree_by_default: bool,
+    pub window_size: (f32, f32),
+    pub window_position: Option<(f32, f32)>,
+}
+
+impl AppConfig {
+    pub fn load() -> Result<Self> {
+        settings::load_config()
+    }
+    
+    pub fn save(&self) -> Result<()> {
+        settings::save_config(self)
+    }
+    
+    pub fn config_dir() -> Option<PathBuf> {
+        settings::get_config_directory()
+    }
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        let mut ignore_patterns = HashSet::new();
+        
+        // Default ignore patterns
+        ignore_patterns.insert("node_modules/".to_string());
+        ignore_patterns.insert("target/".to_string());
+        ignore_patterns.insert(".git/".to_string());
+        ignore_patterns.insert("*.log".to_string());
+        ignore_patterns.insert("*.tmp".to_string());
+        ignore_patterns.insert(".DS_Store".to_string());
+        ignore_patterns.insert("Thumbs.db".to_string());
+        
+        Self {
+            ignore_patterns,
+            last_directory: None,
+            output_directory: dirs::desktop_dir(),
+            case_sensitive_search: false,
+            show_binary_files: true,
+            include_tree_by_default: false,
+            window_size: (1200.0, 800.0),
+            window_position: None,
+        }
+    }
+}
