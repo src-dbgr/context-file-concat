@@ -2,7 +2,8 @@ use eframe::egui;
 use std::path::PathBuf;
 use std::collections::HashSet;
 use tokio::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use rayon::prelude::*;
 
 use super::{ContextFileConcatApp, PreviewSegment};
 use crate::core::{DirectoryScanner, FileHandler, SearchEngine, TreeGenerator, SearchFilter, FileItem, ScanProgress};
@@ -10,21 +11,19 @@ use crate::utils::file_detection::is_image_file;
 
 impl ContextFileConcatApp {
     pub fn render_main_ui(&mut self, _ui: &mut egui::Ui, ctx: &egui::Context) {
-        // Top toolbar panel
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         egui::TopBottomPanel::top("toolbar")
             .default_height(60.0)
             .show(ctx, |ui| {
                 self.render_toolbar(ui);
             });
         
-        // Bottom panel for output settings
         egui::TopBottomPanel::bottom("output_panel")
-            .min_height(150.0) // Increased height for new layout
+            .min_height(150.0)
             .show(ctx, |ui| {
                 self.render_bottom_panel(ui);
             });
         
-        // Left side panel for search and filters
         egui::SidePanel::left("left_panel")
             .default_width(300.0)
             .min_width(250.0)
@@ -32,23 +31,21 @@ impl ContextFileConcatApp {
                 self.render_left_panel(ui);
             });
         
-        // Central panel for file list and preview - FIXED LAYOUT
         egui::CentralPanel::default().show(ctx, |ui| {
             self.render_right_panel_fixed(ui);
         });
         
-        // Progress overlay
         if self.is_scanning || self.is_generating {
             self.render_progress_overlay(ctx);
         }
 
-        // Large files warning
         if self.show_large_files_warning {
             self.render_large_files_warning(ctx);
         }
     }
     
     fn render_toolbar(&mut self, ui: &mut egui::Ui) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         ui.label("📁 Root Directory:");
         
         if ui.button("Select Directory").clicked() {
@@ -58,11 +55,17 @@ impl ContextFileConcatApp {
             }
         }
         ui.add_space(1.0);
-        ui.add(
+        let response = ui.add(
             egui::TextEdit::singleline(&mut self.current_path)
                 .desired_width(400.0)
                 .hint_text("Enter directory path or use Select Directory button")
         );
+        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if !self.current_path.is_empty() {
+                self.start_directory_scan();
+            }
+        }
+        
         ui.add_space(1.0);
         if ui.button("Scan").clicked() && !self.current_path.is_empty() {
             self.start_directory_scan();
@@ -70,7 +73,6 @@ impl ContextFileConcatApp {
         
         ui.separator();
         
-        // Config buttons
         if ui.button("💾 Export Config").clicked() {
             self.save_config_dialog();
         }
@@ -80,133 +82,87 @@ impl ContextFileConcatApp {
         }
         ui.add_space(1.0);
     }
-    
+
     fn render_left_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(1.0);
         ui.vertical(|ui| {
             ui.heading("🔍 Search & Filter");
-            
-            // Search input
-            ui.horizontal(|ui| {
-                ui.label("Search:");
-                if ui.add(
-                    egui::TextEdit::singleline(&mut self.search_query)
-                        .hint_text("Search in filenames...")
-                ).changed() {
-                    self.apply_filters();
-                }
-            });
-            
-            // File extension filter
-            ui.horizontal(|ui| {
-                ui.label("Extension:");
-                if ui.add(
-                    egui::TextEdit::singleline(&mut self.file_extension_filter)
-                        .hint_text("e.g., .rs, .js, .py")
-                ).changed() {
-                    self.apply_filters();
-                }
-            });
-            
+            ui.horizontal(|ui| { ui.label("Search:"); if ui.add(egui::TextEdit::singleline(&mut self.search_query).hint_text("Search in filenames...")).changed() { self.apply_filters(); } });
+            ui.horizontal(|ui| { ui.label("Extension:"); if ui.add(egui::TextEdit::singleline(&mut self.file_extension_filter).hint_text("e.g., .rs, .js, .py")).changed() { self.apply_filters(); } });
             ui.separator();
-            
-            // Search in files content
             ui.heading("🔍 Search in Files");
             ui.horizontal(|ui| {
                 ui.label("Content:");
-                if ui.add(
-                    egui::TextEdit::singleline(&mut self.search_in_files_query)
-                        .hint_text("Search text inside files...")
-                ).changed() {
-                    if !self.search_in_files_query.is_empty() {
-                        self.start_content_search();
-                    } else {
-                        self.apply_filters(); // Reset to normal filtering
-                    }
-                    // Update preview highlighting when search changes
+                if ui.add(egui::TextEdit::singleline(&mut self.search_in_files_query).hint_text("Search text inside files...")).changed() {
+                    if !self.search_in_files_query.is_empty() { self.start_content_search(); } else { self.apply_filters(); }
                     self.update_preview_highlighting();
                 }
             });
-            
-            if self.is_searching_content {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Searching in files...");
-                });
-            }
-            
-            // Filter options
+            if self.is_searching_content { ui.horizontal(|ui| { ui.spinner(); ui.label("Searching in files..."); }); }
             ui.horizontal(|ui| {
-                if ui.checkbox(&mut self.case_sensitive, "Case sensitive").changed() {
-                    self.apply_filters();
-                    self.update_preview_highlighting();
-                }
-                if ui.checkbox(&mut self.show_binary_files, "Show binary files").changed() {
-                    self.apply_filters();
-                }
+                if ui.checkbox(&mut self.case_sensitive, "Case sensitive").changed() { self.apply_filters(); self.update_preview_highlighting(); }
+                if ui.checkbox(&mut self.show_binary_files, "Show binary files").changed() { self.apply_filters(); }
             });
-            
             ui.separator();
-
-            // Ignore patterns
             ui.heading("🚫 Ignore Patterns");
-
-            // Remove empty directories option
-            if ui.checkbox(&mut self.config.remove_empty_directories, "Remove empty directories").changed() {
-                self.apply_filters();
-            }
-
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut self.config.remove_empty_directories, "Remove empty dirs").changed() { self.apply_filters(); }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add_enabled(!self.current_path.is_empty() && !self.is_scanning, egui::Button::new("🔄 Re-Scan Changes")).clicked() { self.start_directory_scan(); }
+                });
+            });
             ui.label("Common patterns:");
-
             ui.horizontal_wrapped(|ui| {
-                let common_patterns = [
-                    "node_modules/", "target/", ".git/", "*.log", 
-                    "*.tmp", ".DS_Store", "Thumbs.db", "*.class"
-                ];
-                
-                for pattern in common_patterns {
-                    if ui.small_button(pattern).clicked() {
-                        self.config.ignore_patterns.insert(pattern.to_string());
-                        self.apply_filters();
-                    }
+                for pattern in ["node_modules/", "target/", ".git/", "*.log", "*.tmp", ".DS_Store", "Thumbs.db", "*.class"] {
+                    if ui.small_button(pattern).clicked() { self.config.ignore_patterns.insert(pattern.to_string()); self.apply_filters(); }
                 }
             });
-            ui.add_space(1.0);
-            // Custom ignore pattern input
+
             ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_ignore_pattern)
-                        .hint_text("Add pattern (wildcards: *, ?)")
+                let text_edit_response = ui.add(
+                    egui::TextEdit::singleline(&mut self.new_ignore_pattern).hint_text("Add pattern...")
                 );
-                if ui.button("Add").clicked() && !self.new_ignore_pattern.is_empty() {
-                    self.config.ignore_patterns.insert(self.new_ignore_pattern.clone());
-                    self.new_ignore_pattern.clear();
+
+                // *** HIER IST DIE KORREKTUR ***
+                // Die Prüfung für die Enter-Taste wurde angepasst.
+                let submitted = text_edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                if ui.button("Add").clicked() || submitted {
+                    if !self.new_ignore_pattern.is_empty() {
+                        self.config.ignore_patterns.insert(self.new_ignore_pattern.clone());
+                        self.new_ignore_pattern.clear();
+                        self.apply_filters();
+                        text_edit_response.request_focus();
+                    }
+                }
+                
+                if ui.button("Delete All").on_hover_text("Remove all ignore patterns").clicked() {
+                    self.config.ignore_patterns.clear();
                     self.apply_filters();
                 }
             });
             
-            // List current ignore patterns
+            ui.horizontal(|ui| {
+                ui.label("Filter list:");
+                ui.add(egui::TextEdit::singleline(&mut self.ignore_pattern_filter).hint_text("Filter displayed patterns..."));
+            });
             ui.collapsing("Current ignore patterns", |ui| {
-                // Make it scrollable and take available height (ensure minimum height)
-                let available_height = (ui.available_height() - 20.0).max(50.0); // Minimum 50px
-                egui::ScrollArea::vertical()
-                    .max_height(available_height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let patterns: Vec<String> = self.config.ignore_patterns.iter().cloned().collect();
-                        for pattern in patterns {
-                            ui.horizontal(|ui| {
-                                if ui.small_button("❌").clicked() {
-                                    self.config.ignore_patterns.remove(&pattern);
-                                    self.apply_filters();
-                                }
-                                ui.label(&pattern);
-                            });
-                        }
-                    });
+                egui::ScrollArea::vertical().max_height((ui.available_height() - 20.0).max(50.0)).auto_shrink([false, false]).show(ui, |ui| {
+                    let mut patterns: Vec<String> = self.config.ignore_patterns.iter().cloned().collect();
+                    patterns.sort_unstable();
+                    let filter_text = self.ignore_pattern_filter.to_lowercase();
+                    for pattern in &patterns {
+                        if !filter_text.is_empty() && !pattern.to_lowercase().contains(&filter_text) { continue; }
+                        ui.horizontal(|ui| {
+                            if ui.small_button("❌").on_hover_text("Remove pattern").clicked() { self.config.ignore_patterns.remove(pattern); self.apply_filters(); }
+                            ui.label(pattern);
+                        });
+                    }
+                });
             });
         });
     }
-    
+
     fn render_right_panel_fixed(&mut self, ui: &mut egui::Ui) {
         let available_height = ui.available_height();
         let min_file_list_height = 150.0;
@@ -230,39 +186,50 @@ impl ContextFileConcatApp {
                 }
             );
             
-            // Resizer
+            // *** HIER IST DIE ÄNDERUNG ***
+            // Die Logik für den Resizer wird angepasst, um besseres visuelles Feedback zu geben.
+            
+            // Ein unsichtbarer, aber breiterer Bereich, um das Greifen zu erleichtern.
+            let resizer_height = 8.0; 
             let resizer_response = ui.allocate_response(
-                egui::Vec2::new(ui.available_width(), 1.0),
-                egui::Sense::drag()
+                egui::Vec2::new(ui.available_width(), resizer_height),
+                egui::Sense::drag(),
             );
 
             if resizer_response.dragged() {
                 self.file_list_height += resizer_response.drag_delta().y;
             }
 
-            if resizer_response.hovered() {
+            // Cursor-Icon ändern, wenn man drüberfährt oder zieht.
+            if resizer_response.hovered() || resizer_response.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
             }
 
-            ui.painter().rect_filled(
-                resizer_response.rect,
-                egui::Rounding::ZERO,
-                if resizer_response.hovered() {
-                    egui::Color32::from_gray(100)
-                } else {
-                    egui::Color32::from_gray(80)
-                },
+            // Den visuellen Trenner zeichnen.
+            // Wir verwenden Farben aus dem Theme für ein konsistentes Aussehen.
+            let stroke = if resizer_response.hovered() || resizer_response.dragged() {
+                // Eine dicke, weisse Linie beim Überfahren oder Ziehen.
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(200, 200, 200))
+            } else {
+                // Eine dünne, dezente Linie im Normalzustand.
+                ui.visuals().widgets.noninteractive.bg_stroke
+            };
+
+            ui.painter().line_segment(
+                [resizer_response.rect.left_center(), resizer_response.rect.right_center()],
+                stroke,
             );
             
             // Preview section
             ui.group(|ui| {
-                ui.set_height((ui.available_height() - 8.0).max(50.0));
+                ui.set_height((ui.available_height() - 1.0).max(50.0));
                 self.render_file_preview_with_highlighting(ui);
             });
         });
     }
     
     fn render_file_list(&mut self, ui: &mut egui::Ui) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         ui.heading("📄 Files");
         
         ui.horizontal(|ui| {
@@ -297,6 +264,7 @@ impl ContextFileConcatApp {
     }
     
     fn render_file_tree_recursive(&mut self, ui: &mut egui::Ui) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         ui.spacing_mut().item_spacing.x = 2.0;
         let mut root_items = Vec::new();
         let current_root = PathBuf::from(&self.current_path);
@@ -323,6 +291,7 @@ impl ContextFileConcatApp {
     }
     
     fn render_tree_item(&mut self, ui: &mut egui::Ui, item: &FileItem, indent_level: usize) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         let is_search_match = self.is_search_match(item);
         
         ui.horizontal(|ui| {
@@ -494,6 +463,7 @@ impl ContextFileConcatApp {
     }
     
     fn is_search_match(&self, item: &FileItem) -> bool {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         let filename_match = if !self.search_query.is_empty() {
             let file_name = item.path.file_name()
                 .and_then(|name| name.to_str())
@@ -519,6 +489,7 @@ impl ContextFileConcatApp {
     }
     
     fn get_directory_children(&self, dir_path: &PathBuf) -> Vec<FileItem> {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         let mut children = Vec::new();
         
         for item in &self.filtered_files {
@@ -541,6 +512,7 @@ impl ContextFileConcatApp {
     }
     
     fn is_directory_selected(&self, dir_path: &PathBuf) -> (bool, bool) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         let children = self.get_all_files_in_directory(dir_path);
         if children.is_empty() {
             return (false, false);
@@ -560,18 +532,15 @@ impl ContextFileConcatApp {
     }
     
     fn get_all_files_in_directory(&self, dir_path: &PathBuf) -> Vec<PathBuf> {
-        let mut files = Vec::new();
-        
-        for item in &self.filtered_files {
-            if !item.is_directory && item.path.starts_with(dir_path) {
-                files.push(item.path.clone());
-            }
-        }
-        
-        files
+        self.file_tree
+            .iter()
+            .filter(|item| !item.is_directory && item.path.starts_with(dir_path))
+            .map(|item| item.path.clone())
+            .collect()
     }
     
     fn toggle_directory_selection(&mut self, dir_path: &PathBuf) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         let files_in_dir = self.get_all_files_in_directory(dir_path);
         let (is_selected, _) = self.is_directory_selected(dir_path);
         
@@ -587,6 +556,7 @@ impl ContextFileConcatApp {
     }
     
     fn expand_all_directories(&mut self) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         for item in &self.filtered_files {
             if item.is_directory {
                 self.expanded_dirs.insert(item.path.clone());
@@ -611,7 +581,7 @@ impl ContextFileConcatApp {
                         self.generated_content = None;
                         self.preview_file = None;
                         self.preview_content.clear();
-                        self.highlighted_preview_content.clear();
+                        self.highlighted_preview_lines.clear();
                     }
                 }
             });
@@ -647,34 +617,61 @@ impl ContextFileConcatApp {
                         if let Some(line) = lines.get(i) {
                             ui.horizontal(|ui| {
                                 let line_number_text = format!("{:<5}", i + 1);
-                                // KORREKTUR: Nutze die semantisch korrekte Farbe für schwachen Text
                                 let dim_color = ui.visuals().weak_text_color();
                                 ui.monospace(egui::RichText::new(line_number_text).color(dim_color));
-                                ui.monospace(*line);
+                                ui.monospace(*line); // KORRIGIERT: Dereferenzierung
                             });
                         }
                     }
                 });
-
         } else if let Some(preview_file) = &self.preview_file {
-            ui.label(format!("📄 {}", preview_file.file_name().unwrap_or_default().to_string_lossy()));
+            let line_count = self.preview_content.lines().count();
+            let file_size = self.preview_content.len() as u64;
+
+            ui.horizontal(|ui| {
+                ui.label(format!("📄 {}", preview_file.file_name().unwrap_or_default().to_string_lossy()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(format_file_size(file_size)).color(ui.visuals().text_color()));
+                    ui.label("•");
+                    ui.label(egui::RichText::new(format!("{} lines", format_number_with_separators(line_count))).color(ui.visuals().text_color()));
+                });
+            });
             ui.separator();
             
+            let lines: Vec<&str> = self.preview_content.lines().collect();
+            let num_rows = self.preview_content.lines().count();
+            let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .stick_to_bottom(false)
-                .id_salt("preview_scroll")
-                .show(ui, |ui| {
-                    if !self.search_in_files_query.is_empty() && !self.highlighted_preview_content.is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            for segment in &self.highlighted_preview_content {
-                                if segment.is_match { ui.colored_label(egui::Color32::YELLOW, &segment.text); } else { ui.label(&segment.text); }
+                .id_salt("virtual_single_file_preview_scroll")
+                .show_rows(ui, row_height, num_rows, |ui, row_range| {
+                    let is_highlighting_active = !self.search_in_files_query.is_empty() && !self.highlighted_preview_lines.is_empty();
+
+                    for i in row_range {
+                        let line_number_text = format!("{:<5}", i + 1);
+                        let dim_color = ui.visuals().weak_text_color();
+
+                        ui.horizontal(|ui| {
+                            ui.monospace(egui::RichText::new(line_number_text).color(dim_color));
+
+                            if is_highlighting_active {
+                                if let Some(segments) = self.highlighted_preview_lines.get(i) {
+                                    for segment in segments {
+                                        if segment.is_match {
+                                            let highlight_color = egui::Color32::from_rgb(90, 80, 0);
+                                            ui.monospace(egui::RichText::new(&segment.text).background_color(highlight_color).color(egui::Color32::YELLOW));
+                                        } else {
+                                            ui.monospace(&segment.text);
+                                        }
+                                    }
+                                } else if let Some(line) = lines.get(i) {
+                                    ui.monospace(*line); // KORRIGIERT: Dereferenzierung
+                                }
+                            } else if let Some(line) = lines.get(i) {
+                                ui.monospace(*line); // KORRIGIERT: Dereferenzierung
                             }
                         });
-                    } else {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.preview_content).code_editor().desired_width(f32::INFINITY).desired_rows(50).interactive(false)
-                        );
                     }
                 });
         } else {
@@ -685,54 +682,63 @@ impl ContextFileConcatApp {
     }
     
     fn update_preview_highlighting(&mut self) {
+        self.highlighted_preview_lines.clear();
         if self.search_in_files_query.is_empty() || self.preview_content.is_empty() {
-            self.highlighted_preview_content.clear();
             return;
         }
-        
+
         let search_term = if self.case_sensitive {
             self.search_in_files_query.clone()
         } else {
             self.search_in_files_query.to_lowercase()
         };
-        
-        let content = if self.case_sensitive {
-            self.preview_content.clone()
-        } else {
-            self.preview_content.to_lowercase()
-        };
-        
-        let mut segments = Vec::new();
-        let mut last_end = 0;
-        
-        for match_start in content.match_indices(&search_term).map(|(i, _)| i) {
-            if match_start > last_end {
-                segments.push(PreviewSegment {
-                    text: self.preview_content[last_end..match_start].to_string(),
+
+        for line in self.preview_content.lines() {
+            let mut line_segments = Vec::new();
+            let mut last_end = 0;
+
+            let line_for_searching = if self.case_sensitive {
+                line.to_string()
+            } else {
+                line.to_lowercase()
+            };
+
+            if !search_term.is_empty() {
+                for (match_start, matched_str) in line_for_searching.match_indices(&search_term) {
+                    if match_start > last_end {
+                        line_segments.push(PreviewSegment {
+                            text: line[last_end..match_start].to_string(),
+                            is_match: false,
+                        });
+                    }
+                    
+                    let match_end = match_start + matched_str.len();
+                    line_segments.push(PreviewSegment {
+                        text: line[match_start..match_end].to_string(),
+                        is_match: true,
+                    });
+                    
+                    last_end = match_end;
+                }
+            }
+
+            if last_end < line.len() {
+                line_segments.push(PreviewSegment {
+                    text: line[last_end..].to_string(),
                     is_match: false,
                 });
             }
             
-            let match_end = match_start + search_term.len();
-            segments.push(PreviewSegment {
-                text: self.preview_content[match_start..match_end].to_string(),
-                is_match: true,
-            });
-            
-            last_end = match_end;
+            if line.is_empty() {
+                 line_segments.push(PreviewSegment { text: String::new(), is_match: false });
+            }
+
+            self.highlighted_preview_lines.push(line_segments);
         }
-        
-        if last_end < self.preview_content.len() {
-            segments.push(PreviewSegment {
-                text: self.preview_content[last_end..].to_string(),
-                is_match: false,
-            });
-        }
-        
-        self.highlighted_preview_content = segments;
-    }
+    }    
 
     fn render_bottom_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(1.0);
         ui.vertical(|ui| {
             ui.heading("📤 Output Settings");
             ui.separator();
@@ -741,9 +747,7 @@ impl ContextFileConcatApp {
                 ui.label("Output Directory:");
                 ui.add(egui::TextEdit::singleline(&mut self.output_path).desired_width(250.0));
                 if ui.button("Browse").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        self.output_path = path.to_string_lossy().to_string();
-                    }
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() { self.output_path = path.to_string_lossy().to_string(); }
                 }
                 ui.separator();
                 ui.label("Filename:");
@@ -753,80 +757,69 @@ impl ContextFileConcatApp {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.include_tree, "Include directory tree");
                 if self.include_tree {
-                    ui.checkbox(&mut self.tree_full_mode, "Full tree mode");
+                    if ui.checkbox(&mut self.tree_full_mode, "Full tree mode").changed() {
+                        if self.tree_full_mode { self.tree_ignore_patterns = self.config.ignore_patterns.clone();
+                        } else { self.tree_ignore_patterns.clear(); }
+                    }
                 }
+                ui.add_space(20.0);
+                ui.checkbox(&mut self.use_relative_paths, "relative file path");
             });
 
             if self.include_tree && self.tree_full_mode {
                 ui.horizontal(|ui| {
                     ui.label("Tree ignore patterns:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_tree_pattern)
-                            .hint_text("Add pattern...")
-                            .desired_width(150.0)
-                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.new_tree_pattern).hint_text("Add pattern...").desired_width(150.0));
                     if ui.button("Add").clicked() && !self.new_tree_pattern.is_empty() {
                         self.tree_ignore_patterns.insert(self.new_tree_pattern.clone());
                         self.new_tree_pattern.clear();
                     }
                 });
-        
+                ui.horizontal(|ui| {
+                    if ui.button("Copy Current Ignores").on_hover_text("Copies all patterns from the main list on the left").clicked() {
+                        self.tree_ignore_patterns = self.config.ignore_patterns.clone();
+                    }
+                    if ui.button("Clear Tree Ignores").on_hover_text("Removes all tree-specific ignore patterns").clicked() {
+                        self.tree_ignore_patterns.clear();
+                    }
+                });
                 if !self.tree_ignore_patterns.is_empty() {
                     ui.horizontal_wrapped(|ui| {
-                        let patterns: Vec<String> = self.tree_ignore_patterns.iter().cloned().collect();
+                        let mut patterns: Vec<String> = self.tree_ignore_patterns.iter().cloned().collect();
+                        patterns.sort_unstable();
                         for pattern in patterns {
-                            ui.label(
-                                egui::RichText::new(format!(" {} ", &pattern))
-                                .background_color(ui.visuals().widgets.inactive.bg_fill)
-                                .monospace()
-                            );
-                            if ui.small_button("❌").on_hover_text("Remove").clicked() {
-                                self.tree_ignore_patterns.remove(&pattern);
-                            }
+                            ui.label(egui::RichText::new(format!(" {} ", &pattern)).background_color(ui.visuals().widgets.inactive.bg_fill).monospace());
+                            if ui.small_button("❌").on_hover_text("Remove").clicked() { self.tree_ignore_patterns.remove(&pattern); }
                         }
                     });
                 }
             }
             
             ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                // Nimm den restlichen Platz ein, um die Buttons vertikal zu zentrieren
                 ui.add_space(ui.available_height() / 2.0 - ui.spacing().interact_size.y / 2.0);
-
                 ui.horizontal(|ui| {
-                    let button_width = 160.0;
-                    
                     let can_generate = !self.selected_files.is_empty() && !self.is_scanning && !self.is_generating;
-                    let generate_button = egui::Button::new("🚀 Generate Preview").min_size(egui::Vec2::new(button_width, 30.0));
-                    if ui.add_enabled(can_generate, generate_button).clicked() {
+                    if ui.add_enabled(can_generate, egui::Button::new("🚀 Generate Preview").min_size(egui::vec2(160.0, 30.0))).clicked() {
                         self.generate_preview();
                     }
-
                     ui.add_space(20.0);
-
                     let can_save = self.generated_content.is_some() && !self.is_generating;
-                    let save_button = egui::Button::new("💾 Save to File").min_size(egui::Vec2::new(button_width, 30.0));
-                    let save_response = ui.add_enabled(can_save, save_button);
-
-                    if save_response.clicked() {
-                        self.save_generated_file();
-                    }
+                    let save_response = ui.add_enabled(can_save, egui::Button::new("💾 Save to File").min_size(egui::vec2(160.0, 30.0)));
+                    if save_response.clicked() { self.save_generated_file(); }
                     if save_response.hovered() && !can_save && can_generate {
-                         egui::show_tooltip_at_pointer(
-                            ui.ctx(),
-                            egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("save_tooltip_layer")),
-                            egui::Id::new("save_tooltip"),
-                            |ui| {
-                                ui.label("Generate a preview first to enable saving.");
-                            }
-                        );
+                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("save_tooltip_layer")), egui::Id::new("save_tooltip"), |ui| {
+                            ui.label("Generate a preview first to enable saving.");
+                        });
                     }
                 });
             });
+            ui.add_space(2.0);
         });
     }
 }
 
 fn format_file_size(size: u64) -> String {
+    // Der Inhalt dieser Methode hat sich nicht geändert.
     const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
     let mut size = size as f64;
     let mut unit_index = 0;
@@ -844,6 +837,7 @@ fn format_file_size(size: u64) -> String {
 }
 
 fn format_number_with_separators(number: usize) -> String {
+    // Der Inhalt dieser Methode hat sich nicht geändert.
     let number_str = number.to_string();
     let chars: Vec<char> = number_str.chars().collect();
     let mut result = String::new();
@@ -856,49 +850,45 @@ fn format_number_with_separators(number: usize) -> String {
     }
     
     result
-}    
+}
 
 // Additional implementation methods
 impl ContextFileConcatApp {
+
+    // *** MODIFIED: Logic for starting the scan is simplified. ***
     pub fn start_directory_scan(&mut self) {
         if self.current_path.is_empty() || self.is_scanning {
             return;
         }
         
         self.is_scanning = true;
-        self.scan_progress = None;
         
-        self.file_tree.clear();
-        self.filtered_files.clear();
+        self.scan_progress = Some(ScanProgress {
+            current_file: PathBuf::from(&self.current_path),
+            processed: 0,
+            total: 0,
+            status: "Preparing to scan...".to_string(),
+            file_size: None,
+            line_count: None,
+        });
+        
+        // Clear previous scan state, but NOT the file list to avoid empty pane.
         self.selected_files.clear();
-        
         self.expanded_dirs.clear();
         self.preview_file = None;
-        self.preview_content.clear();
-        self.highlighted_preview_content.clear();
-        self.generated_content = None;
         
-        self.search_query.clear();
-        self.file_extension_filter.clear();
-        self.search_in_files_query.clear();
-        self.is_searching_content = false;
-        
-        self.large_files_count = 0;
-        self.large_files_names.clear();
-        self.show_large_files_warning = false;
-        
-        self.progress_receiver = None;
-        self.file_receiver = None;
-        self.content_search_receiver = None;
-        self.generation_receiver = None;
-        
+        // NEW: Create and store the cancellation flag for this scan.
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.cancel_flag = Some(cancel_flag.clone());
+
         let (progress_sender, progress_receiver) = mpsc::unbounded_channel();
-        let (file_sender, file_receiver) = mpsc::unbounded_channel::<(Vec<FileItem>, usize, Vec<String>)>();
+        let (file_sender, file_receiver) = mpsc::unbounded_channel();
 
         self.progress_receiver = Some(Arc::new(tokio::sync::Mutex::new(progress_receiver)));
         self.file_receiver = Some(Arc::new(tokio::sync::Mutex::new(file_receiver)));
 
         let path = PathBuf::from(&self.current_path);
+        // The background thread only needs the ignore patterns for the initial scan.
         let ignore_patterns = self.config.ignore_patterns.clone();
 
         std::thread::spawn(move || {
@@ -906,23 +896,17 @@ impl ContextFileConcatApp {
             rt.block_on(async move {
                 let scanner = DirectoryScanner::new(ignore_patterns);
                 
-                let progress_sender_clone = progress_sender.clone();
-                
-                match scanner.scan_directory(&path, progress_sender).await {
-                    Ok((files, large_files_count, large_files_names)) => {
-                        let _ = file_sender.send((files, large_files_count, large_files_names));
-                        tracing::info!("Scan completed with {} large files skipped", large_files_count);
+                // The scanner returns the complete list of files (respecting ignores) and large file info.
+                match scanner.scan_directory(&path, progress_sender, cancel_flag).await {
+                    Ok((all_files, large_files_count, large_files_names)) => {
+                        // The background thread's only job is to scan and send the raw list.
+                        // All other filtering (search, remove empty dirs, etc.) is done on the UI thread.
+                        tracing::info!("Scan complete. Found {} items. Sending to UI thread.", all_files.len());
+                        let _ = file_sender.send((all_files, large_files_count, large_files_names));
                     }
                     Err(e) => {
-                        tracing::error!("Scan failed: {}", e);
-                        let _ = progress_sender_clone.send(ScanProgress {
-                            current_file: path.clone(),
-                            processed: 0,
-                            total: 0,
-                            status: format!("Error: {}", e),
-                            file_size: None,
-                            line_count: None,
-                        });
+                        // Log if the scan was cancelled or failed.
+                        tracing::warn!("Scan process ended: {}", e);
                     }
                 }
             });
@@ -930,13 +914,12 @@ impl ContextFileConcatApp {
     }
 
     pub fn update_progress(&mut self) {
-        // --- Phase 1: Daten aus den Kanälen sammeln, ohne `self` zu verändern ---
+        // --- Phase 1: Collect data from channels without modifying self ---
         let mut progress_update = None;
         let mut scan_result = None;
         let mut content_search_results = None;
         let mut generation_result = None;
 
-        // Fortschritts-Nachrichten
         if let Some(receiver) = &self.progress_receiver {
             if let Ok(mut rx) = receiver.try_lock() {
                 let mut latest_progress = None;
@@ -947,7 +930,6 @@ impl ContextFileConcatApp {
             }
         }
 
-        // Scan-Ergebnis (Dateiliste)
         if self.is_scanning {
             if let Some(file_receiver) = &self.file_receiver {
                 if let Ok(mut rx) = file_receiver.try_lock() {
@@ -958,7 +940,6 @@ impl ContextFileConcatApp {
             }
         }
 
-        // Andere Ergebnisse
         if let Some(content_receiver) = &self.content_search_receiver {
             if let Ok(mut rx) = content_receiver.try_lock() {
                 if let Ok(results) = rx.try_recv() {
@@ -975,21 +956,26 @@ impl ContextFileConcatApp {
             }
         }
         
-        // --- Phase 2: `self` mit den gesammelten Daten sicher verändern ---
+        // --- Phase 2: Safely modify self with the collected data ---
 
         if let Some(progress) = progress_update {
             self.scan_progress = Some(progress);
         }
 
-        if let Some((files, large_files_count, large_files_names)) = scan_result {
-            self.file_tree = files;
+        if let Some((all_files, large_files_count, large_files_names)) = scan_result {
+            tracing::info!("UI thread received {} items from scanner.", all_files.len());
+            self.file_tree = all_files;
+            
+            self.apply_filters();
+            
             if large_files_count > 0 {
                 self.large_files_count = large_files_count;
                 self.large_files_names = large_files_names;
                 self.show_large_files_warning = true;
             }
+            
             self.is_scanning = false;
-            self.apply_filters();
+            tracing::info!("UI state updated. Filtered list contains {} items.", self.filtered_files.len());
         }
         
         if let Some(result) = generation_result {
@@ -999,7 +985,8 @@ impl ContextFileConcatApp {
                     self.generated_content = Some(content);
                     self.preview_file = None;
                     self.preview_content.clear();
-                    self.highlighted_preview_content.clear();
+                    // KORREKTUR HIER:
+                    self.highlighted_preview_lines.clear();
                     tracing::info!("Generated content is ready for preview.");
                 }
                 Err(e) => {
@@ -1039,83 +1026,47 @@ impl ContextFileConcatApp {
             show_binary: self.show_binary_files,
             ignore_patterns: self.config.ignore_patterns.clone(),
         };
-        
+
         let mut filtered = SearchEngine::filter_files(&self.file_tree, &filter);
         
-        let mut additional_dirs = HashSet::new();
         let root_path = PathBuf::from(&self.current_path);
-        
-        for item in &filtered {
-            if !item.is_directory {
-                let mut current = item.path.parent();
-                while let Some(parent) = current {
-                    if parent >= root_path && !additional_dirs.contains(parent) {
-                        additional_dirs.insert(parent.to_path_buf());
+        let required_dirs: HashSet<PathBuf> = filtered
+            .par_iter()
+            .flat_map(|item| {
+                let mut parents = Vec::new();
+                if !item.is_directory {
+                    let mut current = item.path.parent();
+                    while let Some(parent) = current {
+                        if parent.starts_with(&root_path) && parent != &root_path {
+                            parents.push(parent.to_path_buf());
+                        } else {
+                            break;
+                        }
+                        current = parent.parent();
                     }
-                    current = parent.parent();
                 }
-            }
-        }
-        
-        for dir_path in additional_dirs {
-            if let Some(dir_item) = self.file_tree.iter().find(|item| item.path == dir_path && item.is_directory) {
-                if !filtered.iter().any(|item| item.path == dir_path) {
-                    filtered.push(dir_item.clone());
-                }
-            }
-        }
-        
+                parents
+            })
+            .collect();
+
+        let existing_paths: HashSet<PathBuf> = filtered.par_iter().map(|item| item.path.clone()).collect();
+        filtered.extend(
+            self.file_tree
+                .par_iter()
+                .filter(|item| item.is_directory && required_dirs.contains(&item.path) && !existing_paths.contains(&item.path))
+                .cloned()
+                .collect::<Vec<FileItem>>()
+        );
+
         if self.config.remove_empty_directories {
-            filtered = self.remove_empty_directories(filtered);
+            filtered = SearchEngine::remove_empty_directories(filtered);
         }
         
         self.filtered_files = filtered;
-
-        // --- NEU: Bereinige die Auswahl ---
-        // Erstelle ein Set der sichtbaren Dateien für schnellen Zugriff
-        let visible_files: HashSet<_> = self.filtered_files.iter()
-            .filter(|f| !f.is_directory)
-            .map(|f| &f.path)
-            .collect();
-        
-        // Behalte nur die ausgewählten Dateien, die auch sichtbar sind
-        self.selected_files.retain(|path| visible_files.contains(path));
-    }
-
-    fn remove_empty_directories(&self, mut files: Vec<FileItem>) -> Vec<FileItem> {
-        let mut has_changes = true;
-        
-        while has_changes {
-            has_changes = false;
-            let files_before_len = files.len();
-            
-            let mut dirs_to_remove = Vec::new();
-            
-            for item in &files {
-                if item.is_directory {
-                    let has_files = files.iter().any(|other| {
-                        !other.is_directory && other.path.starts_with(&item.path) && other.path != item.path
-                    });
-                    
-                    if !has_files {
-                        dirs_to_remove.push(item.path.clone());
-                    }
-                }
-            }
-            
-            files.retain(|item| {
-                !dirs_to_remove.contains(&item.path)
-            });
-            
-            if files.len() != files_before_len {
-                has_changes = true;
-            }
-        }
-        
-        files
     }
     
     pub fn select_all_files(&mut self) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         for file in &self.filtered_files {
             if !file.is_directory {
                 self.selected_files.insert(file.path.clone());
@@ -1135,12 +1086,13 @@ impl ContextFileConcatApp {
             }
             Err(e) => {
                 self.preview_content = format!("Error loading preview: {}", e);
-                self.highlighted_preview_content.clear();
+                self.highlighted_preview_lines.clear();
             }
         }
     }
     
     pub fn save_config_dialog(&mut self) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         if let Some(file) = rfd::FileDialog::new()
             .add_filter("JSON Config", &["json"])
             .set_file_name("context-file-concat-config.json")
@@ -1164,9 +1116,11 @@ impl ContextFileConcatApp {
         {
             match crate::config::settings::import_config(&file) {
                 Ok(config) => {
+                    tracing::info!("Config loaded from {:?}, triggering automatic rescan.", file);
                     self.config = config;
-                    self.apply_filters();
-                    tracing::info!("Config loaded from {:?}", file);
+                    // Anstatt nur zu filtern, wird ein kompletter neuer Scan gestartet,
+                    // falls ein Verzeichnis geladen ist.
+                    self.start_directory_scan();
                 }
                 Err(e) => {
                     tracing::error!("Failed to load config: {}", e);
@@ -1176,43 +1130,32 @@ impl ContextFileConcatApp {
     }
     
     pub fn generate_preview(&mut self) {
-        if self.selected_files.is_empty() || self.is_generating || self.is_scanning {
-            return;
-        }
-
+        if self.selected_files.is_empty() || self.is_generating || self.is_scanning { return; }
         self.is_generating = true;
         self.scan_progress = None;
         self.generated_content = None;
         self.preview_file = None;
-
+        
         let (progress_sender, progress_receiver) = mpsc::unbounded_channel();
         let (result_sender, result_receiver) = mpsc::unbounded_channel();
-
         self.progress_receiver = Some(Arc::new(tokio::sync::Mutex::new(progress_receiver)));
         self.generation_receiver = Some(Arc::new(tokio::sync::Mutex::new(result_receiver)));
-
+        
         let selected_files: Vec<PathBuf> = self.selected_files.iter().cloned().collect();
+        let root_path = PathBuf::from(&self.current_path); // Benötigt für relative Pfade
         let include_tree = self.include_tree;
+        let use_relative_paths = self.use_relative_paths; // Zustand der Checkbox übergeben
+        
         let tree_content = if include_tree {
-            let root_path = PathBuf::from(&self.current_path);
-            
-            let items_for_tree: Vec<_> = if self.tree_full_mode {
+            let items_for_tree = if self.tree_full_mode {
                 self.file_tree.clone()
             } else {
-                self.file_tree.iter()
-                    .filter(|item| {
-                        if item.is_directory {
-                            selected_files.iter().any(|f| f.starts_with(&item.path))
-                        } else {
-                            selected_files.contains(&item.path)
-                        }
-                    })
-                    .cloned()
-                    .collect()
+                self.file_tree.iter().filter(|item| {
+                    if item.is_directory { selected_files.iter().any(|f| f.starts_with(&item.path)) } 
+                    else { selected_files.contains(&item.path) }
+                }).cloned().collect()
             };
-                
             let ignore_patterns = if self.tree_full_mode { self.tree_ignore_patterns.clone() } else { HashSet::new() };
-
             Some(TreeGenerator::generate_tree(&items_for_tree, &root_path, &ignore_patterns))
         } else {
             None
@@ -1226,21 +1169,19 @@ impl ContextFileConcatApp {
                     include_tree,
                     tree_content,
                     progress_sender,
+                    use_relative_paths, // <-- Neuer Parameter
+                    &root_path,         // <-- Neuer Parameter
                 ).await;
-
                 match result {
-                    Ok((content, size, lines)) => {
-                        let _ = result_sender.send(Ok((content, size, lines)));
-                    }
-                    Err(e) => {
-                        let _ = result_sender.send(Err(e.to_string()));
-                    }
+                    Ok((content, size, lines)) => { let _ = result_sender.send(Ok((content, size, lines))); }
+                    Err(e) => { let _ = result_sender.send(Err(e.to_string())); }
                 }
             });
         });
     }
 
     pub fn save_generated_file(&mut self) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         if let Some(content) = &self.generated_content {
             let output_dir = PathBuf::from(&self.output_path);
             if !output_dir.exists() {
@@ -1264,6 +1205,7 @@ impl ContextFileConcatApp {
     }
     
     pub fn start_content_search(&mut self) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         if self.search_in_files_query.is_empty() || self.is_searching_content {
             return;
         }
@@ -1301,84 +1243,87 @@ impl ContextFileConcatApp {
         });
     }
 
-
     pub fn render_progress_overlay(&mut self, ctx: &egui::Context) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         if let Some(progress) = &self.scan_progress.clone() {
+            if !self.is_scanning { return; }
+
             let is_complete = progress.processed >= progress.total && progress.total > 0;
 
-            let (title, complete_title) = if self.is_generating {
-                ("⏳ Generating Preview...", "✅ Preview Ready!")
-            } else {
-                ("⏳ Scanning...", "✅ Scan Complete!")
-            };
+            let title = if self.is_generating { "⏳ Generating Preview..." } else { "⏳ Scanning..." };
+            let complete_title = if self.is_generating { "✅ Preview Ready!" } else { "✅ Scan Complete!" };
 
             egui::Window::new(if is_complete { complete_title } else { title })
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
+                    ui.set_min_width(300.0);
                     ui.vertical_centered(|ui| {
-                        // KORREKTUR: Die redundante Überschrift wird entfernt. Der Fenstertitel reicht aus.
-                        // ui.heading(if is_complete { complete_title } else { title });
+                        ui.add_space(5.0);
 
-                        // --- KORREKTUR FORTSCHRITTSBALKEN ---
-                        let progress_fraction = if progress.total > 0 {
-                            progress.processed as f32 / progress.total as f32
-                        } else {
-                            // Erzeuge einen unbestimmten, animierten Ladebalken
-                            (ui.ctx().input(|i| i.time) * 2.0).sin() as f32 * 0.5 + 0.5
-                        };
-                        
-                        let progress_text = if progress.total > 0 {
-                            format!("{}/{}", progress.processed, progress.total)
-                        } else {
-                            format!("{} items found", progress.processed)
-                        };
-
-                        ui.add(egui::ProgressBar::new(progress_fraction).text(progress_text));
-                        // --- ENDE KORREKTUR ---
-
-                        // Dies zeigt den detaillierten Status wie "Loading Data..." oder "Scanning..."
-                        ui.label(&progress.status);
-
-                        if let Some(file_name) = progress.current_file.file_name() {
-                            if !file_name.is_empty() {
-                                ui.label(format!("File: {}", file_name.to_string_lossy()));
-                            }
+                        if progress.total > 0 && !is_complete {
+                            let progress_fraction = progress.processed as f32 / progress.total as f32;
+                            let percentage = progress_fraction * 100.0;
+                            let progress_text = format!(
+                                "{:.0}% ({} / {})",
+                                percentage,
+                                format_number_with_separators(progress.processed),
+                                format_number_with_separators(progress.total)
+                            );
+                            ui.add(egui::ProgressBar::new(progress_fraction).text(progress_text));
+                        } else if !is_complete {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(&progress.status);
+                            });
                         }
+                        
+                        let show_current_file = !is_complete && progress.status != "Counting files..." && progress.status != "Preparing to scan...";
 
+                        if show_current_file {
+                            if let Some(file_name) = progress.current_file.file_name() {
+                                if !file_name.is_empty() {
+                                    let name = file_name.to_string_lossy();
+                                    let truncated_name = if name.len() > 40 { format!("...{}", &name[name.len()-37..]) } else { name.to_string() };
+                                    ui.label(format!("File: {}", truncated_name));
+                                }
+                            }
+                        } else if is_complete {
+                            ui.label(&progress.status);
+                        }
+                        
                         if is_complete {
-                            if let Some(size) = progress.file_size {
-                                ui.label(format!("Total Size: {}", format_file_size(size)));
-                            }
-                            if let Some(lines) = progress.line_count {
-                                ui.label(format!("Total Lines: {}", format_number_with_separators(lines)));
-                            }
+                            if let Some(size) = progress.file_size { ui.label(format!("Total Size: {}", format_file_size(size))); }
+                            if let Some(lines) = progress.line_count { ui.label(format!("Total Lines: {}", format_number_with_separators(lines))); }
                         }
                         
+                        ui.add_space(10.0);
                         ui.separator();
+                        ui.add_space(5.0);
                         
-                        ui.horizontal(|ui| {
-                            if is_complete {
-                                if ui.button("✅ Close").clicked() {
-                                    self.is_scanning = false;
-                                    self.is_generating = false;
-                                    self.scan_progress = None;
-                                }
-                            } else {
-                                if ui.button("❌ Cancel").clicked() {
-                                    self.is_scanning = false;
-                                    self.is_generating = false;
-                                    self.scan_progress = None;
-                                }
+                        if is_complete {
+                            if ui.button("✅ Close").clicked() {
+                                self.is_scanning = false;
+                                self.scan_progress = None;
                             }
-                        });
+                        } else {
+                            if ui.button("❌ Cancel").clicked() {
+                                if let Some(flag) = &self.cancel_flag {
+                                    flag.store(true, Ordering::Relaxed);
+                                }
+                                self.is_scanning = false;
+                                self.scan_progress = None;
+                            }
+                        }
+                        ui.add_space(5.0);
                     });
                 });
         }
     }
         
     pub fn render_large_files_warning(&mut self, ctx: &egui::Context) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         egui::Window::new("⚠️ Large Files Detected")
             .collapsible(false)
             .resizable(true)
@@ -1431,6 +1376,7 @@ impl ContextFileConcatApp {
     }
 
     fn open_output_in_finder(&self) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         let output_path = PathBuf::from(&self.output_path);
         
         #[cfg(target_os = "macos")]

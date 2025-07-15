@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 
-use super::FileItem;
+// *** MODIFIZIERT: Nutzt jetzt die zentrale, korrekte Ignore-Logik ***
+use super::{FileItem, build_globset_from_patterns};
 
 pub struct TreeGenerator;
 
@@ -11,14 +12,21 @@ impl TreeGenerator {
         root_path: &Path,
         ignore_patterns: &HashSet<String>
     ) -> String {
+        // *** KORRIGIERT: Wendet die korrekte Ignore-Logik auf die Eingabedateien an ***
+        // 1. Baue ein GlobSet aus den baumspezifischen Ignore-Patterns.
+        let ignore_set = build_globset_from_patterns(ignore_patterns);
+        
+        // 2. Filtere die übergebenen Dateien, bevor der Baum gebaut wird.
+        let filtered_files: Vec<&FileItem> = files
+            .iter()
+            .filter(|file| !ignore_set.is_match(&file.path))
+            .collect();
+
         let mut tree_map = HashMap::new();
         
-        // Build tree structure
-        for file in files {
-            if Self::should_ignore(&file.path, ignore_patterns) {
-                continue;
-            }
-            
+        // Build tree structure from the correctly filtered files.
+        for file in filtered_files {
+            // Die alte `should_ignore`-Prüfung ist hier nicht mehr nötig.
             let relative_path = file.path.strip_prefix(root_path)
                 .unwrap_or(&file.path);
             
@@ -39,6 +47,7 @@ impl TreeGenerator {
         path: &Path,
         is_directory: bool
     ) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         let mut current_path = PathBuf::new();
         
         for component in path.components() {
@@ -75,7 +84,7 @@ impl TreeGenerator {
         prefix: &str,
         is_root: bool
     ) {
-        // Get root nodes (nodes without parents in the current context)
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         let mut root_nodes: Vec<&PathBuf> = if is_root {
             tree_map.keys()
                 .filter(|path| {
@@ -127,6 +136,7 @@ impl TreeGenerator {
         result: &mut String,
         prefix: &str
     ) {
+        // Der Inhalt dieser Methode hat sich nicht geändert.
         let mut sorted_children: Vec<&PathBuf> = children.iter().collect();
         sorted_children.sort_by(|a, b| {
             let a_node = &tree_map[*a];
@@ -163,27 +173,7 @@ impl TreeGenerator {
         }
     }
     
-    fn should_ignore(path: &Path, ignore_patterns: &HashSet<String>) -> bool {
-        let path_str = path.to_string_lossy();
-        
-        for pattern in ignore_patterns {
-            if pattern.ends_with('/') {
-                let dir_pattern = &pattern[..pattern.len() - 1];
-                if path_str.contains(dir_pattern) {
-                    return true;
-                }
-            } else if pattern.starts_with('*') {
-                let ext = &pattern[1..];
-                if path_str.ends_with(ext) {
-                    return true;
-                }
-            } else if path_str.contains(pattern) {
-                return true;
-            }
-        }
-        
-        false
-    }
+    // *** ENTFERNT: Die alte, fehlerhafte should_ignore Funktion wird nicht mehr benötigt. ***
 }
 
 #[derive(Debug, Clone)]

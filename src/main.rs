@@ -19,7 +19,7 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     eframe::run_native(
-        "ContextFileConcat",
+        "CFC - Context File Concatenator",
         options,
         Box::new(|cc| {
             // Use dark theme by default to match macOS

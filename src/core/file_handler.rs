@@ -10,18 +10,19 @@ use crate::utils::file_detection::is_text_file;
 pub struct FileHandler;
 
 impl FileHandler {
-    // MODIFIED: This function now generates content in-memory and returns it, instead of writing to a file.
+
     pub async fn generate_concatenated_content(
         selected_files: &[PathBuf],
         include_tree: bool,
         tree_content: Option<String>,
         progress_sender: mpsc::UnboundedSender<ScanProgress>,
-    // MODIFIED: Returns the content string, its size, and line count
+        use_relative_paths: bool,
+        root_path: &Path,
     ) -> Result<(String, u64, usize)> {
         let mut content = String::new();
         let total_files = selected_files.len();
         
-        // Add header
+        // Dein Header, unverändert
         content.push_str("# ContextFileConcat Output\n");
         content.push_str(&format!("# Generated: {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
         content.push_str(&format!("# Total files: {}\n", total_files));
@@ -38,23 +39,34 @@ impl FileHandler {
                 line_count: None,
             })?;
             
-            // Skip directories
             if file_path.is_dir() {
                 continue;
             }
+
+            let display_path = if use_relative_paths {
+                // Wir entfernen das Elternverzeichnis des root_path, um das root_path selbst im Pfad zu behalten.
+                if let Some(parent) = root_path.parent() {
+                    file_path.strip_prefix(parent).unwrap_or(file_path).display().to_string()
+                } else {
+                    // Fallback für den Fall, dass root_path kein Elternverzeichnis hat (z.B. "/")
+                    file_path.display().to_string()
+                }
+            } else {
+                file_path.display().to_string()
+            };
             
             // Check if file is text
             if !is_text_file(file_path).unwrap_or(false) {
-                content.push_str(&format!("{}\n", file_path.display()));
-                content.push_str("----------------------------------------------------\n");
+                content.push_str(&format!("{}\n", display_path));
+                content.push_str("=====================FILE-START==================\n");
                 content.push_str("[BINARY FILE - CONTENT SKIPPED]\n");
-                content.push_str("----------------------------------------------------\n\n");
+                content.push_str("----------------------FILE-END-------------------\n\n");
                 continue;
             }
             
             // Add file header
-            content.push_str(&format!("{}\n", file_path.display()));
-            content.push_str("----------------------------------------------------\n");
+            content.push_str(&format!("{}\n", display_path));
+            content.push_str("=====================FILE-START==================\n");
             
             // Read and add file content
             match Self::read_file_content(file_path) {
@@ -69,25 +81,22 @@ impl FileHandler {
                 }
             }
             
-            content.push_str("----------------------------------------------------\n\n");
+            content.push_str("----------------------FILE-END-------------------\n\n");
             
-            // Yield control periodically
             if i % 10 == 0 {
                 tokio::task::yield_now().await;
             }
         }
         
-        // Add tree at the end if requested
         if include_tree {
             if let Some(tree) = tree_content {
-                content.push_str("\n# DIRECTORY TREE\n");
+                content.push_str("# DIRECTORY TREE\n");
                 content.push_str("====================================================\n");
                 content.push_str(&tree);
                 content.push_str("====================================================\n");
             }
         }
         
-        // Final progress update before returning
         progress_sender.send(ScanProgress {
             current_file: PathBuf::from("Finalizing..."),
             processed: total_files,
@@ -97,7 +106,6 @@ impl FileHandler {
             line_count: None,
         })?;
         
-        // Calculate file statistics from the generated string
         let file_size = content.len() as u64;
         let line_count = content.lines().count();
 
@@ -115,17 +123,14 @@ impl FileHandler {
     }
     
     fn read_file_content(file_path: &Path) -> Result<String> {
-        // Check file size first (20MB limit)
         let metadata = fs::metadata(file_path)?;
         if metadata.len() > 20 * 1024 * 1024 {
             return Ok(format!("[FILE TOO LARGE: {} bytes - CONTENT SKIPPED]", metadata.len()));
         }
         
-        // Try to read as UTF-8 first
         match fs::read_to_string(file_path) {
             Ok(content) => Ok(content),
             Err(_) => {
-                // If UTF-8 fails, try reading as bytes and converting
                 let bytes = fs::read(file_path)?;
                 match String::from_utf8_lossy(&bytes) {
                     content if content.contains('\u{FFFD}') => {
@@ -172,5 +177,4 @@ impl FileHandler {
         
         Ok(preview)
     }
-
 }

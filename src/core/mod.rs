@@ -2,6 +2,7 @@ pub mod scanner;
 pub mod file_handler;
 pub mod search;
 pub mod tree_generator;
+pub mod ignore; // <-- HINZUGEFÜGT
 
 use std::path::PathBuf;
 
@@ -39,3 +40,4 @@ pub use scanner::DirectoryScanner;
 pub use file_handler::FileHandler;
 pub use search::SearchEngine;
 pub use tree_generator::TreeGenerator;
+pub use ignore::build_globset_from_patterns; // <-- HINZUGEFÜGT
