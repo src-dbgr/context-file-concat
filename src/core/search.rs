@@ -1,13 +1,12 @@
 use std::path::Path;
 use rayon::prelude::*;
-use globset::GlobSet; // MODIFIED: Changed import
 use super::{FileItem, SearchFilter, build_globset_from_patterns}; // MODIFIED
 
 pub struct SearchEngine;
 
 impl SearchEngine {
+    // Stellt die Logik zum Filtern nach Ignore-Patterns wieder her.
     pub fn filter_files(files: &[FileItem], filter: &SearchFilter) -> Vec<FileItem> {
-        // Build the glob set ONCE from the filter's patterns for efficient reuse.
         let ignore_glob_set = build_globset_from_patterns(&filter.ignore_patterns);
         
         files
@@ -17,13 +16,13 @@ impl SearchEngine {
             .collect()
     }
     
-    fn matches_filter(file: &FileItem, filter: &SearchFilter, ignore_glob_set: &GlobSet) -> bool {
+    // Berücksichtigt wieder das ignore_glob_set.
+    fn matches_filter(file: &FileItem, filter: &SearchFilter, ignore_glob_set: &globset::GlobSet) -> bool {
         if file.is_binary && !filter.show_binary {
             return false;
         }
         
-        // Use the blazingly fast pre-compiled GlobSet for matching.
-        // Also check for `.git` here for consistency.
+        // Die Prüfung ist zurück, um die UI-Filterung in Echtzeit zu ermöglichen.
         if file.path.components().any(|c| c.as_os_str() == ".git") || ignore_glob_set.is_match(&file.path) {
             return false;
         }
@@ -38,7 +37,8 @@ impl SearchEngine {
         
         true
     }
-
+    
+    // Die restlichen Methoden bleiben unverändert.
     fn matches_search_query(path: &Path, query: &str, case_sensitive: bool) -> bool {
         let file_name = path.file_name()
             .and_then(|name| name.to_str())

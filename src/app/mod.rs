@@ -43,7 +43,6 @@ pub struct ContextFileConcatApp {
     output_path: String,
     output_filename: String,
     include_tree: bool,
-    tree_full_mode: bool,
     tree_ignore_patterns: HashSet<String>,
     use_relative_paths: bool,
     
@@ -71,6 +70,8 @@ pub struct ContextFileConcatApp {
     
     // For cancelling scans
     cancel_flag: Option<Arc<AtomicBool>>,
+    // *** NEUES FELD ***
+    generation_cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -79,13 +80,16 @@ pub struct PreviewSegment {
     pub is_match: bool,
 }
 
+// in src/app/mod.rs
+
 impl ContextFileConcatApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // Die Konfiguration wird hier korrekt geladen
         let config = AppConfig::load().unwrap_or_default();
         
         let output_filename = format!(
-            "output_{}.txt", 
-            chrono::Local::now().format("%Y%m%d_%H%M%S")
+            "cfc_output_{}.txt", 
+            chrono::Local::now().format("%d%m%Y_%H%M%S")
         );
         
         Self {
@@ -106,21 +110,23 @@ impl ContextFileConcatApp {
             is_scanning: false,
             is_generating: false,
             is_searching_content: false,
-            config,
+            config: config.clone(),
             output_path: dirs::desktop_dir()
                 .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
                 .to_string_lossy()
                 .to_string(),
             output_filename,
-            include_tree: false,
-            tree_full_mode: false,
+
+            // KORREKTUR HIER:
+            // Wir verwenden jetzt den Wert aus der geladenen Konfiguration.
+            include_tree: config.include_tree_by_default,
+
             tree_ignore_patterns: HashSet::new(),
             use_relative_paths: true,
             preview_content: String::new(),
             preview_file: None,
             generated_content: None,
             file_list_height: 400.0,
-            // *** MODIFIZIERT: Initialisiert die neue Datenstruktur ***
             highlighted_preview_lines: Vec::new(),
             large_files_count: 0,
             large_files_names: Vec::new(),
@@ -130,6 +136,7 @@ impl ContextFileConcatApp {
             content_search_receiver: None,
             generation_receiver: None,
             cancel_flag: None,
+            generation_cancel_flag: None,
         }
     }
 }

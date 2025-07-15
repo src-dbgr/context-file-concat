@@ -65,7 +65,7 @@ impl Default for AppConfig {
             output_directory: dirs::desktop_dir(),
             case_sensitive_search: false,
             show_binary_files: true,
-            include_tree_by_default: false,
+            include_tree_by_default: true,
             remove_empty_directories: false,
             window_size: (1200.0, 800.0),
             window_position: None,

@@ -12,21 +12,33 @@ pub fn build_globset_from_patterns(patterns: &HashSet<String>) -> GlobSet {
             continue;
         }
 
-        // *** KORRIGIERT: Behandelt Verzeichnis-Patterns korrekt ***
-        if let Some(dir_pattern) = trimmed_pattern.strip_suffix('/') {
-            // Für ein Verzeichnis-Pattern wie "target/", fügen wir zwei Globs hinzu:
-            
-            // 1. Um das Verzeichnis selbst zu matchen (z.B. "**/target")
-            if let Ok(glob) = Glob::new(&format!("**/{}", dir_pattern)) {
+        // --- MODIFIZIERTE LOGIK ---
+        // Prüfen, ob das Pattern wie ein Verzeichnis behandelt werden soll.
+        // Dies ist der Fall, wenn es mit '/' endet ODER ein einfacher Name ohne Wildcards/Slashes ist (z.B. "target").
+        let is_dir_pattern_suffix = trimmed_pattern.ends_with('/');
+        let is_simple_name_like_dir = !trimmed_pattern.contains('/') 
+            && !trimmed_pattern.contains('*') 
+            && !trimmed_pattern.contains('?');
+
+        if is_dir_pattern_suffix || is_simple_name_like_dir {
+            // Normalisiere das Pattern, indem der eventuelle Schrägstrich am Ende entfernt wird.
+            let base_pattern = if is_dir_pattern_suffix {
+                trimmed_pattern.strip_suffix('/').unwrap_or(trimmed_pattern)
+            } else {
+                trimmed_pattern
+            };
+
+            // 1. Glob, um das Verzeichnis/die Datei selbst zu matchen (z.B. `**/target`).
+            if let Ok(glob) = Glob::new(&format!("**/{}", base_pattern)) {
                 builder.add(glob);
             }
-            // 2. Um alle Inhalte innerhalb dieses Verzeichnisses zu matchen (z.B. "**/target/**")
-            if let Ok(glob) = Glob::new(&format!("**/{}/**", dir_pattern)) {
+            // 2. Glob, um alles INNERHALB des Verzeichnisses zu matchen (z.B. `**/target/**`).
+            if let Ok(glob) = Glob::new(&format!("**/{}/**", base_pattern)) {
                 builder.add(glob);
             }
         } else {
-            // Für Datei-Patterns (z.B. "*.log") oder exakte Namen (".DS_Store"),
-            // wird ein Glob erstellt, der sie überall im Verzeichnisbaum findet.
+            // Alle anderen Patterns (wie `*.log` oder `src/*.rs`) werden als normale Globs behandelt.
+            // Das `**/` Präfix stellt sicher, dass sie in jeder Tiefe gefunden werden.
             if let Ok(glob) = Glob::new(&format!("**/{}", trimmed_pattern)) {
                 builder.add(glob);
             }

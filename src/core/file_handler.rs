@@ -3,33 +3,40 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use anyhow::Result;
 use tokio::sync::mpsc;
-
-use super::ScanProgress;
+use std::collections::HashSet;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use super::{FileItem, ScanProgress, TreeGenerator};
 use crate::utils::file_detection::is_text_file;
 
+// KORREKTUR 1: Die fehlende Struktur-Definition wird hier hinzugefügt.
 pub struct FileHandler;
 
 impl FileHandler {
 
     pub async fn generate_concatenated_content(
         selected_files: &[PathBuf],
-        include_tree: bool,
-        tree_content: Option<String>,
-        progress_sender: mpsc::UnboundedSender<ScanProgress>,
-        use_relative_paths: bool,
         root_path: &Path,
+        use_relative_paths: bool,
+        progress_sender: mpsc::UnboundedSender<ScanProgress>,
+        cancel_flag: Arc<AtomicBool>,
+        include_tree: bool,
+        items_for_tree: Vec<FileItem>, // <-- Geänderter Parameter
+        tree_ignore_patterns: HashSet<String>, // <-- Geänderter Parameter
     ) -> Result<(String, u64, usize)> {
         let mut content = String::new();
         let total_files = selected_files.len();
         
-        // Dein Header, unverändert
         content.push_str("# ContextFileConcat Output\n");
         content.push_str(&format!("# Generated: {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
         content.push_str(&format!("# Total files: {}\n", total_files));
         content.push_str("\n");
         
-        // Process each file
+        // Schritt 1: Verarbeite alle ausgewählten Dateien (unverändert)
         for (i, file_path) in selected_files.iter().enumerate() {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err(anyhow::anyhow!("Content generation cancelled by user."));
+            }
+
             progress_sender.send(ScanProgress {
                 current_file: file_path.clone(),
                 processed: i,
@@ -39,23 +46,14 @@ impl FileHandler {
                 line_count: None,
             })?;
             
-            if file_path.is_dir() {
-                continue;
-            }
+            if file_path.is_dir() { continue; }
 
             let display_path = if use_relative_paths {
-                // Wir entfernen das Elternverzeichnis des root_path, um das root_path selbst im Pfad zu behalten.
                 if let Some(parent) = root_path.parent() {
                     file_path.strip_prefix(parent).unwrap_or(file_path).display().to_string()
-                } else {
-                    // Fallback für den Fall, dass root_path kein Elternverzeichnis hat (z.B. "/")
-                    file_path.display().to_string()
-                }
-            } else {
-                file_path.display().to_string()
-            };
+                } else { file_path.display().to_string() }
+            } else { file_path.display().to_string() };
             
-            // Check if file is text
             if !is_text_file(file_path).unwrap_or(false) {
                 content.push_str(&format!("{}\n", display_path));
                 content.push_str("=====================FILE-START==================\n");
@@ -64,46 +62,43 @@ impl FileHandler {
                 continue;
             }
             
-            // Add file header
             content.push_str(&format!("{}\n", display_path));
             content.push_str("=====================FILE-START==================\n");
             
-            // Read and add file content
             match Self::read_file_content(file_path) {
                 Ok(file_content) => {
                     content.push_str(&file_content);
-                    if !file_content.ends_with('\n') {
-                        content.push('\n');
-                    }
+                    if !file_content.ends_with('\n') { content.push('\n'); }
                 }
-                Err(e) => {
-                    content.push_str(&format!("[ERROR READING FILE: {}]\n", e));
-                }
+                Err(e) => { content.push_str(&format!("[ERROR READING FILE: {}]\n", e)); }
             }
             
             content.push_str("----------------------FILE-END-------------------\n\n");
             
-            if i % 10 == 0 {
-                tokio::task::yield_now().await;
-            }
+            if i % 10 == 0 { tokio::task::yield_now().await; }
         }
         
+        // Schritt 2: Generiere den Verzeichnisbaum HIER im Hintergrund-Thread
         if include_tree {
-            if let Some(tree) = tree_content {
-                content.push_str("# DIRECTORY TREE\n");
-                content.push_str("====================================================\n");
-                content.push_str(&tree);
-                content.push_str("====================================================\n");
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err(anyhow::anyhow!("Content generation cancelled by user."));
             }
+            
+            // Die Logik zum Filtern der `items_for_tree` ist nun im UI-Thread,
+            // also können wir sie hier direkt verwenden.
+            let tree = TreeGenerator::generate_tree(&items_for_tree, root_path, &tree_ignore_patterns);
+            
+            content.push_str("# DIRECTORY TREE\n");
+            content.push_str("====================================================\n");
+            content.push_str(&tree);
+            content.push_str("====================================================\n");
         }
         
         progress_sender.send(ScanProgress {
             current_file: PathBuf::from("Finalizing..."),
-            processed: total_files,
-            total: total_files,
+            processed: total_files, total: total_files,
             status: "Finalizing content...".to_string(),
-            file_size: None,
-            line_count: None,
+            file_size: None, line_count: None,
         })?;
         
         let file_size = content.len() as u64;
@@ -111,8 +106,7 @@ impl FileHandler {
 
         progress_sender.send(ScanProgress {
             current_file: PathBuf::from("Generated Preview"),
-            processed: total_files,
-            total: total_files,
+            processed: total_files, total: total_files,
             status: "Complete!".to_string(),
             file_size: Some(file_size),
             line_count: Some(line_count),
@@ -121,7 +115,7 @@ impl FileHandler {
         tracing::info!("Successfully generated concatenated content in memory.");
         Ok((content, file_size, line_count))
     }
-    
+
     fn read_file_content(file_path: &Path) -> Result<String> {
         let metadata = fs::metadata(file_path)?;
         if metadata.len() > 20 * 1024 * 1024 {
@@ -136,6 +130,7 @@ impl FileHandler {
                     content if content.contains('\u{FFFD}') => {
                         Ok("[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]".to_string())
                     }
+                    // KORREKTUR 2: Der temporäre Slice wird in einen eigenen String umgewandelt.
                     content => Ok(content.to_string()),
                 }
             }

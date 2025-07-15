@@ -1,1 +1,5 @@
 /target
+/cfc_output
+.DS_Store
+output.txt
+cfc_output*.txt
