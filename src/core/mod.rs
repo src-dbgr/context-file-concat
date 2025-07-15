@@ -32,7 +32,6 @@ pub struct SearchFilter {
     pub query: String,
     pub extension: String,
     pub case_sensitive: bool,
-    pub show_binary: bool,
     pub ignore_patterns: std::collections::HashSet<String>,
 }
 

@@ -23,7 +23,6 @@ pub struct ContextFileConcatApp {
     file_extension_filter: String,
     search_in_files_query: String,
     case_sensitive: bool,
-    show_binary_files: bool,
     
     // Input field states
     new_ignore_pattern: String,
@@ -72,6 +71,9 @@ pub struct ContextFileConcatApp {
     cancel_flag: Option<Arc<AtomicBool>>,
     generation_cancel_flag: Option<Arc<AtomicBool>>,
     save_error_message: Option<String>,
+    
+    // Speichert Patterns, die durch "Remove empty dirs" erzeugt wurden
+    auto_removed_dir_patterns: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -101,7 +103,6 @@ impl ContextFileConcatApp {
             file_extension_filter: String::new(),
             search_in_files_query: String::new(),
             case_sensitive: false,
-            show_binary_files: true,
             new_ignore_pattern: String::new(),
             new_tree_pattern: String::new(),
             ignore_pattern_filter: String::new(),
@@ -133,6 +134,7 @@ impl ContextFileConcatApp {
             cancel_flag: None,
             generation_cancel_flag: None,
             save_error_message: None,
+            auto_removed_dir_patterns: HashSet::new(),
         }
     }
 }

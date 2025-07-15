@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 use rayon::prelude::*;
 use super::{FileItem, SearchFilter, build_globset_from_patterns}; // MODIFIED
 
@@ -17,11 +18,7 @@ impl SearchEngine {
     }
     
     // Berücksichtigt wieder das ignore_glob_set.
-    fn matches_filter(file: &FileItem, filter: &SearchFilter, ignore_glob_set: &globset::GlobSet) -> bool {
-        if file.is_binary && !filter.show_binary {
-            return false;
-        }
-        
+    fn matches_filter(file: &FileItem, filter: &SearchFilter, ignore_glob_set: &globset::GlobSet) -> bool {       
         // Die Prüfung ist zurück, um die UI-Filterung in Echtzeit zu ermöglichen.
         if file.path.components().any(|c| c.as_os_str() == ".git") || ignore_glob_set.is_match(&file.path) {
             return false;
@@ -66,8 +63,9 @@ impl SearchEngine {
         }
     }
 
-    pub fn remove_empty_directories(mut files: Vec<FileItem>) -> Vec<FileItem> {
+    pub fn remove_empty_directories(mut files: Vec<FileItem>) -> (Vec<FileItem>, HashSet<PathBuf>) {
         let mut has_changes = true;
+        let mut all_removed_dirs = HashSet::new();
         
         while has_changes {
             has_changes = false;
@@ -91,10 +89,12 @@ impl SearchEngine {
                 files.retain(|item| !dirs_to_remove.contains(&item.path));
                 if files.len() != files_before_len {
                     has_changes = true;
+                    // Füge die in dieser Runde entfernten Verzeichnisse zum Gesamtset hinzu.
+                    all_removed_dirs.extend(dirs_to_remove);
                 }
             }
         }
         
-        files
+        (files, all_removed_dirs)
     }
 }

@@ -50,23 +50,26 @@ impl ContextFileConcatApp {
     fn render_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.label("📁 Root Directory:");
         
-        if ui.button("Select Directory").clicked() {
-            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                self.current_path = path.to_string_lossy().to_string();
-                self.start_directory_scan();
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.current_path)
+                    .desired_width(350.0)
+                    .hint_text("Enter directory path or use Select Directory button")
+            );
+            
+            if ui.button("Select Directory").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.current_path = path.to_string_lossy().to_string();
+                    self.start_directory_scan();
+                }
             }
-        }
-        ui.add_space(1.0);
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut self.current_path)
-                .desired_width(400.0)
-                .hint_text("Enter directory path or use Select Directory button")
-        );
-        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            if !self.current_path.is_empty() {
-                self.start_directory_scan();
+            
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if !self.current_path.is_empty() {
+                    self.start_directory_scan();
+                }
             }
-        }
+        });
         
         ui.add_space(1.0);
         if ui.button("Scan").clicked() && !self.current_path.is_empty() {
@@ -74,14 +77,14 @@ impl ContextFileConcatApp {
         }
         
         ui.separator();
-        
-        if ui.button("💾 Export Config").clicked() {
-            self.save_config_dialog();
-        }
-        ui.add_space(1.0);
-        if ui.button("📂 Import Config").clicked() {
-            self.load_config_dialog();
-        }
+        ui.horizontal(|ui| {
+            if ui.button("💾 Export Config").clicked() {
+                self.save_config_dialog();
+            }
+            if ui.button("📂 Import Config").clicked() {
+                self.load_config_dialog();
+            }
+        });
         ui.add_space(1.0);
     }
 
@@ -95,14 +98,24 @@ impl ContextFileConcatApp {
             ui.heading("🔍 Search in Files");
             ui.horizontal(|ui| {
                 if ui.add(egui::TextEdit::singleline(&mut self.search_in_files_query).hint_text("Search text inside files...")).changed() {
-                    if !self.search_in_files_query.is_empty() { self.start_content_search(); } else { self.apply_filters(); }
+                    if !self.search_in_files_query.is_empty() { 
+                        self.start_content_search(); 
+                    } else { 
+                        self.apply_filters(); 
+                    }
                     self.update_preview_highlighting();
                 }
             });
             if self.is_searching_content { ui.horizontal(|ui| { ui.spinner(); ui.label("Searching in files..."); }); }
             ui.horizontal(|ui| {
-                if ui.checkbox(&mut self.case_sensitive, "Case sensitive").changed() { self.apply_filters(); self.update_preview_highlighting(); }
-                if ui.checkbox(&mut self.show_binary_files, "Show binary files").changed() { self.apply_filters(); }
+                if ui.checkbox(&mut self.case_sensitive, "Case sensitive").changed() { 
+                    self.apply_filters(); 
+                    self.update_preview_highlighting();
+                    // <- HINZUGEFÜGT: Neue Suche wenn Search in Files aktiv ist
+                    if !self.search_in_files_query.is_empty() {
+                        self.start_content_search();
+                    }
+                }
             });
             ui.separator();
             ui.heading("🚫 Ignore Patterns");
@@ -115,10 +128,21 @@ impl ContextFileConcatApp {
             ui.add_space(10.0);
             ui.label("Common Ignore Pattern:");
             ui.horizontal_wrapped(|ui| {
-                for pattern in ["node_modules", "target", ".git", "*.log", "*.lock", "__pycache__", "*.tmp", ".DS_Store", "Thumbs.db", "*.class", "package-lock.json", ".psd", "*.jpg", "*.svg", "*.png", "*.webp", "*.avif", "*.gif", "*.tiff", "*.raw", "*.avif"] {
+                // Gleiche Abstände wie bei den anderen Pattern-Listen
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                
+                for pattern in ["node_modules", "target", ".git", "*.log", "*.lock", "__pycache__", "*.tmp", ".DS_Store", "Thumbs.db", "*.class", "package-lock.json", "*.psd", "*.jpg", "*.svg", "*.png", "*.webp", "*.avif", "*.gif", "*.tiff", "*.raw", "*.avif"] {
                     // NEUE BEDINGUNG: Zeige den Button nur an, wenn das Muster noch nicht in der Liste ist.
                     if !self.config.ignore_patterns.contains(pattern) {
-                        if ui.small_button(pattern).clicked() { 
+                        // Gleiches Styling wie die anderen Pattern-Buttons, aber ohne ❌
+                        let button = egui::Button::new(pattern)
+                            .fill(egui::Color32::TRANSPARENT) // Kein Hintergrund
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(100))) // Dünner grauer Rand
+                            .min_size(egui::vec2(0.0, 20.0)); // Mindesthöhe für bessere Klickbarkeit
+                        
+                        if ui.add(button)
+                            .on_hover_text(format!("Click to add '{}' to ignore patterns", pattern))
+                            .clicked() { 
                             self.config.ignore_patterns.insert(pattern.to_string());
                             self.apply_filters();
                         }
@@ -156,16 +180,37 @@ impl ContextFileConcatApp {
                     let mut patterns: Vec<String> = self.config.ignore_patterns.iter().cloned().collect();
                     patterns.sort_unstable();
                     let filter_text = self.ignore_pattern_filter.to_lowercase();
-                    for pattern in &patterns {
-                        if !filter_text.is_empty() && !pattern.to_lowercase().contains(&filter_text) { continue; }
-                        ui.horizontal(|ui| {
-                            if ui.small_button("❌").on_hover_text("Remove pattern").clicked() { 
-                                self.config.ignore_patterns.remove(pattern); 
-                                self.apply_filters();
+                    
+                    // Horizontal wrapped Layout für automatischen Zeilenumbruch
+                    ui.horizontal_wrapped(|ui| {
+                        // Schöne Abstände zwischen den Elementen
+                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                        
+                        let mut pattern_to_remove: Option<String> = None;
+                        
+                        for pattern in &patterns {
+                            if !filter_text.is_empty() && !pattern.to_lowercase().contains(&filter_text) { continue; }
+                            
+                            // Jedes Pattern als ein Button mit X-Symbol LINKS - bricht automatisch um
+                            let button_text = format!("❌ {}", pattern);
+                            let button = egui::Button::new(button_text)
+                                .fill(egui::Color32::TRANSPARENT) // Kein Hintergrund
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(100))) // Dünner grauer Rand
+                                .min_size(egui::vec2(0.0, 20.0)); // Mindesthöhe für bessere Klickbarkeit
+                            
+                            if ui.add(button)
+                                .on_hover_text("Click to remove this pattern")
+                                .clicked() {
+                                pattern_to_remove = Some(pattern.clone());
                             }
-                            ui.label(pattern);
-                        });
-                    }
+                        }
+                        
+                        // Pattern entfernen nach der Schleife
+                        if let Some(pattern) = pattern_to_remove {
+                            self.config.ignore_patterns.remove(&pattern);
+                            self.apply_filters();
+                        }
+                    });
                 });
             });
         });
@@ -287,14 +332,18 @@ impl ContextFileConcatApp {
                     ui.colored_label(egui::Color32::from_gray(160), dir_name.as_ref());
                 }
 
-                let ignore_button_response = ui.add(egui::Button::new("i").small().min_size(egui::Vec2::new(16.0, 16.0)).fill(egui::Color32::from_gray(30)));
+                let ignore_button_response = ui.add(egui::Button::new("i").small().min_size(egui::Vec2::new(16.0, 16.0)).fill(egui ::Color32::from_gray(35)));
                 if ignore_button_response.clicked() {
-                    if let Some(dir_name) = item.path.file_name().and_then(|n| n.to_str()) {
-                        self.config.ignore_patterns.insert(format!("{}/", dir_name));
-                        self.apply_filters(); // Löst sofortiges Filtern aus, KEINEN Re-Scan
+                    let root_path = PathBuf::from(&self.current_path);
+                    // Erzeuge einen pfad-spezifischen Ignore-Pattern.
+                    if let Ok(relative_path) = item.path.strip_prefix(&root_path) {
+                        // Pattern mit Suffix '/', um das gesamte Verzeichnis zu ignorieren.
+                        let pattern = format!("{}/", relative_path.to_string_lossy());
+                        self.config.ignore_patterns.insert(pattern);
+                        self.apply_filters(); // Filter sofort anwenden
                     }
                 }
-                ignore_button_response.on_hover_text("Add directory to ignore patterns");
+                ignore_button_response.on_hover_text("Add this specific directory to ignore patterns");
 
             } else { // Wenn es eine Datei ist
                 let mut is_selected = self.selected_files.contains(&item.path);
@@ -317,14 +366,18 @@ impl ContextFileConcatApp {
                 };
                 if response.clicked() { self.load_file_preview(&item.path); }
                 
-                let ignore_button_response = ui.add(egui::Button::new("i").small().min_size(egui::Vec2::new(16.0, 16.0)).fill(egui::Color32::from_gray(30)));
+                let ignore_button_response = ui.add(egui::Button::new("i").small().min_size(egui::Vec2::new(16.0, 16.0)).fill(egui ::Color32::from_gray(35)));
                 if ignore_button_response.clicked() {
-                    if let Some(file_name) = item.path.file_name().and_then(|n| n.to_str()) {
-                        self.config.ignore_patterns.insert(file_name.to_string());
-                        self.apply_filters(); // Löst sofortiges Filtern aus, KEINEN Re-Scan
+                    let root_path = PathBuf::from(&self.current_path);
+                    // Erzeuge einen pfad-spezifischen Ignore-Pattern.
+                    if let Ok(relative_path) = item.path.strip_prefix(&root_path) {
+                        // Pattern ist der exakte relative Pfad der Datei.
+                        let pattern = relative_path.to_string_lossy().to_string();
+                        self.config.ignore_patterns.insert(pattern);
+                        self.apply_filters(); // Filter sofort anwenden
                     }
                 }
-                ignore_button_response.on_hover_text("Add file to ignore patterns");
+                ignore_button_response.on_hover_text("Add this specific file to ignore patterns");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(20.0);
@@ -454,14 +507,45 @@ impl ContextFileConcatApp {
             ui.separator();
             let lines: Vec<&str> = self.preview_content.lines().collect();
             let num_rows = self.preview_content.lines().count();
+            let matching_line_numbers: Vec<usize> = if !self.search_in_files_query.is_empty() {
+            let search_term = if self.case_sensitive { 
+                self.search_in_files_query.clone() 
+            } else { 
+                self.search_in_files_query.to_lowercase() 
+            };
+            
+            lines.iter().enumerate()
+                .filter_map(|(i, line)| {
+                    let line_for_search = if self.case_sensitive { 
+                        line.to_string() 
+                    } else { 
+                        line.to_lowercase() 
+                    };
+                    if line_for_search.contains(&search_term) {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
             let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
             egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("virtual_single_file_preview_scroll").show_rows(ui, row_height, num_rows, |ui, row_range| {
                 let is_highlighting_active = !self.search_in_files_query.is_empty() && !self.highlighted_preview_lines.is_empty();
                 for i in row_range {
                     let line_number_text = format!("{:<5}", i + 1);
-                    let dim_color = ui.visuals().weak_text_color();
+                    
+                    // <- HINZUGEFÜGT: Spezielle Farbe für Zeilen mit Matches
+                    let line_number_color = if matching_line_numbers.contains(&i) {
+                        egui::Color32::YELLOW // Gelb für Zeilen mit Matches
+                    } else {
+                        ui.visuals().weak_text_color() // Normal grau
+                    };
+                    
                     ui.horizontal(|ui| {
-                        ui.monospace(egui::RichText::new(line_number_text).color(dim_color));
+                        ui.monospace(egui::RichText::new(line_number_text).color(line_number_color));
                         if is_highlighting_active {
                             if let Some(segments) = self.highlighted_preview_lines.get(i) {
                                 for segment in segments {
@@ -537,7 +621,25 @@ impl ContextFileConcatApp {
 
                 // Button 1: Generate Preview
                 let can_generate = !self.selected_files.is_empty() && !self.is_scanning && !self.is_generating;
-                if ui.add_enabled(can_generate, egui::Button::new("🚀 Generate Preview").min_size(egui::vec2(button_width, button_height))).clicked() {
+                let generate_button = if can_generate {
+                    egui::Button::new(egui::RichText::new("🚀 Generate Preview").color(egui::Color32::WHITE))
+                        .fill(egui::Color32::from_rgb(112, 157, 108)) // #709d6c
+                        .min_size(egui::vec2(button_width, button_height))
+                } else {
+                    egui::Button::new("🚀 Generate Preview")
+                        .fill(egui::Color32::from_gray(60)) // Grau wenn disabled
+                        .min_size(egui::vec2(button_width, button_height))
+                };
+                
+                let generate_response = ui.add_enabled(can_generate, generate_button);
+                
+                // Explizites Hover-Styling für besseren Border
+                if can_generate && generate_response.hovered() {
+                    let hover_stroke = egui::Stroke::new(0.0, egui::Color32::from_rgb(255, 255, 255));
+                    ui.painter().rect_stroke(generate_response.rect, 3.0, hover_stroke);
+                }
+                
+                if generate_response.clicked() {
                     self.generate_preview();
                 }
                 
@@ -563,8 +665,6 @@ impl ContextFileConcatApp {
             
             // ======================= 2. EINSTELLUNGEN (UNTEN, EINKLAPPBAR) =======================
             
-            // ANPASSUNG: ui.heading wird durch ui.collapsing ersetzt.
-            // Alle Einstellungen werden innerhalb dieses Blocks platziert.
             ui.collapsing("📤 Output Settings", |ui| {
                 ui.add_space(5.0); // Ein kleiner Abstand innerhalb der Sektion
 
@@ -600,19 +700,43 @@ impl ContextFileConcatApp {
                         if ui.button("Copy Current Ignores").on_hover_text("Copies all patterns from the main list on the left").clicked() { self.tree_ignore_patterns = self.config.ignore_patterns.clone(); }
                         if ui.button("Clear Tree Ignores").on_hover_text("Removes all tree-specific ignore patterns").clicked() { self.tree_ignore_patterns.clear(); }
                     });
+                    
                     if !self.tree_ignore_patterns.is_empty() {
+                        ui.add_space(5.0);
+                        
+                        // LÖSUNG: Jedes Pattern als ein einzelner klickbarer Button für echten Zeilenumbruch
                         ui.horizontal_wrapped(|ui| {
+                            // Schöne Abstände zwischen den Elementen
+                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                            
                             let mut patterns: Vec<String> = self.tree_ignore_patterns.iter().cloned().collect();
                             patterns.sort_unstable();
-                            for pattern in patterns {
-                                ui.label(egui::RichText::new(format!(" {} ", &pattern)).background_color(ui.visuals().widgets.inactive.bg_fill).monospace());
-                                if ui.small_button("❌").on_hover_text("Remove").clicked() { self.tree_ignore_patterns.remove(&pattern); }
+                            
+                            let mut pattern_to_remove: Option<String> = None;
+
+                            for pattern in &patterns {
+                                // Jedes Pattern als ein Button mit X-Symbol LINKS - bricht automatisch um
+                                let button_text = format!("❌ {}", pattern);
+                                let button = egui::Button::new(button_text)
+                                    .fill(egui::Color32::TRANSPARENT) // Kein Hintergrund
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(100))) // Dünner grauer Rand
+                                    .min_size(egui::vec2(0.0, 20.0)); // Mindesthöhe für bessere Klickbarkeit
+                                
+                                if ui.add(button)
+                                    .on_hover_text("Click to remove this pattern")
+                                    .clicked() {
+                                    pattern_to_remove = Some(pattern.clone());
+                                }
+                            }
+                            
+                            if let Some(pattern) = pattern_to_remove {
+                                self.tree_ignore_patterns.remove(&pattern);
                             }
                         });
                     }
                 }
             });
-            ui.add_space(2.0); // Ein wenig Abstand zum bottom
+            ui.add_space(2.0);
         });
     }
     
@@ -744,34 +868,64 @@ impl ContextFileConcatApp {
     }
 
     pub fn apply_filters(&mut self) {
+        // Zuerst alle automatisch hinzugefügten Ignore-Patterns der letzten Runde entfernen,
+        // um einen sauberen Zustand für die neue Filterung zu schaffen.
+        self.config.ignore_patterns.retain(|p| !self.auto_removed_dir_patterns.contains(p));
+        self.auto_removed_dir_patterns.clear();
+
         let filter = SearchFilter {
             query: self.search_query.clone(),
             extension: self.file_extension_filter.clone(),
             case_sensitive: self.case_sensitive,
-            show_binary: self.show_binary_files,
-            ignore_patterns: self.config.ignore_patterns.clone(), // WIEDER HINZUGEFÜGT
+            ignore_patterns: self.config.ignore_patterns.clone(),
         };
+        
         let mut filtered = SearchEngine::filter_files(&self.file_tree, &filter);
+
+        // Füge Elternverzeichnisse für gefilterte Dateien hinzu, um die Baumstruktur zu erhalten.
         let root_path = PathBuf::from(&self.current_path);
         let required_dirs: HashSet<PathBuf> = filtered.par_iter().flat_map(|item| {
             let mut parents = Vec::new();
             if !item.is_directory {
                 let mut current = item.path.parent();
                 while let Some(parent) = current {
-                    if parent.starts_with(&root_path) && parent != &root_path { parents.push(parent.to_path_buf()); } else { break; }
+                    if parent.starts_with(&root_path) && parent != &root_path {
+                        parents.push(parent.to_path_buf());
+                    } else {
+                        break;
+                    }
                     current = parent.parent();
                 }
             }
             parents
         }).collect();
+        
         let existing_paths: HashSet<PathBuf> = filtered.par_iter().map(|item| item.path.clone()).collect();
         filtered.extend(
             self.file_tree.par_iter()
                 .filter(|item| item.is_directory && required_dirs.contains(&item.path) && !existing_paths.contains(&item.path))
                 .cloned().collect::<Vec<FileItem>>()
         );
-        if self.config.remove_empty_directories { filtered = SearchEngine::remove_empty_directories(filtered); }
+
+        // NEUE LOGIK: Wenn "Remove empty dirs" aktiv ist.
+        if self.config.remove_empty_directories {
+            let (pruned_files, removed_dirs) = SearchEngine::remove_empty_directories(filtered);
+            
+            for dir_path in removed_dirs {
+                if let Ok(relative_path) = dir_path.strip_prefix(&root_path) {
+                    // Füge den relativen Pfad als Ignore-Pattern hinzu.
+                    // Wichtig: mit Suffix '/', damit es als Verzeichnis behandelt wird.
+                    let pattern = format!("{}/", relative_path.to_string_lossy());
+                    self.config.ignore_patterns.insert(pattern.clone());
+                    self.auto_removed_dir_patterns.insert(pattern);
+                }
+            }
+            filtered = pruned_files;
+        }
+
         self.filtered_files = filtered;
+        
+        // Bereinige die Auswahl, um nur noch gültige Pfade zu behalten.
         let valid_paths: HashSet<PathBuf> = self.filtered_files.par_iter().map(|item| item.path.clone()).collect();
         self.selected_files.retain(|path| valid_paths.contains(path));
     }
@@ -785,7 +939,7 @@ impl ContextFileConcatApp {
     pub fn load_file_preview(&mut self, file_path: &PathBuf) {
         self.generated_content = None;
         self.preview_file = Some(file_path.clone());
-        match FileHandler::get_file_preview(file_path, 1000) {
+        match FileHandler::get_file_preview(file_path, 1500) {
             Ok(content) => { self.preview_content = content; self.update_preview_highlighting(); }
             Err(e) => { self.preview_content = format!("Error loading preview: {}", e); self.highlighted_preview_lines.clear(); }
         }
@@ -984,6 +1138,7 @@ impl ContextFileConcatApp {
         if self.search_in_files_query.is_empty() || self.is_searching_content { return; }
         self.is_searching_content = true;
         let search_query = self.search_in_files_query.clone();
+        let case_sensitive = self.case_sensitive; // <- HINZUGEFÜGT
         let files_to_search: Vec<FileItem> = self.file_tree.iter().filter(|item| !item.is_directory && !item.is_binary).cloned().collect();
         let (result_sender, result_receiver) = mpsc::unbounded_channel();
         self.content_search_receiver = Some(Arc::new(tokio::sync::Mutex::new(result_receiver)));
@@ -993,7 +1148,14 @@ impl ContextFileConcatApp {
                 let mut matching_files = Vec::new();
                 for file_item in files_to_search {
                     if let Ok(content) = std::fs::read_to_string(&file_item.path) {
-                        if content.to_lowercase().contains(&search_query.to_lowercase()) {
+                        // <- GEÄNDERT: Case Sensitivity berücksichtigen
+                        let matches = if case_sensitive {
+                            content.contains(&search_query)
+                        } else {
+                            content.to_lowercase().contains(&search_query.to_lowercase())
+                        };
+                        
+                        if matches {
                             matching_files.push(file_item);
                         }
                     }
