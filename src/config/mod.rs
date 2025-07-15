@@ -29,15 +29,15 @@ impl Default for AppConfig {
         let mut ignore_patterns = HashSet::new();
         
         // Default ignore patterns for build artifacts and caches
-        ignore_patterns.insert("node_modules/".to_string());
-        ignore_patterns.insert("target/".to_string());
-        ignore_patterns.insert(".idea/".to_string());
-        ignore_patterns.insert(".git/".to_string());
+        ignore_patterns.insert("node_modules".to_string());
+        ignore_patterns.insert("target".to_string());
+        ignore_patterns.insert(".idea".to_string());
+        ignore_patterns.insert(".git".to_string());
         ignore_patterns.insert("*.log".to_string());
         ignore_patterns.insert("*.tmp".to_string());
         ignore_patterns.insert(".DS_Store".to_string());
         ignore_patterns.insert("Thumbs.db".to_string());
-        ignore_patterns.insert("__pycache__/".to_string());
+        ignore_patterns.insert("__pycache__".to_string());
         ignore_patterns.insert("*.pyc".to_string());
         ignore_patterns.insert("*.pyo".to_string());
         ignore_patterns.insert("*.class".to_string());

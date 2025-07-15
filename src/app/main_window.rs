@@ -44,6 +44,7 @@ impl ContextFileConcatApp {
         if self.show_large_files_warning {
             self.render_large_files_warning(ctx);
         }
+        self.render_save_error_popup(ctx);
     }
     
     fn render_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -88,12 +89,11 @@ impl ContextFileConcatApp {
         ui.add_space(1.0);
         ui.vertical(|ui| {
             ui.heading("🔍 Search & Filter");
-            ui.horizontal(|ui| { ui.label("Search:"); if ui.add(egui::TextEdit::singleline(&mut self.search_query).hint_text("Search in filenames...")).changed() { self.apply_filters(); } });
-            ui.horizontal(|ui| { ui.label("Extension:"); if ui.add(egui::TextEdit::singleline(&mut self.file_extension_filter).hint_text("e.g., .rs, .js, .py")).changed() { self.apply_filters(); } });
+            ui.horizontal(|ui| { if ui.add(egui::TextEdit::singleline(&mut self.search_query).hint_text("Search for filenames...")).changed() { self.apply_filters(); } });
+            ui.horizontal(|ui| { if ui.add(egui::TextEdit::singleline(&mut self.file_extension_filter).hint_text("Search for file extension e.g., .rs, .js, .py")).changed() { self.apply_filters(); } });
             ui.separator();
             ui.heading("🔍 Search in Files");
             ui.horizontal(|ui| {
-                ui.label("Content:");
                 if ui.add(egui::TextEdit::singleline(&mut self.search_in_files_query).hint_text("Search text inside files...")).changed() {
                     if !self.search_in_files_query.is_empty() { self.start_content_search(); } else { self.apply_filters(); }
                     self.update_preview_highlighting();
@@ -109,41 +109,47 @@ impl ContextFileConcatApp {
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut self.config.remove_empty_directories, "Remove empty dirs").changed() { self.apply_filters(); }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled(!self.current_path.is_empty() && !self.is_scanning, egui::Button::new("🔄 Re-Scan Changes")).clicked() { self.start_directory_scan(); }
+                    if ui.add_enabled(!self.current_path.is_empty() && !self.is_scanning, egui::Button::new("🔄 Re-Scan Files")).clicked() { self.start_directory_scan(); }
                 });
             });
+            ui.add_space(10.0);
             ui.label("Common Ignore Pattern:");
             ui.horizontal_wrapped(|ui| {
-                for pattern in ["node_modules/", "target/", ".git/", "*.log", "*.lock", "*.tmp", ".DS_Store", "Thumbs.db", "*.class", "package-lock.json", ".psd", "*.jpg", "*.svg", "*.png", "*.webp", "*.avif", "*.gif", "*.tiff", "*.raw", "*.avif"] {
-                    if ui.small_button(pattern).clicked() { 
-                        self.config.ignore_patterns.insert(pattern.to_string());
-                        self.apply_filters();
+                for pattern in ["node_modules", "target", ".git", "*.log", "*.lock", "__pycache__", "*.tmp", ".DS_Store", "Thumbs.db", "*.class", "package-lock.json", ".psd", "*.jpg", "*.svg", "*.png", "*.webp", "*.avif", "*.gif", "*.tiff", "*.raw", "*.avif"] {
+                    // NEUE BEDINGUNG: Zeige den Button nur an, wenn das Muster noch nicht in der Liste ist.
+                    if !self.config.ignore_patterns.contains(pattern) {
+                        if ui.small_button(pattern).clicked() { 
+                            self.config.ignore_patterns.insert(pattern.to_string());
+                            self.apply_filters();
+                        }
                     }
                 }
             });
-
-            ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
                 let text_edit_response = ui.add(
                     egui::TextEdit::singleline(&mut self.new_ignore_pattern).hint_text("Add Ignore Pattern...")
                 );
                 let submitted = text_edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if ui.button("Add").clicked() || submitted {
-                    if !self.new_ignore_pattern.is_empty() {
-                        self.config.ignore_patterns.insert(self.new_ignore_pattern.clone());
-                        self.new_ignore_pattern.clear();
-                        self.apply_filters();
-                        text_edit_response.request_focus();
+                ui.add_space(1.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Add").clicked() || submitted {
+                        if !self.new_ignore_pattern.is_empty() {
+                            self.config.ignore_patterns.insert(self.new_ignore_pattern.clone());
+                            self.new_ignore_pattern.clear();
+                            self.apply_filters();
+                            text_edit_response.request_focus();
+                        }
                     }
-                }
-                if ui.button("Delete All").on_hover_text("Remove all ignore patterns").clicked() {
-                    self.config.ignore_patterns.clear();
-                    self.apply_filters();
-                }
+                    if ui.button("Delete All").on_hover_text("Remove all ignore patterns").clicked() {
+                        self.config.ignore_patterns.clear();
+                        self.apply_filters();
+                    }
+                });
             });
-            
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
-                ui.label("Filter list:");
-                ui.add(egui::TextEdit::singleline(&mut self.ignore_pattern_filter).hint_text("Filter displayed patterns..."));
+                ui.add(egui::TextEdit::singleline(&mut self.ignore_pattern_filter).hint_text("Filter currently assigned ignore patterns..."));
             });
             ui.collapsing("Current ignore patterns", |ui| {
                 egui::ScrollArea::vertical().max_height((ui.available_height() - 20.0).max(50.0)).auto_shrink([false, false]).show(ui, |ui| {
@@ -163,7 +169,7 @@ impl ContextFileConcatApp {
                 });
             });
         });
-    }    
+    }
 
     fn render_right_panel_fixed(&mut self, ui: &mut egui::Ui) {
         let available_height = ui.available_height();
@@ -860,54 +866,70 @@ impl ContextFileConcatApp {
     }
 
     pub fn save_generated_file(&mut self) {
-        // ÄNDERUNG HIER: .clone() löst den immutable borrow sofort auf.
         if let Some(content) = self.generated_content.clone() {
-            // Dieser Aufruf ist jetzt sicher, da `self` nicht mehr ausgeliehen ist.
             self.update_default_filename_if_needed();
 
-            let output_dir = PathBuf::from(&self.output_path);
-
-            if !output_dir.exists() {
-                if let Err(e) = std::fs::create_dir_all(&output_dir) {
-                    tracing::error!("Failed to create output directory '{:?}': {}", output_dir, e);
-                    return;
-                }
+            // --- VERSUCH 1: Primärer Pfad ---
+            let primary_path_str = self.output_path.clone();
+            if self.try_write_to_dir(&content, &primary_path_str).is_ok() {
+                return; // Erfolg!
             }
 
-            let mut final_path = output_dir.join(&self.output_filename);
-            let mut counter = 1;
-
-            while final_path.exists() {
-                let stem = Path::new(&self.output_filename)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                let extension = Path::new(&self.output_filename)
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-
-                let new_filename = if extension.is_empty() {
-                    format!("{}_({})", stem, counter)
-                } else {
-                    format!("{}_({}).{}", stem, counter, extension)
-                };
-                
-                final_path = output_dir.join(new_filename);
-                counter += 1;
-            }
+            // --- VERSUCH 2: Fallback-Pfad (Desktop oder Home) ---
+            tracing::warn!("Schreiben in den primären Pfad '{}' fehlgeschlagen. Versuche Fallback.", primary_path_str);
             
-            // `content` ist hier die geklonte Variable
-            match std::fs::write(&final_path, &content) {
-                Ok(_) => {
-                    tracing::info!("Successfully saved generated file to: {}", final_path.display());
-                    self.open_output_in_finder();
-                }
-                Err(e) => {
-                    tracing::error!("Failed to save generated file: {}", e);
+            let fallback_path = dirs::desktop_dir()
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
+            
+            if let Some(fallback_str) = fallback_path.to_str() {
+                if self.try_write_to_dir(&content, fallback_str).is_ok() {
+                    self.output_path = fallback_str.to_string();
+                    return; // Erfolg!
                 }
             }
+
+            // --- LETZTER SCHRITT: Fehler-Pop-up anzeigen (mit mehr Details) ---
+            tracing::error!("Schreiben in den Fallback-Pfad fehlgeschlagen. Zeige Fehler-Pop-up.");
+            
+            // ÄNDERUNG HIER: Die Fehlermeldung wird jetzt dynamisch mit den Pfaden erstellt.
+            let error_message = format!(
+                "Failed to save the file.\n\nCould not write to the primary directory:\n'{}'\n\nAlso failed to write to the fallback directory:\n'{}'\n\nPlease check your write permissions.",
+                primary_path_str,
+                fallback_path.display()
+            );
+            self.save_error_message = Some(error_message);
         }
+    }
+
+    fn try_write_to_dir(&mut self, content: &str, output_dir_str: &str) -> Result<(), std::io::Error> {
+        if output_dir_str.is_empty() {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Output directory is not specified"));
+        }
+        
+        let output_dir = PathBuf::from(output_dir_str);
+        std::fs::create_dir_all(&output_dir)?;
+
+        let mut final_path = output_dir.join(&self.output_filename);
+        let mut counter = 1;
+
+        while final_path.exists() {
+            let stem = Path::new(&self.output_filename).file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let extension = Path::new(&self.output_filename).extension().and_then(|s| s.to_str()).unwrap_or("");
+            let new_filename = if extension.is_empty() {
+                format!("{}_({})", stem, counter)
+            } else {
+                format!("{}_({}).{}", stem, counter, extension)
+            };
+            final_path = output_dir.join(new_filename);
+            counter += 1;
+        }
+
+        std::fs::write(&final_path, content)?;
+
+        tracing::info!("Successfully saved file to: {}", final_path.display());
+        self.open_output_in_finder();
+
+        Ok(())
     }
 
     fn update_default_filename_if_needed(&mut self) {
@@ -928,6 +950,32 @@ impl ContextFileConcatApp {
                 );
             } else {
                 tracing::info!("Benutzerdefinierter Dateiname erkannt: '{}' wird beibehalten.", self.output_filename);
+            }
+        }
+    }
+
+    fn render_save_error_popup(&mut self, ctx: &egui::Context) {
+        if let Some(error_message) = &self.save_error_message.clone() {
+            let mut is_open = true;
+            egui::Window::new("Save Error")
+                .open(&mut is_open)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new("💥").size(30.0));
+                        ui.add_space(10.0);
+                        ui.label(error_message);
+                        ui.add_space(10.0);
+                        if ui.button("Close").clicked() {
+                            self.save_error_message = None;
+                        }
+                    });
+                });
+
+            if !is_open {
+                self.save_error_message = None;
             }
         }
     }

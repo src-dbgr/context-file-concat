@@ -70,8 +70,8 @@ pub struct ContextFileConcatApp {
     
     // For cancelling scans
     cancel_flag: Option<Arc<AtomicBool>>,
-    // *** NEUES FELD ***
     generation_cancel_flag: Option<Arc<AtomicBool>>,
+    save_error_message: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -84,7 +84,6 @@ pub struct PreviewSegment {
 
 impl ContextFileConcatApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        // Die Konfiguration wird hier korrekt geladen
         let config = AppConfig::load().unwrap_or_default();
         
         let output_filename = format!(
@@ -116,11 +115,7 @@ impl ContextFileConcatApp {
                 .to_string_lossy()
                 .to_string(),
             output_filename,
-
-            // KORREKTUR HIER:
-            // Wir verwenden jetzt den Wert aus der geladenen Konfiguration.
             include_tree: config.include_tree_by_default,
-
             tree_ignore_patterns: HashSet::new(),
             use_relative_paths: true,
             preview_content: String::new(),
@@ -137,6 +132,7 @@ impl ContextFileConcatApp {
             generation_receiver: None,
             cancel_flag: None,
             generation_cancel_flag: None,
+            save_error_message: None,
         }
     }
 }
