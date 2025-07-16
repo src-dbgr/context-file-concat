@@ -1,1 +1,12 @@
 /target
+/cfc_output
+.DS_Store
+output.txt
+cfc_output*.txt
+refactor.sh
+node_modules
+index.html.bak
+src/ui/dist/
+blabla.json
+.env
+README_PRIV.md

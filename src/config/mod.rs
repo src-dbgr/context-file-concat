@@ -1,58 +1,99 @@
 pub mod settings;
 
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
-use anyhow::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub ignore_patterns: HashSet<String>,
+    pub tree_ignore_patterns: HashSet<String>,
     pub last_directory: Option<PathBuf>,
     pub output_directory: Option<PathBuf>,
+    pub output_filename: String,
     pub case_sensitive_search: bool,
-    pub show_binary_files: bool,
     pub include_tree_by_default: bool,
+    pub use_relative_paths: bool,
+    pub remove_empty_directories: bool,
     pub window_size: (f32, f32),
     pub window_position: Option<(f32, f32)>,
+    // NEU: Kontrolle über das automatische Laden des letzten Verzeichnisses
+    pub auto_load_last_directory: bool,
+    // NEU: Performance-Einstellungen
+    pub max_file_size_mb: u64,
+    pub scan_chunk_size: usize,
 }
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
         settings::load_config()
     }
-    
-    pub fn save(&self) -> Result<()> {
-        settings::save_config(self)
-    }
-    
-    pub fn config_dir() -> Option<PathBuf> {
-        settings::get_config_directory()
-    }
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         let mut ignore_patterns = HashSet::new();
-        
-        // Default ignore patterns
-        ignore_patterns.insert("node_modules/".to_string());
-        ignore_patterns.insert("target/".to_string());
-        ignore_patterns.insert(".git/".to_string());
-        ignore_patterns.insert("*.log".to_string());
-        ignore_patterns.insert("*.tmp".to_string());
-        ignore_patterns.insert(".DS_Store".to_string());
-        ignore_patterns.insert("Thumbs.db".to_string());
-        
+        let common_patterns = [
+            "node_modules",
+            "venv",
+            "target",
+            ".idea",
+            ".git",
+            "*.log",
+            "*.tmp",
+            ".DS_Store",
+            "Thumbs.db",
+            "__pycache__",
+            "*.pyc",
+            "*.class",
+            "*.o",
+            "*.obj",
+            "package-lock.json",
+            "*.lock",
+            ".gitignore",
+        ];
+        for pattern in common_patterns {
+            ignore_patterns.insert(pattern.to_string());
+        }
+
+        let image_extensions = [
+            "*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.ico", "*.webp", "*.tiff", "*.tif",
+            "*.heic", "*.heif", "*.avif", "*.raw", "*.icns",
+        ];
+        for ext in image_extensions {
+            ignore_patterns.insert(ext.to_string());
+        }
+
+        let binary_extensions = [
+            "*.exe", "*.dll", "*.so", "*.dylib", "*.app", "*.deb", "*.rpm", "*.msi", "*.jar",
+            "*.war", "*.a", "*.lib", "*.rlib", "*.pdf", "*.doc", "*.docx", "*.xls", "*.xlsx",
+            "*.ppt", "*.pptx", "*.zip", "*.tar", "*.gz", "*.7z", "*.rar", "*.bin", "*.dat", "*.db",
+            "*.sqlite", "*.mp4", "*.mp3",
+        ];
+        for ext in binary_extensions {
+            ignore_patterns.insert(ext.to_string());
+        }
+
         Self {
             ignore_patterns,
+            tree_ignore_patterns: HashSet::new(),
             last_directory: None,
             output_directory: dirs::desktop_dir(),
+            output_filename: format!(
+                "cfc_output_{}.txt",
+                chrono::Local::now().format("%Y%m%d_%H%M%S")
+            ),
             case_sensitive_search: false,
-            show_binary_files: true,
-            include_tree_by_default: false,
+            include_tree_by_default: true,
+            use_relative_paths: true,
+            remove_empty_directories: false,
             window_size: (1200.0, 800.0),
             window_position: None,
+            // NEU: Standard-Einstellungen
+            auto_load_last_directory: false, // Kann deaktiviert werden
+            max_file_size_mb: 20,            // 20MB Standard-Limit
+            scan_chunk_size: 100,            // 100 Dateien pro Chunk
         }
     }
 }

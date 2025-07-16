@@ -1,29 +1,42 @@
 [package]
 name = "context-file-concat"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-egui = "0.29"
-eframe = { version = "0.29", default-features = true, features = ["default_fonts", "glow", "persistence"] }
+# Web-View Architecture
+wry = "0.37"
+tao = "0.26"
+
+# Core Logic & Utilities
 tokio = { version = "1.0", features = ["full"] }
-walkdir = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
+walkdir = "2.0"
+globset = "0.4"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-camino = "1.1"
-directories = "5.0"
-regex = "1.0"
-tree_magic_mini = "3.0"
 chrono = { version = "0.4", features = ["serde"] }
 rfd = "0.15"
 dirs = "5.0"
+directories = "5.0"
+rayon = "1.10"
+tree_magic_mini = "3.0"
+camino = "1.1"
+regex = "1.0"
+thiserror = "1.0"
 
-# Für bessere Performance im Release-Build
+# For better Performance in Release-Build
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# --- BUNDLE INFORMATION ---
+[package.metadata.bundle]
+name = "CFC - Context File Concatenator"
+identifier = "io.devsam.contextfileconcat"
+version = "0.2.0"
+icon = ["assets/icon.icns"]
