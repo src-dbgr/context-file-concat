@@ -78,11 +78,11 @@ impl ContextFileConcatApp {
         
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button("💾 Export Config").clicked() {
-                self.save_config_dialog();
-            }
             if ui.button("📂 Import Config").clicked() {
                 self.load_config_dialog();
+            }
+            if ui.button("💾 Export Config").clicked() {
+                self.save_config_dialog();
             }
         });
         ui.add_space(1.0);
@@ -92,14 +92,44 @@ impl ContextFileConcatApp {
         ui.add_space(1.0);
         ui.vertical(|ui| {
             ui.heading("🔍 Search & Filter");
-            ui.horizontal(|ui| { if ui.add(egui::TextEdit::singleline(&mut self.search_query).hint_text("Search for filenames...")).changed() { self.apply_filters(); } });
-            ui.horizontal(|ui| { if ui.add(egui::TextEdit::singleline(&mut self.file_extension_filter).hint_text("Search for file extension e.g., .rs, .js, .py")).changed() { self.apply_filters(); } });
-            ui.separator();
-            ui.heading("🔍 Search in Files");
+            ui.horizontal(|ui| { 
+                if ui.add(egui::TextEdit::singleline(&mut self.search_query).hint_text("Search for filenames...")).changed() {
+                    self.apply_filters(); 
+                    // *** HINZUFÜGEN: Auto-expand bei Suche ***
+                    if !self.search_query.is_empty() {
+                        self.expand_all_directories();
+                    }
+                }
+            });
+            // Gestrichelte Linie einfügen
+            draw_dashed_separator(ui,
+                egui::Color32::from_gray(64), // Dunkelgrau
+                1.0, // Strichstärke
+                4.0, // Strichlänge
+                4.0, // Lückenlänge
+            );
+            ui.horizontal(|ui| { 
+                if ui.add(egui::TextEdit::singleline(&mut self.file_extension_filter).hint_text("Search for file extension e.g., .rs, .js, .py")).changed() { 
+                    self.apply_filters(); 
+                    // *** HINZUFÜGEN: Auto-expand bei Suche ***
+                    if !self.file_extension_filter.is_empty() {
+                        self.expand_all_directories();
+                    }
+                } 
+            });
+            // Gestrichelte Linie einfügen
+            draw_dashed_separator(ui,
+                egui::Color32::from_gray(64), // Dunkelgrau
+                1.0, // Strichstärke
+                4.0, // Strichlänge
+                4.0, // Lückenlänge
+            );
             ui.horizontal(|ui| {
                 if ui.add(egui::TextEdit::singleline(&mut self.search_in_files_query).hint_text("Search text inside files...")).changed() {
                     if !self.search_in_files_query.is_empty() { 
                         self.start_content_search(); 
+                        // *** HINZUFÜGEN: Auto-expand bei Suche ***
+                        self.expand_all_directories();
                     } else { 
                         self.apply_filters(); 
                     }
@@ -118,13 +148,11 @@ impl ContextFileConcatApp {
                 }
             });
             ui.separator();
-            ui.heading("🚫 Ignore Patterns");
             ui.horizontal(|ui| {
-                if ui.checkbox(&mut self.config.remove_empty_directories, "Remove empty dirs").changed() { self.apply_filters(); }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled(!self.current_path.is_empty() && !self.is_scanning, egui::Button::new("🔄 Re-Scan Files")).clicked() { self.start_directory_scan(); }
-                });
-            });
+                ui.heading("🚫 Ignore Patterns");
+                if ui.add_enabled(!self.current_path.is_empty() && !self.is_scanning, egui::Button::new("🔄 Re-Scan Files")).clicked() { self.start_directory_scan(); }
+            });                
+            if ui.checkbox(&mut self.config.remove_empty_directories, "Remove empty dirs").changed() { self.apply_filters(); }
             ui.add_space(10.0);
             ui.label("Common Ignore Pattern:");
             ui.horizontal_wrapped(|ui| {
@@ -214,6 +242,25 @@ impl ContextFileConcatApp {
                 });
             });
         });
+        /// Zeichnet eine horizontale, gestrichelte Linie über die gesamte Breite des aktuellen Bereichs.
+        fn draw_dashed_separator(ui: &mut egui::Ui, color: egui::Color32, stroke_width: f32, dash_length: f32, gap_length: f32) {
+            let (response, painter) = ui.allocate_painter(
+                egui::vec2(ui.available_width(), 2.0),
+                egui::Sense::hover(),
+            );
+            let rect = response.rect;
+            let y = rect.center().y;
+            let stroke = egui::Stroke::new(stroke_width, color);
+            let mut x = rect.left();
+            while x < rect.right() {
+                painter.line_segment(
+                    [egui::Pos2::new(x, y), egui::Pos2::new(x + dash_length, y)],
+                    stroke,
+                );
+                x += dash_length + gap_length;
+            }
+        }
+
     }
 
     fn render_right_panel_fixed(&mut self, ui: &mut egui::Ui) {
@@ -262,14 +309,34 @@ impl ContextFileConcatApp {
     }
     
     fn render_file_list(&mut self, ui: &mut egui::Ui) {
-        ui.heading("📄 Files");
         ui.horizontal(|ui| {
+            ui.heading("Files");
+            ui.separator();
             if ui.button("Select All").clicked() { self.select_all_files(); }
             if ui.button("Deselect All").clicked() { self.selected_files.clear(); }
             if ui.button("Expand All").clicked() { self.expand_all_directories(); }
             if ui.button("Collapse All").clicked() { self.expanded_dirs.clear(); }
             ui.separator();
-            ui.label(format!("{} files found, {} selected", self.filtered_files.len(), self.selected_files.len()));
+            
+            // *** GEÄNDERT: Zeige auch versteckte Selections an ***
+            let total_files_in_tree = self.file_tree.iter().filter(|item| !item.is_directory).count();
+            let total_selected = self.selected_files.len();
+            let visible_selected = self.filtered_files.iter()
+                .filter(|item| !item.is_directory && self.selected_files.contains(&item.path))
+                .count();
+            
+            ui.label(format!("{} files found", self.filtered_files.len()));
+            
+            if total_selected > visible_selected {
+                ui.label("•");
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("{} selected ({} hidden by filter)", total_selected, total_selected - visible_selected)
+                );
+            } else {
+                ui.label("•");
+                ui.label(format!("{} selected", total_selected));
+            }
         });
         ui.separator();
         egui::ScrollArea::vertical()
@@ -660,7 +727,7 @@ impl ContextFileConcatApp {
                 }
             });
             
-            ui.add_space(5.0); // Ein wenig Abstand unter den Buttons
+            ui.add_space(1.0); // Ein wenig Abstand unter den Buttons
             ui.separator(); // Eine Trennlinie
             
             // ======================= 2. EINSTELLUNGEN (UNTEN, EINKLAPPBAR) =======================
@@ -925,15 +992,40 @@ impl ContextFileConcatApp {
 
         self.filtered_files = filtered;
         
-        // Bereinige die Auswahl, um nur noch gültige Pfade zu behalten.
-        let valid_paths: HashSet<PathBuf> = self.filtered_files.par_iter().map(|item| item.path.clone()).collect();
-        self.selected_files.retain(|path| valid_paths.contains(path));
+        // *** GEÄNDERT: Nur noch Konsistenz-Prüfung gegen file_tree, nicht gegen filtered_files ***
+        // selected_files sollte nur bereinigt werden, wenn Files tatsächlich aus file_tree entfernt wurden
+        let valid_paths_in_tree: HashSet<PathBuf> = self.file_tree.par_iter().map(|item| item.path.clone()).collect();
+        
+        // 1. Bereinige selected_files nur gegen file_tree (nicht gegen filtered_files!)
+        self.selected_files.retain(|path| valid_paths_in_tree.contains(path));
+        
+        // 2. Bereinige expanded_dirs nur gegen file_tree
+        self.expanded_dirs.retain(|path| valid_paths_in_tree.contains(path));
+        
+        // 3. Bereinige preview_file nur wenn es nicht mehr in file_tree existiert
+        if let Some(preview_path) = &self.preview_file {
+            if !valid_paths_in_tree.contains(preview_path) {
+                self.preview_file = None;
+                self.preview_content.clear();
+                self.highlighted_preview_lines.clear();
+            }
+        }
+        
+        tracing::info!("apply_filters: {} files filtered, {} selected total (may include hidden)", 
+            self.filtered_files.len(), self.selected_files.len());
     }
     
+
     pub fn select_all_files(&mut self) {
+        // *** GEÄNDERT: Wähle nur sichtbare (gefilterte) Files aus ***
+        // Das ist konsistenter mit der UI-Erwartung - "Select All" wählt nur sichtbare Items aus
         for file in &self.filtered_files {
-            if !file.is_directory { self.selected_files.insert(file.path.clone()); }
+            if !file.is_directory { 
+                self.selected_files.insert(file.path.clone()); 
+            }
         }
+        tracing::info!("select_all_files: {} visible files selected", 
+            self.filtered_files.iter().filter(|item| !item.is_directory).count());
     }
     
     pub fn load_file_preview(&mut self, file_path: &PathBuf) {
@@ -969,6 +1061,17 @@ impl ContextFileConcatApp {
     
     pub fn generate_preview(&mut self) {
         if self.selected_files.is_empty() || self.is_generating || self.is_scanning { return; }
+        
+        // *** KRITISCH: Letzte Konsistenz-Prüfung vor der Generierung ***
+        let selected_files_ordered = self.get_selected_files_in_tree_order();
+        
+        if selected_files_ordered.is_empty() {
+            tracing::warn!("generate_preview: No valid selected files found after consistency check");
+            return;
+        }
+        
+        tracing::info!("generate_preview: Processing {} files in tree order", selected_files_ordered.len());
+
         if let Some(flag) = &self.generation_cancel_flag {
             flag.store(true, Ordering::Relaxed);
             tracing::info!("Requested cancellation of previous generation task.");
@@ -1002,7 +1105,7 @@ impl ContextFileConcatApp {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async move {
                 let result = FileHandler::generate_concatenated_content(
-                    &selected_files,
+                    &selected_files_ordered, // *** HIER die sortierte Liste verwenden ***
                     &root_path,
                     use_relative_paths,
                     progress_sender,
@@ -1227,7 +1330,7 @@ impl ContextFileConcatApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
-                    ui.heading("💥 Large Files Skipped");
+                    ui.heading("Large Files Skipped");
                     ui.add_space(10.0);
                     ui.label(format!("{} files were skipped because they exceed the 20MB limit.", self.large_files_count));
                     ui.label("These files are not included in the scan for performance reasons.");
@@ -1262,6 +1365,99 @@ impl ContextFileConcatApp {
         #[cfg(target_os = "windows")] { let _ = std::process::Command::new("explorer").arg(&output_path).spawn(); }
         #[cfg(target_os = "linux")] { let _ = std::process::Command::new("xdg-open").arg(&output_path).spawn(); }
     }
+}
+
+impl ContextFileConcatApp {
+    /// Sammelt ALLE ausgewählten Dateien in der Tree-Reihenfolge
+    /// UNABHÄNGIG davon, ob ihre Eltern-Verzeichnisse im UI expanded sind
+    /// UNABHÄNGIG vom aktuellen visuellen Filter
+    fn get_selected_files_in_tree_order(&self) -> Vec<PathBuf> {
+        let current_root = PathBuf::from(&self.current_path);
+        
+        // 1. Sammle alle ausgewählten Dateien (nicht Verzeichnisse) aus file_tree, NICHT aus filtered_files
+        let mut selected_file_items: Vec<&FileItem> = self.file_tree  // <-- GEÄNDERT: von filtered_files zu file_tree
+            .iter()
+            .filter(|item| !item.is_directory && self.selected_files.contains(&item.path))
+            .collect();
+        
+        // 2. Sortiere sie in der korrekten Tree-Reihenfolge basierend auf ihrem Pfad
+        selected_file_items.sort_by(|a, b| {
+            self.compare_paths_for_tree_order(&a.path, &b.path, &current_root)
+        });
+        
+        // 3. Extrahiere die Pfade
+        let ordered_files: Vec<PathBuf> = selected_file_items
+            .into_iter()
+            .map(|item| item.path.clone())
+            .collect();
+        
+        // 4. Doppelte Validierung für 100% Konsistenz gegen file_tree (nicht filtered_files)
+        let tree_paths: std::collections::HashSet<PathBuf> = self.file_tree  // <-- GEÄNDERT: von filtered_files zu file_tree
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        
+        let final_files: Vec<PathBuf> = ordered_files
+            .into_iter()
+            .filter(|path| {
+                self.selected_files.contains(path) && tree_paths.contains(path)
+            })
+            .collect();
+        
+        tracing::info!("get_selected_files_in_tree_order: {} files in tree order (independent of UI filter)", final_files.len());
+        final_files
+    }
+    
+    /// Vergleicht zwei Pfade für die korrekte Tree-Reihenfolge
+    /// Implementiert die gleiche Logik wie das UI-Tree: Verzeichnisse zuerst, dann alphabetisch
+    fn compare_paths_for_tree_order(&self, path_a: &PathBuf, path_b: &PathBuf, root: &PathBuf) -> std::cmp::Ordering {
+        // Berechne relative Pfade
+        let rel_a = path_a.strip_prefix(root).unwrap_or(path_a);
+        let rel_b = path_b.strip_prefix(root).unwrap_or(path_b);
+        
+        // Vergleiche die Pfad-Komponenten Ebene für Ebene
+        let components_a: Vec<_> = rel_a.components().collect();
+        let components_b: Vec<_> = rel_b.components().collect();
+        
+        // Vergleiche gemeinsame Pfad-Ebenen
+        let min_len = components_a.len().min(components_b.len());
+        
+        for i in 0..min_len {
+            let comp_a = &components_a[i];
+            let comp_b = &components_b[i];
+            
+            if comp_a != comp_b {
+                // Wenn wir auf der letzten Ebene sind, vergleiche direkt
+                if i == min_len - 1 {
+                    // Beide sind auf der gleichen Ebene - alphabetisch sortieren
+                    return comp_a.as_os_str().cmp(comp_b.as_os_str());
+                } else {
+                    // Wir sind in einem Zwischenpfad - prüfe, ob eines ein Verzeichnis ist
+                    let is_dir_a = i < components_a.len() - 1; // Hat weitere Komponenten = ist Verzeichnis
+                    let is_dir_b = i < components_b.len() - 1; // Hat weitere Komponenten = ist Verzeichnis
+                    
+                    match (is_dir_a, is_dir_b) {
+                        (true, false) => return std::cmp::Ordering::Less,    // Verzeichnis vor Datei
+                        (false, true) => return std::cmp::Ordering::Greater, // Datei nach Verzeichnis
+                        _ => return comp_a.as_os_str().cmp(comp_b.as_os_str()), // Beide gleich -> alphabetisch
+                    }
+                }
+            }
+        }
+        
+        // Einer ist ein Präfix des anderen - der kürzere (Verzeichnis) kommt zuerst
+        components_a.len().cmp(&components_b.len())
+    }
+
+    /// Debug-Methode um die Sortierung zu validieren
+    fn debug_file_order(&self, files: &[PathBuf]) {
+        tracing::info!("=== FILE ORDER DEBUG ===");
+        for (i, file) in files.iter().enumerate() {
+            let relative = file.strip_prefix(&self.current_path).unwrap_or(file);
+            tracing::info!("{:3}: {}", i + 1, relative.display());
+        }
+        tracing::info!("=== END FILE ORDER DEBUG ===");
+    }    
 }
 
 fn format_file_size(size: u64) -> String {
