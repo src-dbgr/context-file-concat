@@ -1,101 +1,121 @@
-pub mod main_window;
+//! The `app` module orchestrates the interaction between the `core` logic and the `ui`.
+//!
+//! It manages the application state, handles events from the WebView (IPC messages),
+//! and sends updates back to the UI. It acts as the "controller" in an MVC-like pattern.
 
-use eframe::egui;
-use std::collections::HashSet;
-use std::path::PathBuf;
-use tokio::sync::{mpsc, Mutex};
-use std::sync::Arc;
+pub mod commands;
+pub mod events;
+pub mod state;
+pub mod tasks;
+pub mod view_model;
 
-use crate::core::{FileItem, ScanProgress};
-use crate::config::AppConfig;
+use std::sync::{Arc, Mutex};
+use tao::event_loop::EventLoopProxy;
+use wry::WebView;
 
-pub struct ContextFileConcatApp {
-    // UI State
-    current_path: String,
-    selected_files: HashSet<PathBuf>,
-    file_tree: Vec<FileItem>,
-    filtered_files: Vec<FileItem>,
-    
-    // Search and Filter
-    search_query: String,
-    file_extension_filter: String,
-    case_sensitive: bool,
-    show_binary_files: bool,
-    
-    // Progress
-    scan_progress: Option<ScanProgress>,
-    is_scanning: bool,
-    
-    // Config
-    config: AppConfig,
-    
-    // Output settings
-    output_path: String,
-    output_filename: String,
-    include_tree: bool,
-    
-    // File preview
-    preview_content: String,
-    preview_file: Option<PathBuf>,
-    
-    // Async communication
-    progress_receiver: Option<Arc<Mutex<mpsc::UnboundedReceiver<ScanProgress>>>>,
-    file_receiver: Option<Arc<Mutex<mpsc::UnboundedReceiver<Vec<FileItem>>>>>,
-}
+use events::{IpcMessage, UserEvent};
+use state::AppState;
 
-impl ContextFileConcatApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let config = AppConfig::load().unwrap_or_default();
-        
-        let output_filename = format!(
-            "output_{}.txt", 
-            chrono::Local::now().format("%Y%m%d_%H%M%S")
-        );
-        
-        Self {
-            current_path: String::new(),
-            selected_files: HashSet::new(),
-            file_tree: Vec::new(),
-            filtered_files: Vec::new(),
-            search_query: String::new(),
-            file_extension_filter: String::new(),
-            case_sensitive: false,
-            show_binary_files: true,
-            scan_progress: None,
-            is_scanning: false,
-            config,
-            output_path: dirs::desktop_dir()
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
-                .to_string_lossy()
-                .to_string(),
-            output_filename,
-            include_tree: false,
-            preview_content: String::new(),
-            preview_file: None,
-            progress_receiver: None,
-            file_receiver: None,
-        }
-    }
-}
-
-impl eframe::App for ContextFileConcatApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.update_progress();
-        
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.render_main_ui(ui, ctx);
+/// The main handler for IPC messages from the WebView.
+///
+/// It parses the message and delegates to the appropriate command handler function
+/// in the `commands` module. Each command is spawned as a separate Tokio task.
+pub fn handle_ipc_message(
+    message: String,
+    proxy: EventLoopProxy<UserEvent>,
+    state: Arc<Mutex<AppState>>,
+) {
+    if let Ok(msg) = serde_json::from_str::<IpcMessage>(&message) {
+        tokio::spawn(async move {
+            match msg.command.as_str() {
+                "selectDirectory" => commands::select_directory(proxy, state),
+                "clearDirectory" => commands::clear_directory(proxy, state),
+                "rescanDirectory" => commands::rescan_directory(proxy, state),
+                "cancelScan" => commands::cancel_scan(proxy, state),
+                "updateConfig" => commands::update_config(msg.payload, proxy, state),
+                "initialize" => commands::initialize(proxy, state),
+                "updateFilters" => commands::update_filters(msg.payload, proxy, state).await,
+                "loadFilePreview" => commands::load_file_preview(msg.payload, proxy, state),
+                "addIgnorePath" => commands::add_ignore_path(msg.payload, proxy, state),
+                "toggleSelection" => commands::toggle_selection(msg.payload, proxy, state),
+                "toggleDirectorySelection" => {
+                    commands::toggle_directory_selection(msg.payload, proxy, state)
+                }
+                "toggleExpansion" => commands::toggle_expansion(msg.payload, proxy, state),
+                "expandCollapseAll" => commands::expand_collapse_all(msg.payload, proxy, state),
+                "selectAll" => commands::select_all(proxy, state),
+                "deselectAll" => commands::deselect_all(proxy, state),
+                "generatePreview" => commands::generate_preview(proxy, state).await,
+                "clearPreviewState" => commands::clear_preview_state(proxy, state),
+                "saveFile" => commands::save_file(msg.payload, proxy, state),
+                "pickOutputDirectory" => commands::pick_output_directory(proxy, state),
+                "importConfig" => commands::import_config(proxy, state),
+                "exportConfig" => commands::export_config(proxy, state),
+                _ => tracing::warn!("Unknown IPC command: {}", msg.command),
+            }
         });
-        
-        // Request repaint for smooth progress updates
-        if self.is_scanning {
-            ctx.request_repaint();
-        }
+    } else {
+        tracing::error!("Failed to parse IPC message: {}", message);
     }
-    
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        // Save app state
-        if let Ok(config_json) = serde_json::to_string(&self.config) {
-            storage.set_string("app_config", config_json);
+}
+
+/// Processes events sent from the backend to the UI thread.
+///
+/// It translates each `UserEvent` into a JavaScript call in the WebView to update the UI.
+pub fn handle_user_event(event: UserEvent, webview: &WebView) {
+    let script = match event {
+        UserEvent::StateUpdate(state) => {
+            format!(
+                "window.render({});",
+                serde_json::to_string(&*state).unwrap_or_default()
+            )
         }
+        UserEvent::ShowFilePreview {
+            content,
+            language,
+            search_term,
+            path,
+        } => format!(
+            "window.showPreviewContent({}, {}, {}, {});",
+            serde_json::to_string(&content).unwrap_or_default(),
+            serde_json::to_string(&language).unwrap_or_default(),
+            serde_json::to_string(&search_term).unwrap_or_default(),
+            serde_json::to_string(&path).unwrap_or_default()
+        ),
+        UserEvent::ShowGeneratedContent(content) => format!(
+            "window.showGeneratedContent({});",
+            serde_json::to_string(&content).unwrap_or_default()
+        ),
+        UserEvent::ShowError(msg) => {
+            format!(
+                "window.showError({});",
+                serde_json::to_string(&msg).unwrap_or_default()
+            )
+        }
+        UserEvent::SaveComplete(success, path) => format!(
+            "window.fileSaveStatus({}, {});",
+            success,
+            serde_json::to_string(&path).unwrap_or_default()
+        ),
+        UserEvent::ConfigExported(success) => format!(
+            "window.showStatus('{}');",
+            if success {
+                "Config exported successfully."
+            } else {
+                "Failed to export config."
+            }
+        ),
+        UserEvent::ScanProgress(progress) => {
+            format!(
+                "window.updateScanProgress({});",
+                serde_json::to_string(&progress).unwrap_or_default()
+            )
+        }
+        UserEvent::DragStateChanged(is_dragging) => {
+            format!("window.setDragState({is_dragging});")
+        }
+    };
+    if let Err(e) = webview.evaluate_script(&script) {
+        tracing::error!("Failed to evaluate script: {}", e);
     }
 }
