@@ -1,0 +1,204 @@
+:root {
+  --bg-color: #202124;
+  --sidebar-bg: #282a2e;
+  --panel-bg: #303134;
+  --main-bg: #1e1e1e;
+  --text-color: #e8eaed;
+  --text-color-muted: #9aa0a6;
+  --border-color: #3c4043;
+  --accent-color: #8ab4f8;
+  --green-accent: #34a853;
+  --button-bg: #3c4043;
+  --button-hover-bg: #5f6368;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body,
+html {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  background-color: var(--bg-color);
+  color: var(--text-color);
+  height: 100vh;
+  overflow: hidden;
+  font-size: 14px;
+}
+
+.container {
+  display: flex;
+  height: 100%;
+}
+
+/* --- Sidebar --- */
+.sidebar {
+  width: 30%;
+  min-width: 300px;
+  max-width: 600px; /* Verhindert, dass die Sidebar zu breit wird */
+  background-color: var(--sidebar-bg);
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  gap: 10px;
+  resize: horizontal;
+  overflow: auto;
+}
+
+.panel {
+  background-color: var(--panel-bg);
+  border-radius: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.panel-header h3 {
+  margin: 0;
+  font-size: 1em;
+}
+
+.file-tree-panel {
+  flex-grow: 1; /* Wichtig, damit dieser Panel den restlichen Platz einnimmt */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* Verhindert, dass der Inhalt überläuft */
+}
+
+#file-tree-container {
+  flex-grow: 1;
+  overflow-y: auto;
+  padding-right: 5px; /* Platz für Scrollbar */
+}
+.placeholder {
+  color: var(--text-color-muted);
+}
+.path-display {
+  font-size: 0.8em;
+  color: var(--text-color-muted);
+  word-wrap: break-word;
+  margin-top: 8px;
+  user-select: text;
+}
+
+/* --- Buttons --- */
+button {
+  background-color: var(--button-bg);
+  color: var(--text-color);
+  border: 1px solid transparent;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.2s, opacity 0.2s;
+}
+button:hover {
+  background-color: var(--button-hover-bg);
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.button-primary {
+  background-color: var(--accent-color);
+  color: #202124;
+  font-weight: 500;
+}
+.button-primary:hover {
+  opacity: 0.9;
+}
+.button-cta {
+  background-color: var(--green-accent);
+  border-color: transparent;
+  font-weight: bold;
+}
+.button-cta:hover {
+  opacity: 0.9;
+}
+.button-group button {
+  font-size: 0.9em;
+  padding: 4px 8px;
+}
+
+/* --- Main Content --- */
+.main-content {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--main-bg);
+}
+
+#editor-container {
+  flex-grow: 1;
+  width: 100%;
+}
+
+.footer {
+  flex-shrink: 0;
+  padding: 10px;
+  background-color: var(--sidebar-bg);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+}
+
+.status-bar {
+  flex-shrink: 0;
+  padding: 8px 0;
+  margin-top: auto; /* Schiebt die Statusleiste nach unten */
+  border-top: 1px solid var(--border-color);
+  font-size: 0.8em;
+  color: var(--text-color-muted);
+  text-align: center;
+}
+
+/* --- Tree View Styling --- */
+.tree ul {
+  list-style-type: none;
+  padding-left: 18px;
+  margin: 4px 0;
+}
+.tree details summary {
+  cursor: pointer;
+  list-style: none; /* remove triangle */
+  padding: 2px;
+}
+.tree details summary::before {
+  content: "▶";
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 0.75em;
+  transition: transform 0.1s linear;
+  transform-origin: center;
+}
+.tree details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.tree .tree-item {
+  display: flex;
+  align-items: center;
+  padding: 2px 0;
+}
+.tree .tree-item input {
+  margin-right: 8px;
+}
+.tree-item-label {
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+}
+.tree-item-label:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}

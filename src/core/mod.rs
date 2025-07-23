@@ -1,12 +1,14 @@
-pub mod scanner;
 pub mod file_handler;
+pub mod ignore;
+pub mod scanner;
 pub mod search;
-pub mod tree_generator;
-pub mod ignore; // <-- HINZUGEFÜGT
+pub mod tree_generator; // <-- HINZUGEFÜGT
 
+use serde::{Deserialize, Serialize}; // Hinzufügen
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+// WICHTIG: Serialize und Deserialize hinzufügen
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileItem {
     pub path: PathBuf,
     pub is_directory: bool,
@@ -35,8 +37,7 @@ pub struct SearchFilter {
     pub ignore_patterns: std::collections::HashSet<String>,
 }
 
-pub use scanner::DirectoryScanner;
 pub use file_handler::FileHandler;
-pub use search::SearchEngine;
-pub use tree_generator::TreeGenerator;
-pub use ignore::build_globset_from_patterns; // <-- HINZUGEFÜGT
+pub use ignore::build_globset_from_patterns;
+pub use scanner::DirectoryScanner;
+pub use tree_generator::TreeGenerator; // <-- HINZUGEFÜGT

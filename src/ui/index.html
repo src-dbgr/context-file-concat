@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CFC - Context File Concatenator</title>
+    <style>
+      /*INJECT_CSS*/
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+  </head>
+  <body>
+    <div class="container">
+      <aside class="sidebar">
+        <div class="panel">
+          <button id="select-dir-btn" class="button-primary">
+            📁 Verzeichnis auswählen
+          </button>
+          <p id="current-path" class="path-display">
+            Kein Verzeichnis ausgewählt.
+          </p>
+        </div>
+        <div class="panel file-tree-panel">
+          <div class="panel-header">
+            <h3>Dateien</h3>
+            <div class="button-group">
+              <button id="select-all-btn" title="Alle auswählen">Alle +</button>
+              <button id="deselect-all-btn" title="Alle abwählen">
+                Alle -
+              </button>
+              <button id="expand-all-btn" title="Alle ausklappen">⇲</button>
+              <button id="collapse-all-btn" title="Alle einklappen">⇱</button>
+            </div>
+          </div>
+          <div id="file-tree-container">
+            <p class="placeholder">Bitte zuerst ein Verzeichnis scannen.</p>
+          </div>
+        </div>
+        <div class="status-bar" id="status-bar">Status: Bereit.</div>
+      </aside>
+
+      <main class="main-content">
+        <div id="editor-container"></div>
+        <footer class="footer">
+          <button id="generate-btn" class="button-cta" disabled>
+            🚀 Preview generieren
+          </button>
+          <button id="save-btn" class="button-secondary" disabled>
+            💾 In Datei speichern
+          </button>
+        </footer>
+      </main>
+    </div>
+    <script>
+      /*INJECT_JS*/
+    </script>
+  </body>
+</html>
