@@ -13,7 +13,6 @@ document.addEventListener("DOMContentLoaded", () => {
     extensionFilter: document.getElementById("extension-filter"),
     caseSensitive: document.getElementById("case-sensitive"),
     rescanBtn: document.getElementById("rescan-btn"),
-    commonPatterns: document.getElementById("common-patterns"),
     newIgnorePattern: document.getElementById("new-ignore-pattern"),
     addPatternBtn: document.getElementById("add-pattern-btn"),
     currentPatternsContainer: document.getElementById(
@@ -28,23 +27,28 @@ document.addEventListener("DOMContentLoaded", () => {
     fileTreeContainer: document.getElementById("file-tree-container"),
     // Preview/Editor
     previewTitle: document.getElementById("preview-title"),
+    copyBtn: document.getElementById("copy-btn"),
     clearPreviewBtn: document.getElementById("clear-preview-btn"),
     editorContainer: document.getElementById("editor-container"),
     // Bottom Panel
     generateBtn: document.getElementById("generate-btn"),
     saveBtn: document.getElementById("save-btn"),
     includeTree: document.getElementById("include-tree"),
+    relativePaths: document.getElementById("relative-paths"),
+    outputDir: document.getElementById("output-dir"),
+    browseOutputDirBtn: document.getElementById("browse-output-dir"),
+    outputFilename: document.getElementById("output-filename"),
     // Other
     statusBar: document.getElementById("status-bar"),
     resizer: document.getElementById("resizer"),
     fileListPanel: document.getElementById("file-list-panel"),
+    previewPanel: document.getElementById("preview-panel"),
+    contentSplitter: document.querySelector(".content-splitter"),
   };
 
-  // --- IPC Communication ---
   const post = (command, payload = null) =>
     window.ipc.postMessage(JSON.stringify({ command, payload }));
 
-  // --- Monaco Editor Initialization ---
   require.config({
     paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs" },
   });
@@ -63,9 +67,7 @@ document.addEventListener("DOMContentLoaded", () => {
   elements.selectDirBtn.addEventListener("click", () =>
     post("selectDirectory")
   );
-  elements.rescanBtn.addEventListener("click", () =>
-    post("selectDirectory", appState.current_path)
-  );
+  elements.rescanBtn.addEventListener("click", () => post("selectDirectory"));
   elements.importConfigBtn.addEventListener("click", () =>
     post("importConfig")
   );
@@ -85,33 +87,26 @@ document.addEventListener("DOMContentLoaded", () => {
     post("saveFile", editor.getValue())
   );
   elements.clearPreviewBtn.addEventListener("click", clearPreview);
+  elements.copyBtn.addEventListener("click", copyToClipboard);
+  elements.browseOutputDirBtn.addEventListener("click", () =>
+    post("pickOutputDirectory")
+  );
 
-  const debounce = (func, delay) => {
-    let timeout;
-    return function (...args) {
-      clearTimeout(timeout);
-      timeout = setTimeout(() => func.apply(this, args), delay);
-    };
-  };
-
-  const onFilterChange = debounce(() => {
-    const newConfig = { ...appState.config };
-    // This is a placeholder for full filtering via config. A more complex IPC message is needed for this.
-    // For now, filtering is mainly on the Rust side via ignore patterns.
-    // post("updateConfig", newConfig);
-  }, 300);
-
-  elements.searchQuery.addEventListener("input", onFilterChange);
-  elements.extensionFilter.addEventListener("input", onFilterChange);
-  elements.caseSensitive.addEventListener("change", onFilterChange);
-  elements.includeTree.addEventListener("change", () => {
+  const onConfigChange = () => {
     const newConfig = {
       ...appState.config,
       include_tree_by_default: elements.includeTree.checked,
+      use_relative_paths: elements.relativePaths.checked,
+      output_filename: elements.outputFilename.value,
     };
     post("updateConfig", newConfig);
-  });
-  elements.addPatternBtn.addEventListener("click", addIgnorePattern);
+  };
+
+  elements.includeTree.addEventListener("change", onConfigChange);
+  elements.relativePaths.addEventListener("change", onConfigChange);
+  elements.outputFilename.addEventListener("change", onConfigChange);
+
+  elements.addPatternBtn.addEventListener("click", () => addIgnorePattern());
   elements.newIgnorePattern.addEventListener("keydown", (e) => {
     if (e.key === "Enter") addIgnorePattern();
   });
@@ -133,18 +128,22 @@ document.addEventListener("DOMContentLoaded", () => {
     appState = newState;
     renderUI();
   };
-  window.showPreviewContent = (content) => {
+  window.showPreviewContent = (content, language) => {
     editor.setValue(content);
+    monaco.editor.setModelLanguage(editor.getModel(), language);
     editor.updateOptions({ readOnly: true });
     elements.previewTitle.textContent = "Preview (Read-only)";
-    elements.clearPreviewBtn.style.display = "block";
+    elements.copyBtn.style.display = "inline-block";
+    elements.clearPreviewBtn.style.display = "inline-block";
   };
   window.showGeneratedContent = (content) => {
     editor.setValue(content);
+    monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
     editor.updateOptions({ readOnly: false });
     elements.previewTitle.textContent = "Generated Preview (Editable)";
     elements.saveBtn.disabled = false;
-    elements.clearPreviewBtn.style.display = "block";
+    elements.copyBtn.style.display = "inline-block";
+    elements.clearPreviewBtn.style.display = "inline-block";
   };
   window.showError = (msg) => {
     elements.statusBar.textContent = `Error: ${msg}`;
@@ -164,23 +163,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // --- UI Rendering ---
   function renderUI() {
-    // Config & Path
     elements.currentPath.textContent =
       appState.current_path || "No directory selected.";
     elements.currentPath.title = appState.current_path;
-    elements.includeTree.checked = appState.config.include_tree_by_default;
 
-    // Buttons
+    // Config settings
+    const { config } = appState;
+    elements.includeTree.checked = config.include_tree_by_default;
+    elements.relativePaths.checked = config.use_relative_paths;
+    elements.outputDir.value = config.output_directory?.toString() || "Not set";
+    elements.outputFilename.value = config.output_filename;
+
     const hasSelection = appState.selected_files_count > 0;
     elements.generateBtn.disabled = !hasSelection || appState.is_scanning;
     elements.rescanBtn.disabled =
       !appState.current_path || appState.is_scanning;
 
-    // Stats
     elements.statusBar.textContent = `Status: ${appState.status_message}`;
     elements.fileStats.textContent = `Visible: ${appState.visible_files_count} | Selected: ${appState.selected_files_count}`;
 
-    // File Tree
     elements.fileTreeContainer.innerHTML = "";
     if (appState.is_scanning) {
       elements.fileTreeContainer.innerHTML =
@@ -202,24 +203,26 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function renderIgnorePatterns() {
-    // Current patterns
     elements.currentPatternsContainer.innerHTML = "";
-    appState.config.ignore_patterns.sort().forEach((p) => {
-      const chip = document.createElement("div");
-      chip.className = "current-pattern-chip";
-      chip.innerHTML = `<span>${p}</span><button class="remove-pattern-btn" data-pattern="${p}">&times;</button>`;
-      chip.querySelector("button").addEventListener("click", (e) => {
-        const patternToRemove = e.target.dataset.pattern;
-        const newPatterns = appState.config.ignore_patterns.filter(
-          (pat) => pat !== patternToRemove
-        );
-        post("updateConfig", {
-          ...appState.config,
-          ignore_patterns: newPatterns,
+    (appState.config.ignore_patterns || [])
+      .slice()
+      .sort()
+      .forEach((p) => {
+        const chip = document.createElement("div");
+        chip.className = "current-pattern-chip";
+        chip.innerHTML = `<span>${p}</span><button class="remove-pattern-btn" data-pattern="${p}">&times;</button>`;
+        chip.querySelector("button").addEventListener("click", (e) => {
+          const patternToRemove = e.target.dataset.pattern;
+          const newPatterns = appState.config.ignore_patterns.filter(
+            (pat) => pat !== patternToRemove
+          );
+          post("updateConfig", {
+            ...appState.config,
+            ignore_patterns: newPatterns,
+          });
         });
+        elements.currentPatternsContainer.appendChild(chip);
       });
-      elements.currentPatternsContainer.appendChild(chip);
-    });
   }
 
   function createTreeLevel(nodes) {
@@ -230,37 +233,38 @@ document.addEventListener("DOMContentLoaded", () => {
         const details = document.createElement("details");
         details.open = node.is_expanded;
         details.addEventListener("toggle", (e) => {
-          if (e.target.open !== node.is_expanded) {
+          if (e.target.open !== node.is_expanded)
             post("toggleExpansion", node.path);
-          }
         });
 
         const summary = document.createElement("summary");
-        summary.innerHTML = `
-          <input type="checkbox" ${node.is_selected ? "checked" : ""}>
-          <span class="file-name">📁 ${node.name}</span>
-          <button class="ignore-btn" title="Add this directory to ignore patterns">i</button>`;
-        summary.querySelector("input").addEventListener("click", (e) => {
-          e.preventDefault(); // Prevent details toggling
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = node.selection_state === "full";
+        checkbox.indeterminate = node.selection_state === "partial";
+        checkbox.addEventListener("click", (e) => {
+          e.preventDefault();
           post("toggleDirectorySelection", node.path);
         });
+
+        summary.innerHTML = `<span class="file-name">📁 ${node.name}</span> <button class="ignore-btn" title="Add this directory to ignore patterns">i</button>`;
+        summary.prepend(checkbox);
+
         summary.querySelector(".ignore-btn").addEventListener("click", (e) => {
           e.preventDefault();
-          const pattern = `${node.name}/`;
-          if (!appState.config.ignore_patterns.includes(pattern)) {
-            post("updateConfig", {
-              ...appState.config,
-              ignore_patterns: [...appState.config.ignore_patterns, pattern],
-            });
-          }
+          e.stopPropagation();
+          post("addIgnorePath", node.path);
         });
+
         details.appendChild(summary);
         details.appendChild(createTreeLevel(node.children));
         li.appendChild(details);
       } else {
         li.innerHTML = `
           <label class="tree-item-label">
-            <input type="checkbox" ${node.is_selected ? "checked" : ""}>
+            <input type="checkbox" ${
+              node.selection_state === "full" ? "checked" : ""
+            }>
             <span class="file-name" data-path="${node.path}">${
           node.is_binary ? "🔧" : "📄"
         } ${node.name}</span>
@@ -275,12 +279,7 @@ document.addEventListener("DOMContentLoaded", () => {
         );
         li.querySelector(".ignore-btn").addEventListener("click", (e) => {
           e.stopPropagation();
-          if (!appState.config.ignore_patterns.includes(node.name)) {
-            post("updateConfig", {
-              ...appState.config,
-              ignore_patterns: [...appState.config.ignore_patterns, node.name],
-            });
-          }
+          post("addIgnorePath", node.path);
         });
       }
       ul.appendChild(li);
@@ -291,9 +290,22 @@ document.addEventListener("DOMContentLoaded", () => {
   function clearPreview() {
     editor.setValue("// Preview cleared.");
     editor.updateOptions({ readOnly: true });
+    monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
     elements.previewTitle.textContent = "Preview";
     elements.saveBtn.disabled = true;
     elements.clearPreviewBtn.style.display = "none";
+    elements.copyBtn.style.display = "none";
+  }
+
+  function copyToClipboard() {
+    navigator.clipboard.writeText(editor.getValue()).then(
+      () => {
+        elements.statusBar.textContent = "Status: Copied to clipboard!";
+      },
+      () => {
+        elements.statusBar.textContent = "Error: Could not copy to clipboard.";
+      }
+    );
   }
 
   function formatFileSize(bytes) {
@@ -306,7 +318,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // --- Resizer Logic ---
   let mouseDown = false;
-  elements.resizer.addEventListener("mousedown", (e) => {
+  elements.resizer.addEventListener("mousedown", () => {
     mouseDown = true;
     document.body.style.cursor = "ns-resize";
   });
@@ -327,23 +339,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // --- Keyboard Shorcut Fix ---
   document.addEventListener("keydown", (e) => {
-    if (e.ctrlKey || e.metaKey) {
-      if (
-        e.key === "c" ||
-        e.key === "x" ||
-        e.key === "v" ||
-        e.key === "a" ||
-        e.key === "z" ||
-        e.key === "y"
-      ) {
-        // If the editor has focus, let it handle the event
-        if (editor && editor.hasTextFocus()) {
-          e.stopPropagation();
-        }
+    if (
+      (e.ctrlKey || e.metaKey) &&
+      ["c", "x", "v", "a", "z", "y"].includes(e.key)
+    ) {
+      if (editor && editor.hasTextFocus()) {
+        e.stopPropagation();
       }
     }
   });
 
-  // --- Initial Load ---
   post("initialize");
 });

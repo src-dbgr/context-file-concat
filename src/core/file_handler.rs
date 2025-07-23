@@ -15,6 +15,7 @@ impl FileHandler {
         include_tree: bool,
         items_for_tree: Vec<FileItem>,
         tree_ignore_patterns: HashSet<String>,
+        use_relative_paths: bool,
     ) -> Result<String> {
         let mut content = String::new();
         content.push_str(&format!(
@@ -37,8 +38,17 @@ impl FileHandler {
                 continue;
             }
 
-            let display_path = file_path.strip_prefix(root_path).unwrap_or(file_path);
-            content.push_str(&format!("{}\n", display_path.display()));
+            let display_path = if use_relative_paths {
+                file_path
+                    .strip_prefix(root_path)
+                    .unwrap_or(file_path)
+                    .display()
+                    .to_string()
+            } else {
+                file_path.display().to_string()
+            };
+
+            content.push_str(&format!("{}\n", display_path));
             content.push_str("=====================FILE-START==================\n");
 
             match Self::read_file_content(file_path) {

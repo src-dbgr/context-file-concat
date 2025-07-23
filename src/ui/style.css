@@ -36,6 +36,7 @@ html {
   display: flex;
   height: calc(100% - 25px);
 }
+
 .sidebar {
   width: 350px;
   min-width: 280px;
@@ -50,11 +51,14 @@ html {
   overflow-x: hidden;
   overflow-y: auto;
 }
+
 .main-content {
   flex-grow: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
+
 .top-bar {
   display: flex;
   justify-content: space-between;
@@ -63,6 +67,7 @@ html {
   border-bottom: 1px solid var(--border-color);
   background-color: var(--bg-color-medium);
   flex-shrink: 0;
+  gap: 10px;
 }
 .path-selection {
   display: flex;
@@ -71,10 +76,17 @@ html {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 #current-path {
   color: var(--text-color-muted);
   font-size: 0.9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.config-buttons {
+  display: flex;
+  gap: 10px;
 }
 
 .content-splitter {
@@ -83,25 +95,25 @@ html {
   flex-grow: 1;
   overflow: hidden;
 }
-
 .file-list-panel {
   height: 60%;
   display: flex;
   flex-direction: column;
   padding: 10px;
+  min-height: 100px;
 }
 .preview-panel {
   height: 40%;
   display: flex;
   flex-direction: column;
   padding: 10px;
+  min-height: 100px;
 }
 .resizer {
   height: 8px;
   background-color: var(--border-color);
   cursor: ns-resize;
   flex-shrink: 0;
-  position: relative;
 }
 .resizer:hover {
   background-color: var(--accent-color);
@@ -112,7 +124,7 @@ html {
   align-items: center;
   justify-content: center;
   gap: 20px;
-  padding: 8px;
+  padding: 8px 12px;
   border-top: 1px solid var(--border-color);
   background-color: var(--bg-color-medium);
   flex-shrink: 0;
@@ -153,6 +165,8 @@ html {
   font-size: 0.8em;
   color: var(--text-color-muted);
   white-space: nowrap;
+  text-align: right;
+  flex-grow: 1;
 }
 
 input[type="text"] {
@@ -201,28 +215,15 @@ button:disabled {
   background-color: transparent;
   border-color: var(--button-bg);
 }
+.button-group {
+  display: flex;
+  gap: 5px;
+}
 .button-group button {
   font-size: 0.85em;
   padding: 4px 8px;
 }
 
-.common-patterns {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-.pattern-chip {
-  background-color: transparent;
-  border: 1px solid var(--border-color);
-  font-size: 0.8em;
-  padding: 2px 6px;
-  border-radius: 10px;
-  cursor: pointer;
-}
-.pattern-chip:hover {
-  background-color: var(--button-bg);
-}
 .current-patterns {
   max-height: 150px;
   overflow-y: auto;
@@ -262,15 +263,21 @@ button:disabled {
   padding-left: 20px;
   margin: 2px 0;
 }
-.tree summary {
-  cursor: pointer;
-  list-style: none;
-  padding: 2px;
-  border-radius: 3px;
+.tree summary,
+.tree .tree-item-label {
   display: flex;
   align-items: center;
+  gap: 6px;
+  padding: 2px;
+  border-radius: 3px;
+  cursor: pointer;
+  width: 100%;
 }
-.tree summary:hover {
+.tree summary {
+  list-style: none;
+}
+.tree summary:hover,
+.tree .tree-item-label:hover {
   background-color: var(--bg-color-light);
 }
 .tree summary::before {
@@ -283,32 +290,23 @@ button:disabled {
 .tree details[open] > summary::before {
   transform: rotate(90deg);
 }
-.tree .tree-item-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px;
-  border-radius: 3px;
-  cursor: pointer;
-  width: 100%;
-}
-.tree .tree-item-label:hover {
-  background-color: var(--bg-color-light);
-}
-.tree .tree-item-label input {
+.tree input[type="checkbox"] {
   margin: 0;
+  flex-shrink: 0;
 }
 .file-name {
   flex-grow: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 .file-size {
   font-size: 0.8em;
   color: var(--text-color-muted);
   margin-left: auto;
   padding-left: 10px;
+  flex-shrink: 0;
 }
 .ignore-btn {
   all: unset;
@@ -317,6 +315,7 @@ button:disabled {
   font-size: 0.8em;
   padding: 0 4px;
   border-radius: 3px;
+  flex-shrink: 0;
 }
 .ignore-btn:hover {
   background-color: var(--button-hover-bg);
@@ -325,13 +324,29 @@ button:disabled {
 #editor-container {
   flex-grow: 1;
   width: 100%;
+  min-height: 0;
 }
 .output-settings summary {
   cursor: pointer;
 }
 .output-settings .settings-content {
-  padding: 8px;
-  margin-top: 5px;
+  padding: 12px;
+  margin-top: 8px;
   background-color: var(--bg-color-light);
   border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.setting-row label {
+  white-space: nowrap;
+}
+.setting-row input[type="text"] {
+  flex-grow: 1;
+  margin-bottom: 0;
 }

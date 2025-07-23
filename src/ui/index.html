@@ -39,7 +39,6 @@
               🔄 Re-Scan
             </button>
           </div>
-          <div class="common-patterns" id="common-patterns"></div>
           <div class="input-group">
             <input
               type="text"
@@ -84,9 +83,14 @@
           <div id="preview-panel" class="preview-panel">
             <div class="panel-header">
               <h3 id="preview-title">Preview</h3>
-              <button id="clear-preview-btn" style="display: none">
-                ❌ Clear Preview
-              </button>
+              <div>
+                <button id="copy-btn" style="display: none">
+                  📋 Copy to Clipboard
+                </button>
+                <button id="clear-preview-btn" style="display: none">
+                  ❌ Clear Preview
+                </button>
+              </div>
             </div>
             <div id="editor-container"></div>
           </div>
@@ -104,10 +108,25 @@
           <details class="output-settings">
             <summary>📤 Output Settings</summary>
             <div class="settings-content">
-              <label
-                ><input type="checkbox" id="include-tree" /> Include directory
-                tree</label
-              >
+              <div class="setting-row">
+                <label for="output-dir">Output Directory:</label>
+                <input type="text" id="output-dir" readonly />
+                <button id="browse-output-dir">Browse</button>
+              </div>
+              <div class="setting-row">
+                <label for="output-filename">Filename:</label>
+                <input type="text" id="output-filename" />
+              </div>
+              <div class="setting-row">
+                <label
+                  ><input type="checkbox" id="include-tree" /> Include directory
+                  tree</label
+                >
+                <label
+                  ><input type="checkbox" id="relative-paths" /> Use relative
+                  file paths</label
+                >
+              </div>
             </div>
           </details>
         </footer>
