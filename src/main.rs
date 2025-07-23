@@ -86,7 +86,11 @@ impl AppState {
 #[derive(Debug)]
 enum UserEvent {
     StateUpdate(UiState),
-    ShowFilePreview { content: String, language: String },
+    ShowFilePreview {
+        content: String,
+        language: String,
+        search_term: Option<String>,
+    },
     ShowGeneratedContent(String),
     ShowError(String),
     SaveComplete(bool, String),
@@ -157,7 +161,7 @@ fn handle_ipc_message(
                                 should_scan = true;
                             }
                         }
-                    } // MutexGuard wird hier freigegeben
+                    }
 
                     if should_scan {
                         scan_directory(proxy, state).await;
@@ -176,10 +180,9 @@ fn handle_ipc_message(
                             state_guard.config.last_directory = Some(path);
                             config::settings::save_config(&state_guard.config).ok();
                         } else {
-                            return; // User cancelled dialog
+                            return;
                         }
                     }
-                    // Die Sperre wird vor dem await-Aufruf freigegeben
                     scan_directory(proxy, state).await;
                 }
                 "updateConfig" => {
@@ -197,7 +200,6 @@ fn handle_ipc_message(
                     if let Ok(filters) =
                         serde_json::from_value::<HashMap<String, String>>(msg.payload)
                     {
-                        // KORREKTUR: Sperre nur für den Lese- und Schreibvorgang halten
                         let should_search_content = {
                             let mut state_guard = state.lock().unwrap();
                             state_guard.search_query =
@@ -211,23 +213,56 @@ fn handle_ipc_message(
 
                             if new_content_query != state_guard.content_search_query {
                                 state_guard.content_search_query = new_content_query;
-                                true // Signal, um eine neue Inhaltssuche zu starten
+                                true
                             } else {
-                                false // Signal, um nur die Filter anzuwenden
+                                false
                             }
-                        }; // MutexGuard wird hier freigegeben
+                        };
 
                         if should_search_content {
                             search_in_files(proxy.clone(), state.clone()).await;
                         } else {
                             let mut state_guard = state.lock().unwrap();
                             apply_filters(&mut state_guard);
+                            if !state_guard.search_query.is_empty() {
+                                auto_expand_for_matches(&mut state_guard);
+                            }
                             proxy
                                 .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
                                 .unwrap();
                         }
                     }
                 }
+                "loadFilePreview" => {
+                    if let Ok(path_str) = serde_json::from_value::<String>(msg.payload) {
+                        let path = PathBuf::from(path_str);
+                        let search_term = {
+                            let state_guard = state.lock().unwrap();
+                            if state_guard.content_search_query.is_empty() {
+                                None
+                            } else {
+                                Some(state_guard.content_search_query.clone())
+                            }
+                        };
+
+                        match FileHandler::get_file_preview(&path, 1500) {
+                            Ok(content) => {
+                                let language = get_language_from_path(&path);
+                                proxy
+                                    .send_event(UserEvent::ShowFilePreview {
+                                        content,
+                                        language,
+                                        search_term,
+                                    })
+                                    .unwrap();
+                            }
+                            Err(e) => proxy
+                                .send_event(UserEvent::ShowError(e.to_string()))
+                                .unwrap(),
+                        }
+                    }
+                }
+                // Andere IPC-Befehle bleiben gleich...
                 "addIgnorePath" => {
                     if let Ok(path_str) = serde_json::from_value::<String>(msg.payload) {
                         let path_to_ignore = PathBuf::from(path_str);
@@ -344,22 +379,6 @@ fn handle_ipc_message(
                     proxy
                         .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
                         .unwrap();
-                }
-                "loadFilePreview" => {
-                    if let Ok(path_str) = serde_json::from_value::<String>(msg.payload) {
-                        let path = PathBuf::from(path_str);
-                        match FileHandler::get_file_preview(&path, 1500) {
-                            Ok(content) => {
-                                let language = get_language_from_path(&path);
-                                proxy
-                                    .send_event(UserEvent::ShowFilePreview { content, language })
-                                    .unwrap();
-                            }
-                            Err(e) => proxy
-                                .send_event(UserEvent::ShowError(e.to_string()))
-                                .unwrap(),
-                        }
-                    }
                 }
                 "generatePreview" => {
                     let (selected, root, config, all_files) = {
@@ -486,10 +505,15 @@ fn handle_user_event(event: UserEvent, webview: &WebView) {
                 serde_json::to_string(&state).unwrap_or_default()
             )
         }
-        UserEvent::ShowFilePreview { content, language } => format!(
-            "window.showPreviewContent({}, {});",
+        UserEvent::ShowFilePreview {
+            content,
+            language,
+            search_term,
+        } => format!(
+            "window.showPreviewContent({}, {}, {});",
             serde_json::to_string(&content).unwrap_or_default(),
-            serde_json::to_string(&language).unwrap_or_default()
+            serde_json::to_string(&language).unwrap_or_default(),
+            serde_json::to_string(&search_term).unwrap_or_default()
         ),
         UserEvent::ShowGeneratedContent(content) => format!(
             "window.showGeneratedContent({});",
@@ -569,12 +593,10 @@ fn apply_filters(state: &mut AppState) {
 
     let mut filtered = SearchEngine::filter_files(&state.full_file_list, &filter);
 
-    // If there is an active content search, further filter by its results
     if !state.content_search_query.is_empty() {
         filtered.retain(|item| state.content_search_results.contains(&item.path));
     }
 
-    // Add parent directories for all visible items to maintain tree structure
     let root_path = PathBuf::from(&state.current_path);
     let required_dirs: HashSet<PathBuf> = filtered
         .par_iter()
@@ -607,49 +629,48 @@ fn apply_filters(state: &mut AppState) {
     state.filtered_file_list = filtered;
 }
 
-fn generate_ui_state(state: &AppState) -> UiState {
-    let root = PathBuf::from(&state.current_path);
+/// Sammelt alle Elternverzeichnisse von Suchergebnissen und fügt sie zu `expanded_dirs` hinzu.
+fn auto_expand_for_matches(state: &mut AppState) {
+    let root_path = PathBuf::from(&state.current_path);
+    let matches: Vec<PathBuf> = state
+        .filtered_file_list
+        .iter()
+        .filter(|item| {
+            let file_name = item.path.file_name().unwrap_or_default().to_string_lossy();
+            let name_match = if !state.search_query.is_empty() {
+                if state.config.case_sensitive_search {
+                    file_name.contains(&state.search_query)
+                } else {
+                    file_name
+                        .to_lowercase()
+                        .contains(&state.search_query.to_lowercase())
+                }
+            } else {
+                false
+            };
+            let content_match = state.content_search_results.contains(&item.path);
+            (name_match || content_match) && !item.is_directory
+        })
+        .map(|item| item.path.clone())
+        .collect();
 
-    let search_matches = if !state.content_search_query.is_empty() {
-        state.content_search_results.clone()
-    } else {
-        HashSet::new()
-    };
-
-    let tree = build_tree_nodes(
-        &state.filtered_file_list,
-        &root,
-        &state.selected_files,
-        &state.expanded_dirs,
-        &search_matches,
-        &state.search_query,
-        state.config.case_sensitive_search,
-    );
-    UiState {
-        config: state.config.clone(),
-        current_path: state.current_path.clone(),
-        tree,
-        total_files_found: state.full_file_list.len(),
-        visible_files_count: state.filtered_file_list.len(),
-        selected_files_count: state.selected_files.len(),
-        is_scanning: state.is_scanning,
-        status_message: if state.is_scanning {
-            "Scanning...".to_string()
-        } else {
-            "Ready.".to_string()
-        },
-        search_query: state.search_query.clone(),
-        extension_filter: state.extension_filter.clone(),
-        content_search_query: state.content_search_query.clone(),
+    for path in matches {
+        let mut current = path.parent();
+        while let Some(parent) = current {
+            if parent.starts_with(&root_path) && parent != root_path {
+                state.expanded_dirs.insert(parent.to_path_buf());
+            } else {
+                break;
+            }
+            current = parent.parent();
+        }
     }
 }
 
 async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     let (files_to_search, query, case_sensitive) = {
-        // KORREKTUR: state_guard als mutable deklarieren
         let mut state_guard = state.lock().unwrap();
         if state_guard.content_search_query.is_empty() {
-            // If query is cleared, reset the search results and apply other filters
             state_guard.content_search_results.clear();
             apply_filters(&mut state_guard);
             proxy
@@ -691,9 +712,47 @@ async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppS
         let mut state_guard = state.lock().unwrap();
         state_guard.content_search_results = matching_paths;
         apply_filters(&mut state_guard);
+        auto_expand_for_matches(&mut state_guard); // Auto-expand nach der Suche
         proxy
             .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
             .unwrap();
+    }
+}
+
+fn generate_ui_state(state: &AppState) -> UiState {
+    let root = PathBuf::from(&state.current_path);
+
+    let search_matches = if !state.content_search_query.is_empty() {
+        state.content_search_results.clone()
+    } else {
+        HashSet::new()
+    };
+
+    let tree = build_tree_nodes(
+        &state.filtered_file_list,
+        &root,
+        &state.selected_files,
+        &state.expanded_dirs,
+        &search_matches,
+        &state.search_query,
+        state.config.case_sensitive_search,
+    );
+    UiState {
+        config: state.config.clone(),
+        current_path: state.current_path.clone(),
+        tree,
+        total_files_found: state.full_file_list.len(),
+        visible_files_count: state.filtered_file_list.len(),
+        selected_files_count: state.selected_files.len(),
+        is_scanning: state.is_scanning,
+        status_message: if state.is_scanning {
+            "Scanning...".to_string()
+        } else {
+            "Ready.".to_string()
+        },
+        search_query: state.search_query.clone(),
+        extension_filter: state.extension_filter.clone(),
+        content_search_query: state.content_search_query.clone(),
     }
 }
 

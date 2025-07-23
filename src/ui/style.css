@@ -264,7 +264,6 @@ button:disabled {
   padding-left: 20px;
   margin: 2px 0;
 }
-/* KORREKTUR: Kind-Elemente von <details> sind ebenfalls Listen und müssen eingerückt werden */
 .tree details ul {
   padding-left: 25px;
 }
@@ -336,6 +335,12 @@ button:disabled {
   width: 100%;
   min-height: 0;
 }
+
+/* Stil für Such-Highlights im Editor */
+.search-highlight {
+  background-color: #fbbc0440;
+}
+
 .output-settings summary {
   cursor: pointer;
 }

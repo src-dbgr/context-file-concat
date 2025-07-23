@@ -2,6 +2,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let editor;
   let appState = {};
   let filterDebounceTimeout;
+  let currentDecorations = [];
 
   const elements = {
     // Top bar
@@ -113,14 +114,13 @@ document.addEventListener("DOMContentLoaded", () => {
         extensionFilter: elements.extensionFilter.value,
         contentSearchQuery: elements.contentSearchQuery.value,
       });
-    }, 300); // 300ms debounce
+    }, 300);
   };
 
   elements.includeTree.addEventListener("change", onConfigChange);
   elements.relativePaths.addEventListener("change", onConfigChange);
   elements.outputFilename.addEventListener("change", onConfigChange);
   elements.caseSensitive.addEventListener("change", onConfigChange);
-
   elements.searchQuery.addEventListener("input", onFilterChange);
   elements.extensionFilter.addEventListener("input", onFilterChange);
   elements.contentSearchQuery.addEventListener("input", onFilterChange);
@@ -147,16 +147,43 @@ document.addEventListener("DOMContentLoaded", () => {
     appState = newState;
     renderUI();
   };
-  window.showPreviewContent = (content, language) => {
+
+  window.showPreviewContent = (content, language, searchTerm) => {
     editor.setValue(content);
-    monaco.editor.setModelLanguage(editor.getModel(), language);
+    const model = editor.getModel();
+    monaco.editor.setModelLanguage(model, language);
     editor.updateOptions({ readOnly: true });
+
+    // Highlight logic
+    if (searchTerm && searchTerm.trim() !== "") {
+      const matches = model.findMatches(
+        searchTerm,
+        true,
+        false,
+        true,
+        null,
+        true
+      );
+      const newDecorations = matches.map((match) => ({
+        range: match.range,
+        options: { inlineClassName: "search-highlight" },
+      }));
+      currentDecorations = editor.deltaDecorations(
+        currentDecorations,
+        newDecorations
+      );
+    } else {
+      currentDecorations = editor.deltaDecorations(currentDecorations, []);
+    }
+
     elements.previewTitle.textContent = "Preview (Read-only)";
     elements.copyBtn.style.display = "inline-block";
     elements.clearPreviewBtn.style.display = "inline-block";
   };
+
   window.showGeneratedContent = (content) => {
     editor.setValue(content);
+    currentDecorations = editor.deltaDecorations(currentDecorations, []); // Clear highlights
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
     editor.updateOptions({ readOnly: false });
     elements.previewTitle.textContent = "Generated Preview (Editable)";
@@ -186,15 +213,12 @@ document.addEventListener("DOMContentLoaded", () => {
       appState.current_path || "No directory selected.";
     elements.currentPath.title = appState.current_path;
 
-    // Config & Filter settings
     const { config } = appState;
     elements.caseSensitive.checked = config.case_sensitive_search;
     elements.includeTree.checked = config.include_tree_by_default;
     elements.relativePaths.checked = config.use_relative_paths;
     elements.outputDir.value = config.output_directory?.toString() || "Not set";
     elements.outputFilename.value = config.output_filename;
-
-    // Set filter inputs without triggering events
     elements.searchQuery.value = appState.search_query;
     elements.extensionFilter.value = appState.extension_filter;
     elements.contentSearchQuery.value = appState.content_search_query;
@@ -313,9 +337,10 @@ document.addEventListener("DOMContentLoaded", () => {
         li.querySelector("input").addEventListener("change", () =>
           post("toggleSelection", node.path)
         );
-        li.querySelector(".file-name").addEventListener("click", () =>
-          post("loadFilePreview", node.path)
-        );
+        li.querySelector(".file-name").addEventListener("click", (e) => {
+          e.stopPropagation(); // KORREKTUR: Verhindert, dass das Label-Event ausgelöst wird.
+          post("loadFilePreview", node.path);
+        });
         li.querySelector(".ignore-btn").addEventListener("click", (e) => {
           e.stopPropagation();
           post("addIgnorePath", node.path);
@@ -328,6 +353,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function clearPreview() {
     editor.setValue("// Preview cleared.");
+    currentDecorations = editor.deltaDecorations(currentDecorations, []);
     editor.updateOptions({ readOnly: true });
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
     elements.previewTitle.textContent = "Preview";
@@ -376,7 +402,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // --- Keyboard Shorcut Fix for Monaco on macOS ---
+  // KORREKTUR: Wichtiger Fix für den Absturz bei CMD+C auf macOS im Editor.
   document.addEventListener("keydown", (e) => {
     if (
       (e.ctrlKey || e.metaKey) &&
