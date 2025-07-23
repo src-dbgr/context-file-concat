@@ -34,6 +34,7 @@ struct UiState {
     search_query: String,
     extension_filter: String,
     content_search_query: String,
+    current_config_filename: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -63,6 +64,7 @@ struct AppState {
     extension_filter: String,
     content_search_query: String,
     content_search_results: HashSet<PathBuf>,
+    current_config_filename: Option<String>,
 }
 
 impl AppState {
@@ -79,6 +81,7 @@ impl AppState {
             extension_filter: String::new(),
             content_search_query: String::new(),
             content_search_results: HashSet::new(),
+            current_config_filename: None,
         }
     }
 }
@@ -482,6 +485,11 @@ fn handle_ipc_message(
                             {
                                 let mut state_guard = state.lock().unwrap();
                                 state_guard.config = config;
+                                // Store the imported config filename
+                                state_guard.current_config_filename = path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .map(|s| s.to_string());
                                 config::settings::save_config(&state_guard.config).ok();
                             }
                             scan_directory(proxy, state).await;
@@ -769,6 +777,7 @@ fn generate_ui_state(state: &AppState) -> UiState {
         search_query: state.search_query.clone(),
         extension_filter: state.extension_filter.clone(),
         content_search_query: state.content_search_query.clone(),
+        current_config_filename: state.current_config_filename.clone(),
     }
 }
 

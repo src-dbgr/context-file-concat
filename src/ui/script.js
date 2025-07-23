@@ -9,6 +9,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Top bar
     selectDirBtn: document.getElementById("select-dir-btn"),
     currentPath: document.getElementById("current-path"),
+    currentConfigFilename: document.getElementById("current-config-filename"),
     importConfigBtn: document.getElementById("import-config-btn"),
     exportConfigBtn: document.getElementById("export-config-btn"),
     // Sidebar
@@ -367,14 +368,19 @@ document.addEventListener("DOMContentLoaded", () => {
 
     editor.updateOptions({ readOnly: true });
 
-    // FIX 1: Dateiname im Preview-Titel anzeigen
-    const fileName =
-      path.split("/").pop() || path.split("\\").pop() || "Unknown File";
+    // Scroll to top of file
+    editor.setPosition({ lineNumber: 1, column: 1 });
+    editor.revealLine(1);
+
+    // Updated: Show path, lines, and file size (not chars)
+    const pathStr = path || "Unknown File";
     const lines = content.split("\n").length;
-    const chars = content.length;
+    const sizeBytes = new Blob([content], { type: "text/plain" }).size;
+    const sizeFormatted = formatFileSize(sizeBytes);
+
     elements.previewTitle.innerHTML = `
-      <span class="preview-main-title">📄 ${fileName}</span>
-      <span class="preview-stats">${lines} lines • ${chars} chars • Read-only</span>
+      <span class="preview-main-title">${pathStr}</span>
+      <span class="preview-stats">${lines} lines • ${sizeFormatted} • Read-only</span>
     `;
 
     elements.copyBtn.style.display = "inline-block";
@@ -388,16 +394,29 @@ document.addEventListener("DOMContentLoaded", () => {
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
     editor.updateOptions({ readOnly: false });
 
-    // FIX 2: Statistiken für Generated Preview anzeigen
-    const lines = content.split("\n").length;
-    const chars = content.length;
-    const words = content.split(/\s+/).filter((word) => word.length > 0).length;
-    const sizeKB = (chars / 1024).toFixed(1);
+    // Function to update stats
+    const updateGeneratedStats = () => {
+      const currentContent = editor.getValue();
+      const lines = currentContent.split("\n").length;
+      const sizeBytes = new Blob([currentContent], { type: "text/plain" }).size;
+      const sizeFormatted = formatFileSize(sizeBytes);
 
-    elements.previewTitle.innerHTML = `
-      <span class="preview-main-title">🚀 Generated Preview</span>
-      <span class="preview-stats">${lines} lines • ${words} words • ${chars} chars • ${sizeKB} KB • Editable</span>
-    `;
+      elements.previewTitle.innerHTML = `
+        <span class="preview-main-title">🚀 Generated Preview</span>
+        <span class="preview-stats">${lines} lines • ${sizeFormatted} • Editable</span>
+      `;
+    };
+
+    // Initial stats
+    updateGeneratedStats();
+
+    // Add event listener for live updates
+    const model = editor.getModel();
+    if (model) {
+      model.onDidChangeContent(() => {
+        updateGeneratedStats();
+      });
+    }
 
     elements.saveBtn.disabled = false;
     elements.copyBtn.style.display = "inline-block";
@@ -427,6 +446,14 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.currentPath.textContent =
       appState.current_path || "No directory selected.";
     elements.currentPath.title = appState.current_path;
+
+    // Show current config filename if available
+    if (appState.current_config_filename) {
+      elements.currentConfigFilename.textContent =
+        appState.current_config_filename;
+    } else {
+      elements.currentConfigFilename.textContent = "";
+    }
 
     const { config } = appState;
     elements.caseSensitive.checked = config.case_sensitive_search;
@@ -518,19 +545,20 @@ document.addEventListener("DOMContentLoaded", () => {
           nameSpan.classList.add("is-match");
         }
 
-        summary.appendChild(checkbox);
-        summary.appendChild(nameSpan);
         const ignoreBtn = document.createElement("button");
         ignoreBtn.className = "ignore-btn";
         ignoreBtn.title = "Add this directory to ignore patterns";
         ignoreBtn.textContent = "i";
-        summary.appendChild(ignoreBtn);
 
         ignoreBtn.addEventListener("click", (e) => {
           e.preventDefault();
           e.stopPropagation();
           post("addIgnorePath", node.path);
         });
+
+        summary.appendChild(checkbox);
+        summary.appendChild(nameSpan);
+        summary.appendChild(ignoreBtn);
 
         details.appendChild(summary);
         details.appendChild(createTreeLevel(node.children));
@@ -539,31 +567,42 @@ document.addEventListener("DOMContentLoaded", () => {
         const container = document.createElement("div");
         container.className = "tree-item-container";
 
-        container.innerHTML = `
-          <input type="checkbox" ${
-            node.selection_state === "full" ? "checked" : ""
-          }>
-          <span class="file-name ${
-            node.is_match ? "is-match" : ""
-          }" data-path="${node.path}">${node.is_binary ? "🔧" : "📄"} ${
-          node.name
-        }</span>
-          <span class="file-size">${formatFileSize(node.size)}</span>
-          <button class="ignore-btn" title="Add this file to ignore patterns">i</button>
-        `;
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = node.selection_state === "full";
+        checkbox.addEventListener("change", () =>
+          post("toggleSelection", node.path)
+        );
 
-        container
-          .querySelector("input")
-          .addEventListener("change", () => post("toggleSelection", node.path));
-        container.querySelector(".file-name").addEventListener("click", () => {
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "file-name";
+        if (node.is_match) {
+          nameSpan.classList.add("is-match");
+        }
+        nameSpan.textContent = `${node.is_binary ? "🔧" : "📄"} ${node.name}`;
+        nameSpan.setAttribute("data-path", node.path);
+        nameSpan.addEventListener("click", () => {
           post("loadFilePreview", node.path);
         });
-        container
-          .querySelector(".ignore-btn")
-          .addEventListener("click", (e) => {
-            e.stopPropagation();
-            post("addIgnorePath", node.path);
-          });
+
+        const ignoreBtn = document.createElement("button");
+        ignoreBtn.className = "ignore-btn";
+        ignoreBtn.title = "Add this file to ignore patterns";
+        ignoreBtn.textContent = "i";
+        ignoreBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          post("addIgnorePath", node.path);
+        });
+
+        const sizeSpan = document.createElement("span");
+        sizeSpan.className = "file-size";
+        sizeSpan.textContent = formatFileSize(node.size);
+
+        container.appendChild(checkbox);
+        container.appendChild(nameSpan);
+        container.appendChild(ignoreBtn);
+        container.appendChild(sizeSpan);
+
         li.appendChild(container);
       }
       ul.appendChild(li);

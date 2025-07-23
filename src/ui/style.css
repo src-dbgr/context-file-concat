@@ -89,7 +89,18 @@ html {
 }
 .config-buttons {
   display: flex;
+  align-items: center;
   gap: 10px;
+}
+.config-filename {
+  color: var(--accent-color);
+  font-size: 0.85em;
+  font-weight: 500;
+  font-style: italic;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .content-splitter {
@@ -152,6 +163,15 @@ html {
   padding: 12px;
   border: 1px solid var(--border-color);
 }
+
+/* Special styling for ignore patterns panel to take available space */
+.ignore-patterns-panel {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .panel-header {
   display: flex;
   justify-content: space-between;
@@ -164,12 +184,47 @@ html {
   font-size: 1em;
   white-space: nowrap;
 }
+
+/* Updated files header layout */
+.files-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  gap: 15px;
+}
+.files-title-section {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+}
+.files-title-section h3 {
+  margin: 0;
+  font-size: 1em;
+  white-space: nowrap;
+}
+
 .stats {
   font-size: 0.8em;
   color: var(--text-color-muted);
   white-space: nowrap;
   text-align: right;
-  flex-grow: 1;
+}
+
+/* Preview title improvements */
+#preview-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.preview-main-title {
+  font-size: 1em;
+  font-weight: normal;
+}
+.preview-stats {
+  font-size: 0.8em;
+  color: var(--text-color-muted);
+  font-weight: normal;
 }
 
 input[type="text"] {
@@ -256,12 +311,13 @@ button:disabled {
 }
 
 .current-patterns {
-  max-height: 150px;
+  flex-grow: 1;
   overflow-y: auto;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 10px;
+  min-height: 0;
 }
 .current-pattern-chip {
   display: flex;
@@ -330,7 +386,6 @@ button:disabled {
   flex-shrink: 0;
 }
 .file-name {
-  flex-grow: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -351,7 +406,7 @@ button:disabled {
 .ignore-btn {
   all: unset;
   cursor: pointer;
-  margin-left: 8px;
+  margin-left: 6px;
   font-size: 0.8em;
   padding: 0 4px;
   border-radius: 3px;

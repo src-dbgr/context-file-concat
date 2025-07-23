@@ -34,7 +34,7 @@
           >
         </div>
 
-        <div class="panel">
+        <div class="panel ignore-patterns-panel">
           <div class="panel-header">
             <h3>🚫 Ignore Patterns</h3>
             <button
@@ -63,6 +63,7 @@
             <span id="current-path">No directory selected.</span>
           </div>
           <div class="config-buttons">
+            <span id="current-config-filename" class="config-filename"></span>
             <button id="import-config-btn">📂 Import Config</button>
             <button id="export-config-btn">💾 Export Config</button>
           </div>
@@ -70,15 +71,17 @@
 
         <div class="content-splitter">
           <div id="file-list-panel" class="file-list-panel">
-            <div class="panel-header">
-              <h3>Files</h3>
-              <div class="stats" id="file-stats"></div>
-              <div class="button-group">
-                <button id="select-all-btn">Select All</button>
-                <button id="deselect-all-btn">Deselect All</button>
-                <button id="expand-all-btn">Expand All</button>
-                <button id="collapse-all-btn">Collapse All</button>
+            <div class="panel-header files-header">
+              <div class="files-title-section">
+                <h3>Files</h3>
+                <div class="button-group">
+                  <button id="select-all-btn">Select All</button>
+                  <button id="deselect-all-btn">Deselect All</button>
+                  <button id="expand-all-btn">Expand All</button>
+                  <button id="collapse-all-btn">Collapse All</button>
+                </div>
               </div>
+              <div class="stats" id="file-stats"></div>
             </div>
             <div id="file-tree-container" class="file-tree-container"></div>
           </div>
