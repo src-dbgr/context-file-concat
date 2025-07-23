@@ -90,6 +90,7 @@ enum UserEvent {
         content: String,
         language: String,
         search_term: Option<String>,
+        path: PathBuf, // HINZUGEFÜGT
     },
     ShowGeneratedContent(String),
     ShowError(String),
@@ -267,6 +268,7 @@ fn handle_ipc_message(
                                         content,
                                         language,
                                         search_term,
+                                        path, // HINZUGEFÜGT
                                     })
                                     .unwrap();
                             }
@@ -522,11 +524,13 @@ fn handle_user_event(event: UserEvent, webview: &WebView) {
             content,
             language,
             search_term,
+            path, // HINZUGEFÜGT
         } => format!(
-            "window.showPreviewContent({}, {}, {});",
+            "window.showPreviewContent({}, {}, {}, {});", // 4. Parameter hinzugefügt
             serde_json::to_string(&content).unwrap_or_default(),
             serde_json::to_string(&language).unwrap_or_default(),
-            serde_json::to_string(&search_term).unwrap_or_default()
+            serde_json::to_string(&search_term).unwrap_or_default(),
+            serde_json::to_string(&path).unwrap_or_default() // HINZUGEFÜGT
         ),
         UserEvent::ShowGeneratedContent(content) => format!(
             "window.showGeneratedContent({});",

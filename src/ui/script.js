@@ -3,6 +3,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let appState = {};
   let filterDebounceTimeout;
   let currentDecorations = [];
+  let currentPreviewedPath = null; // Für Live-Highlight-Updates
 
   const elements = {
     // Top bar
@@ -144,38 +145,76 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // --- Global Event Handlers from Rust ---
   window.render = (newState) => {
-    appState = newState;
-    renderUI();
-  };
+    // FIX 2: Re-apply highlighting if the content search term changes on an active preview
+    if (
+      currentPreviewedPath &&
+      editor?.getModel() &&
+      newState.content_search_query !== (appState.content_search_query || "")
+    ) {
+      const model = editor.getModel();
+      const searchTerm = newState.content_search_query;
+      const matchCase = newState.config.case_sensitive_search;
 
-  window.showPreviewContent = (content, language, searchTerm) => {
-    editor.setValue(content);
-    const model = editor.getModel();
-    if (model) {
-      monaco.editor.setModelLanguage(model, language);
+      let newDecorations = [];
       if (searchTerm && searchTerm.trim() !== "") {
         const matches = model.findMatches(
           searchTerm,
           true,
           false,
-          true,
+          matchCase,
           null,
           true
         );
-        const newDecorations = matches.map((match) => ({
+        newDecorations = matches.map((match) => ({
           range: match.range,
           options: {
             inlineClassName: "search-highlight",
             hoverMessage: { value: "Search match" },
           },
         }));
-        currentDecorations = editor.deltaDecorations(
-          currentDecorations,
-          newDecorations
-        );
-      } else {
-        currentDecorations = editor.deltaDecorations(currentDecorations, []);
       }
+      currentDecorations = editor.deltaDecorations(
+        currentDecorations,
+        newDecorations
+      );
+    }
+
+    appState = newState;
+    renderUI();
+  };
+
+  // FIX 2: Update showPreviewContent to handle path and apply correct case-sensitivity
+  window.showPreviewContent = (content, language, searchTerm, path) => {
+    currentPreviewedPath = path; // Store path for live updates
+    editor.setValue(content);
+    const model = editor.getModel();
+
+    if (model) {
+      monaco.editor.setModelLanguage(model, language);
+      let newDecorations = [];
+      if (searchTerm && searchTerm.trim() !== "") {
+        // Use case sensitivity from the current app state
+        const matchCase = appState.config.case_sensitive_search;
+        const matches = model.findMatches(
+          searchTerm,
+          true,
+          false,
+          matchCase,
+          null,
+          true
+        );
+        newDecorations = matches.map((match) => ({
+          range: match.range,
+          options: {
+            inlineClassName: "search-highlight",
+            hoverMessage: { value: "Search match" },
+          },
+        }));
+      }
+      currentDecorations = editor.deltaDecorations(
+        currentDecorations,
+        newDecorations
+      );
     }
 
     editor.updateOptions({ readOnly: true });
@@ -185,6 +224,7 @@ document.addEventListener("DOMContentLoaded", () => {
   };
 
   window.showGeneratedContent = (content) => {
+    currentPreviewedPath = null; // Generated content is not a specific file preview
     editor.setValue(content);
     currentDecorations = editor.deltaDecorations(currentDecorations, []);
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
@@ -194,12 +234,15 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.copyBtn.style.display = "inline-block";
     elements.clearPreviewBtn.style.display = "inline-block";
   };
+
   window.showError = (msg) => {
     elements.statusBar.textContent = `Error: ${msg}`;
   };
+
   window.showStatus = (msg) => {
     elements.statusBar.textContent = `Status: ${msg}`;
   };
+
   window.fileSaveStatus = (success, path) => {
     if (path === "cancelled") {
       elements.statusBar.textContent = "Status: Save cancelled.";
@@ -324,21 +367,20 @@ document.addEventListener("DOMContentLoaded", () => {
         details.appendChild(createTreeLevel(node.children));
         li.appendChild(details);
       } else {
-        // KORREKTUR: Wrapper-Div statt <label>
         const container = document.createElement("div");
         container.className = "tree-item-container";
 
         container.innerHTML = `
-            <input type="checkbox" ${
-              node.selection_state === "full" ? "checked" : ""
-            }>
-            <span class="file-name ${
-              node.is_match ? "is-match" : ""
-            }" data-path="${node.path}">${node.is_binary ? "🔧" : "📄"} ${
+          <input type="checkbox" ${
+            node.selection_state === "full" ? "checked" : ""
+          }>
+          <span class="file-name ${
+            node.is_match ? "is-match" : ""
+          }" data-path="${node.path}">${node.is_binary ? "🔧" : "📄"} ${
           node.name
         }</span>
-            <span class="file-size">${formatFileSize(node.size)}</span>
-            <button class="ignore-btn" title="Add this file to ignore patterns">i</button>
+          <span class="file-size">${formatFileSize(node.size)}</span>
+          <button class="ignore-btn" title="Add this file to ignore patterns">i</button>
         `;
 
         container
@@ -361,6 +403,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function clearPreview() {
+    currentPreviewedPath = null; // No file is being previewed
     editor.setValue("// Preview cleared.");
     currentDecorations = editor.deltaDecorations(currentDecorations, []);
     editor.updateOptions({ readOnly: true });
@@ -371,10 +414,19 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.copyBtn.style.display = "none";
   }
 
+  // FIX 1: Provide better visual feedback on copy
   function copyToClipboard() {
+    const originalText = elements.copyBtn.textContent;
     navigator.clipboard.writeText(editor.getValue()).then(
       () => {
         elements.statusBar.textContent = "Status: Copied to clipboard!";
+        elements.copyBtn.textContent = "✅ Copied!";
+        setTimeout(() => {
+          elements.copyBtn.textContent = originalText;
+          if (appState && appState.status_message) {
+            elements.statusBar.textContent = `Status: ${appState.status_message}`;
+          }
+        }, 2000);
       },
       () => {
         elements.statusBar.textContent = "Error: Could not copy to clipboard.";
@@ -411,21 +463,21 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // KORREKTUR: Globaler Event-Listener, um Abstürze bei Tastaturkürzeln zu verhindern.
+  // FIX 3: Global event listener to prevent crashes from keyboard shortcuts
   document.addEventListener("keydown", (e) => {
-    // Prüft auf Cmd (Mac) oder Ctrl (Windows/Linux)
+    // Check for Cmd (Mac) or Ctrl (Windows/Linux)
     if (!e.metaKey && !e.ctrlKey) {
       return;
     }
 
-    // Prüft, ob der Fokus auf einem Element liegt, das Tastenkombinationen selbst verarbeiten soll
+    // Check if focus is on an element that handles shortcuts itself
     const isTextField =
       e.target.tagName === "INPUT" && e.target.type === "text";
     const isEditorFocused = editor && editor.hasTextFocus();
 
     if (isTextField || isEditorFocused) {
       const key = e.key.toLowerCase();
-      // Fängt gängige Bearbeitungs- und Navigationskürzel ab
+      // Intercept common editing shortcuts
       if (
         [
           "a",
@@ -442,6 +494,8 @@ document.addEventListener("DOMContentLoaded", () => {
           "end",
         ].includes(key)
       ) {
+        // Stop the event from bubbling up to the wry host, which prevents the crash.
+        // The browser/editor's default action (like copying) will still execute.
         e.stopPropagation();
       }
     }
