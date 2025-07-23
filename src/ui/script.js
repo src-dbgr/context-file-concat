@@ -143,7 +143,14 @@ document.addEventListener("DOMContentLoaded", () => {
           // Funktionstasten
           (e.key.startsWith("F") && e.key.length <= 3); // F1-F12
 
-        if (shouldBlock) {
+        // ALLOW CMD+F for search functionality in editor
+        const isEditorFocused =
+          document.activeElement &&
+          document.activeElement.closest(".monaco-editor");
+        const isFindCommand =
+          (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f";
+
+        if (shouldBlock && !(isEditorFocused && isFindCommand)) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
@@ -223,7 +230,11 @@ document.addEventListener("DOMContentLoaded", () => {
           ["Home", "End", "PageUp", "PageDown"].includes(e.key) ||
           (e.key.startsWith("F") && e.key.length <= 3);
 
-        if (shouldBlock) {
+        // ALLOW CMD+F for search functionality in editor
+        const isFindCommand =
+          (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f";
+
+        if (shouldBlock && !isFindCommand) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
@@ -573,7 +584,13 @@ document.addEventListener("DOMContentLoaded", () => {
       !appState.current_path || appState.is_scanning;
 
     elements.statusBar.textContent = `Status: ${appState.status_message}`;
-    elements.fileStats.textContent = `Visible: ${appState.visible_files_count} | Selected: ${appState.selected_files_count}`;
+
+    // Calculate file statistics more clearly
+    const { totalFiles, totalFolders } = countTreeItems(appState.tree);
+    const visibleItems = appState.visible_files_count;
+    const selectedFiles = appState.selected_files_count;
+
+    elements.fileStats.textContent = `Files: ${selectedFiles} selected of ${totalFiles} • Folders: ${totalFolders} • Total visible: ${visibleItems}`;
 
     elements.fileTreeContainer.innerHTML = "";
     if (appState.is_scanning) {
@@ -594,6 +611,28 @@ document.addEventListener("DOMContentLoaded", () => {
 
     setupCommonPatterns();
     renderIgnorePatterns();
+  }
+
+  // Helper function to count files and folders recursively
+  function countTreeItems(nodes) {
+    let totalFiles = 0;
+    let totalFolders = 0;
+
+    function traverse(items) {
+      for (const item of items) {
+        if (item.is_directory) {
+          totalFolders++;
+          if (item.children && item.children.length > 0) {
+            traverse(item.children);
+          }
+        } else {
+          totalFiles++;
+        }
+      }
+    }
+
+    traverse(nodes);
+    return { totalFiles, totalFolders };
   }
 
   function renderIgnorePatterns() {
