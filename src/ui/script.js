@@ -64,21 +64,6 @@ document.addEventListener("DOMContentLoaded", () => {
       automaticLayout: true,
       wordWrap: "on",
     });
-
-    // KORREKTUR 2: Zuverlässigerer Fix für den Cmd+C-Absturz
-    editor.onKeyDown((e) => {
-      // monaco.KeyMod.CtrlCmd = 2048, monaco.KeyCode.KeyC = 33 etc.
-      const isCopy = e.keyCode === 33 && (e.ctrlKey || e.metaKey);
-      const isPaste = e.keyCode === 52 && (e.ctrlKey || e.metaKey);
-      const isCut = e.keyCode === 54 && (e.ctrlKey || e.metaKey);
-      const isSelectAll = e.keyCode === 31 && (e.ctrlKey || e.metaKey);
-      const isUndo = e.keyCode === 56 && (e.ctrlKey || e.metaKey);
-      const isRedo = e.keyCode === 58 && (e.ctrlKey || e.metaKey);
-
-      if (isCopy || isPaste || isCut || isSelectAll || isUndo || isRedo) {
-        e.stopPropagation();
-      }
-    });
   });
 
   // --- Event Listeners ---
@@ -168,7 +153,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const model = editor.getModel();
     if (model) {
       monaco.editor.setModelLanguage(model, language);
-      // Highlight logic
       if (searchTerm && searchTerm.trim() !== "") {
         const matches = model.findMatches(
           searchTerm,
@@ -202,7 +186,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   window.showGeneratedContent = (content) => {
     editor.setValue(content);
-    currentDecorations = editor.deltaDecorations(currentDecorations, []); // Clear highlights
+    currentDecorations = editor.deltaDecorations(currentDecorations, []);
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
     editor.updateOptions({ readOnly: false });
     elements.previewTitle.textContent = "Generated Preview (Editable)";
@@ -298,7 +282,6 @@ document.addEventListener("DOMContentLoaded", () => {
     nodes.forEach((node) => {
       const li = document.createElement("li");
       if (node.is_directory) {
-        // ... Directory rendering (bleibt unverändert)
         const details = document.createElement("details");
         details.open = node.is_expanded;
         details.addEventListener("toggle", (e) => {
@@ -361,8 +344,7 @@ document.addEventListener("DOMContentLoaded", () => {
         container
           .querySelector("input")
           .addEventListener("change", () => post("toggleSelection", node.path));
-        container.querySelector(".file-name").addEventListener("click", (e) => {
-          // Wichtig: stopPropagation ist hier nicht mehr nötig, da wir kein Label mehr haben
+        container.querySelector(".file-name").addEventListener("click", () => {
           post("loadFilePreview", node.path);
         });
         container
@@ -426,6 +408,42 @@ document.addEventListener("DOMContentLoaded", () => {
       const newTopPercent = (newTopHeight / totalHeight) * 100;
       elements.fileListPanel.style.height = `${newTopPercent}%`;
       elements.previewPanel.style.height = `${100 - newTopPercent}%`;
+    }
+  });
+
+  // KORREKTUR: Globaler Event-Listener, um Abstürze bei Tastaturkürzeln zu verhindern.
+  document.addEventListener("keydown", (e) => {
+    // Prüft auf Cmd (Mac) oder Ctrl (Windows/Linux)
+    if (!e.metaKey && !e.ctrlKey) {
+      return;
+    }
+
+    // Prüft, ob der Fokus auf einem Element liegt, das Tastenkombinationen selbst verarbeiten soll
+    const isTextField =
+      e.target.tagName === "INPUT" && e.target.type === "text";
+    const isEditorFocused = editor && editor.hasTextFocus();
+
+    if (isTextField || isEditorFocused) {
+      const key = e.key.toLowerCase();
+      // Fängt gängige Bearbeitungs- und Navigationskürzel ab
+      if (
+        [
+          "a",
+          "c",
+          "v",
+          "x",
+          "z",
+          "y",
+          "arrowleft",
+          "arrowright",
+          "arrowup",
+          "arrowdown",
+          "home",
+          "end",
+        ].includes(key)
+      ) {
+        e.stopPropagation();
+      }
     }
   });
 

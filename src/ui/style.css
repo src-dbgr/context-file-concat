@@ -7,7 +7,7 @@
   --border-color: #3c4043;
   --text-color: #e8eaed;
   --text-color-muted: #9aa0a6;
-  --accent-color: #8ab4f8;
+  --accent-color: #8ab4f8; /* Blau für Hervorhebungen */
   --green-accent: #34a853;
   --yellow-accent: #fbbc04;
   --button-bg: #4d5156;
@@ -269,7 +269,6 @@ button:disabled {
 }
 .tree summary,
 .tree .tree-item-container {
-  /* Geändert von .tree-item-label */
   display: flex;
   align-items: center;
   gap: 6px;
@@ -283,7 +282,6 @@ button:disabled {
 }
 .tree summary:hover,
 .tree .tree-item-container:hover {
-  /* Geändert von .tree-item-label */
   background-color: var(--bg-color-light);
 }
 .tree summary::before {
@@ -341,8 +339,7 @@ button:disabled {
 
 /* KORREKTUR: Dominanterer Stil für Such-Highlights im Editor */
 .search-highlight {
-  background-color: var(--yellow-accent);
-  color: var(--bg-color-dark);
+  background-color: rgba(16, 135, 50, 0.7); /* Blau mit 40% Opazität */
   border-radius: 2px;
 }
 

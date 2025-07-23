@@ -47,7 +47,7 @@ struct TreeNode {
     // "none", "partial", "full"
     selection_state: String,
     is_expanded: bool,
-    is_match: bool, // Hinzugefügt für Such-Highlighting
+    is_match: bool,
 }
 
 struct AppState {
@@ -151,6 +151,31 @@ fn handle_ipc_message(
     if let Ok(msg) = serde_json::from_str::<IpcMessage>(&message) {
         tokio::spawn(async move {
             match msg.command.as_str() {
+                "updateConfig" => {
+                    if let Ok(new_config) = serde_json::from_value(msg.payload) {
+                        // KORREKTUR: Prüfen ob eine neue Inhaltssuche nötig ist
+                        let should_research_content = {
+                            let mut state_guard = state.lock().unwrap();
+                            let old_case_sensitive = state_guard.config.case_sensitive_search;
+                            state_guard.config = new_config;
+                            config::settings::save_config(&state_guard.config).ok();
+
+                            old_case_sensitive != state_guard.config.case_sensitive_search
+                                && !state_guard.content_search_query.is_empty()
+                        };
+
+                        if should_research_content {
+                            search_in_files(proxy.clone(), state.clone()).await;
+                        } else {
+                            let mut state_guard = state.lock().unwrap();
+                            apply_filters(&mut state_guard);
+                            proxy
+                                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                                .unwrap();
+                        }
+                    }
+                }
+                // ... andere IPC Befehle ...
                 "initialize" => {
                     let mut should_scan = false;
                     {
@@ -184,17 +209,6 @@ fn handle_ipc_message(
                         }
                     }
                     scan_directory(proxy, state).await;
-                }
-                "updateConfig" => {
-                    if let Ok(new_config) = serde_json::from_value(msg.payload) {
-                        let mut state_guard = state.lock().unwrap();
-                        state_guard.config = new_config;
-                        config::settings::save_config(&state_guard.config).ok();
-                        apply_filters(&mut state_guard);
-                        proxy
-                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
-                            .unwrap();
-                    }
                 }
                 "updateFilters" => {
                     if let Ok(filters) =
@@ -262,7 +276,6 @@ fn handle_ipc_message(
                         }
                     }
                 }
-                // Andere IPC-Befehle bleiben gleich...
                 "addIgnorePath" => {
                     if let Ok(path_str) = serde_json::from_value::<String>(msg.payload) {
                         let path_to_ignore = PathBuf::from(path_str);
@@ -629,7 +642,6 @@ fn apply_filters(state: &mut AppState) {
     state.filtered_file_list = filtered;
 }
 
-/// Sammelt alle Elternverzeichnisse von Suchergebnissen und fügt sie zu `expanded_dirs` hinzu.
 fn auto_expand_for_matches(state: &mut AppState) {
     let root_path = PathBuf::from(&state.current_path);
     let matches: Vec<PathBuf> = state
@@ -712,7 +724,7 @@ async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppS
         let mut state_guard = state.lock().unwrap();
         state_guard.content_search_results = matching_paths;
         apply_filters(&mut state_guard);
-        auto_expand_for_matches(&mut state_guard); // Auto-expand nach der Suche
+        auto_expand_for_matches(&mut state_guard);
         proxy
             .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
             .unwrap();
