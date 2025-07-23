@@ -9,6 +9,7 @@ use crate::core::{
     build_globset_from_patterns, DirectoryScanner, FileHandler, FileItem, SearchEngine,
     SearchFilter,
 };
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -30,6 +31,9 @@ struct UiState {
     selected_files_count: usize,
     is_scanning: bool,
     status_message: String,
+    search_query: String,
+    extension_filter: String,
+    content_search_query: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -43,6 +47,7 @@ struct TreeNode {
     // "none", "partial", "full"
     selection_state: String,
     is_expanded: bool,
+    is_match: bool, // Hinzugefügt für Such-Highlighting
 }
 
 struct AppState {
@@ -53,6 +58,11 @@ struct AppState {
     selected_files: HashSet<PathBuf>,
     expanded_dirs: HashSet<PathBuf>,
     is_scanning: bool,
+    // Filter state
+    search_query: String,
+    extension_filter: String,
+    content_search_query: String,
+    content_search_results: HashSet<PathBuf>,
 }
 
 impl AppState {
@@ -65,6 +75,10 @@ impl AppState {
             selected_files: HashSet::new(),
             expanded_dirs: HashSet::new(),
             is_scanning: false,
+            search_query: String::new(),
+            extension_filter: String::new(),
+            content_search_query: String::new(),
+            content_search_results: HashSet::new(),
         }
     }
 }
@@ -143,7 +157,7 @@ fn handle_ipc_message(
                                 should_scan = true;
                             }
                         }
-                    }
+                    } // MutexGuard wird hier freigegeben
 
                     if should_scan {
                         scan_directory(proxy, state).await;
@@ -154,16 +168,19 @@ fn handle_ipc_message(
                             .unwrap();
                     }
                 }
-                "selectDirectory" => {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        {
+                "selectDirectory" | "rescanDirectory" => {
+                    if msg.command == "selectDirectory" {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
                             let mut state_guard = state.lock().unwrap();
                             state_guard.current_path = path.to_string_lossy().to_string();
                             state_guard.config.last_directory = Some(path);
                             config::settings::save_config(&state_guard.config).ok();
+                        } else {
+                            return; // User cancelled dialog
                         }
-                        scan_directory(proxy, state).await;
                     }
+                    // Die Sperre wird vor dem await-Aufruf freigegeben
+                    scan_directory(proxy, state).await;
                 }
                 "updateConfig" => {
                     if let Ok(new_config) = serde_json::from_value(msg.payload) {
@@ -174,6 +191,41 @@ fn handle_ipc_message(
                         proxy
                             .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
                             .unwrap();
+                    }
+                }
+                "updateFilters" => {
+                    if let Ok(filters) =
+                        serde_json::from_value::<HashMap<String, String>>(msg.payload)
+                    {
+                        // KORREKTUR: Sperre nur für den Lese- und Schreibvorgang halten
+                        let should_search_content = {
+                            let mut state_guard = state.lock().unwrap();
+                            state_guard.search_query =
+                                filters.get("searchQuery").cloned().unwrap_or_default();
+                            state_guard.extension_filter =
+                                filters.get("extensionFilter").cloned().unwrap_or_default();
+                            let new_content_query = filters
+                                .get("contentSearchQuery")
+                                .cloned()
+                                .unwrap_or_default();
+
+                            if new_content_query != state_guard.content_search_query {
+                                state_guard.content_search_query = new_content_query;
+                                true // Signal, um eine neue Inhaltssuche zu starten
+                            } else {
+                                false // Signal, um nur die Filter anzuwenden
+                            }
+                        }; // MutexGuard wird hier freigegeben
+
+                        if should_search_content {
+                            search_in_files(proxy.clone(), state.clone()).await;
+                        } else {
+                            let mut state_guard = state.lock().unwrap();
+                            apply_filters(&mut state_guard);
+                            proxy
+                                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                                .unwrap();
+                        }
                     }
                 }
                 "addIgnorePath" => {
@@ -310,32 +362,21 @@ fn handle_ipc_message(
                     }
                 }
                 "generatePreview" => {
-                    let (selected, root, config) = {
+                    let (selected, root, config, all_files) = {
                         let state_guard = state.lock().unwrap();
                         (
                             get_selected_files_in_tree_order(&state_guard),
                             PathBuf::from(&state_guard.current_path),
                             state_guard.config.clone(),
+                            state_guard.full_file_list.clone(),
                         )
-                    };
-
-                    let items_for_tree = {
-                        let state_guard = state.lock().unwrap();
-                        let ignore_set =
-                            build_globset_from_patterns(&state_guard.config.ignore_patterns);
-                        state_guard
-                            .full_file_list
-                            .iter()
-                            .filter(|item| !ignore_set.is_match(&item.path))
-                            .cloned()
-                            .collect()
                     };
 
                     let result = FileHandler::generate_concatenated_content_simple(
                         &selected,
                         &root,
                         config.include_tree_by_default,
-                        items_for_tree,
+                        all_files,
                         config.tree_ignore_patterns,
                         config.use_relative_paths,
                     )
@@ -520,21 +561,69 @@ async fn scan_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppSt
 
 fn apply_filters(state: &mut AppState) {
     let filter = SearchFilter {
-        query: String::new(),
-        extension: String::new(),
+        query: state.search_query.clone(),
+        extension: state.extension_filter.clone(),
         case_sensitive: state.config.case_sensitive_search,
         ignore_patterns: state.config.ignore_patterns.clone(),
     };
-    state.filtered_file_list = SearchEngine::filter_files(&state.full_file_list, &filter);
+
+    let mut filtered = SearchEngine::filter_files(&state.full_file_list, &filter);
+
+    // If there is an active content search, further filter by its results
+    if !state.content_search_query.is_empty() {
+        filtered.retain(|item| state.content_search_results.contains(&item.path));
+    }
+
+    // Add parent directories for all visible items to maintain tree structure
+    let root_path = PathBuf::from(&state.current_path);
+    let required_dirs: HashSet<PathBuf> = filtered
+        .par_iter()
+        .flat_map(|item| {
+            let mut parents = Vec::new();
+            let mut current = item.path.parent();
+            while let Some(parent) = current {
+                if parent.starts_with(&root_path) {
+                    parents.push(parent.to_path_buf());
+                } else {
+                    break;
+                }
+                current = parent.parent();
+            }
+            parents
+        })
+        .collect();
+
+    let existing_paths_in_filtered: HashSet<PathBuf> =
+        filtered.par_iter().map(|item| item.path.clone()).collect();
+
+    for dir_path in required_dirs {
+        if !existing_paths_in_filtered.contains(&dir_path) {
+            if let Some(dir_item) = state.full_file_list.iter().find(|i| i.path == dir_path) {
+                filtered.push(dir_item.clone());
+            }
+        }
+    }
+
+    state.filtered_file_list = filtered;
 }
 
 fn generate_ui_state(state: &AppState) -> UiState {
     let root = PathBuf::from(&state.current_path);
+
+    let search_matches = if !state.content_search_query.is_empty() {
+        state.content_search_results.clone()
+    } else {
+        HashSet::new()
+    };
+
     let tree = build_tree_nodes(
         &state.filtered_file_list,
         &root,
         &state.selected_files,
         &state.expanded_dirs,
+        &search_matches,
+        &state.search_query,
+        state.config.case_sensitive_search,
     );
     UiState {
         config: state.config.clone(),
@@ -549,6 +638,62 @@ fn generate_ui_state(state: &AppState) -> UiState {
         } else {
             "Ready.".to_string()
         },
+        search_query: state.search_query.clone(),
+        extension_filter: state.extension_filter.clone(),
+        content_search_query: state.content_search_query.clone(),
+    }
+}
+
+async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
+    let (files_to_search, query, case_sensitive) = {
+        // KORREKTUR: state_guard als mutable deklarieren
+        let mut state_guard = state.lock().unwrap();
+        if state_guard.content_search_query.is_empty() {
+            // If query is cleared, reset the search results and apply other filters
+            state_guard.content_search_results.clear();
+            apply_filters(&mut state_guard);
+            proxy
+                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                .unwrap();
+            return;
+        }
+        (
+            state_guard.full_file_list.clone(),
+            state_guard.content_search_query.clone(),
+            state_guard.config.case_sensitive_search,
+        )
+    };
+
+    let matching_paths: HashSet<PathBuf> = files_to_search
+        .into_par_iter()
+        .filter_map(|item| {
+            if item.is_directory || item.is_binary {
+                return None;
+            }
+            if let Ok(content) = std::fs::read_to_string(&item.path) {
+                let found = if case_sensitive {
+                    content.contains(&query)
+                } else {
+                    content.to_lowercase().contains(&query.to_lowercase())
+                };
+                if found {
+                    Some(item.path)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    {
+        let mut state_guard = state.lock().unwrap();
+        state_guard.content_search_results = matching_paths;
+        apply_filters(&mut state_guard);
+        proxy
+            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+            .unwrap();
     }
 }
 
@@ -582,6 +727,9 @@ fn build_tree_nodes(
     root_path: &Path,
     selected: &HashSet<PathBuf>,
     expanded: &HashSet<PathBuf>,
+    content_search_matches: &HashSet<PathBuf>,
+    filename_query: &str,
+    case_sensitive: bool,
 ) -> Vec<TreeNode> {
     let mut nodes: HashMap<PathBuf, TreeNode> = HashMap::new();
     let mut children_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
@@ -597,15 +745,24 @@ fn build_tree_nodes(
             }
         };
 
+        let file_name = item.path.file_name().unwrap_or_default().to_string_lossy();
+        let name_match = if !filename_query.is_empty() {
+            if case_sensitive {
+                file_name.contains(filename_query)
+            } else {
+                file_name
+                    .to_lowercase()
+                    .contains(&filename_query.to_lowercase())
+            }
+        } else {
+            false
+        };
+        let content_match = content_search_matches.contains(&item.path);
+
         nodes.insert(
             item.path.clone(),
             TreeNode {
-                name: item
-                    .path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
+                name: file_name.to_string(),
                 path: item.path.clone(),
                 is_directory: item.is_directory,
                 is_binary: item.is_binary,
@@ -613,10 +770,11 @@ fn build_tree_nodes(
                 children: Vec::new(),
                 selection_state,
                 is_expanded: expanded.contains(&item.path),
+                is_match: name_match || content_match,
             },
         );
         if let Some(parent) = item.path.parent() {
-            if parent.starts_with(root_path) && parent != root_path {
+            if parent.starts_with(root_path) {
                 children_map
                     .entry(parent.to_path_buf())
                     .or_default()

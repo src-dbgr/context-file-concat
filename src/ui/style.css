@@ -9,6 +9,7 @@
   --text-color-muted: #9aa0a6;
   --accent-color: #8ab4f8;
   --green-accent: #34a853;
+  --yellow-accent: #fbbc04;
   --button-bg: #4d5156;
   --button-hover-bg: #5f6368;
 }
@@ -263,6 +264,10 @@ button:disabled {
   padding-left: 20px;
   margin: 2px 0;
 }
+/* KORREKTUR: Kind-Elemente von <details> sind ebenfalls Listen und müssen eingerückt werden */
+.tree details ul {
+  padding-left: 25px;
+}
 .tree summary,
 .tree .tree-item-label {
   display: flex;
@@ -286,6 +291,7 @@ button:disabled {
   margin-right: 6px;
   font-size: 0.7em;
   transition: transform 0.1s linear;
+  flex-shrink: 0;
 }
 .tree details[open] > summary::before {
   transform: rotate(90deg);
@@ -300,6 +306,10 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+.file-name.is-match {
+  color: var(--yellow-accent);
+  font-weight: bold;
 }
 .file-size {
   font-size: 0.8em;

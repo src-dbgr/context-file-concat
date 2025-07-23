@@ -38,13 +38,21 @@ impl FileHandler {
                 continue;
             }
 
+            // KORRIGIERTE PFAD-LOGIK
             let display_path = if use_relative_paths {
-                file_path
-                    .strip_prefix(root_path)
-                    .unwrap_or(file_path)
-                    .display()
-                    .to_string()
+                // Relativer Pfad: Beinhaltet das Hauptverzeichnis
+                // z.B. context-file-concat/src/main.rs
+                if let Some(parent) = root_path.parent() {
+                    file_path
+                        .strip_prefix(parent)
+                        .unwrap_or(file_path)
+                        .display()
+                        .to_string()
+                } else {
+                    file_path.display().to_string()
+                }
             } else {
+                // Absoluter Pfad
                 file_path.display().to_string()
             };
 

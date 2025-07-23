@@ -1,6 +1,7 @@
 document.addEventListener("DOMContentLoaded", () => {
   let editor;
   let appState = {};
+  let filterDebounceTimeout;
 
   const elements = {
     // Top bar
@@ -11,6 +12,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Sidebar
     searchQuery: document.getElementById("search-query"),
     extensionFilter: document.getElementById("extension-filter"),
+    contentSearchQuery: document.getElementById("content-search-query"),
     caseSensitive: document.getElementById("case-sensitive"),
     rescanBtn: document.getElementById("rescan-btn"),
     newIgnorePattern: document.getElementById("new-ignore-pattern"),
@@ -67,7 +69,7 @@ document.addEventListener("DOMContentLoaded", () => {
   elements.selectDirBtn.addEventListener("click", () =>
     post("selectDirectory")
   );
-  elements.rescanBtn.addEventListener("click", () => post("selectDirectory"));
+  elements.rescanBtn.addEventListener("click", () => post("rescanDirectory"));
   elements.importConfigBtn.addEventListener("click", () =>
     post("importConfig")
   );
@@ -95,6 +97,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const onConfigChange = () => {
     const newConfig = {
       ...appState.config,
+      case_sensitive_search: elements.caseSensitive.checked,
       include_tree_by_default: elements.includeTree.checked,
       use_relative_paths: elements.relativePaths.checked,
       output_filename: elements.outputFilename.value,
@@ -102,9 +105,25 @@ document.addEventListener("DOMContentLoaded", () => {
     post("updateConfig", newConfig);
   };
 
+  const onFilterChange = () => {
+    clearTimeout(filterDebounceTimeout);
+    filterDebounceTimeout = setTimeout(() => {
+      post("updateFilters", {
+        searchQuery: elements.searchQuery.value,
+        extensionFilter: elements.extensionFilter.value,
+        contentSearchQuery: elements.contentSearchQuery.value,
+      });
+    }, 300); // 300ms debounce
+  };
+
   elements.includeTree.addEventListener("change", onConfigChange);
   elements.relativePaths.addEventListener("change", onConfigChange);
   elements.outputFilename.addEventListener("change", onConfigChange);
+  elements.caseSensitive.addEventListener("change", onConfigChange);
+
+  elements.searchQuery.addEventListener("input", onFilterChange);
+  elements.extensionFilter.addEventListener("input", onFilterChange);
+  elements.contentSearchQuery.addEventListener("input", onFilterChange);
 
   elements.addPatternBtn.addEventListener("click", () => addIgnorePattern());
   elements.newIgnorePattern.addEventListener("keydown", (e) => {
@@ -167,12 +186,18 @@ document.addEventListener("DOMContentLoaded", () => {
       appState.current_path || "No directory selected.";
     elements.currentPath.title = appState.current_path;
 
-    // Config settings
+    // Config & Filter settings
     const { config } = appState;
+    elements.caseSensitive.checked = config.case_sensitive_search;
     elements.includeTree.checked = config.include_tree_by_default;
     elements.relativePaths.checked = config.use_relative_paths;
     elements.outputDir.value = config.output_directory?.toString() || "Not set";
     elements.outputFilename.value = config.output_filename;
+
+    // Set filter inputs without triggering events
+    elements.searchQuery.value = appState.search_query;
+    elements.extensionFilter.value = appState.extension_filter;
+    elements.contentSearchQuery.value = appState.content_search_query;
 
     const hasSelection = appState.selected_files_count > 0;
     elements.generateBtn.disabled = !hasSelection || appState.is_scanning;
@@ -193,7 +218,7 @@ document.addEventListener("DOMContentLoaded", () => {
       elements.fileTreeContainer.appendChild(treeRoot);
     } else if (appState.current_path) {
       elements.fileTreeContainer.innerHTML =
-        '<p class="placeholder">No files found.</p>';
+        '<p class="placeholder">No files found matching filters.</p>';
     } else {
       elements.fileTreeContainer.innerHTML =
         '<p class="placeholder">Select a directory to start.</p>';
@@ -247,10 +272,22 @@ document.addEventListener("DOMContentLoaded", () => {
           post("toggleDirectorySelection", node.path);
         });
 
-        summary.innerHTML = `<span class="file-name">📁 ${node.name}</span> <button class="ignore-btn" title="Add this directory to ignore patterns">i</button>`;
-        summary.prepend(checkbox);
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "file-name";
+        nameSpan.textContent = `📁 ${node.name}`;
+        if (node.is_match) {
+          nameSpan.classList.add("is-match");
+        }
 
-        summary.querySelector(".ignore-btn").addEventListener("click", (e) => {
+        summary.appendChild(checkbox);
+        summary.appendChild(nameSpan);
+        const ignoreBtn = document.createElement("button");
+        ignoreBtn.className = "ignore-btn";
+        ignoreBtn.title = "Add this directory to ignore patterns";
+        ignoreBtn.textContent = "i";
+        summary.appendChild(ignoreBtn);
+
+        ignoreBtn.addEventListener("click", (e) => {
           e.preventDefault();
           e.stopPropagation();
           post("addIgnorePath", node.path);
@@ -265,9 +302,11 @@ document.addEventListener("DOMContentLoaded", () => {
             <input type="checkbox" ${
               node.selection_state === "full" ? "checked" : ""
             }>
-            <span class="file-name" data-path="${node.path}">${
-          node.is_binary ? "🔧" : "📄"
-        } ${node.name}</span>
+            <span class="file-name ${
+              node.is_match ? "is-match" : ""
+            }" data-path="${node.path}">${node.is_binary ? "🔧" : "📄"} ${
+          node.name
+        }</span>
             <span class="file-size">${formatFileSize(node.size)}</span>
             <button class="ignore-btn" title="Add this file to ignore patterns">i</button>
           </label>`;
@@ -337,11 +376,11 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // --- Keyboard Shorcut Fix ---
+  // --- Keyboard Shorcut Fix for Monaco on macOS ---
   document.addEventListener("keydown", (e) => {
     if (
       (e.ctrlKey || e.metaKey) &&
-      ["c", "x", "v", "a", "z", "y"].includes(e.key)
+      ["c", "x", "v", "a", "z", "y"].includes(e.key.toLowerCase())
     ) {
       if (editor && editor.hasTextFocus()) {
         e.stopPropagation();
