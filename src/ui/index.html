@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -13,44 +13,107 @@
     <div class="container">
       <aside class="sidebar">
         <div class="panel">
-          <button id="select-dir-btn" class="button-primary">
-            📁 Verzeichnis auswählen
-          </button>
-          <p id="current-path" class="path-display">
-            Kein Verzeichnis ausgewählt.
-          </p>
+          <div class="panel-header"><h3>🔍 Search & Filter</h3></div>
+          <input
+            type="text"
+            id="search-query"
+            placeholder="Search filenames..."
+          />
+          <input
+            type="text"
+            id="extension-filter"
+            placeholder="Filter by extension (e.g., rs, py)"
+          />
+          <label
+            ><input type="checkbox" id="case-sensitive" /> Case Sensitive</label
+          >
         </div>
-        <div class="panel file-tree-panel">
+
+        <div class="panel">
           <div class="panel-header">
-            <h3>Dateien</h3>
-            <div class="button-group">
-              <button id="select-all-btn" title="Alle auswählen">Alle +</button>
-              <button id="deselect-all-btn" title="Alle abwählen">
-                Alle -
-              </button>
-              <button id="expand-all-btn" title="Alle ausklappen">⇲</button>
-              <button id="collapse-all-btn" title="Alle einklappen">⇱</button>
-            </div>
+            <h3>🚫 Ignore Patterns</h3>
+            <button
+              id="rescan-btn"
+              title="Re-scan with current ignore patterns"
+            >
+              🔄 Re-Scan
+            </button>
           </div>
-          <div id="file-tree-container">
-            <p class="placeholder">Bitte zuerst ein Verzeichnis scannen.</p>
+          <div class="common-patterns" id="common-patterns"></div>
+          <div class="input-group">
+            <input
+              type="text"
+              id="new-ignore-pattern"
+              placeholder="Add pattern (*.log, build/)"
+            />
+            <button id="add-pattern-btn">Add</button>
           </div>
+          <div id="current-patterns-container" class="current-patterns"></div>
         </div>
-        <div class="status-bar" id="status-bar">Status: Bereit.</div>
       </aside>
 
       <main class="main-content">
-        <div id="editor-container"></div>
-        <footer class="footer">
-          <button id="generate-btn" class="button-cta" disabled>
-            🚀 Preview generieren
-          </button>
-          <button id="save-btn" class="button-secondary" disabled>
-            💾 In Datei speichern
-          </button>
+        <div class="top-bar">
+          <div class="path-selection">
+            <button id="select-dir-btn">📁 Select Directory</button>
+            <span id="current-path">No directory selected.</span>
+          </div>
+          <div class="config-buttons">
+            <button id="import-config-btn">📂 Import Config</button>
+            <button id="export-config-btn">💾 Export Config</button>
+          </div>
+        </div>
+
+        <div class="content-splitter">
+          <div id="file-list-panel" class="file-list-panel">
+            <div class="panel-header">
+              <h3>Files</h3>
+              <div class="stats" id="file-stats"></div>
+              <div class="button-group">
+                <button id="select-all-btn">Select All</button>
+                <button id="deselect-all-btn">Deselect All</button>
+                <button id="expand-all-btn">Expand All</button>
+                <button id="collapse-all-btn">Collapse All</button>
+              </div>
+            </div>
+            <div id="file-tree-container" class="file-tree-container"></div>
+          </div>
+
+          <div id="resizer" class="resizer"></div>
+
+          <div id="preview-panel" class="preview-panel">
+            <div class="panel-header">
+              <h3 id="preview-title">Preview</h3>
+              <button id="clear-preview-btn" style="display: none">
+                ❌ Clear Preview
+              </button>
+            </div>
+            <div id="editor-container"></div>
+          </div>
+        </div>
+
+        <footer class="bottom-panel">
+          <div class="main-actions">
+            <button id="generate-btn" class="button-cta" disabled>
+              🚀 Generate Preview
+            </button>
+            <button id="save-btn" class="button-secondary" disabled>
+              💾 Save to File
+            </button>
+          </div>
+          <details class="output-settings">
+            <summary>📤 Output Settings</summary>
+            <div class="settings-content">
+              <label
+                ><input type="checkbox" id="include-tree" /> Include directory
+                tree</label
+              >
+            </div>
+          </details>
         </footer>
       </main>
     </div>
+    <div id="status-bar">Ready.</div>
     <script>
       /*INJECT_JS*/
     </script>

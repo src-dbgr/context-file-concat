@@ -4,9 +4,15 @@ mod config;
 mod core;
 mod utils;
 
+use crate::config::AppConfig;
+use crate::core::{
+    build_globset_from_patterns, DirectoryScanner, FileHandler, FileItem, SearchEngine,
+    SearchFilter,
+}; // TreeGenerator entfernt
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
@@ -14,22 +20,62 @@ use tao::{
 };
 use wry::{WebView, WebViewBuilder};
 
-use crate::core::{DirectoryScanner, FileHandler, FileItem};
+#[derive(Serialize, Clone, Debug)]
+struct UiState {
+    config: AppConfig,
+    current_path: String,
+    tree: Vec<TreeNode>,
+    total_files_found: usize,
+    visible_files_count: usize,
+    selected_files_count: usize,
+    is_scanning: bool,
+    status_message: String,
+}
 
-// --- KORREKTUR HIER ---
-#[derive(Debug, Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 struct TreeNode {
     name: String,
     path: PathBuf,
+    is_directory: bool,
     is_binary: bool,
+    size: u64,
     children: Vec<TreeNode>,
+    is_selected: bool,
+    is_expanded: bool,
 }
 
-#[derive(Debug, Clone)]
+struct AppState {
+    config: AppConfig,
+    current_path: String,
+    full_file_list: Vec<FileItem>,
+    filtered_file_list: Vec<FileItem>,
+    selected_files: HashSet<PathBuf>,
+    expanded_dirs: HashSet<PathBuf>,
+    is_scanning: bool,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            config: AppConfig::load().unwrap_or_default(),
+            current_path: String::new(),
+            full_file_list: Vec::new(),
+            filtered_file_list: Vec::new(),
+            selected_files: HashSet::new(),
+            expanded_dirs: HashSet::new(),
+            is_scanning: false,
+        }
+    }
+}
+
+#[derive(Debug)]
 enum UserEvent {
-    UpdateFileTree(Result<Vec<TreeNode>, String>),
-    UpdateGeneratedContent(Result<String, String>),
-    FileSaveStatus(bool, String),
+    StateUpdate(UiState),
+    ShowFilePreview(String),
+    ShowGeneratedContent(String),
+    ShowError(String),
+    SaveComplete(bool, String),
+    ConfigExported(bool),
 }
 
 #[derive(Deserialize, Debug)]
@@ -44,239 +90,515 @@ async fn main() {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title("CFC - Context File Concatenator")
-        .with_inner_size(tao::dpi::LogicalSize::new(1200, 800))
+        .with_inner_size(tao::dpi::LogicalSize::new(1400, 900))
+        .with_min_inner_size(tao::dpi::LogicalSize::new(900, 600))
         .build(&event_loop)
         .expect("Failed to build Window");
+
     let proxy = event_loop.create_proxy();
-    let html_content = include_str!("ui/index.html");
-    let css_content = include_str!("ui/style.css");
-    let js_content = include_str!("ui/script.js");
-    let final_html = html_content
-        .replace("/*INJECT_CSS*/", css_content)
-        .replace("/*INJECT_JS*/", js_content);
+    let state = Arc::new(Mutex::new(AppState::new()));
+
+    let html_content = include_str!("ui/index.html")
+        .replace("/*INJECT_CSS*/", include_str!("ui/style.css"))
+        .replace("/*INJECT_JS*/", include_str!("ui/script.js"));
+
     let webview = WebViewBuilder::new(&window)
-        .with_html(final_html)
-        .with_ipc_handler(move |message: String| handle_ipc_message(message, proxy.clone()))
+        .with_html(html_content)
+        .with_ipc_handler(move |message: String| {
+            handle_ipc_message(message, proxy.clone(), state.clone())
+        })
         .with_devtools(true)
         .build()
         .expect("Failed to build WebView");
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
-            *control_flow = ControlFlow::Exit
-        }
-        if let Event::UserEvent(user_event) = event {
-            handle_user_event(user_event, &webview);
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(user_event) => handle_user_event(user_event, &webview),
+            _ => (),
         }
     });
 }
 
-fn handle_ipc_message(message: String, proxy: EventLoopProxy<UserEvent>) {
+fn handle_ipc_message(
+    message: String,
+    proxy: EventLoopProxy<UserEvent>,
+    state: Arc<Mutex<AppState>>,
+) {
     if let Ok(msg) = serde_json::from_str::<IpcMessage>(&message) {
-        match msg.command.as_str() {
-            "selectDirectory" => {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    // Send path to JS to trigger the scan
-                    if let Ok(path_str) = serde_json::to_string(&path.to_string_lossy()) {
-                        let _ = proxy.send_event(UserEvent::UpdateFileTree(Err(path_str)));
+        tokio::spawn(async move {
+            match msg.command.as_str() {
+                "initialize" => {
+                    let should_scan = {
+                        let mut state_guard = state.lock().unwrap();
+                        if let Some(last_dir) = state_guard.config.last_directory.clone() {
+                            if last_dir.exists() {
+                                state_guard.current_path = last_dir.to_string_lossy().to_string();
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    };
+
+                    if should_scan {
+                        scan_directory(proxy.clone(), state.clone()).await;
+                    } else {
+                        let state_guard = state.lock().unwrap();
+                        proxy
+                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                            .unwrap();
                     }
                 }
-            }
-            "scanDirectory" => {
-                if let Some(path_str) = msg.payload.as_str() {
-                    let path = PathBuf::from(path_str);
-                    tokio::spawn(async move {
-                        let config = config::AppConfig::load().unwrap_or_default();
-                        let scanner = DirectoryScanner::new(config.ignore_patterns);
-                        let result = scanner.scan_directory_basic(&path).await;
-                        let tree = result.map(build_file_tree);
-                        let _ = proxy
-                            .send_event(UserEvent::UpdateFileTree(tree.map_err(|e| e.to_string())));
-                    });
+                "selectDirectory" => {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        {
+                            let mut state_guard = state.lock().unwrap();
+                            state_guard.current_path = path.to_string_lossy().to_string();
+                            state_guard.config.last_directory = Some(path);
+                            config::settings::save_config(&state_guard.config).ok();
+                        }
+                        scan_directory(proxy, state).await;
+                    }
                 }
-            }
-            "generateContent" => {
-                if let Ok(paths) = serde_json::from_value::<Vec<String>>(msg.payload) {
-                    let file_paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-                    let root_path = find_common_root(&file_paths).unwrap_or_default();
-                    tokio::spawn(async move {
-                        let result = FileHandler::generate_concatenated_content_simple(
-                            &file_paths,
-                            &root_path,
-                        )
-                        .await;
+                "updateConfig" => {
+                    if let Ok(new_config) = serde_json::from_value(msg.payload) {
+                        let mut state_guard = state.lock().unwrap();
+                        state_guard.config = new_config;
+                        config::settings::save_config(&state_guard.config).ok();
+                        apply_filters(&mut state_guard);
                         proxy
-                            .send_event(UserEvent::UpdateGeneratedContent(
-                                result.map_err(|e| e.to_string()),
-                            ))
+                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
                             .unwrap();
-                    });
+                    }
                 }
-            }
-            "saveFile" => {
-                if let Some(content) = msg.payload.as_str() {
-                    let content_clone = content.to_string();
+                "toggleSelection" => {
+                    if let Ok(path_str) = serde_json::from_value::<String>(msg.payload) {
+                        let path = PathBuf::from(path_str);
+                        let mut state_guard = state.lock().unwrap();
+                        if state_guard.selected_files.contains(&path) {
+                            state_guard.selected_files.remove(&path);
+                        } else {
+                            state_guard.selected_files.insert(path);
+                        }
+                        proxy
+                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                            .unwrap();
+                    }
+                }
+                "toggleDirectorySelection" => {
+                    if let Ok(path_str) = serde_json::from_value::<String>(msg.payload) {
+                        let dir_path = PathBuf::from(path_str);
+                        let mut state_guard = state.lock().unwrap();
+                        let files_in_dir: Vec<PathBuf> = state_guard
+                            .filtered_file_list
+                            .iter()
+                            .filter(|item| !item.is_directory && item.path.starts_with(&dir_path))
+                            .map(|item| item.path.clone())
+                            .collect();
+                        let all_selected = files_in_dir
+                            .iter()
+                            .all(|f| state_guard.selected_files.contains(f));
+
+                        if all_selected && !files_in_dir.is_empty() {
+                            for file in files_in_dir {
+                                state_guard.selected_files.remove(&file);
+                            }
+                        } else {
+                            for file in files_in_dir {
+                                state_guard.selected_files.insert(file);
+                            }
+                        }
+                        proxy
+                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                            .unwrap();
+                    }
+                }
+                "toggleExpansion" => {
+                    if let Ok(path_str) = serde_json::from_value::<String>(msg.payload) {
+                        let path = PathBuf::from(path_str);
+                        let mut state_guard = state.lock().unwrap();
+                        if state_guard.expanded_dirs.contains(&path) {
+                            state_guard.expanded_dirs.remove(&path);
+                        } else {
+                            state_guard.expanded_dirs.insert(path);
+                        }
+                        proxy
+                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                            .unwrap();
+                    }
+                }
+                "expandCollapseAll" => {
+                    if let Ok(expand) = serde_json::from_value::<bool>(msg.payload) {
+                        let mut state_guard = state.lock().unwrap();
+                        if expand {
+                            state_guard.expanded_dirs = state_guard
+                                .filtered_file_list
+                                .iter()
+                                .filter(|i| i.is_directory)
+                                .map(|i| i.path.clone())
+                                .collect();
+                        } else {
+                            state_guard.expanded_dirs.clear();
+                        }
+                        proxy
+                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                            .unwrap();
+                    }
+                }
+                "selectAll" => {
+                    let mut state_guard = state.lock().unwrap();
+                    // *** KORREKTUR HIER ***
+                    // 1. Sammle die Pfade, die hinzugefügt werden sollen.
+                    let paths_to_select: Vec<PathBuf> = state_guard
+                        .filtered_file_list
+                        .iter()
+                        .filter(|item| !item.is_directory)
+                        .map(|item| item.path.clone())
+                        .collect();
+
+                    // 2. Füge die gesammelten Pfade hinzu, nachdem die Iteration beendet ist.
+                    state_guard.selected_files.extend(paths_to_select);
+
+                    proxy
+                        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                        .unwrap();
+                }
+                "deselectAll" => {
+                    let mut state_guard = state.lock().unwrap();
+                    state_guard.selected_files.clear();
+                    proxy
+                        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                        .unwrap();
+                }
+                "loadFilePreview" => {
+                    if let Ok(path_str) = serde_json::from_value::<String>(msg.payload) {
+                        match FileHandler::get_file_preview(&PathBuf::from(path_str), 1500) {
+                            Ok(content) => proxy
+                                .send_event(UserEvent::ShowFilePreview(content))
+                                .unwrap(),
+                            Err(e) => proxy
+                                .send_event(UserEvent::ShowError(e.to_string()))
+                                .unwrap(),
+                        }
+                    }
+                }
+                "generatePreview" => {
+                    let (
+                        selected_files_ordered,
+                        root_path,
+                        include_tree,
+                        items_for_tree,
+                        tree_ignore,
+                    ) = {
+                        let state_guard = state.lock().unwrap();
+                        let ignore_set =
+                            build_globset_from_patterns(&state_guard.config.ignore_patterns);
+                        let items = state_guard
+                            .full_file_list
+                            .iter()
+                            .filter(|item| !ignore_set.is_match(&item.path))
+                            .cloned()
+                            .collect();
+                        (
+                            get_selected_files_in_tree_order(&state_guard),
+                            PathBuf::from(&state_guard.current_path),
+                            state_guard.config.include_tree_by_default,
+                            items,
+                            state_guard.config.ignore_patterns.clone(),
+                        )
+                    };
+
+                    let result = FileHandler::generate_concatenated_content_simple(
+                        &selected_files_ordered,
+                        &root_path,
+                        include_tree,
+                        items_for_tree,
+                        tree_ignore,
+                    )
+                    .await;
+
+                    match result {
+                        Ok(content) => proxy
+                            .send_event(UserEvent::ShowGeneratedContent(content))
+                            .unwrap(),
+                        Err(e) => proxy
+                            .send_event(UserEvent::ShowError(e.to_string()))
+                            .unwrap(),
+                    }
+                }
+                "saveFile" => {
+                    if let Some(content) = msg.payload.as_str() {
+                        let content_clone = content.to_string();
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Text File", &["txt"])
+                            .set_file_name("cfc_output.txt")
+                            .save_file()
+                        {
+                            match std::fs::write(&path, content_clone) {
+                                Ok(_) => proxy
+                                    .send_event(UserEvent::SaveComplete(
+                                        true,
+                                        path.to_string_lossy().to_string(),
+                                    ))
+                                    .unwrap(),
+                                Err(e) => proxy
+                                    .send_event(UserEvent::SaveComplete(false, e.to_string()))
+                                    .unwrap(),
+                            };
+                        } else {
+                            proxy
+                                .send_event(UserEvent::SaveComplete(false, "cancelled".to_string()))
+                                .unwrap();
+                        }
+                    }
+                }
+                "importConfig" => {
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Text", &["txt"])
-                        .set_file_name("cfc-output.txt")
+                        .add_filter("JSON", &["json"])
+                        .pick_file()
+                    {
+                        if let Ok(config) = config::settings::import_config(&path) {
+                            {
+                                let mut state_guard = state.lock().unwrap();
+                                state_guard.config = config;
+                                config::settings::save_config(&state_guard.config).ok();
+                            }
+                            scan_directory(proxy, state).await;
+                        } else {
+                            proxy
+                                .send_event(UserEvent::ShowError(
+                                    "Failed to import config.".to_string(),
+                                ))
+                                .unwrap();
+                        }
+                    }
+                }
+                "exportConfig" => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("JSON", &["json"])
+                        .set_file_name("cfc-config.json")
                         .save_file()
                     {
-                        tokio::spawn(async move {
-                            let (success, path_str) = match std::fs::write(&path, content_clone) {
-                                Ok(_) => (true, path.to_string_lossy().to_string()),
-                                Err(_) => (false, "".to_string()),
-                            };
-                            proxy
-                                .send_event(UserEvent::FileSaveStatus(success, path_str))
-                                .unwrap();
-                        });
-                    } else {
-                        proxy
-                            .send_event(UserEvent::FileSaveStatus(false, "cancelled".to_string()))
-                            .unwrap();
+                        let state_guard = state.lock().unwrap();
+                        let result =
+                            config::settings::export_config(&state_guard.config, &path).is_ok();
+                        proxy.send_event(UserEvent::ConfigExported(result)).unwrap();
                     }
                 }
+                _ => tracing::warn!("Unknown IPC command: {}", msg.command),
             }
-            _ => tracing::warn!("Unknown IPC command: {}", msg.command),
-        }
+        });
     }
 }
 
 fn handle_user_event(event: UserEvent, webview: &WebView) {
-    match event {
-        UserEvent::UpdateFileTree(result) => {
-            let script = match result {
-                // Ein "Err" wird hier zweckentfremdet, um den initialen Pfad an JS zu senden
-                Err(path_json) => format!("window.setScannedPath({});", path_json),
-                Ok(tree) => format!(
-                    "window.updateFileTree({});",
-                    serde_json::to_string(&tree).unwrap()
-                ),
-            };
-            let _ = webview.evaluate_script(&script);
+    let script = match event {
+        UserEvent::StateUpdate(state) => {
+            format!(
+                "window.render({});",
+                serde_json::to_string(&state).unwrap_or_default()
+            )
         }
-        UserEvent::UpdateGeneratedContent(result) => {
-            let script = match result {
-                Ok(content) => format!(
-                    "window.showGeneratedContent({});",
-                    serde_json::to_string(&content).unwrap()
-                ),
-                Err(e) => format!(
-                    "window.showError('Generation failed: {}');",
-                    serde_json::to_string(&e).unwrap()
-                ),
-            };
-            let _ = webview.evaluate_script(&script);
+        UserEvent::ShowFilePreview(content) => format!(
+            "window.showPreviewContent({});",
+            serde_json::to_string(&content).unwrap_or_default()
+        ),
+        UserEvent::ShowGeneratedContent(content) => format!(
+            "window.showGeneratedContent({});",
+            serde_json::to_string(&content).unwrap_or_default()
+        ),
+        UserEvent::ShowError(msg) => format!(
+            "window.showError({});",
+            serde_json::to_string(&msg).unwrap_or_default()
+        ),
+        UserEvent::SaveComplete(success, path) => format!(
+            "window.fileSaveStatus({}, {});",
+            success,
+            serde_json::to_string(&path).unwrap_or_default()
+        ),
+        UserEvent::ConfigExported(success) => format!(
+            "window.showStatus('{}');",
+            if success {
+                "Config exported successfully."
+            } else {
+                "Failed to export config."
+            }
+        ),
+    };
+    webview.evaluate_script(&script).ok();
+}
+
+async fn scan_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
+    {
+        let mut state_lock = state.lock().unwrap();
+        state_lock.is_scanning = true;
+        proxy
+            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+            .unwrap();
+    }
+
+    let (path_str, ignore_patterns) = {
+        let state_lock = state.lock().unwrap();
+        (
+            state_lock.current_path.clone(),
+            state_lock.config.ignore_patterns.clone(),
+        )
+    };
+
+    let scanner = DirectoryScanner::new(ignore_patterns);
+    match scanner.scan_directory_basic(&PathBuf::from(path_str)).await {
+        Ok(files) => {
+            let mut state_lock = state.lock().unwrap();
+            state_lock.full_file_list = files;
+            apply_filters(&mut state_lock);
+            state_lock.is_scanning = false;
+            proxy
+                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+                .unwrap();
         }
-        UserEvent::FileSaveStatus(success, path) => {
-            let script = format!(
-                "window.fileSaveStatus({}, {});",
-                success,
-                serde_json::to_string(&path).unwrap()
-            );
-            let _ = webview.evaluate_script(&script);
+        Err(e) => {
+            let mut state_lock = state.lock().unwrap();
+            state_lock.is_scanning = false;
+            proxy
+                .send_event(UserEvent::ShowError(e.to_string()))
+                .unwrap();
+            proxy
+                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+                .unwrap();
         }
+    };
+}
+
+fn apply_filters(state: &mut AppState) {
+    let filter = SearchFilter {
+        query: String::new(),     // Placeholder for future UI implementation
+        extension: String::new(), // Placeholder for future UI implementation
+        case_sensitive: state.config.case_sensitive_search,
+        ignore_patterns: state.config.ignore_patterns.clone(),
+    };
+    state.filtered_file_list = SearchEngine::filter_files(&state.full_file_list, &filter);
+}
+
+fn generate_ui_state(state: &AppState) -> UiState {
+    let root = PathBuf::from(&state.current_path);
+    let tree = build_tree_nodes(
+        &state.filtered_file_list,
+        &root,
+        &state.selected_files,
+        &state.expanded_dirs,
+    );
+    UiState {
+        config: state.config.clone(),
+        current_path: state.current_path.clone(),
+        tree,
+        total_files_found: state.full_file_list.len(),
+        visible_files_count: state.filtered_file_list.len(),
+        selected_files_count: state.selected_files.len(),
+        is_scanning: state.is_scanning,
+        status_message: if state.is_scanning {
+            "Scanning...".to_string()
+        } else {
+            "Ready.".to_string()
+        },
     }
 }
 
-fn build_file_tree(items: Vec<FileItem>) -> Vec<TreeNode> {
+fn build_tree_nodes(
+    items: &[FileItem],
+    root_path: &Path,
+    selected: &HashSet<PathBuf>,
+    expanded: &HashSet<PathBuf>,
+) -> Vec<TreeNode> {
     let mut nodes: HashMap<PathBuf, TreeNode> = HashMap::new();
-    // Create all file nodes first
-    for item in &items {
-        if item.is_directory {
-            continue;
-        }
-        let node = TreeNode {
-            name: item.path.file_name().unwrap().to_string_lossy().to_string(),
-            path: item.path.clone(),
-            is_binary: item.is_binary,
-            children: Vec::new(),
-        };
-        nodes.insert(item.path.clone(), node);
-    }
+    let mut children_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
 
-    let mut parent_map: HashMap<PathBuf, Vec<TreeNode>> = HashMap::new();
     for item in items {
-        if item.is_directory {
-            continue;
-        }
-        if let Some(parent) = item.parent {
-            if let Some(node) = nodes.remove(&item.path) {
-                parent_map.entry(parent).or_default().push(node);
+        nodes.insert(
+            item.path.clone(),
+            TreeNode {
+                name: item
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+                path: item.path.clone(),
+                is_directory: item.is_directory,
+                is_binary: item.is_binary,
+                size: item.size,
+                children: Vec::new(),
+                is_selected: if item.is_directory {
+                    false
+                } else {
+                    selected.contains(&item.path)
+                },
+                is_expanded: expanded.contains(&item.path),
+            },
+        );
+        if let Some(parent) = item.path.parent() {
+            if parent.starts_with(root_path) {
+                children_map
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .push(item.path.clone());
             }
         }
     }
 
-    let all_paths: Vec<PathBuf> = parent_map.keys().cloned().collect();
-    let root = find_common_root(&all_paths).unwrap_or_default();
-
-    build_level(&root, &mut parent_map)
-}
-
-fn build_level(
-    parent_path: &Path,
-    parent_map: &mut HashMap<PathBuf, Vec<TreeNode>>,
-) -> Vec<TreeNode> {
-    let mut children = Vec::new();
-
-    // Find all directories that are direct children of parent_path
-    let subdirs: Vec<PathBuf> = parent_map
-        .keys()
-        .filter(|p| p.parent() == Some(parent_path))
-        .cloned()
+    let mut root_nodes_paths: Vec<PathBuf> = items
+        .iter()
+        .filter(|item| item.path.parent() == Some(root_path))
+        .map(|item| item.path.clone())
         .collect();
 
-    for subdir in subdirs {
-        let subdir_children = build_level(&subdir, parent_map);
-        if !subdir_children.is_empty() {
-            children.push(TreeNode {
-                name: subdir.file_name().unwrap().to_string_lossy().to_string(),
-                path: subdir,
-                is_binary: true, // not relevant for dirs
-                children: subdir_children,
-            });
+    fn build_level(
+        paths: &mut Vec<PathBuf>,
+        nodes: &mut HashMap<PathBuf, TreeNode>,
+        children_map: &HashMap<PathBuf, Vec<PathBuf>>,
+    ) -> Vec<TreeNode> {
+        paths.sort_by(|a, b| {
+            let node_a = nodes.get(a).unwrap();
+            let node_b = nodes.get(b).unwrap();
+            match (node_a.is_directory, node_b.is_directory) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.file_name().cmp(&b.file_name()),
+            }
+        });
+
+        let mut result = Vec::new();
+        for path in paths {
+            if let Some(mut node) = nodes.remove(path) {
+                if let Some(children_paths) = children_map.get(path) {
+                    node.children = build_level(&mut children_paths.clone(), nodes, children_map);
+                }
+                result.push(node);
+            }
         }
+        result
     }
 
-    // Add files at this level
-    if let Some(mut files) = parent_map.remove(parent_path) {
-        children.append(&mut files);
-    }
-
-    children.sort_by(|a, b| {
-        let a_is_dir = !a.children.is_empty();
-        let b_is_dir = !b.children.is_empty();
-        if a_is_dir != b_is_dir {
-            b_is_dir.cmp(&a_is_dir) // true (dir) comes first
-        } else {
-            a.name.to_lowercase().cmp(&b.name.to_lowercase())
-        }
-    });
-
-    children
+    build_level(&mut root_nodes_paths, &mut nodes, &children_map)
 }
 
-fn find_common_root(paths: &[PathBuf]) -> Option<PathBuf> {
-    if paths.is_empty() {
-        return None;
-    }
-    let mut common_path = paths[0].clone();
-    if common_path.is_file() {
-        if let Some(parent) = common_path.parent() {
-            common_path = parent.to_path_buf();
-        }
-    }
-    loop {
-        if paths.iter().all(|p| p.starts_with(&common_path)) {
-            return Some(common_path);
-        }
-        if !common_path.pop() {
-            break;
-        }
-    }
-    None
+fn get_selected_files_in_tree_order(state: &AppState) -> Vec<PathBuf> {
+    let mut selected_file_items: Vec<&FileItem> = state
+        .full_file_list
+        .iter()
+        .filter(|item| !item.is_directory && state.selected_files.contains(&item.path))
+        .collect();
+
+    selected_file_items.sort_by_key(|a| a.path.clone());
+
+    selected_file_items
+        .into_iter()
+        .map(|item| item.path.clone())
+        .collect()
 }
