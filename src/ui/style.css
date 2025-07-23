@@ -268,20 +268,22 @@ button:disabled {
   padding-left: 25px;
 }
 .tree summary,
-.tree .tree-item-label {
+.tree .tree-item-container {
+  /* Geändert von .tree-item-label */
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 2px;
   border-radius: 3px;
-  cursor: pointer;
   width: 100%;
 }
 .tree summary {
   list-style: none;
+  cursor: pointer;
 }
 .tree summary:hover,
-.tree .tree-item-label:hover {
+.tree .tree-item-container:hover {
+  /* Geändert von .tree-item-label */
   background-color: var(--bg-color-light);
 }
 .tree summary::before {
@@ -305,6 +307,7 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  cursor: pointer;
 }
 .file-name.is-match {
   color: var(--yellow-accent);
@@ -336,9 +339,11 @@ button:disabled {
   min-height: 0;
 }
 
-/* Stil für Such-Highlights im Editor */
+/* KORREKTUR: Dominanterer Stil für Such-Highlights im Editor */
 .search-highlight {
-  background-color: #fbbc0440;
+  background-color: var(--yellow-accent);
+  color: var(--bg-color-dark);
+  border-radius: 2px;
 }
 
 .output-settings summary {

@@ -64,6 +64,21 @@ document.addEventListener("DOMContentLoaded", () => {
       automaticLayout: true,
       wordWrap: "on",
     });
+
+    // KORREKTUR 2: Zuverlässigerer Fix für den Cmd+C-Absturz
+    editor.onKeyDown((e) => {
+      // monaco.KeyMod.CtrlCmd = 2048, monaco.KeyCode.KeyC = 33 etc.
+      const isCopy = e.keyCode === 33 && (e.ctrlKey || e.metaKey);
+      const isPaste = e.keyCode === 52 && (e.ctrlKey || e.metaKey);
+      const isCut = e.keyCode === 54 && (e.ctrlKey || e.metaKey);
+      const isSelectAll = e.keyCode === 31 && (e.ctrlKey || e.metaKey);
+      const isUndo = e.keyCode === 56 && (e.ctrlKey || e.metaKey);
+      const isRedo = e.keyCode === 58 && (e.ctrlKey || e.metaKey);
+
+      if (isCopy || isPaste || isCut || isSelectAll || isUndo || isRedo) {
+        e.stopPropagation();
+      }
+    });
   });
 
   // --- Event Listeners ---
@@ -151,31 +166,35 @@ document.addEventListener("DOMContentLoaded", () => {
   window.showPreviewContent = (content, language, searchTerm) => {
     editor.setValue(content);
     const model = editor.getModel();
-    monaco.editor.setModelLanguage(model, language);
-    editor.updateOptions({ readOnly: true });
-
-    // Highlight logic
-    if (searchTerm && searchTerm.trim() !== "") {
-      const matches = model.findMatches(
-        searchTerm,
-        true,
-        false,
-        true,
-        null,
-        true
-      );
-      const newDecorations = matches.map((match) => ({
-        range: match.range,
-        options: { inlineClassName: "search-highlight" },
-      }));
-      currentDecorations = editor.deltaDecorations(
-        currentDecorations,
-        newDecorations
-      );
-    } else {
-      currentDecorations = editor.deltaDecorations(currentDecorations, []);
+    if (model) {
+      monaco.editor.setModelLanguage(model, language);
+      // Highlight logic
+      if (searchTerm && searchTerm.trim() !== "") {
+        const matches = model.findMatches(
+          searchTerm,
+          true,
+          false,
+          true,
+          null,
+          true
+        );
+        const newDecorations = matches.map((match) => ({
+          range: match.range,
+          options: {
+            inlineClassName: "search-highlight",
+            hoverMessage: { value: "Search match" },
+          },
+        }));
+        currentDecorations = editor.deltaDecorations(
+          currentDecorations,
+          newDecorations
+        );
+      } else {
+        currentDecorations = editor.deltaDecorations(currentDecorations, []);
+      }
     }
 
+    editor.updateOptions({ readOnly: true });
     elements.previewTitle.textContent = "Preview (Read-only)";
     elements.copyBtn.style.display = "inline-block";
     elements.clearPreviewBtn.style.display = "inline-block";
@@ -279,6 +298,7 @@ document.addEventListener("DOMContentLoaded", () => {
     nodes.forEach((node) => {
       const li = document.createElement("li");
       if (node.is_directory) {
+        // ... Directory rendering (bleibt unverändert)
         const details = document.createElement("details");
         details.open = node.is_expanded;
         details.addEventListener("toggle", (e) => {
@@ -321,8 +341,11 @@ document.addEventListener("DOMContentLoaded", () => {
         details.appendChild(createTreeLevel(node.children));
         li.appendChild(details);
       } else {
-        li.innerHTML = `
-          <label class="tree-item-label">
+        // KORREKTUR: Wrapper-Div statt <label>
+        const container = document.createElement("div");
+        container.className = "tree-item-container";
+
+        container.innerHTML = `
             <input type="checkbox" ${
               node.selection_state === "full" ? "checked" : ""
             }>
@@ -333,18 +356,22 @@ document.addEventListener("DOMContentLoaded", () => {
         }</span>
             <span class="file-size">${formatFileSize(node.size)}</span>
             <button class="ignore-btn" title="Add this file to ignore patterns">i</button>
-          </label>`;
-        li.querySelector("input").addEventListener("change", () =>
-          post("toggleSelection", node.path)
-        );
-        li.querySelector(".file-name").addEventListener("click", (e) => {
-          e.stopPropagation(); // KORREKTUR: Verhindert, dass das Label-Event ausgelöst wird.
+        `;
+
+        container
+          .querySelector("input")
+          .addEventListener("change", () => post("toggleSelection", node.path));
+        container.querySelector(".file-name").addEventListener("click", (e) => {
+          // Wichtig: stopPropagation ist hier nicht mehr nötig, da wir kein Label mehr haben
           post("loadFilePreview", node.path);
         });
-        li.querySelector(".ignore-btn").addEventListener("click", (e) => {
-          e.stopPropagation();
-          post("addIgnorePath", node.path);
-        });
+        container
+          .querySelector(".ignore-btn")
+          .addEventListener("click", (e) => {
+            e.stopPropagation();
+            post("addIgnorePath", node.path);
+          });
+        li.appendChild(container);
       }
       ul.appendChild(li);
     });
@@ -399,18 +426,6 @@ document.addEventListener("DOMContentLoaded", () => {
       const newTopPercent = (newTopHeight / totalHeight) * 100;
       elements.fileListPanel.style.height = `${newTopPercent}%`;
       elements.previewPanel.style.height = `${100 - newTopPercent}%`;
-    }
-  });
-
-  // KORREKTUR: Wichtiger Fix für den Absturz bei CMD+C auf macOS im Editor.
-  document.addEventListener("keydown", (e) => {
-    if (
-      (e.ctrlKey || e.metaKey) &&
-      ["c", "x", "v", "a", "z", "y"].includes(e.key.toLowerCase())
-    ) {
-      if (editor && editor.hasTextFocus()) {
-        e.stopPropagation();
-      }
     }
   });
 
