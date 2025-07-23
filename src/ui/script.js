@@ -366,7 +366,17 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     editor.updateOptions({ readOnly: true });
-    elements.previewTitle.textContent = "Preview (Read-only)";
+
+    // FIX 1: Dateiname im Preview-Titel anzeigen
+    const fileName =
+      path.split("/").pop() || path.split("\\").pop() || "Unknown File";
+    const lines = content.split("\n").length;
+    const chars = content.length;
+    elements.previewTitle.innerHTML = `
+      <span class="preview-main-title">📄 ${fileName}</span>
+      <span class="preview-stats">${lines} lines • ${chars} chars • Read-only</span>
+    `;
+
     elements.copyBtn.style.display = "inline-block";
     elements.clearPreviewBtn.style.display = "inline-block";
   };
@@ -377,7 +387,18 @@ document.addEventListener("DOMContentLoaded", () => {
     currentDecorations = editor.deltaDecorations(currentDecorations, []);
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
     editor.updateOptions({ readOnly: false });
-    elements.previewTitle.textContent = "Generated Preview (Editable)";
+
+    // FIX 2: Statistiken für Generated Preview anzeigen
+    const lines = content.split("\n").length;
+    const chars = content.length;
+    const words = content.split(/\s+/).filter((word) => word.length > 0).length;
+    const sizeKB = (chars / 1024).toFixed(1);
+
+    elements.previewTitle.innerHTML = `
+      <span class="preview-main-title">🚀 Generated Preview</span>
+      <span class="preview-stats">${lines} lines • ${words} words • ${chars} chars • ${sizeKB} KB • Editable</span>
+    `;
+
     elements.saveBtn.disabled = false;
     elements.copyBtn.style.display = "inline-block";
     elements.clearPreviewBtn.style.display = "inline-block";
@@ -556,7 +577,10 @@ document.addEventListener("DOMContentLoaded", () => {
     currentDecorations = editor.deltaDecorations(currentDecorations, []);
     editor.updateOptions({ readOnly: true });
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
-    elements.previewTitle.textContent = "Preview";
+    elements.previewTitle.innerHTML = `
+      <span class="preview-main-title">👁️ Preview</span>
+      <span class="preview-stats">Select a file to preview</span>
+    `;
     elements.saveBtn.disabled = true;
     elements.clearPreviewBtn.style.display = "none";
     elements.copyBtn.style.display = "none";
