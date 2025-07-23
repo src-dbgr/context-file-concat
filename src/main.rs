@@ -90,7 +90,7 @@ enum UserEvent {
         content: String,
         language: String,
         search_term: Option<String>,
-        path: PathBuf, // HINZUGEFÜGT
+        path: PathBuf,
     },
     ShowGeneratedContent(String),
     ShowError(String),
@@ -108,6 +108,7 @@ struct IpcMessage {
 async fn main() {
     tracing_subscriber::fmt::init();
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+
     let window = WindowBuilder::new()
         .with_title("CFC - Context File Concatenator")
         .with_inner_size(tao::dpi::LogicalSize::new(1400, 900))
@@ -176,7 +177,6 @@ fn handle_ipc_message(
                         }
                     }
                 }
-                // ... andere IPC Befehle ...
                 "initialize" => {
                     let mut should_scan = false;
                     {
@@ -268,7 +268,7 @@ fn handle_ipc_message(
                                         content,
                                         language,
                                         search_term,
-                                        path, // HINZUGEFÜGT
+                                        path,
                                     })
                                     .unwrap();
                             }
@@ -524,13 +524,13 @@ fn handle_user_event(event: UserEvent, webview: &WebView) {
             content,
             language,
             search_term,
-            path, // HINZUGEFÜGT
+            path,
         } => format!(
-            "window.showPreviewContent({}, {}, {}, {});", // 4. Parameter hinzugefügt
+            "window.showPreviewContent({}, {}, {}, {});",
             serde_json::to_string(&content).unwrap_or_default(),
             serde_json::to_string(&language).unwrap_or_default(),
             serde_json::to_string(&search_term).unwrap_or_default(),
-            serde_json::to_string(&path).unwrap_or_default() // HINZUGEFÜGT
+            serde_json::to_string(&path).unwrap_or_default()
         ),
         UserEvent::ShowGeneratedContent(content) => format!(
             "window.showGeneratedContent({});",

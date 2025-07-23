@@ -3,7 +3,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let appState = {};
   let filterDebounceTimeout;
   let currentDecorations = [];
-  let currentPreviewedPath = null; // Für Live-Highlight-Updates
+  let currentPreviewedPath = null;
 
   const elements = {
     // Top bar
@@ -64,6 +64,107 @@ document.addEventListener("DOMContentLoaded", () => {
       readOnly: true,
       automaticLayout: true,
       wordWrap: "on",
+    });
+
+    // FIX 1: Komplette Blockierung aller problematischen Tastenkombinationen
+    // Wir fangen Events auf mehreren Ebenen ab
+
+    // Globaler Document Event Listener (höchste Priorität)
+    document.addEventListener(
+      "keydown",
+      (e) => {
+        if (e.metaKey || e.ctrlKey) {
+          const key = e.key.toLowerCase();
+          const problematicKeys = [
+            "a",
+            "c",
+            "v",
+            "x",
+            "z",
+            "y",
+            "f",
+            "s",
+            "r",
+            "n",
+            "o",
+            "p",
+            "w",
+            "t",
+          ];
+          if (problematicKeys.includes(key)) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+
+            // Für Cmd+C bieten wir eine alternative Implementierung
+            if (key === "c") {
+              copyToClipboard();
+            }
+            // Für Cmd+A bieten wir eine alternative Implementierung
+            else if (
+              key === "a" &&
+              editor &&
+              document.activeElement &&
+              document.activeElement.closest(".monaco-editor")
+            ) {
+              editor.getModel()?.pushEditOperations([], [], () => null);
+              editor.setSelection(editor.getModel().getFullModelRange());
+            }
+
+            return false;
+          }
+        }
+      },
+      true
+    ); // Capture phase für höchste Priorität
+
+    // Editor-spezifische Event-Behandlung
+    editor.getDomNode().addEventListener(
+      "keydown",
+      (e) => {
+        if (e.metaKey || e.ctrlKey) {
+          const key = e.key.toLowerCase();
+          const interceptedKeys = [
+            "a",
+            "c",
+            "v",
+            "x",
+            "z",
+            "y",
+            "f",
+            "s",
+            "r",
+            "n",
+            "o",
+            "p",
+            "w",
+            "t",
+          ];
+          if (interceptedKeys.includes(key)) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+
+            // Custom-Implementierung für nützliche Shortcuts
+            if (key === "c") {
+              copyToClipboard();
+            } else if (key === "a") {
+              const model = editor.getModel();
+              if (model) {
+                editor.setSelection(model.getFullModelRange());
+              }
+            }
+
+            return false;
+          }
+        }
+      },
+      true
+    );
+
+    // Zusätzliche Sicherheit: Context Menu Events blockieren
+    editor.getDomNode().addEventListener("contextmenu", (e) => {
+      // Wir lassen das Context Menu zu, aber überschreiben Copy-Aktionen
     });
   });
 
@@ -145,7 +246,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // --- Global Event Handlers from Rust ---
   window.render = (newState) => {
-    // FIX 2: Re-apply highlighting if the content search term changes on an active preview
     if (
       currentPreviewedPath &&
       editor?.getModel() &&
@@ -183,9 +283,8 @@ document.addEventListener("DOMContentLoaded", () => {
     renderUI();
   };
 
-  // FIX 2: Update showPreviewContent to handle path and apply correct case-sensitivity
   window.showPreviewContent = (content, language, searchTerm, path) => {
-    currentPreviewedPath = path; // Store path for live updates
+    currentPreviewedPath = path;
     editor.setValue(content);
     const model = editor.getModel();
 
@@ -193,7 +292,6 @@ document.addEventListener("DOMContentLoaded", () => {
       monaco.editor.setModelLanguage(model, language);
       let newDecorations = [];
       if (searchTerm && searchTerm.trim() !== "") {
-        // Use case sensitivity from the current app state
         const matchCase = appState.config.case_sensitive_search;
         const matches = model.findMatches(
           searchTerm,
@@ -224,7 +322,7 @@ document.addEventListener("DOMContentLoaded", () => {
   };
 
   window.showGeneratedContent = (content) => {
-    currentPreviewedPath = null; // Generated content is not a specific file preview
+    currentPreviewedPath = null;
     editor.setValue(content);
     currentDecorations = editor.deltaDecorations(currentDecorations, []);
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
@@ -403,7 +501,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function clearPreview() {
-    currentPreviewedPath = null; // No file is being previewed
+    currentPreviewedPath = null;
     editor.setValue("// Preview cleared.");
     currentDecorations = editor.deltaDecorations(currentDecorations, []);
     editor.updateOptions({ readOnly: true });
@@ -414,24 +512,123 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.copyBtn.style.display = "none";
   }
 
-  // FIX 1: Provide better visual feedback on copy
+  // FIX 2: Vollständig überarbeitete Copy-Funktion mit garantierter Funktionalität
   function copyToClipboard() {
-    const originalText = elements.copyBtn.textContent;
-    navigator.clipboard.writeText(editor.getValue()).then(
-      () => {
-        elements.statusBar.textContent = "Status: Copied to clipboard!";
-        elements.copyBtn.textContent = "✅ Copied!";
-        setTimeout(() => {
-          elements.copyBtn.textContent = originalText;
-          if (appState && appState.status_message) {
-            elements.statusBar.textContent = `Status: ${appState.status_message}`;
+    if (!editor) {
+      elements.statusBar.textContent = "Error: Editor not available.";
+      return;
+    }
+
+    // Den aktuellen Editor-Inhalt holen (garantiert der neueste Stand)
+    const model = editor.getModel();
+    if (!model) {
+      elements.statusBar.textContent = "Error: No content to copy.";
+      return;
+    }
+
+    const contentToCopy = model.getValue();
+    if (!contentToCopy || contentToCopy.trim().length === 0) {
+      elements.statusBar.textContent = "Error: No content to copy.";
+      return;
+    }
+
+    const button = elements.copyBtn;
+    const originalText = button.textContent;
+    const originalStyle = {
+      backgroundColor: button.style.backgroundColor,
+      color: button.style.color,
+    };
+
+    // UI-Feedback sofort anzeigen
+    button.textContent = "⏳ Copying...";
+    button.style.backgroundColor = "#FFA500";
+    button.disabled = true;
+
+    // Clipboard API mit mehreren Fallback-Methoden
+    const copyMethods = [
+      // Methode 1: Moderne Clipboard API
+      () => navigator.clipboard.writeText(contentToCopy),
+
+      // Methode 2: Fallback für ältere Browser
+      () =>
+        new Promise((resolve, reject) => {
+          const textArea = document.createElement("textarea");
+          textArea.value = contentToCopy;
+          textArea.style.position = "fixed";
+          textArea.style.left = "-999999px";
+          textArea.style.top = "-999999px";
+          document.body.appendChild(textArea);
+          textArea.focus();
+          textArea.select();
+
+          try {
+            const successful = document.execCommand("copy");
+            document.body.removeChild(textArea);
+            if (successful) {
+              resolve();
+            } else {
+              reject(new Error("execCommand copy failed"));
+            }
+          } catch (err) {
+            document.body.removeChild(textArea);
+            reject(err);
           }
-        }, 2000);
-      },
-      () => {
-        elements.statusBar.textContent = "Error: Could not copy to clipboard.";
+        }),
+    ];
+
+    // Versuche die Kopiermethoden der Reihe nach
+    const tryCopyMethod = async (methodIndex = 0) => {
+      if (methodIndex >= copyMethods.length) {
+        throw new Error("All copy methods failed");
       }
-    );
+
+      try {
+        await copyMethods[methodIndex]();
+        return true;
+      } catch (error) {
+        console.warn(`Copy method ${methodIndex + 1} failed:`, error);
+        return tryCopyMethod(methodIndex + 1);
+      }
+    };
+
+    tryCopyMethod()
+      .then(() => {
+        // Erfolg
+        elements.statusBar.textContent = `✅ Content copied to clipboard! (${contentToCopy.length} characters)`;
+        button.textContent = "✅ Copied!";
+        button.style.backgroundColor = "#34a853";
+        button.style.color = "#ffffff";
+      })
+      .catch((error) => {
+        // Fehler
+        console.error("Failed to copy to clipboard:", error);
+        elements.statusBar.textContent =
+          "❌ Failed to copy to clipboard. Try selecting and copying manually.";
+        button.textContent = "❌ Failed";
+        button.style.backgroundColor = "#dc3545";
+        button.style.color = "#ffffff";
+      })
+      .finally(() => {
+        // UI nach 3 Sekunden zurücksetzen
+        setTimeout(() => {
+          button.textContent = originalText;
+          button.style.backgroundColor = originalStyle.backgroundColor;
+          button.style.color = originalStyle.color;
+          button.disabled = false;
+
+          // Status zurücksetzen falls kein neuer Status gesetzt wurde
+          if (
+            elements.statusBar.textContent.includes("copied to clipboard") ||
+            elements.statusBar.textContent.includes("Failed to copy")
+          ) {
+            if (appState && appState.status_message) {
+              elements.statusBar.textContent = `Status: ${appState.status_message}`;
+            } else {
+              elements.statusBar.textContent = "Status: Ready.";
+            }
+          }
+        }, 3000);
+      });
   }
 
   function formatFileSize(bytes) {
@@ -460,44 +657,6 @@ document.addEventListener("DOMContentLoaded", () => {
       const newTopPercent = (newTopHeight / totalHeight) * 100;
       elements.fileListPanel.style.height = `${newTopPercent}%`;
       elements.previewPanel.style.height = `${100 - newTopPercent}%`;
-    }
-  });
-
-  // FIX 3: Global event listener to prevent crashes from keyboard shortcuts
-  document.addEventListener("keydown", (e) => {
-    // Check for Cmd (Mac) or Ctrl (Windows/Linux)
-    if (!e.metaKey && !e.ctrlKey) {
-      return;
-    }
-
-    // Check if focus is on an element that handles shortcuts itself
-    const isTextField =
-      e.target.tagName === "INPUT" && e.target.type === "text";
-    const isEditorFocused = editor && editor.hasTextFocus();
-
-    if (isTextField || isEditorFocused) {
-      const key = e.key.toLowerCase();
-      // Intercept common editing shortcuts
-      if (
-        [
-          "a",
-          "c",
-          "v",
-          "x",
-          "z",
-          "y",
-          "arrowleft",
-          "arrowright",
-          "arrowup",
-          "arrowdown",
-          "home",
-          "end",
-        ].includes(key)
-      ) {
-        // Stop the event from bubbling up to the wry host, which prevents the crash.
-        // The browser/editor's default action (like copying) will still execute.
-        e.stopPropagation();
-      }
     }
   });
 

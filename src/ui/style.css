@@ -10,6 +10,8 @@
   --accent-color: #8ab4f8; /* Blau für Hervorhebungen */
   --green-accent: #34a853;
   --yellow-accent: #fbbc04;
+  --orange-accent: #ffa500; /* FIX: Orange für "in progress" */
+  --red-accent: #dc3545; /* FIX: Rot für Fehler */
   --button-bg: #4d5156;
   --button-hover-bg: #5f6368;
 }
@@ -195,15 +197,43 @@ button {
   padding: 6px 12px;
   border-radius: 4px;
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition: all 0.2s ease; /* FIX: Übergang für alle Eigenschaften */
   white-space: nowrap;
 }
-button:hover {
+button:hover:not(:disabled) {
   background-color: var(--button-hover-bg);
+  transform: translateY(-1px); /* FIX: Kleiner Hover-Effekt */
 }
 button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+/* FIX: Spezielle Styles für Copy-Button-Feedback */
+#copy-btn {
+  min-width: 150px; /* FIX: Feste Breite damit Text nicht springt */
+  text-align: center;
+  font-weight: 500;
+}
+
+#copy-btn:disabled {
+  cursor: not-allowed;
+}
+
+/* FIX: Status-spezifische Button-Styles */
+.button-copying {
+  background-color: var(--orange-accent) !important;
+  color: #ffffff !important;
+}
+
+.button-success {
+  background-color: var(--green-accent) !important;
+  color: #ffffff !important;
+}
+
+.button-error {
+  background-color: var(--red-accent) !important;
+  color: #ffffff !important;
 }
 
 .button-cta {
@@ -337,10 +367,17 @@ button:disabled {
   min-height: 0;
 }
 
-/* KORREKTUR: Dominanterer Stil für Such-Highlights im Editor */
+/* FIX: Verbesserter Such-Highlight-Style */
 .search-highlight {
-  background-color: rgba(16, 135, 50, 0.7); /* Blau mit 40% Opazität */
-  border-radius: 2px;
+  background-color: rgba(
+    255,
+    193,
+    7,
+    0.4
+  ) !important; /* Gelb mit 40% Opazität */
+  border: 1px solid rgba(255, 193, 7, 0.8) !important;
+  border-radius: 2px !important;
+  box-shadow: 0 0 3px rgba(255, 193, 7, 0.5) !important;
 }
 
 .output-settings summary {
