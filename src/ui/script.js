@@ -73,90 +73,140 @@ document.addEventListener("DOMContentLoaded", () => {
     document.addEventListener(
       "keydown",
       (e) => {
-        if (e.metaKey || e.ctrlKey) {
-          const key = e.key.toLowerCase();
-          const problematicKeys = [
-            "a",
-            "c",
-            "v",
-            "x",
-            "z",
-            "y",
-            "f",
-            "s",
-            "r",
-            "n",
-            "o",
-            "p",
-            "w",
-            "t",
-          ];
-          if (problematicKeys.includes(key)) {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
+        // ERWEITERT: Alle potentiell problematischen Tasten abfangen
+        const shouldBlock =
+          // Cmd/Ctrl + Buchstaben/Zahlen (die über macOS Menu-System laufen könnten)
+          ((e.metaKey || e.ctrlKey) &&
+            (e.key.length === 1 || // Alle einzelnen Zeichen (a-z, 0-9, Sonderzeichen)
+              [
+                "Backspace",
+                "Delete",
+                "Enter",
+                "Return",
+                "Tab",
+                "Escape",
+              ].includes(e.key))) ||
+          // Standalone-Navigationstasten die Probleme machen können
+          ["Home", "End", "PageUp", "PageDown"].includes(e.key) ||
+          // Funktionstasten
+          (e.key.startsWith("F") && e.key.length <= 3); // F1-F12
 
-            // Für Cmd+C bieten wir eine alternative Implementierung
-            if (key === "c") {
-              copyToClipboard();
-            }
-            // Für Cmd+A bieten wir eine alternative Implementierung
-            else if (
-              key === "a" &&
-              editor &&
-              document.activeElement &&
-              document.activeElement.closest(".monaco-editor")
-            ) {
-              editor.getModel()?.pushEditOperations([], [], () => null);
-              editor.setSelection(editor.getModel().getFullModelRange());
-            }
+        if (shouldBlock) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
 
-            return false;
+          // Spezielle Behandlung für nützliche Shortcuts
+          if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
+            copyToClipboard();
+          } else if (
+            (e.metaKey || e.ctrlKey) &&
+            e.key.toLowerCase() === "a" &&
+            editor &&
+            document.activeElement &&
+            document.activeElement.closest(".monaco-editor")
+          ) {
+            const model = editor.getModel();
+            if (model) {
+              editor.setSelection(model.getFullModelRange());
+            }
           }
+          // Home-Taste: An Zeilenanfang springen (im Editor)
+          else if (
+            e.key === "Home" &&
+            editor &&
+            document.activeElement &&
+            document.activeElement.closest(".monaco-editor")
+          ) {
+            const position = editor.getPosition();
+            if (position) {
+              editor.setPosition({
+                lineNumber: position.lineNumber,
+                column: 1,
+              });
+            }
+          }
+          // End-Taste: An Zeilenende springen (im Editor)
+          else if (
+            e.key === "End" &&
+            editor &&
+            document.activeElement &&
+            document.activeElement.closest(".monaco-editor")
+          ) {
+            const position = editor.getPosition();
+            if (position) {
+              const model = editor.getModel();
+              if (model) {
+                const lineLength = model.getLineLength(position.lineNumber);
+                editor.setPosition({
+                  lineNumber: position.lineNumber,
+                  column: lineLength + 1,
+                });
+              }
+            }
+          }
+
+          return false;
         }
       },
       true
     ); // Capture phase für höchste Priorität
 
-    // Editor-spezifische Event-Behandlung
+    // Editor-spezifische Event-Behandlung (zusätzliche Sicherheit)
     editor.getDomNode().addEventListener(
       "keydown",
       (e) => {
-        if (e.metaKey || e.ctrlKey) {
-          const key = e.key.toLowerCase();
-          const interceptedKeys = [
-            "a",
-            "c",
-            "v",
-            "x",
-            "z",
-            "y",
-            "f",
-            "s",
-            "r",
-            "n",
-            "o",
-            "p",
-            "w",
-            "t",
-          ];
-          if (interceptedKeys.includes(key)) {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
+        // Gleiche Logik wie oben für doppelte Sicherheit
+        const shouldBlock =
+          ((e.metaKey || e.ctrlKey) &&
+            (e.key.length === 1 ||
+              [
+                "Backspace",
+                "Delete",
+                "Enter",
+                "Return",
+                "Tab",
+                "Escape",
+              ].includes(e.key))) ||
+          ["Home", "End", "PageUp", "PageDown"].includes(e.key) ||
+          (e.key.startsWith("F") && e.key.length <= 3);
 
-            // Custom-Implementierung für nützliche Shortcuts
-            if (key === "c") {
-              copyToClipboard();
-            } else if (key === "a") {
+        if (shouldBlock) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+
+          // Custom-Implementierungen (gleich wie oben)
+          if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
+            copyToClipboard();
+          } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
+            const model = editor.getModel();
+            if (model) {
+              editor.setSelection(model.getFullModelRange());
+            }
+          } else if (e.key === "Home") {
+            const position = editor.getPosition();
+            if (position) {
+              editor.setPosition({
+                lineNumber: position.lineNumber,
+                column: 1,
+              });
+            }
+          } else if (e.key === "End") {
+            const position = editor.getPosition();
+            if (position) {
               const model = editor.getModel();
               if (model) {
-                editor.setSelection(model.getFullModelRange());
+                const lineLength = model.getLineLength(position.lineNumber);
+                editor.setPosition({
+                  lineNumber: position.lineNumber,
+                  column: lineLength + 1,
+                });
               }
             }
-
-            return false;
           }
+
+          return false;
         }
       },
       true
