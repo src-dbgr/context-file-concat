@@ -481,24 +481,28 @@ fn handle_ipc_message(
                         .add_filter("JSON", &["json"])
                         .pick_file()
                     {
-                        if let Ok(config) = config::settings::import_config(&path) {
-                            {
-                                let mut state_guard = state.lock().unwrap();
-                                state_guard.config = config;
-                                // Store the imported config filename
-                                state_guard.current_config_filename = path
-                                    .file_name()
-                                    .and_then(|name| name.to_str())
-                                    .map(|s| s.to_string());
-                                config::settings::save_config(&state_guard.config).ok();
+                        match config::settings::import_config(&path) {
+                            Ok(config) => {
+                                {
+                                    let mut state_guard = state.lock().unwrap();
+                                    state_guard.config = config;
+                                    // Store the imported config filename
+                                    state_guard.current_config_filename = path
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .map(|s| s.to_string());
+                                    config::settings::save_config(&state_guard.config).ok();
+                                }
+                                scan_directory(proxy, state).await;
                             }
-                            scan_directory(proxy, state).await;
-                        } else {
-                            proxy
-                                .send_event(UserEvent::ShowError(
-                                    "Failed to import config.".to_string(),
-                                ))
-                                .unwrap();
+                            Err(e) => {
+                                proxy
+                                    .send_event(UserEvent::ShowError(format!(
+                                        "Failed to import config: {}",
+                                        e
+                                    )))
+                                    .unwrap();
+                            }
                         }
                     }
                 }
@@ -658,6 +662,17 @@ fn apply_filters(state: &mut AppState) {
     } else {
         state.filtered_file_list = filtered;
     }
+
+    // CRITICAL FIX: Remove selected files that are no longer visible due to filtering
+    let visible_paths: HashSet<PathBuf> = state
+        .filtered_file_list
+        .iter()
+        .map(|item| item.path.clone())
+        .collect();
+
+    state
+        .selected_files
+        .retain(|path| visible_paths.contains(path));
 }
 
 fn auto_expand_for_matches(state: &mut AppState) {
