@@ -651,7 +651,13 @@ fn apply_filters(state: &mut AppState) {
         }
     }
 
-    state.filtered_file_list = filtered;
+    // Apply remove empty directories if enabled
+    if state.config.remove_empty_directories {
+        let (filtered_without_empty, _) = SearchEngine::remove_empty_directories(filtered);
+        state.filtered_file_list = filtered_without_empty;
+    } else {
+        state.filtered_file_list = filtered;
+    }
 }
 
 fn auto_expand_for_matches(state: &mut AppState) {

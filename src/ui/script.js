@@ -20,6 +20,12 @@ document.addEventListener("DOMContentLoaded", () => {
     rescanBtn: document.getElementById("rescan-btn"),
     newIgnorePattern: document.getElementById("new-ignore-pattern"),
     addPatternBtn: document.getElementById("add-pattern-btn"),
+    commonPatternsContainer: document.getElementById(
+      "common-patterns-container"
+    ),
+    deleteAllPatternsBtn: document.getElementById("delete-all-patterns-btn"),
+    removeEmptyDirs: document.getElementById("remove-empty-dirs"),
+    filterPatterns: document.getElementById("filter-patterns"),
     currentPatternsContainer: document.getElementById(
       "current-patterns-container"
     ),
@@ -50,6 +56,51 @@ document.addEventListener("DOMContentLoaded", () => {
     previewPanel: document.getElementById("preview-panel"),
     contentSplitter: document.querySelector(".content-splitter"),
   };
+
+  // Common ignore patterns
+  const commonIgnorePatterns = [
+    "node_modules",
+    "target",
+    ".git",
+    ".idea",
+    "__pycache__",
+    "*.log",
+    "*.tmp",
+    ".DS_Store",
+    "Thumbs.db",
+    "*.pyc",
+    "*.class",
+    "*.o",
+    "*.obj",
+    "package-lock.json",
+    "*.lock",
+    ".gitignore",
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.bmp",
+    "*.ico",
+    "*.webp",
+    "*.exe",
+    "*.dll",
+    "*.so",
+    "*.dylib",
+    "*.zip",
+    "*.tar",
+    "*.gz",
+    "*.7z",
+    "*.rar",
+    "*.pdf",
+    "*.doc",
+    "*.docx",
+    "*.mp3",
+    "*.mp4",
+    "dist",
+    "build",
+  ];
+
+  let currentPatternFilter = "";
 
   const post = (command, payload = null) =>
     window.ipc.postMessage(JSON.stringify({ command, payload }));
@@ -254,6 +305,7 @@ document.addEventListener("DOMContentLoaded", () => {
       case_sensitive_search: elements.caseSensitive.checked,
       include_tree_by_default: elements.includeTree.checked,
       use_relative_paths: elements.relativePaths.checked,
+      remove_empty_directories: elements.removeEmptyDirs.checked,
       output_filename: elements.outputFilename.value,
     };
     post("updateConfig", newConfig);
@@ -283,16 +335,65 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Enter") addIgnorePattern();
   });
 
+  // New ignore pattern event listeners
+  elements.deleteAllPatternsBtn.addEventListener("click", () => {
+    const newConfig = {
+      ...appState.config,
+      ignore_patterns: [],
+    };
+    post("updateConfig", newConfig);
+  });
+
+  elements.removeEmptyDirs.addEventListener("change", () => {
+    const newConfig = {
+      ...appState.config,
+      remove_empty_directories: elements.removeEmptyDirs.checked,
+    };
+    post("updateConfig", newConfig);
+  });
+
+  elements.filterPatterns.addEventListener("input", (e) => {
+    currentPatternFilter = e.target.value.toLowerCase();
+    renderIgnorePatterns();
+  });
+
   function addIgnorePattern() {
     const pattern = elements.newIgnorePattern.value.trim();
+    if (pattern) {
+      addIgnorePatternValue(pattern);
+      elements.newIgnorePattern.value = "";
+    }
+  }
+
+  function addIgnorePatternValue(pattern) {
     if (pattern && !appState.config.ignore_patterns.includes(pattern)) {
       const newConfig = {
         ...appState.config,
         ignore_patterns: [...appState.config.ignore_patterns, pattern],
       };
       post("updateConfig", newConfig);
-      elements.newIgnorePattern.value = "";
     }
+  }
+
+  function setupCommonPatterns() {
+    elements.commonPatternsContainer.innerHTML = "";
+
+    // Filter out patterns that are already in use
+    const availablePatterns = commonIgnorePatterns.filter(
+      (pattern) => !appState.config.ignore_patterns.includes(pattern)
+    );
+
+    availablePatterns.forEach((pattern) => {
+      const chip = document.createElement("button");
+      chip.className = "common-pattern-chip";
+      chip.textContent = pattern;
+      chip.title = `Click to add "${pattern}" to ignore patterns`;
+      chip.addEventListener("click", (e) => {
+        e.preventDefault();
+        addIgnorePatternValue(pattern);
+      });
+      elements.commonPatternsContainer.appendChild(chip);
+    });
   }
 
   // --- Global Event Handlers from Rust ---
@@ -459,6 +560,7 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.caseSensitive.checked = config.case_sensitive_search;
     elements.includeTree.checked = config.include_tree_by_default;
     elements.relativePaths.checked = config.use_relative_paths;
+    elements.removeEmptyDirs.checked = config.remove_empty_directories || false;
     elements.outputDir.value = config.output_directory?.toString() || "Not set";
     elements.outputFilename.value = config.output_filename;
     elements.searchQuery.value = appState.search_query;
@@ -490,30 +592,38 @@ document.addEventListener("DOMContentLoaded", () => {
         '<p class="placeholder">Select a directory to start.</p>';
     }
 
+    setupCommonPatterns();
     renderIgnorePatterns();
   }
 
   function renderIgnorePatterns() {
     elements.currentPatternsContainer.innerHTML = "";
-    (appState.config.ignore_patterns || [])
-      .slice()
-      .sort()
-      .forEach((p) => {
-        const chip = document.createElement("div");
-        chip.className = "current-pattern-chip";
-        chip.innerHTML = `<span>${p}</span><button class="remove-pattern-btn" data-pattern="${p}">&times;</button>`;
-        chip.querySelector("button").addEventListener("click", (e) => {
-          const patternToRemove = e.target.dataset.pattern;
-          const newPatterns = appState.config.ignore_patterns.filter(
-            (pat) => pat !== patternToRemove
-          );
-          post("updateConfig", {
-            ...appState.config,
-            ignore_patterns: newPatterns,
-          });
+
+    let patterns = (appState.config.ignore_patterns || []).slice().sort();
+
+    // Apply filter if active
+    if (currentPatternFilter) {
+      patterns = patterns.filter((pattern) =>
+        pattern.toLowerCase().includes(currentPatternFilter)
+      );
+    }
+
+    patterns.forEach((p) => {
+      const chip = document.createElement("div");
+      chip.className = "current-pattern-chip";
+      chip.innerHTML = `<span>${p}</span><button class="remove-pattern-btn" data-pattern="${p}">&times;</button>`;
+      chip.querySelector("button").addEventListener("click", (e) => {
+        const patternToRemove = e.target.dataset.pattern;
+        const newPatterns = appState.config.ignore_patterns.filter(
+          (pat) => pat !== patternToRemove
+        );
+        post("updateConfig", {
+          ...appState.config,
+          ignore_patterns: newPatterns,
         });
-        elements.currentPatternsContainer.appendChild(chip);
       });
+      elements.currentPatternsContainer.appendChild(chip);
+    });
   }
 
   function createTreeLevel(nodes) {

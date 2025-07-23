@@ -52,6 +52,32 @@
             />
             <button id="add-pattern-btn">Add</button>
           </div>
+          <div class="ignore-options">
+            <div class="ignore-actions">
+              <button
+                id="delete-all-patterns-btn"
+                title="Remove all ignore patterns"
+              >
+                Delete All
+              </button>
+              <label
+                ><input type="checkbox" id="remove-empty-dirs" /> Remove empty
+                dirs</label
+              >
+            </div>
+          </div>
+          <div class="common-patterns-section">
+            <label class="common-patterns-label">Common Ignore Pattern:</label>
+            <div
+              id="common-patterns-container"
+              class="common-patterns-container"
+            ></div>
+          </div>
+          <input
+            type="text"
+            id="filter-patterns"
+            placeholder="Filter currently assigned ignore patterns..."
+          />
           <div id="current-patterns-container" class="current-patterns"></div>
         </div>
       </aside>
