@@ -1146,8 +1146,96 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.clearPreviewBtn.style.display = "inline-block";
   };
 
+  function splitPathForDisplay(fullPath) {
+    if (!fullPath) return { pathPart: "", filename: "Unknown File" };
+
+    // Berechne relativen Pfad zum selected directory
+    const currentDir = appState.current_path;
+    let relativePath = fullPath;
+
+    if (currentDir && fullPath.startsWith(currentDir)) {
+      relativePath = fullPath.substring(currentDir.length);
+      // Entferne führende Slashes
+      relativePath = relativePath.replace(/^[\/\\]+/, "");
+    }
+
+    const parts = relativePath.replace(/\\/g, "/").split("/");
+
+    if (parts.length <= 1) {
+      return { pathPart: "", filename: relativePath };
+    }
+
+    const filename = parts[parts.length - 1];
+    const pathPart = parts.slice(0, -1).join("/") + "/";
+
+    return { pathPart, filename };
+  }
+
+  window.showPreviewContent = (content, language, searchTerm, path) => {
+    currentPreviewedPath = path;
+    currentFullPath = path;
+
+    editor.setValue(content);
+    const model = editor.getModel();
+
+    if (model) {
+      monaco.editor.setModelLanguage(model, language);
+      let newDecorations = [];
+      if (searchTerm && searchTerm.trim() !== "") {
+        const matchCase = appState.config.case_sensitive_search;
+        const matches = model.findMatches(
+          searchTerm,
+          true,
+          false,
+          matchCase,
+          null,
+          true
+        );
+        newDecorations = matches.map((match) => ({
+          range: match.range,
+          options: {
+            inlineClassName: "search-highlight",
+            hoverMessage: { value: "Search match" },
+          },
+        }));
+      }
+      currentDecorations = editor.deltaDecorations(
+        currentDecorations,
+        newDecorations
+      );
+    }
+
+    editor.updateOptions({ readOnly: true });
+    editor.setPosition({ lineNumber: 1, column: 1 });
+    editor.revealLine(1);
+
+    const pathStr = path || "Unknown File";
+    const { pathPart, filename } = splitPathForDisplay(pathStr);
+    const lines = content.split("\n").length;
+    const sizeBytes = new Blob([content], { type: "text/plain" }).size;
+    const sizeFormatted = formatFileSize(sizeBytes);
+
+    const previewTitle = document.querySelector(
+      ".preview-panel #preview-title"
+    );
+    if (previewTitle) {
+      // Relativer Pfad mit einheitlicher Schrift
+      previewTitle.innerHTML = `
+      <div class="preview-path-container" title="${pathStr}">
+        <span class="preview-path-part">${pathPart}</span><span class="preview-filename">${filename}</span>
+      </div>
+      <span class="preview-stats">${lines} lines • ${sizeFormatted} • Read-only</span>
+    `;
+    }
+
+    elements.copyBtn.style.display = "inline-block";
+    elements.clearPreviewBtn.style.display = "inline-block";
+  };
+
   window.showGeneratedContent = (content) => {
     currentPreviewedPath = null;
+    currentFullPath = null;
+
     editor.setValue(content);
     currentDecorations = editor.deltaDecorations(currentDecorations, []);
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
@@ -1164,7 +1252,9 @@ document.addEventListener("DOMContentLoaded", () => {
       );
       if (previewTitle) {
         previewTitle.innerHTML = `
-        <span class="preview-main-title">🚀 Generated Preview</span>
+        <div class="preview-path-container">
+          <span class="preview-filename">🚀 Generated Preview</span>
+        </div>
         <span class="preview-stats">${lines} lines • ${sizeFormatted} • Editable</span>
       `;
       }
@@ -1509,7 +1599,9 @@ document.addEventListener("DOMContentLoaded", () => {
     );
     if (previewTitle) {
       previewTitle.innerHTML = `
-      <span class="preview-main-title">👁️ Preview</span>
+      <div class="preview-path-container">
+        <span class="preview-filename">👁️ Preview</span>
+      </div>
       <span class="preview-stats">Select a file to preview</span>
     `;
     }

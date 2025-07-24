@@ -165,6 +165,36 @@ body.sidebar-resizing {
   width: 100%;
 }
 
+.preview-path-container {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  width: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Monaco,
+    "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
+  letter-spacing: -0.02em;
+  font-size: 1em;
+  font-weight: normal; /* KORRIGIERT: Keine fette Schrift */
+  cursor: help;
+}
+
+.preview-path-part {
+  color: var(--text-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 1;
+  font-weight: normal;
+}
+
+.preview-filename {
+  color: var(--text-color); /* Gleiche Farbe */
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-weight: normal; /* KORRIGIERT: Keine fette Schrift mehr */
+}
+
 .preview-panel .panel-header > div {
   display: flex;
   gap: 6px;
@@ -327,10 +357,12 @@ body.vertical-resizing {
   font-size: 1em;
   font-weight: normal;
 }
+
 .preview-stats {
   font-size: 0.8em;
   color: var(--text-color-muted);
   font-weight: normal;
+  white-space: nowrap;
 }
 
 input[type="text"] {
