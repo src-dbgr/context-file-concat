@@ -137,6 +137,7 @@ body.sidebar-resizing {
   flex-grow: 1;
   overflow: hidden;
 }
+
 .file-list-panel {
   height: 60%;
   display: flex;
@@ -144,12 +145,47 @@ body.sidebar-resizing {
   padding: 10px;
   min-height: 100px;
 }
+
 .preview-panel {
   height: 40%;
   display: flex;
   flex-direction: column;
   padding: 10px;
   min-height: 100px;
+}
+
+/* SPEZIFISCH: Nur der Preview-Panel bekommt die neue Logik */
+.preview-panel .panel-header #preview-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0; /* KRITISCH: Ermöglicht Shrinking */
+  flex: 1; /* KRITISCH: Nimmt verfügbaren Platz */
+  overflow: hidden;
+  margin: 0;
+}
+
+/* SPEZIFISCH: Nur Preview-Titel bekommt Ellipsis-Behandlung */
+.preview-panel .preview-main-title {
+  font-size: 1em;
+  font-weight: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  min-width: 0;
+  cursor: help;
+
+  /* Monospace Font für bessere Pfad-Lesbarkeit */
+  font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Monaco,
+    "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
+  letter-spacing: -0.02em;
+}
+
+/* SPEZIFISCH: Nur Preview-Stats */
+.preview-panel .preview-stats {
+  font-size: 0.8em;
+  color: var(--text-color-muted);
+  font-weight: normal;
+  white-space: nowrap;
 }
 
 .resizer {
@@ -231,8 +267,11 @@ body.vertical-resizing {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 10px;
-  gap: 10px;
+  gap: 15px;
+  min-height: 40px;
+  overflow: hidden;
 }
+
 .panel-header h3 {
   margin: 0;
   font-size: 1em;
@@ -512,17 +551,37 @@ button:disabled:hover {
 
 .file-tree-container {
   flex-grow: 1;
+  overflow-x: auto;
   overflow-y: auto;
   padding-right: 5px;
 }
+
+.tree .file-name {
+  white-space: nowrap;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.tree .file-name.is-match {
+  color: var(--yellow-accent);
+  font-weight: bold;
+}
+
+.tree {
+  min-width: max-content;
+}
+
 .tree ul {
   list-style-type: none;
   padding-left: 25px;
   margin: 2px 0;
+  min-width: max-content; /* WICHTIG: Verhindert Wrapping */
 }
+
 .tree details ul {
   padding-left: 30px;
 }
+
 .tree summary,
 .tree .tree-item-container {
   display: flex;
@@ -530,16 +589,19 @@ button:disabled:hover {
   gap: 6px;
   padding: 2px;
   border-radius: 3px;
-  width: 100%;
+  min-width: max-content;
 }
+
 .tree summary {
   list-style: none;
   cursor: pointer;
 }
+
 .tree summary:hover,
 .tree .tree-item-container:hover {
   background-color: var(--bg-color-light);
 }
+
 .tree summary::before {
   content: "▶";
   display: inline-block;
@@ -566,6 +628,7 @@ button:disabled:hover {
   color: var(--yellow-accent);
   font-weight: bold;
 }
+
 .file-size {
   font-size: 0.8em;
   color: var(--text-color-muted);
@@ -573,6 +636,7 @@ button:disabled:hover {
   padding-left: 10px;
   flex-shrink: 0;
 }
+
 .ignore-btn {
   all: unset;
   cursor: pointer;

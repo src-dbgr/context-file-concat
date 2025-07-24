@@ -905,8 +905,188 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.statusBar.textContent = `Status: ${statusText}`;
   };
 
+  /**
+   * Berechnet die optimale Pfad-Anzeige basierend auf verfügbarem Platz
+   * Kürzt nur von links, nutzt den Platz optimal aus
+   */
+  function getOptimalPathForAvailableSpace(fullPath, containerElement) {
+    if (!fullPath) {
+      return "Unknown File";
+    }
+
+    if (!containerElement) {
+      return getBasicTruncatedPath(fullPath);
+    }
+
+    const containerWidth = containerElement.offsetWidth;
+    const availableWidth = containerWidth - 20;
+
+    if (availableWidth <= 100) {
+      const parts = fullPath.replace(/\\/g, "/").split("/");
+      const filename = parts[parts.length - 1];
+      return filename.length > 20
+        ? filename.substring(0, 17) + "..."
+        : filename;
+    }
+
+    const measureElement = createMeasureElement(containerElement);
+
+    try {
+      measureElement.textContent = fullPath;
+      if (measureElement.offsetWidth <= availableWidth) {
+        return fullPath;
+      }
+
+      const parts = fullPath.replace(/\\/g, "/").split("/");
+      if (parts.length <= 1) {
+        return truncateTextToFit(fullPath, availableWidth, measureElement);
+      }
+
+      const filename = parts[parts.length - 1];
+      measureElement.textContent = filename;
+      const filenameWidth = measureElement.offsetWidth;
+
+      if (filenameWidth >= availableWidth - 30) {
+        return truncateTextToFit(filename, availableWidth, measureElement);
+      }
+
+      measureElement.textContent = "...";
+      const ellipsisWidth = measureElement.offsetWidth;
+      const availableForPath =
+        availableWidth - filenameWidth - ellipsisWidth - 10;
+
+      if (availableForPath <= 0) {
+        return `.../${filename}`;
+      }
+
+      let bestPath = `.../${filename}`;
+
+      for (let i = parts.length - 2; i >= 0; i--) {
+        const pathSegment = parts.slice(i, -1).join("/");
+        const testPath = `.../${pathSegment}/${filename}`;
+
+        measureElement.textContent = testPath;
+        if (measureElement.offsetWidth <= availableWidth) {
+          bestPath = testPath;
+          break;
+        }
+      }
+
+      return bestPath;
+    } finally {
+      if (measureElement.parentNode) {
+        measureElement.parentNode.removeChild(measureElement);
+      }
+    }
+  }
+
+  /**
+   * Erstellt ein temporäres Element für Text-Breiten-Messung
+   */
+  function createMeasureElement(referenceElement) {
+    const measureElement = document.createElement("span");
+    measureElement.style.visibility = "hidden";
+    measureElement.style.position = "absolute";
+    measureElement.style.top = "-9999px";
+    measureElement.style.left = "-9999px";
+    measureElement.style.whiteSpace = "nowrap";
+
+    const computedStyle = getComputedStyle(referenceElement);
+    measureElement.style.fontFamily = computedStyle.fontFamily;
+    measureElement.style.fontSize = computedStyle.fontSize;
+    measureElement.style.fontWeight = computedStyle.fontWeight;
+    measureElement.style.letterSpacing = computedStyle.letterSpacing;
+
+    document.body.appendChild(measureElement);
+    return measureElement;
+  }
+
+  /**
+   * Kürzt Text so dass er in die verfügbare Breite passt
+   */
+  function truncateTextToFit(text, availableWidth, measureElement) {
+    if (!text) return "";
+
+    measureElement.textContent = text;
+    if (measureElement.offsetWidth <= availableWidth) {
+      return text;
+    }
+
+    let left = 0;
+    let right = text.length;
+    let bestLength = 0;
+
+    while (left <= right) {
+      const mid = Math.floor((left + right) / 2);
+      const testText = text.substring(0, mid);
+
+      measureElement.textContent = testText;
+      if (measureElement.offsetWidth <= availableWidth) {
+        bestLength = mid;
+        left = mid + 1;
+      } else {
+        right = mid - 1;
+      }
+    }
+
+    return bestLength > 3
+      ? text.substring(0, bestLength)
+      : text.substring(0, 3);
+  }
+
+  /**
+   * Einfache Fallback-Kürzung wenn kein Container verfügbar
+   */
+  function getBasicTruncatedPath(fullPath) {
+    const parts = fullPath.replace(/\\/g, "/").split("/");
+    if (parts.length <= 1) {
+      return fullPath;
+    }
+    const filename = parts[parts.length - 1];
+    return `.../${filename}`;
+  }
+
+  // Variable um den aktuellen Pfad zu speichern
+  let currentFullPath = null;
+
+  // Debounce Funktion für Performance
+  function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+      const later = () => {
+        clearTimeout(timeout);
+        func(...args);
+      };
+      clearTimeout(timeout);
+      timeout = setTimeout(later, wait);
+    };
+  }
+
+  function updatePathDisplay() {
+    if (!currentFullPath) return;
+
+    // SPEZIFISCH: Nur im Preview-Panel nach dem Element suchen
+    const previewPanel = document.querySelector(".preview-panel");
+    if (!previewPanel) return;
+
+    const titleElement = previewPanel.querySelector(".preview-main-title");
+    if (titleElement) {
+      const optimalPath = getOptimalPathForAvailableSpace(
+        currentFullPath,
+        titleElement
+      );
+      titleElement.textContent = optimalPath;
+    }
+  }
+
+  // Window Resize Listener mit Debouncing
+  const debouncedUpdatePath = debounce(updatePathDisplay, 150);
+  window.addEventListener("resize", debouncedUpdatePath);
+
   window.showPreviewContent = (content, language, searchTerm, path) => {
     currentPreviewedPath = path;
+    currentFullPath = path;
+
     editor.setValue(content);
     const model = editor.getModel();
 
@@ -938,21 +1118,29 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     editor.updateOptions({ readOnly: true });
-
-    // Scroll to top of file
     editor.setPosition({ lineNumber: 1, column: 1 });
     editor.revealLine(1);
 
-    // Updated: Show path, lines, and file size (not chars)
     const pathStr = path || "Unknown File";
     const lines = content.split("\n").length;
     const sizeBytes = new Blob([content], { type: "text/plain" }).size;
     const sizeFormatted = formatFileSize(sizeBytes);
 
-    elements.previewTitle.innerHTML = `
-      <span class="preview-main-title">${pathStr}</span>
+    // KORRIGIERT: Verwende das spezifische Preview-Title Element
+    const previewTitle = document.querySelector(
+      ".preview-panel #preview-title"
+    );
+    if (previewTitle) {
+      previewTitle.innerHTML = `
+      <span class="preview-main-title" title="${pathStr}">Loading...</span>
       <span class="preview-stats">${lines} lines • ${sizeFormatted} • Read-only</span>
     `;
+
+      // Berechne optimale Anzeige nach Layout-Update
+      setTimeout(() => {
+        updatePathDisplay();
+      }, 0);
+    }
 
     elements.copyBtn.style.display = "inline-block";
     elements.clearPreviewBtn.style.display = "inline-block";
@@ -965,23 +1153,25 @@ document.addEventListener("DOMContentLoaded", () => {
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
     editor.updateOptions({ readOnly: false });
 
-    // Function to update stats
     const updateGeneratedStats = () => {
       const currentContent = editor.getValue();
       const lines = currentContent.split("\n").length;
       const sizeBytes = new Blob([currentContent], { type: "text/plain" }).size;
       const sizeFormatted = formatFileSize(sizeBytes);
 
-      elements.previewTitle.innerHTML = `
+      const previewTitle = document.querySelector(
+        ".preview-panel #preview-title"
+      );
+      if (previewTitle) {
+        previewTitle.innerHTML = `
         <span class="preview-main-title">🚀 Generated Preview</span>
         <span class="preview-stats">${lines} lines • ${sizeFormatted} • Editable</span>
       `;
+      }
     };
 
-    // Initial stats
     updateGeneratedStats();
 
-    // Add event listener for live updates
     const model = editor.getModel();
     if (model) {
       model.onDidChangeContent(() => {
@@ -1307,14 +1497,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function clearPreview() {
     currentPreviewedPath = null;
+    currentFullPath = null;
+
     editor.setValue("// Preview cleared.");
     currentDecorations = editor.deltaDecorations(currentDecorations, []);
     editor.updateOptions({ readOnly: true });
     monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
-    elements.previewTitle.innerHTML = `
+
+    const previewTitle = document.querySelector(
+      ".preview-panel #preview-title"
+    );
+    if (previewTitle) {
+      previewTitle.innerHTML = `
       <span class="preview-main-title">👁️ Preview</span>
       <span class="preview-stats">Select a file to preview</span>
     `;
+    }
+
     elements.saveBtn.disabled = true;
     elements.clearPreviewBtn.style.display = "none";
     elements.copyBtn.style.display = "none";
@@ -1532,6 +1731,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
   }
+
   // --- Resizer Logic (Vertikal) ---
   let mouseDown = false;
   elements.resizer.addEventListener("mousedown", () => {
