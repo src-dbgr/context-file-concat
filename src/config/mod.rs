@@ -31,6 +31,7 @@ impl Default for AppConfig {
         let mut ignore_patterns = HashSet::new();
         let common_patterns = [
             "node_modules",
+            "venv",
             "target",
             ".idea",
             ".git",

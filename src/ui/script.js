@@ -60,6 +60,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // Common ignore patterns
   const commonIgnorePatterns = [
     "node_modules",
+    "venv",
+    "*.ipynb",
     "target",
     ".git",
     ".idea",

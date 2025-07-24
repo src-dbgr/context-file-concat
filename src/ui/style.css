@@ -430,6 +430,7 @@ button:disabled {
   gap: 10px;
 }
 #delete-all-patterns-btn {
+  margin-top: 5px;
   font-size: 0.8em;
   padding: 4px 8px;
   background-color: var(--red-accent);
