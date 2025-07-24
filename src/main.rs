@@ -19,6 +19,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
+use tokio::task::JoinHandle;
 use wry::{WebView, WebViewBuilder};
 
 #[derive(Serialize, Clone, Debug)]
@@ -65,8 +66,9 @@ struct AppState {
     content_search_results: HashSet<PathBuf>,
     current_config_filename: Option<String>,
     scan_progress: ScanProgress,
-    current_scan_cancelled: Arc<AtomicBool>,
     auto_load_last_directory: bool,
+    scan_task: Option<JoinHandle<()>>,
+    scan_cancellation_flag: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -87,42 +89,36 @@ impl AppState {
             scan_progress: ScanProgress {
                 files_scanned: 0,
                 large_files_skipped: 0,
-                current_scanning_path: String::new(),
+                current_scanning_path: "Ready.".to_string(),
             },
-            current_scan_cancelled: Arc::new(AtomicBool::new(false)),
             auto_load_last_directory: false,
+            scan_task: None,
+            scan_cancellation_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
     fn cancel_current_scan(&mut self) {
-        if self.is_scanning {
-            tracing::info!("🛑 Cancelling current scan");
-            self.current_scan_cancelled.store(true, Ordering::Relaxed);
+        tracing::info!("LOG: AppState::cancel_current_scan aufgerufen.");
+        if let Some(handle) = self.scan_task.take() {
+            tracing::info!("LOG: Aktiver Scan-Task gefunden. Rufe handle.abort() auf...");
+            handle.abort();
+            tracing::info!("LOG: handle.abort() wurde aufgerufen.");
+        } else {
+            tracing::warn!(
+                "LOG: cancel_current_scan aufgerufen, aber kein aktiver Scan-Task gefunden."
+            );
         }
+
+        tracing::info!("LOG: Setze Stopp-Signal (AtomicBool) auf true.");
+        self.scan_cancellation_flag.store(true, Ordering::Relaxed);
 
         self.is_scanning = false;
         self.scan_progress = ScanProgress {
             files_scanned: 0,
             large_files_skipped: 0,
-            current_scanning_path: "Scan cancelled".to_string(),
+            current_scanning_path: "Scan cancelled.".to_string(),
         };
-    }
-
-    fn start_new_scan(&mut self) -> Arc<AtomicBool> {
-        // Cancel any existing scan
-        self.current_scan_cancelled.store(true, Ordering::Relaxed);
-
-        // Create new cancel flag
-        self.current_scan_cancelled = Arc::new(AtomicBool::new(false));
-        self.is_scanning = true;
-        self.scan_progress = ScanProgress {
-            files_scanned: 0,
-            large_files_skipped: 0,
-            current_scanning_path: "Initializing scan...".to_string(),
-        };
-
-        tracing::info!("🚀 Starting new scan");
-        self.current_scan_cancelled.clone()
+        tracing::info!("LOG: AppState wurde auf 'cancelled' zurückgesetzt.");
     }
 }
 
@@ -152,21 +148,17 @@ struct IpcMessage {
 async fn main() {
     tracing_subscriber::fmt::init();
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-
     let window = WindowBuilder::new()
         .with_title("CFC - Context File Concatenator")
         .with_inner_size(tao::dpi::LogicalSize::new(1400, 900))
         .with_min_inner_size(tao::dpi::LogicalSize::new(900, 600))
         .build(&event_loop)
         .expect("Failed to build Window");
-
     let proxy = event_loop.create_proxy();
     let state = Arc::new(Mutex::new(AppState::new()));
-
     let html_content = include_str!("ui/index.html")
         .replace("/*INJECT_CSS*/", include_str!("ui/style.css"))
         .replace("/*INJECT_JS*/", include_str!("ui/script.js"));
-
     let webview = WebViewBuilder::new(&window)
         .with_html(html_content)
         .with_ipc_handler(move |message: String| {
@@ -175,7 +167,6 @@ async fn main() {
         .with_devtools(true)
         .build()
         .expect("Failed to build WebView");
-
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
@@ -198,67 +189,66 @@ fn handle_ipc_message(
         tokio::spawn(async move {
             match msg.command.as_str() {
                 "selectDirectory" | "rescanDirectory" => {
-                    // CRITICAL FIX: Always cancel current scan FIRST
-                    {
-                        let mut state_guard = state.lock().unwrap();
-                        state_guard.cancel_current_scan();
-
-                        // Send immediate UI update to show scan stopped
-                        proxy
-                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
-                            .unwrap();
-                    }
-
-                    // Small delay to ensure cancellation is processed
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    tracing::info!("LOG: IPC '{}' erhalten.", msg.command);
+                    let mut state_guard = state.lock().unwrap();
+                    state_guard.cancel_current_scan();
 
                     if msg.command == "selectDirectory" {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            {
-                                let mut state_guard = state.lock().unwrap();
-                                state_guard.current_path = path.to_string_lossy().to_string();
-                                state_guard.config.last_directory = Some(path);
-                                config::settings::save_config(&state_guard.config).ok();
-                            }
+                            state_guard.current_path = path.to_string_lossy().to_string();
+                            state_guard.config.last_directory = Some(path);
+                            config::settings::save_config(&state_guard.config).ok();
                         } else {
+                            tracing::info!("LOG: Benutzer hat Verzeichnisauswahl abgebrochen.");
+                            state_guard.is_scanning = false;
+                            proxy
+                                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                                .unwrap();
                             return;
                         }
                     }
 
-                    // Start new scan
-                    scan_directory(proxy, state).await;
-                }
+                    state_guard.is_scanning = true;
+                    state_guard.scan_progress = ScanProgress {
+                        files_scanned: 0,
+                        large_files_skipped: 0,
+                        current_scanning_path: "Initializing scan...".to_string(),
+                    };
 
-                // NEW: Cancel scan command
-                "cancelScan" => {
-                    let mut state_guard = state.lock().unwrap();
-                    state_guard.cancel_current_scan();
-                    tracing::info!("🛑 Scan cancelled by user");
+                    let new_cancel_flag = Arc::new(AtomicBool::new(false));
+                    state_guard.scan_cancellation_flag = new_cancel_flag.clone();
+
+                    let proxy_clone = proxy.clone();
+                    let state_clone = state.clone();
+
+                    tracing::info!("LOG: Spawne neuen scan_directory_task.");
+                    let handle = tokio::spawn(async move {
+                        scan_directory_task(proxy_clone, state_clone, new_cancel_flag).await;
+                    });
+                    state_guard.scan_task = Some(handle);
 
                     proxy
                         .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
                         .unwrap();
-
+                }
+                "cancelScan" => {
+                    tracing::info!("LOG: IPC 'cancelScan' erhalten. [T0 - STARTPUNKT]");
+                    let mut state_guard = state.lock().unwrap();
+                    state_guard.cancel_current_scan();
                     proxy
-                        .send_event(UserEvent::ShowError("Scan cancelled by user.".to_string()))
+                        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
                         .unwrap();
                 }
-
-                // Enhanced updateConfig with better scan handling
                 "updateConfig" => {
                     if let Ok(new_config) = serde_json::from_value(msg.payload) {
                         let should_restart_scan = {
                             let mut state_guard = state.lock().unwrap();
                             let old_ignore_patterns = state_guard.config.ignore_patterns.clone();
                             let was_scanning = state_guard.is_scanning;
-
                             state_guard.config = new_config;
                             config::settings::save_config(&state_guard.config).ok();
-
                             let ignore_patterns_changed =
                                 old_ignore_patterns != state_guard.config.ignore_patterns;
-
-                            // If ignore patterns changed during scan, restart scan
                             if ignore_patterns_changed && was_scanning {
                                 state_guard.cancel_current_scan();
                                 true
@@ -266,11 +256,28 @@ fn handle_ipc_message(
                                 false
                             }
                         };
-
                         if should_restart_scan {
                             tracing::info!("🔄 Restarting scan due to ignore pattern changes");
                             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                            scan_directory(proxy.clone(), state.clone()).await;
+                            let mut state_guard = state.lock().unwrap();
+                            state_guard.is_scanning = true;
+                            state_guard.scan_progress = ScanProgress {
+                                files_scanned: 0,
+                                large_files_skipped: 0,
+                                current_scanning_path: "Initializing scan...".to_string(),
+                            };
+                            let new_cancel_flag = Arc::new(AtomicBool::new(false));
+                            state_guard.scan_cancellation_flag = new_cancel_flag.clone();
+                            let proxy_clone = proxy.clone();
+                            let state_clone = state.clone();
+                            let handle = tokio::spawn(async move {
+                                scan_directory_task(proxy_clone, state_clone, new_cancel_flag)
+                                    .await;
+                            });
+                            state_guard.scan_task = Some(handle);
+                            proxy
+                                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                                .unwrap();
                         } else {
                             let mut state_guard = state.lock().unwrap();
                             apply_filters(&mut state_guard);
@@ -281,7 +288,6 @@ fn handle_ipc_message(
                     }
                 }
                 "initialize" => {
-                    // GEÄNDERT: Auto-Load ist jetzt optional
                     let should_auto_scan = {
                         let mut state_guard = state.lock().unwrap();
                         if state_guard.auto_load_last_directory {
@@ -300,9 +306,25 @@ fn handle_ipc_message(
                             false
                         }
                     };
-
                     if should_auto_scan {
-                        scan_directory(proxy, state).await;
+                        let mut state_guard = state.lock().unwrap();
+                        state_guard.is_scanning = true;
+                        state_guard.scan_progress = ScanProgress {
+                            files_scanned: 0,
+                            large_files_skipped: 0,
+                            current_scanning_path: "Initializing scan...".to_string(),
+                        };
+                        let new_cancel_flag = Arc::new(AtomicBool::new(false));
+                        state_guard.scan_cancellation_flag = new_cancel_flag.clone();
+                        let proxy_clone = proxy.clone();
+                        let state_clone = state.clone();
+                        let handle = tokio::spawn(async move {
+                            scan_directory_task(proxy_clone, state_clone, new_cancel_flag).await;
+                        });
+                        state_guard.scan_task = Some(handle);
+                        proxy
+                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                            .unwrap();
                     } else {
                         let state_guard = state.lock().unwrap();
                         proxy
@@ -324,7 +346,6 @@ fn handle_ipc_message(
                                 .get("contentSearchQuery")
                                 .cloned()
                                 .unwrap_or_default();
-
                             if new_content_query != state_guard.content_search_query {
                                 state_guard.content_search_query = new_content_query;
                                 true
@@ -332,7 +353,6 @@ fn handle_ipc_message(
                                 false
                             }
                         };
-
                         if should_search_content {
                             search_in_files(proxy.clone(), state.clone()).await;
                         } else {
@@ -358,7 +378,6 @@ fn handle_ipc_message(
                                 Some(state_guard.content_search_query.clone())
                             }
                         };
-
                         match FileHandler::get_file_preview(&path, 1500) {
                             Ok(content) => {
                                 let language = get_language_from_path(&path);
@@ -382,7 +401,6 @@ fn handle_ipc_message(
                         let path_to_ignore = PathBuf::from(path_str);
                         let mut state_guard = state.lock().unwrap();
                         let root_path = PathBuf::from(&state_guard.current_path);
-
                         if let Ok(relative_path) = path_to_ignore.strip_prefix(&root_path) {
                             let mut pattern = relative_path.to_string_lossy().to_string();
                             if path_to_ignore.is_dir() {
@@ -421,13 +439,11 @@ fn handle_ipc_message(
                             .filter(|item| !item.is_directory && item.path.starts_with(&dir_path))
                             .map(|item| item.path.clone())
                             .collect();
-
                         let selection_state = get_directory_selection_state(
                             &dir_path,
                             &state_guard.filtered_file_list,
                             &state_guard.selected_files,
                         );
-
                         if selection_state == "full" {
                             for file in files_in_dir {
                                 state_guard.selected_files.remove(&file);
@@ -495,17 +511,15 @@ fn handle_ipc_message(
                         .unwrap();
                 }
                 "generatePreview" => {
-                    // WICHTIG: Immer die aktuellsten Daten verwenden
                     let (selected, root, config, all_files) = {
                         let state_guard = state.lock().unwrap();
                         (
                             get_selected_files_in_tree_order(&state_guard),
                             PathBuf::from(&state_guard.current_path),
                             state_guard.config.clone(),
-                            state_guard.full_file_list.clone(), // Aktuelle Daten
+                            state_guard.full_file_list.clone(),
                         )
                     };
-
                     let result = FileHandler::generate_concatenated_content_simple(
                         &selected,
                         &root,
@@ -515,7 +529,6 @@ fn handle_ipc_message(
                         config.use_relative_paths,
                     )
                     .await;
-
                     match result {
                         Ok(content) => proxy
                             .send_event(UserEvent::ShowGeneratedContent(content))
@@ -538,13 +551,11 @@ fn handle_ipc_message(
                         let dialog = rfd::FileDialog::new()
                             .add_filter("Text File", &["txt"])
                             .set_file_name(&filename);
-
                         let dialog = if let Some(dir) = output_dir {
                             dialog.set_directory(dir)
                         } else {
                             dialog
                         };
-
                         if let Some(path) = dialog.save_file() {
                             match std::fs::write(&path, content_clone) {
                                 Ok(_) => proxy
@@ -582,9 +593,7 @@ fn handle_ipc_message(
                             Ok(config) => {
                                 {
                                     let mut state_guard = state.lock().unwrap();
-                                    // Alten Scan abbrechen
                                     state_guard.cancel_current_scan();
-
                                     state_guard.config = config;
                                     state_guard.current_config_filename = path
                                         .file_name()
@@ -592,7 +601,27 @@ fn handle_ipc_message(
                                         .map(|s| s.to_string());
                                     config::settings::save_config(&state_guard.config).ok();
                                 }
-                                scan_directory(proxy, state).await;
+                                let mut state_guard = state.lock().unwrap();
+                                state_guard.is_scanning = true;
+                                state_guard.scan_progress = ScanProgress {
+                                    files_scanned: 0,
+                                    large_files_skipped: 0,
+                                    current_scanning_path: "Initializing scan...".to_string(),
+                                };
+                                let new_cancel_flag = Arc::new(AtomicBool::new(false));
+                                state_guard.scan_cancellation_flag = new_cancel_flag.clone();
+                                let proxy_clone = proxy.clone();
+                                let state_clone = state.clone();
+                                let handle = tokio::spawn(async move {
+                                    scan_directory_task(proxy_clone, state_clone, new_cancel_flag)
+                                        .await;
+                                });
+                                state_guard.scan_task = Some(handle);
+                                proxy
+                                    .send_event(UserEvent::StateUpdate(generate_ui_state(
+                                        &state_guard,
+                                    )))
+                                    .unwrap();
                             }
                             Err(e) => {
                                 proxy
@@ -621,6 +650,108 @@ fn handle_ipc_message(
             }
         });
     }
+}
+
+async fn scan_directory_task(
+    proxy: EventLoopProxy<UserEvent>,
+    state: Arc<Mutex<AppState>>,
+    cancel_flag: Arc<AtomicBool>,
+) {
+    tracing::info!("LOG: TASK:: scan_directory_task gestartet.");
+    let (path_str, ignore_patterns, config, search_query, extension_filter, content_search_results) = {
+        let state_lock = state.lock().unwrap();
+        (
+            state_lock.current_path.clone(),
+            state_lock.config.ignore_patterns.clone(),
+            state_lock.config.clone(),
+            state_lock.search_query.clone(),
+            state_lock.extension_filter.clone(),
+            state_lock.content_search_results.clone(),
+        )
+    };
+
+    let path = PathBuf::from(&path_str);
+    if !path.is_dir() {
+        proxy
+            .send_event(UserEvent::ShowError(
+                "Selected path is not a valid directory.".to_string(),
+            ))
+            .unwrap();
+        let mut state_lock = state.lock().unwrap();
+        state_lock.cancel_current_scan();
+        proxy
+            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+            .unwrap();
+        return;
+    }
+
+    let scanner = DirectoryScanner::new(ignore_patterns);
+    let progress_proxy = proxy.clone();
+    let progress_callback = move |progress: ScanProgress| {
+        let _ = progress_proxy.send_event(UserEvent::ScanProgress(progress));
+    };
+
+    tracing::info!("LOG: TASK:: Rufe scanner.scan_directory_with_progress auf...");
+    let scan_result = scanner
+        .scan_directory_with_progress(&path, cancel_flag, progress_callback)
+        .await;
+    tracing::info!(
+        "LOG: TASK:: scanner.scan_directory_with_progress ist zurückgekehrt. Ergebnis: {}",
+        if scan_result.is_ok() { "Ok" } else { "Err" }
+    );
+
+    // **NEUE LOGIK**: Die langsame Nachverarbeitung passiert hier, BEVOR die globale Sperre geholt wird.
+    let final_files = match scan_result {
+        Ok(files) => files,
+        Err(e) => {
+            tracing::error!("LOG: TASK:: Scan mit Fehler beendet: {}", e);
+            let mut state_lock = state.lock().unwrap();
+            if !state_lock.is_scanning {
+                return;
+            } // Bereits abgebrochen
+            state_lock.scan_progress.current_scanning_path = format!("Scan failed: {}", e);
+            state_lock.is_scanning = false;
+            state_lock.scan_task = None;
+            proxy
+                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+                .unwrap();
+            return;
+        }
+    };
+
+    tracing::info!("LOG: TASK:: Scan erfolgreich. {} Dateien gefunden. Starte Nachverarbeitung (apply_filters)...", final_files.len());
+    let filtered_files = apply_filters_on_data(
+        &final_files,
+        &path,
+        &config,
+        &search_query,
+        &extension_filter,
+        &content_search_results,
+    );
+    tracing::info!(
+        "LOG: TASK:: Nachverarbeitung beendet. {} Dateien übrig.",
+        filtered_files.len()
+    );
+
+    // Hole die Sperre JETZT ERST, nur für das schnelle Schreiben der Ergebnisse.
+    let mut state_lock = state.lock().unwrap();
+    if !state_lock.is_scanning {
+        tracing::warn!("LOG: TASK:: Nachverarbeitung fertig, aber App-Zustand ist 'nicht scannend' (wurde abgebrochen). Verwerfe Ergebnisse.");
+        return;
+    }
+
+    state_lock.full_file_list = final_files;
+    state_lock.filtered_file_list = filtered_files;
+    state_lock.is_scanning = false;
+    state_lock.scan_progress.current_scanning_path = format!(
+        "Scan complete. Found {} visible items.",
+        state_lock.filtered_file_list.len()
+    );
+    state_lock.scan_task = None;
+    proxy
+        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+        .unwrap();
+    tracing::info!("LOG: TASK:: Finaler Zustand wurde aktualisiert und an die UI gesendet.");
 }
 
 fn handle_user_event(event: UserEvent, webview: &WebView) {
@@ -666,136 +797,96 @@ fn handle_user_event(event: UserEvent, webview: &WebView) {
                 "Failed to export config."
             }
         ),
-        UserEvent::ScanProgress(progress) => format!(
-            "window.updateScanProgress({});",
-            serde_json::to_string(&progress).unwrap_or_default()
-        ),
+        UserEvent::ScanProgress(progress) => {
+            tracing::info!(
+                "LOG: EVENT_LOOP:: Sende Progress-Update an UI ({} Dateien verarbeitet)",
+                progress.files_scanned
+            );
+            format!(
+                "window.updateScanProgress({});",
+                serde_json::to_string(&progress).unwrap_or_default()
+            )
+        }
     };
     webview.evaluate_script(&script).ok();
 }
 
-// Enhanced scan_directory function with better cancellation
-async fn scan_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    let (path_str, ignore_patterns, cancel_flag) = {
-        let mut state_lock = state.lock().unwrap();
-
-        // Ensure any previous scan is cancelled
-        state_lock.cancel_current_scan();
-
-        // Start new scan with fresh cancel flag
-        let cancel_flag = state_lock.start_new_scan();
-
-        tracing::info!("🚀 Starting scan of: {}", state_lock.current_path);
-
-        // Send immediate UI update
-        proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
-            .unwrap();
-
-        (
-            state_lock.current_path.clone(),
-            state_lock.config.ignore_patterns.clone(),
-            cancel_flag,
+fn generate_ui_state(state: &AppState) -> UiState {
+    let root = PathBuf::from(&state.current_path);
+    let search_matches = if !state.content_search_query.is_empty() {
+        state.content_search_results.clone()
+    } else {
+        HashSet::new()
+    };
+    let tree = if state.is_scanning {
+        Vec::new()
+    } else {
+        build_tree_nodes(
+            &state.filtered_file_list,
+            &root,
+            &state.selected_files,
+            &state.expanded_dirs,
+            &search_matches,
+            &state.search_query,
+            state.config.case_sensitive_search,
         )
     };
-
-    // Validate path before scanning
-    let path = PathBuf::from(&path_str);
-    if !path.exists() || !path.is_dir() {
-        let mut state_lock = state.lock().unwrap();
-        state_lock.is_scanning = false;
-        proxy
-            .send_event(UserEvent::ShowError(
-                "Selected directory does not exist or is not accessible.".to_string(),
-            ))
-            .unwrap();
-        proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
-            .unwrap();
-        return;
+    let status_message = if state.is_scanning {
+        format!(
+            "Status: Scanning... {} files processed. {} large files skipped ({})",
+            state.scan_progress.files_scanned,
+            state.scan_progress.large_files_skipped,
+            state.scan_progress.current_scanning_path
+        )
+    } else {
+        format!(
+            "Status: {}",
+            state.scan_progress.current_scanning_path.clone()
+        )
+    };
+    UiState {
+        config: state.config.clone(),
+        current_path: state.current_path.clone(),
+        tree,
+        total_files_found: state.full_file_list.len(),
+        visible_files_count: state.filtered_file_list.len(),
+        selected_files_count: state.selected_files.len(),
+        is_scanning: state.is_scanning,
+        status_message,
+        search_query: state.search_query.clone(),
+        extension_filter: state.extension_filter.clone(),
+        content_search_query: state.content_search_query.clone(),
+        current_config_filename: state.current_config_filename.clone(),
+        scan_progress: state.scan_progress.clone(),
     }
-
-    let scanner = DirectoryScanner::new(ignore_patterns);
-
-    // ENHANCED: Better progress callback with cancellation checks
-    let progress_proxy = proxy.clone();
-    let progress_cancel_flag = cancel_flag.clone();
-    let progress_callback = move |progress: ScanProgress| {
-        // Don't send progress updates if scan was cancelled
-        if !progress_cancel_flag.load(Ordering::Relaxed) {
-            let _ = progress_proxy.send_event(UserEvent::ScanProgress(progress));
-        }
-    };
-
-    match scanner
-        .scan_directory_with_progress(&path, cancel_flag.clone(), progress_callback)
-        .await
-    {
-        Ok(files) => {
-            let mut state_lock = state.lock().unwrap();
-
-            // Double-check if scan was cancelled during processing
-            if !cancel_flag.load(Ordering::Relaxed) {
-                tracing::info!(
-                    "✅ Scan completed successfully: {} files found",
-                    files.len()
-                );
-
-                state_lock.full_file_list = files;
-                apply_filters(&mut state_lock);
-                state_lock.is_scanning = false;
-
-                proxy
-                    .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
-                    .unwrap();
-            } else {
-                tracing::info!("🛑 Scan was cancelled during processing");
-                state_lock.is_scanning = false;
-            }
-        }
-        Err(e) => {
-            let mut state_lock = state.lock().unwrap();
-            state_lock.is_scanning = false;
-
-            if !cancel_flag.load(Ordering::Relaxed) {
-                tracing::error!("❌ Scan failed: {}", e);
-                proxy
-                    .send_event(UserEvent::ShowError(e.to_string()))
-                    .unwrap();
-            } else {
-                tracing::info!("🛑 Scan cancelled: {}", e);
-            }
-
-            proxy
-                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
-                .unwrap();
-        }
-    };
 }
 
-// Alle anderen Funktionen bleiben unverändert...
-fn apply_filters(state: &mut AppState) {
+/// **NEU**: Eine "reine" Funktion, die keine globale Sperre benötigt.
+fn apply_filters_on_data(
+    full_file_list: &[FileItem],
+    root_path: &Path,
+    config: &AppConfig,
+    search_query: &str,
+    extension_filter: &str,
+    content_search_results: &HashSet<PathBuf>,
+) -> Vec<FileItem> {
     let filter = SearchFilter {
-        query: state.search_query.clone(),
-        extension: state.extension_filter.clone(),
-        case_sensitive: state.config.case_sensitive_search,
-        ignore_patterns: state.config.ignore_patterns.clone(),
+        query: search_query.to_string(),
+        extension: extension_filter.to_string(),
+        case_sensitive: config.case_sensitive_search,
+        ignore_patterns: config.ignore_patterns.clone(),
     };
-
-    let mut filtered = SearchEngine::filter_files(&state.full_file_list, &filter);
-
-    if !state.content_search_query.is_empty() {
-        filtered.retain(|item| state.content_search_results.contains(&item.path));
+    let mut filtered = SearchEngine::filter_files(full_file_list, &filter);
+    if !content_search_results.is_empty() {
+        filtered.retain(|item| content_search_results.contains(&item.path));
     }
-
-    let root_path = PathBuf::from(&state.current_path);
     let required_dirs: HashSet<PathBuf> = filtered
         .par_iter()
         .flat_map(|item| {
             let mut parents = Vec::new();
             let mut current = item.path.parent();
             while let Some(parent) = current {
-                if parent.starts_with(&root_path) {
+                if parent.starts_with(root_path) {
                     parents.push(parent.to_path_buf());
                 } else {
                     break;
@@ -805,31 +896,39 @@ fn apply_filters(state: &mut AppState) {
             parents
         })
         .collect();
-
     let existing_paths_in_filtered: HashSet<PathBuf> =
         filtered.par_iter().map(|item| item.path.clone()).collect();
-
     for dir_path in required_dirs {
         if !existing_paths_in_filtered.contains(&dir_path) {
-            if let Some(dir_item) = state.full_file_list.iter().find(|i| i.path == dir_path) {
+            if let Some(dir_item) = full_file_list.iter().find(|i| i.path == dir_path) {
                 filtered.push(dir_item.clone());
             }
         }
     }
-
-    if state.config.remove_empty_directories {
+    if config.remove_empty_directories {
         let (filtered_without_empty, _) = SearchEngine::remove_empty_directories(filtered);
-        state.filtered_file_list = filtered_without_empty;
+        filtered_without_empty
     } else {
-        state.filtered_file_list = filtered;
+        filtered
     }
+}
 
+// Die alte apply_filters wird zu einem einfachen Wrapper
+fn apply_filters(state: &mut AppState) {
+    let filtered_list = apply_filters_on_data(
+        &state.full_file_list,
+        &PathBuf::from(&state.current_path),
+        &state.config,
+        &state.search_query,
+        &state.extension_filter,
+        &state.content_search_results,
+    );
+    state.filtered_file_list = filtered_list;
     let visible_paths: HashSet<PathBuf> = state
         .filtered_file_list
         .iter()
         .map(|item| item.path.clone())
         .collect();
-
     state
         .selected_files
         .retain(|path| visible_paths.contains(path));
@@ -858,7 +957,6 @@ fn auto_expand_for_matches(state: &mut AppState) {
         })
         .map(|item| item.path.clone())
         .collect();
-
     for path in matches {
         let mut current = path.parent();
         while let Some(parent) = current {
@@ -871,7 +969,6 @@ fn auto_expand_for_matches(state: &mut AppState) {
         }
     }
 }
-
 async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     let (files_to_search, query, case_sensitive) = {
         let mut state_guard = state.lock().unwrap();
@@ -889,7 +986,6 @@ async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppS
             state_guard.config.case_sensitive_search,
         )
     };
-
     let matching_paths: HashSet<PathBuf> = files_to_search
         .into_par_iter()
         .filter_map(|item| {
@@ -912,7 +1008,6 @@ async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppS
             }
         })
         .collect();
-
     {
         let mut state_guard = state.lock().unwrap();
         state_guard.content_search_results = matching_paths;
@@ -923,70 +1018,6 @@ async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppS
             .unwrap();
     }
 }
-
-// Enhanced UI state generation with better scan status
-fn generate_ui_state(state: &AppState) -> UiState {
-    let root = PathBuf::from(&state.current_path);
-
-    let search_matches = if !state.content_search_query.is_empty() {
-        state.content_search_results.clone()
-    } else {
-        HashSet::new()
-    };
-
-    let tree = if state.is_scanning {
-        Vec::new() // Don't build tree during scan for better performance
-    } else {
-        build_tree_nodes(
-            &state.filtered_file_list,
-            &root,
-            &state.selected_files,
-            &state.expanded_dirs,
-            &search_matches,
-            &state.search_query,
-            state.config.case_sensitive_search,
-        )
-    };
-
-    let status_message = if state.is_scanning {
-        format!(
-            "Scanning... {} files processed{}{}",
-            state.scan_progress.files_scanned,
-            if state.scan_progress.large_files_skipped > 0 {
-                format!(
-                    ", {} large files skipped",
-                    state.scan_progress.large_files_skipped
-                )
-            } else {
-                String::new()
-            },
-            if !state.scan_progress.current_scanning_path.is_empty() {
-                format!(" ({})", state.scan_progress.current_scanning_path)
-            } else {
-                String::new()
-            }
-        )
-    } else {
-        "Ready.".to_string()
-    };
-
-    UiState {
-        config: state.config.clone(),
-        current_path: state.current_path.clone(),
-        tree,
-        total_files_found: state.full_file_list.len(),
-        visible_files_count: state.filtered_file_list.len(),
-        selected_files_count: state.selected_files.len(),
-        is_scanning: state.is_scanning,
-        status_message,
-        search_query: state.search_query.clone(),
-        extension_filter: state.extension_filter.clone(),
-        content_search_query: state.content_search_query.clone(),
-        current_config_filename: state.current_config_filename.clone(),
-        scan_progress: state.scan_progress.clone(),
-    }
-}
-
 fn get_directory_selection_state(
     dir_path: &Path,
     all_items: &[FileItem],
@@ -1011,7 +1042,6 @@ fn get_directory_selection_state(
         "partial".to_string()
     }
 }
-
 fn build_tree_nodes(
     items: &[FileItem],
     root_path: &Path,
@@ -1023,7 +1053,6 @@ fn build_tree_nodes(
 ) -> Vec<TreeNode> {
     let mut nodes: HashMap<PathBuf, TreeNode> = HashMap::new();
     let mut children_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-
     for item in items {
         let selection_state = if item.is_directory {
             get_directory_selection_state(&item.path, items, selected)
@@ -1034,7 +1063,6 @@ fn build_tree_nodes(
                 "none".to_string()
             }
         };
-
         let file_name = item.path.file_name().unwrap_or_default().to_string_lossy();
         let name_match = if !filename_query.is_empty() {
             if case_sensitive {
@@ -1048,7 +1076,6 @@ fn build_tree_nodes(
             false
         };
         let content_match = content_search_matches.contains(&item.path);
-
         nodes.insert(
             item.path.clone(),
             TreeNode {
@@ -1072,13 +1099,11 @@ fn build_tree_nodes(
             }
         }
     }
-
     let mut root_nodes_paths: Vec<PathBuf> = items
         .iter()
         .filter(|item| item.path.parent() == Some(root_path))
         .map(|item| item.path.clone())
         .collect();
-
     fn build_level(
         paths: &mut Vec<PathBuf>,
         nodes: &mut HashMap<PathBuf, TreeNode>,
@@ -1093,7 +1118,6 @@ fn build_tree_nodes(
                 _ => a.file_name().cmp(&b.file_name()),
             }
         });
-
         let mut result = Vec::new();
         for path in paths {
             if let Some(mut node) = nodes.remove(path) {
@@ -1105,10 +1129,8 @@ fn build_tree_nodes(
         }
         result
     }
-
     build_level(&mut root_nodes_paths, &mut nodes, &children_map)
 }
-
 fn get_selected_files_in_tree_order(state: &AppState) -> Vec<PathBuf> {
     let mut selected_file_items: Vec<&FileItem> = state
         .full_file_list
@@ -1121,7 +1143,6 @@ fn get_selected_files_in_tree_order(state: &AppState) -> Vec<PathBuf> {
         .map(|item| item.path.clone())
         .collect()
 }
-
 fn get_language_from_path(path: &Path) -> String {
     match path.extension().and_then(|s| s.to_str()) {
         Some("rs") => "rust",
