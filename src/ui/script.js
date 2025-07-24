@@ -1532,25 +1532,115 @@ document.addEventListener("DOMContentLoaded", () => {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
   }
-
-  // --- Resizer Logic ---
+  // --- Resizer Logic (Vertikal) ---
   let mouseDown = false;
   elements.resizer.addEventListener("mousedown", () => {
     mouseDown = true;
+
+    // NEU: Visual Feedback hinzufügen
+    document.body.classList.add("vertical-resizing");
+    elements.resizer.classList.add("resizing");
     document.body.style.cursor = "ns-resize";
   });
+
+  // --- Sidebar Horizontal Resizer Logic (bleibt gleich) ---
+  let sidebarMouseDown = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  document.addEventListener("mousedown", (e) => {
+    const sidebar = document.querySelector(".sidebar");
+    if (!sidebar) return;
+
+    const rect = sidebar.getBoundingClientRect();
+    const rightEdge = rect.right;
+
+    if (e.clientX >= rightEdge - 5 && e.clientX <= rightEdge + 5) {
+      sidebarMouseDown = true;
+      startX = e.clientX;
+      startWidth = parseInt(getComputedStyle(sidebar).width, 10);
+
+      document.body.classList.add("sidebar-resizing");
+      sidebar.classList.add("resizing");
+
+      e.preventDefault();
+    }
+  });
+
+  // ERWEITERT: Mouseup für beide Resizer mit Visual Feedback
   document.addEventListener("mouseup", () => {
-    mouseDown = false;
+    // Vertikaler Resizer
+    if (mouseDown) {
+      mouseDown = false;
+
+      // NEU: Visual Feedback entfernen
+      document.body.classList.remove("vertical-resizing");
+      elements.resizer.classList.remove("resizing");
+    }
+
+    // Horizontaler Sidebar Resizer
+    if (sidebarMouseDown) {
+      sidebarMouseDown = false;
+
+      document.body.classList.remove("sidebar-resizing");
+      const sidebar = document.querySelector(".sidebar");
+      if (sidebar) {
+        sidebar.classList.remove("resizing");
+      }
+    }
+
+    // Cursor zurücksetzen
     document.body.style.cursor = "default";
   });
+
+  // Mousemove bleibt gleich...
   document.addEventListener("mousemove", (e) => {
-    if (!mouseDown) return;
-    const totalHeight = elements.contentSplitter.offsetHeight;
-    const newTopHeight = e.clientY - elements.fileListPanel.offsetTop;
-    if (newTopHeight > 100 && newTopHeight < totalHeight - 100) {
-      const newTopPercent = (newTopHeight / totalHeight) * 100;
-      elements.fileListPanel.style.height = `${newTopPercent}%`;
-      elements.previewPanel.style.height = `${100 - newTopPercent}%`;
+    const sidebar = document.querySelector(".sidebar");
+
+    // Sidebar Horizontal Resize
+    if (sidebarMouseDown && sidebar) {
+      const dx = e.clientX - startX;
+      let newWidth = startWidth + dx;
+
+      const minWidth = 280;
+      const maxWidth = 600;
+
+      newWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
+
+      sidebar.style.width = newWidth + "px";
+      e.preventDefault();
+      return;
+    }
+
+    // Vertikaler File Panel Resize
+    if (mouseDown) {
+      const totalHeight = elements.contentSplitter.offsetHeight;
+      const newTopHeight = e.clientY - elements.fileListPanel.offsetTop;
+      if (newTopHeight > 100 && newTopHeight < totalHeight - 100) {
+        const newTopPercent = (newTopHeight / totalHeight) * 100;
+        elements.fileListPanel.style.height = `${newTopPercent}%`;
+        elements.previewPanel.style.height = `${100 - newTopPercent}%`;
+      }
+      return;
+    }
+
+    // Cursor ändern für Sidebar Resize Hit-Bereich
+    if (sidebar) {
+      const rect = sidebar.getBoundingClientRect();
+      const rightEdge = rect.right;
+
+      if (e.clientX >= rightEdge - 5 && e.clientX <= rightEdge + 5) {
+        document.body.style.cursor = "ew-resize";
+      } else if (document.body.style.cursor === "ew-resize") {
+        document.body.style.cursor = "default";
+      }
+    }
+  });
+
+  // Cursor zurücksetzen wenn Maus die Sidebar verlässt
+  document.querySelector(".sidebar")?.addEventListener("mouseleave", () => {
+    if (!sidebarMouseDown && document.body.style.cursor === "ew-resize") {
+      document.body.style.cursor = "default";
     }
   });
 

@@ -40,6 +40,7 @@ html {
   height: calc(100% - 25px);
 }
 
+/* GEÄNDERT: resize: horizontal entfernt und Cursor-Logik hinzugefügt */
 .sidebar {
   width: 350px;
   min-width: 280px;
@@ -50,9 +51,36 @@ html {
   flex-direction: column;
   padding: 10px;
   gap: 10px;
-  resize: horizontal;
+  /* resize: horizontal; <-- ENTFERNT */
   overflow-x: hidden;
   overflow-y: auto;
+  position: relative; /* NEU: Für positioning des Resize-Handles */
+}
+
+/* NEU: Resize-Handle als rechter Rand */
+.sidebar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: -5px; /* 5px über den Border hinaus für größeren Hit-Bereich */
+  width: 10px; /* 10px breiter Hit-Bereich */
+  height: 100%;
+  cursor: ew-resize;
+  z-index: 10;
+  /* Optional: Für Debugging sichtbar machen */
+  /* background-color: rgba(255, 0, 0, 0.1); */
+}
+
+/* NEU: Hover-Effekt für den Border */
+.sidebar.resizing {
+  border-right-color: var(--accent-color);
+  transition: border-right-color 0.2s ease;
+}
+
+/* NEU: Cursor für den gesamten Body während Resize */
+body.sidebar-resizing {
+  cursor: ew-resize !important;
+  user-select: none;
 }
 
 .main-content {
@@ -123,14 +151,39 @@ html {
   padding: 10px;
   min-height: 100px;
 }
+
 .resizer {
-  height: 8px;
+  height: 1px;
   background-color: var(--border-color);
   cursor: ns-resize;
   flex-shrink: 0;
+  transition: all 0.2s ease;
+  position: relative; /* NEU: Für Positioning des Hit-Bereichs */
 }
-.resizer:hover {
+
+.resizer.resizing {
   background-color: var(--accent-color);
+  transition: all 0.2s ease; /* Smooth Übergang */
+}
+
+/* NEU: Unsichtbare Hit-Zone für einfacheres Targeting */
+.resizer::before {
+  content: "";
+  position: absolute;
+  top: -8px; /* 8px nach oben */
+  left: 0;
+  right: 0;
+  height: 18px; /* 2px sichtbar + 16px unsichtbar = 18px total Hit-Zone */
+  cursor: ns-resize;
+  z-index: 1;
+  /* Optional: Für Debugging sichtbar machen */
+  /* background-color: rgba(255, 0, 0, 0.1); */
+}
+
+/* NEU: Body-Styling während vertikalem Resize */
+body.vertical-resizing {
+  cursor: ns-resize !important;
+  user-select: none;
 }
 
 .bottom-panel {
