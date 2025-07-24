@@ -209,7 +209,7 @@ body.sidebar-resizing {
   flex-shrink: 0;
 }
 
-.preview-panel .preview-main-title {
+/* .preview-panel .preview-main-title {
   font-size: 1em;
   font-weight: normal;
   white-space: nowrap;
@@ -221,7 +221,7 @@ body.sidebar-resizing {
   font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Monaco,
     "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
   letter-spacing: -0.02em;
-}
+} */
 
 .preview-panel .preview-stats {
   font-size: 0.8em;
@@ -446,22 +446,6 @@ button:disabled:hover {
 
 #copy-btn:disabled {
   cursor: not-allowed;
-}
-
-/* FIX: Status-spezifische Button-Styles */
-.button-copying {
-  background-color: var(--orange-accent) !important;
-  color: #ffffff !important;
-}
-
-.button-success {
-  background-color: var(--green-accent) !important;
-  color: #ffffff !important;
-}
-
-.button-error {
-  background-color: var(--red-accent) !important;
-  color: #ffffff !important;
 }
 
 .button-cta {
