@@ -602,13 +602,13 @@ button:disabled:hover {
 
 .tree ul {
   list-style-type: none;
-  padding-left: 25px;
+  padding-left: 0px;
   margin: 2px 0;
   min-width: max-content; /* WICHTIG: Verhindert Wrapping */
 }
 
 .tree details ul {
-  padding-left: 30px;
+  padding-left: 21px;
 }
 
 .tree summary,
@@ -634,13 +634,23 @@ button:disabled:hover {
 .tree summary::before {
   content: "▶";
   display: inline-block;
-  margin-right: 6px;
+  margin-right: 5px;
   font-size: 0.7em;
   transition: transform 0.1s linear;
   flex-shrink: 0;
+  width: 0.6em; /* WICHTIG: Explizite Breite setzen */
 }
 .tree details[open] > summary::before {
   transform: rotate(90deg);
+}
+/* NEU: Unsichtbarer Platzhalter für Files damit sie auf gleicher Höhe stehen */
+.tree .tree-item-container::before {
+  content: "";
+  display: inline-block;
+  width: 0.4em; /* Gleiche Breite wie das ▶ Symbol */
+  margin-right: 5px; /* Gleicher Abstand wie bei Ordnern */
+  flex-shrink: 0;
+  /* Unsichtbar aber nimmt Platz ein */
 }
 .tree input[type="checkbox"] {
   margin: 0;
@@ -674,6 +684,7 @@ button:disabled:hover {
   padding: 0 4px;
   border-radius: 3px;
   flex-shrink: 0;
+  background-color: var(--bg-color-light);
 }
 .ignore-btn:hover {
   background-color: var(--button-hover-bg);
