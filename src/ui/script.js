@@ -781,6 +781,17 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // --- Global Event Handlers from Rust ---
+
+  // NEU: Handler für Drag-and-Drop-Zustand
+  window.setDragState = (isDragging) => {
+    const container = elements.fileTreeContainer;
+    if (isDragging) {
+      container.classList.add("drag-over");
+    } else {
+      container.classList.remove("drag-over");
+    }
+  };
+
   window.render = (newState) => {
     const wasScanning = appState.is_scanning;
     const isNowScanning = newState.is_scanning;
@@ -1124,8 +1135,9 @@ document.addEventListener("DOMContentLoaded", () => {
       elements.fileTreeContainer.innerHTML =
         '<p class="placeholder">No files found matching filters.</p>';
     } else {
+      // GEÄNDERT: Platzhaltertext für Drag & Drop
       elements.fileTreeContainer.innerHTML =
-        '<p class="placeholder">Select a directory to start.</p>';
+        '<p class="placeholder">Select or drop a directory to start.</p>';
     }
 
     elements.statusBar.textContent = `Status: ${appState.status_message}`;

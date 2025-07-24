@@ -210,17 +210,17 @@ body.sidebar-resizing {
 }
 
 /* .preview-panel .preview-main-title {
-  font-size: 1em;
-  font-weight: normal;
-  white-space: nowrap;
-  overflow: hidden;
-  min-width: 0;
-  cursor: help;
-  width: 100%;
-  display: block;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Monaco,
-    "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
-  letter-spacing: -0.02em;
+  font-size: 1em;
+  font-weight: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  min-width: 0;
+  cursor: help;
+  width: 100%;
+  display: block;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Monaco,
+    "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
+  letter-spacing: -0.02em;
 } */
 
 .preview-panel .preview-stats {
@@ -583,6 +583,25 @@ button:disabled:hover {
   overflow-x: auto;
   overflow-y: auto;
   padding-right: 5px;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* NEU: Visuelles Feedback für Drag & Drop */
+/* .file-tree-container.drag-over {
+  background-color: rgba(138, 180, 248, 0.1);
+} */
+
+.file-tree-container.drag-over .placeholder {
+  background-color: rgba(138, 180, 248, 0.1);
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+.file-tree-container.drag-over .placeholder::before {
+  content: "📥";
+  transform: scale(1.1);
 }
 
 .tree .file-name {
@@ -884,13 +903,16 @@ button:disabled:hover {
 /* Enhanced placeholder styling */
 .placeholder {
   text-align: center;
+  align-content: center;
   color: var(--text-color-muted);
   font-style: italic;
-  padding: 40px 20px;
-  background: var(--bg-color-light);
+  /* padding: 40px 20px; */
+  flex-grow: 1;
+  background: var(--bg-color-medium);
   border-radius: 8px;
   border: 2px dashed var(--border-color);
-  margin: 20px 0;
+  margin: auto 20px; /* Vertikal zentrieren */
+  transition: all 0.2s ease;
 }
 
 .placeholder::before {
@@ -899,6 +921,7 @@ button:disabled:hover {
   font-size: 2em;
   margin-bottom: 10px;
   opacity: 0.5;
+  transition: all 0.2s ease;
 }
 
 /* Animations */

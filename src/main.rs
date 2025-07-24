@@ -136,12 +136,68 @@ enum UserEvent {
     SaveComplete(bool, String),
     ConfigExported(bool),
     ScanProgress(ScanProgress),
+    DragStateChanged(bool),
 }
 
 #[derive(Deserialize, Debug)]
 struct IpcMessage {
     command: String,
     payload: serde_json::Value,
+}
+
+// KORRIGIERT: Hilfsfunktion, die Ownership-Probleme vermeidet
+fn start_scan_on_path(
+    path: PathBuf,
+    proxy: EventLoopProxy<UserEvent>,
+    state: Arc<Mutex<AppState>>,
+) {
+    tokio::spawn(async move {
+        // KORREKTE Logik zur Bestimmung des Verzeichnispfades
+        let directory_path = if path.is_dir() {
+            path
+        } else {
+            path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+        };
+
+        if !directory_path.is_dir() {
+            proxy
+                .send_event(UserEvent::ShowError(
+                    "Dropped item is not a valid directory.".to_string(),
+                ))
+                .ok();
+            return;
+        }
+
+        let mut state_guard = state.lock().unwrap();
+        state_guard.cancel_current_scan();
+
+        state_guard.current_path = directory_path.to_string_lossy().to_string();
+        state_guard.config.last_directory = Some(directory_path);
+        config::settings::save_config(&state_guard.config).ok();
+
+        state_guard.is_scanning = true;
+        state_guard.scan_progress = ScanProgress {
+            files_scanned: 0,
+            large_files_skipped: 0,
+            current_scanning_path: "Initializing scan...".to_string(),
+        };
+
+        let new_cancel_flag = Arc::new(AtomicBool::new(false));
+        state_guard.scan_cancellation_flag = new_cancel_flag.clone();
+
+        let proxy_clone = proxy.clone();
+        let state_clone = state.clone();
+
+        tracing::info!("LOG: Spawne neuen scan_directory_task.");
+        let handle = tokio::spawn(async move {
+            scan_directory_task(proxy_clone, state_clone, new_cancel_flag).await;
+        });
+        state_guard.scan_task = Some(handle);
+
+        proxy
+            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+            .unwrap();
+    });
 }
 
 #[tokio::main]
@@ -154,19 +210,57 @@ async fn main() {
         .with_min_inner_size(tao::dpi::LogicalSize::new(900, 600))
         .build(&event_loop)
         .expect("Failed to build Window");
+
     let proxy = event_loop.create_proxy();
     let state = Arc::new(Mutex::new(AppState::new()));
+
     let html_content = include_str!("ui/index.html")
         .replace("/*INJECT_CSS*/", include_str!("ui/style.css"))
         .replace("/*INJECT_JS*/", include_str!("ui/script.js"));
+
+    let proxy_clone_for_drop = proxy.clone();
+    let state_clone_for_drop = state.clone();
+
     let webview = WebViewBuilder::new(&window)
         .with_html(html_content)
         .with_ipc_handler(move |message: String| {
             handle_ipc_message(message, proxy.clone(), state.clone())
         })
+        .with_file_drop_handler(move |event| {
+            // The IDE was correct to suggest using the wry import.
+            use wry::FileDropEvent;
+            match event {
+                FileDropEvent::Hovered { .. } => {
+                    proxy_clone_for_drop
+                        .send_event(UserEvent::DragStateChanged(true))
+                        .unwrap();
+                }
+                FileDropEvent::Dropped { paths, .. } => {
+                    proxy_clone_for_drop
+                        .send_event(UserEvent::DragStateChanged(false))
+                        .unwrap();
+                    if let Some(path) = paths.first() {
+                        start_scan_on_path(
+                            path.clone(),
+                            proxy_clone_for_drop.clone(),
+                            state_clone_for_drop.clone(),
+                        );
+                    }
+                }
+                FileDropEvent::Cancelled => {
+                    proxy_clone_for_drop
+                        .send_event(UserEvent::DragStateChanged(false))
+                        .unwrap();
+                }
+                // FIX: Add this wildcard arm to handle any other variants.
+                _ => (),
+            }
+            true
+        })
         .with_devtools(true)
         .build()
         .expect("Failed to build WebView");
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
@@ -188,48 +282,27 @@ fn handle_ipc_message(
     if let Ok(msg) = serde_json::from_str::<IpcMessage>(&message) {
         tokio::spawn(async move {
             match msg.command.as_str() {
-                "selectDirectory" | "rescanDirectory" => {
-                    tracing::info!("LOG: IPC '{}' erhalten.", msg.command);
-                    let mut state_guard = state.lock().unwrap();
-                    state_guard.cancel_current_scan();
-
-                    if msg.command == "selectDirectory" {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            state_guard.current_path = path.to_string_lossy().to_string();
-                            state_guard.config.last_directory = Some(path);
-                            config::settings::save_config(&state_guard.config).ok();
-                        } else {
-                            tracing::info!("LOG: Benutzer hat Verzeichnisauswahl abgebrochen.");
-                            state_guard.is_scanning = false;
-                            proxy
-                                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
-                                .unwrap();
-                            return;
-                        }
+                "selectDirectory" => {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        start_scan_on_path(path, proxy.clone(), state.clone());
+                    } else {
+                        tracing::info!("LOG: Benutzer hat Verzeichnisauswahl abgebrochen.");
+                        let mut state_guard = state.lock().unwrap();
+                        state_guard.is_scanning = false;
+                        proxy
+                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                            .unwrap();
                     }
-
-                    state_guard.is_scanning = true;
-                    state_guard.scan_progress = ScanProgress {
-                        files_scanned: 0,
-                        large_files_skipped: 0,
-                        current_scanning_path: "Initializing scan...".to_string(),
-                    };
-
-                    let new_cancel_flag = Arc::new(AtomicBool::new(false));
-                    state_guard.scan_cancellation_flag = new_cancel_flag.clone();
-
-                    let proxy_clone = proxy.clone();
-                    let state_clone = state.clone();
-
-                    tracing::info!("LOG: Spawne neuen scan_directory_task.");
-                    let handle = tokio::spawn(async move {
-                        scan_directory_task(proxy_clone, state_clone, new_cancel_flag).await;
-                    });
-                    state_guard.scan_task = Some(handle);
-
-                    proxy
-                        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
-                        .unwrap();
+                }
+                "rescanDirectory" => {
+                    let current_path_str = { state.lock().unwrap().current_path.clone() };
+                    if !current_path_str.is_empty() {
+                        start_scan_on_path(
+                            PathBuf::from(current_path_str),
+                            proxy.clone(),
+                            state.clone(),
+                        );
+                    }
                 }
                 "cancelScan" => {
                     tracing::info!("LOG: IPC 'cancelScan' erhalten. [T0 - STARTPUNKT]");
@@ -259,25 +332,14 @@ fn handle_ipc_message(
                         if should_restart_scan {
                             tracing::info!("🔄 Restarting scan due to ignore pattern changes");
                             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                            let mut state_guard = state.lock().unwrap();
-                            state_guard.is_scanning = true;
-                            state_guard.scan_progress = ScanProgress {
-                                files_scanned: 0,
-                                large_files_skipped: 0,
-                                current_scanning_path: "Initializing scan...".to_string(),
-                            };
-                            let new_cancel_flag = Arc::new(AtomicBool::new(false));
-                            state_guard.scan_cancellation_flag = new_cancel_flag.clone();
-                            let proxy_clone = proxy.clone();
-                            let state_clone = state.clone();
-                            let handle = tokio::spawn(async move {
-                                scan_directory_task(proxy_clone, state_clone, new_cancel_flag)
-                                    .await;
-                            });
-                            state_guard.scan_task = Some(handle);
-                            proxy
-                                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
-                                .unwrap();
+                            let current_path_str = { state.lock().unwrap().current_path.clone() };
+                            if !current_path_str.is_empty() {
+                                start_scan_on_path(
+                                    PathBuf::from(current_path_str),
+                                    proxy.clone(),
+                                    state.clone(),
+                                );
+                            }
                         } else {
                             let mut state_guard = state.lock().unwrap();
                             apply_filters(&mut state_guard);
@@ -307,24 +369,12 @@ fn handle_ipc_message(
                         }
                     };
                     if should_auto_scan {
-                        let mut state_guard = state.lock().unwrap();
-                        state_guard.is_scanning = true;
-                        state_guard.scan_progress = ScanProgress {
-                            files_scanned: 0,
-                            large_files_skipped: 0,
-                            current_scanning_path: "Initializing scan...".to_string(),
-                        };
-                        let new_cancel_flag = Arc::new(AtomicBool::new(false));
-                        state_guard.scan_cancellation_flag = new_cancel_flag.clone();
-                        let proxy_clone = proxy.clone();
-                        let state_clone = state.clone();
-                        let handle = tokio::spawn(async move {
-                            scan_directory_task(proxy_clone, state_clone, new_cancel_flag).await;
-                        });
-                        state_guard.scan_task = Some(handle);
-                        proxy
-                            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
-                            .unwrap();
+                        let current_path_str = { state.lock().unwrap().current_path.clone() };
+                        start_scan_on_path(
+                            PathBuf::from(current_path_str),
+                            proxy.clone(),
+                            state.clone(),
+                        );
                     } else {
                         let state_guard = state.lock().unwrap();
                         proxy
@@ -591,38 +641,37 @@ fn handle_ipc_message(
                         .pick_file()
                     {
                         match config::settings::import_config(&path) {
-                            Ok(config) => {
-                                {
-                                    let mut state_guard = state.lock().unwrap();
-                                    state_guard.cancel_current_scan();
-                                    state_guard.config = config;
-                                    state_guard.current_config_filename = path
-                                        .file_name()
-                                        .and_then(|name| name.to_str())
-                                        .map(|s| s.to_string());
-                                    config::settings::save_config(&state_guard.config).ok();
-                                }
-                                let mut state_guard = state.lock().unwrap();
-                                state_guard.is_scanning = true;
-                                state_guard.scan_progress = ScanProgress {
-                                    files_scanned: 0,
-                                    large_files_skipped: 0,
-                                    current_scanning_path: "Initializing scan...".to_string(),
-                                };
-                                let new_cancel_flag = Arc::new(AtomicBool::new(false));
-                                state_guard.scan_cancellation_flag = new_cancel_flag.clone();
-                                let proxy_clone = proxy.clone();
-                                let state_clone = state.clone();
-                                let handle = tokio::spawn(async move {
-                                    scan_directory_task(proxy_clone, state_clone, new_cancel_flag)
-                                        .await;
+                            Ok(new_config) => {
+                                let filename = path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .map(|s| s.to_string());
+
+                                // Scan mit der neuen Konfiguration starten
+                                tokio::spawn(async move {
+                                    let directory_to_scan = {
+                                        let mut state_guard = state.lock().unwrap();
+                                        state_guard.cancel_current_scan();
+                                        state_guard.config = new_config;
+                                        state_guard.current_config_filename = filename;
+                                        config::settings::save_config(&state_guard.config).ok();
+                                        state_guard.config.last_directory.clone()
+                                    };
+
+                                    if let Some(dir) = directory_to_scan {
+                                        if dir.exists() {
+                                            start_scan_on_path(dir, proxy, state);
+                                        }
+                                    } else {
+                                        // Nur UI aktualisieren, wenn kein Verzeichnis zum Scannen da ist
+                                        let state_guard = state.lock().unwrap();
+                                        proxy
+                                            .send_event(UserEvent::StateUpdate(generate_ui_state(
+                                                &state_guard,
+                                            )))
+                                            .unwrap();
+                                    }
                                 });
-                                state_guard.scan_task = Some(handle);
-                                proxy
-                                    .send_event(UserEvent::StateUpdate(generate_ui_state(
-                                        &state_guard,
-                                    )))
-                                    .unwrap();
                             }
                             Err(e) => {
                                 proxy
@@ -701,7 +750,6 @@ async fn scan_directory_task(
         if scan_result.is_ok() { "Ok" } else { "Err" }
     );
 
-    // **NEUE LOGIK**: Die langsame Nachverarbeitung passiert hier, BEVOR die globale Sperre geholt wird.
     let final_files = match scan_result {
         Ok(files) => files,
         Err(e) => {
@@ -709,7 +757,7 @@ async fn scan_directory_task(
             let mut state_lock = state.lock().unwrap();
             if !state_lock.is_scanning {
                 return;
-            } // Bereits abgebrochen
+            }
             state_lock.scan_progress.current_scanning_path = format!("Scan failed: {}", e);
             state_lock.is_scanning = false;
             state_lock.scan_task = None;
@@ -734,7 +782,6 @@ async fn scan_directory_task(
         filtered_files.len()
     );
 
-    // Hole die Sperre JETZT ERST, nur für das schnelle Schreiben der Ergebnisse.
     let mut state_lock = state.lock().unwrap();
     if !state_lock.is_scanning {
         tracing::warn!("LOG: TASK:: Nachverarbeitung fertig, aber App-Zustand ist 'nicht scannend' (wurde abgebrochen). Verwerfe Ergebnisse.");
@@ -807,6 +854,9 @@ fn handle_user_event(event: UserEvent, webview: &WebView) {
                 "window.updateScanProgress({});",
                 serde_json::to_string(&progress).unwrap_or_default()
             )
+        }
+        UserEvent::DragStateChanged(is_dragging) => {
+            format!("window.setDragState({});", is_dragging)
         }
     };
     webview.evaluate_script(&script).ok();
