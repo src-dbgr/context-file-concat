@@ -95,11 +95,8 @@
   "last_directory": null,
   "output_directory": "/Users/penrose/Desktop",
   "case_sensitive_search": false,
-  "include_tree_by_default": false,
+  "include_tree_by_default": true,
   "remove_empty_directories": true,
-  "window_size": [
-    1200.0,
-    800.0
-  ],
+  "window_size": [1200.0, 800.0],
   "window_position": null
 }
