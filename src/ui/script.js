@@ -905,10 +905,6 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.statusBar.textContent = `Status: ${statusText}`;
   };
 
-  /**
-   * Berechnet die optimale Pfad-Anzeige basierend auf verfügbarem Platz
-   * Kürzt nur von links, nutzt den Platz optimal aus
-   */
   function getOptimalPathForAvailableSpace(fullPath, containerElement) {
     if (!fullPath) {
       return "Unknown File";
@@ -918,56 +914,54 @@ document.addEventListener("DOMContentLoaded", () => {
       return getBasicTruncatedPath(fullPath);
     }
 
+    // DIREKTER ANSATZ: Nutze die tatsächliche Container-Breite
+    const containerStyle = getComputedStyle(containerElement);
     const containerWidth = containerElement.offsetWidth;
-    const availableWidth = containerWidth - 20;
 
-    if (availableWidth <= 100) {
-      const parts = fullPath.replace(/\\/g, "/").split("/");
-      const filename = parts[parts.length - 1];
-      return filename.length > 20
-        ? filename.substring(0, 17) + "..."
-        : filename;
-    }
+    // MINIMALER Puffer - nur für Rendering-Ungenauigkeiten
+    const availableWidth = containerWidth - 10; // Nur 10px Puffer
 
     const measureElement = createMeasureElement(containerElement);
 
     try {
+      // Teste ob der volle Pfad passt
       measureElement.textContent = fullPath;
       if (measureElement.offsetWidth <= availableWidth) {
-        return fullPath;
+        return fullPath; // Voller Pfad passt!
       }
 
       const parts = fullPath.replace(/\\/g, "/").split("/");
       if (parts.length <= 1) {
+        // Nur Dateiname - nutze verfügbaren Platz optimal
         return truncateTextToFit(fullPath, availableWidth, measureElement);
       }
 
       const filename = parts[parts.length - 1];
-      measureElement.textContent = filename;
-      const filenameWidth = measureElement.offsetWidth;
 
-      if (filenameWidth >= availableWidth - 30) {
+      // Teste erst: .../<filename>
+      let testPath = `.../${filename}`;
+      measureElement.textContent = testPath;
+
+      if (measureElement.offsetWidth > availableWidth) {
+        // Sogar der kurze Pfad ist zu lang - kürze den Dateinamen
         return truncateTextToFit(filename, availableWidth, measureElement);
       }
 
-      measureElement.textContent = "...";
-      const ellipsisWidth = measureElement.offsetWidth;
-      const availableForPath =
-        availableWidth - filenameWidth - ellipsisWidth - 10;
+      // Jetzt versuche mehr Pfad-Teile hinzuzufügen
+      let bestPath = testPath;
 
-      if (availableForPath <= 0) {
-        return `.../${filename}`;
-      }
-
-      let bestPath = `.../${filename}`;
-
+      // Gehe vom Ende rückwärts und füge Verzeichnisse hinzu
       for (let i = parts.length - 2; i >= 0; i--) {
-        const pathSegment = parts.slice(i, -1).join("/");
-        const testPath = `.../${pathSegment}/${filename}`;
+        const pathSegments = parts.slice(i, -1);
+        testPath = `.../${pathSegments.join("/")}/${filename}`;
 
         measureElement.textContent = testPath;
+
         if (measureElement.offsetWidth <= availableWidth) {
           bestPath = testPath;
+          // WICHTIG: Weiter versuchen, vielleicht passt noch mehr
+        } else {
+          // Zu lang - nimm den letzten erfolgreichen
           break;
         }
       }
@@ -1065,16 +1059,21 @@ document.addEventListener("DOMContentLoaded", () => {
   function updatePathDisplay() {
     if (!currentFullPath) return;
 
-    // SPEZIFISCH: Nur im Preview-Panel nach dem Element suchen
     const previewPanel = document.querySelector(".preview-panel");
     if (!previewPanel) return;
 
     const titleElement = previewPanel.querySelector(".preview-main-title");
     if (titleElement) {
+      // DEBUG: Log verfügbare Breite
+      console.log("Container width:", titleElement.offsetWidth);
+      console.log("Full path:", currentFullPath);
+
       const optimalPath = getOptimalPathForAvailableSpace(
         currentFullPath,
         titleElement
       );
+
+      console.log("Optimal path:", optimalPath);
       titleElement.textContent = optimalPath;
     }
   }
@@ -1126,7 +1125,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const sizeBytes = new Blob([content], { type: "text/plain" }).size;
     const sizeFormatted = formatFileSize(sizeBytes);
 
-    // KORRIGIERT: Verwende das spezifische Preview-Title Element
     const previewTitle = document.querySelector(
       ".preview-panel #preview-title"
     );
@@ -1136,10 +1134,12 @@ document.addEventListener("DOMContentLoaded", () => {
       <span class="preview-stats">${lines} lines • ${sizeFormatted} • Read-only</span>
     `;
 
-      // Berechne optimale Anzeige nach Layout-Update
-      setTimeout(() => {
-        updatePathDisplay();
-      }, 0);
+      // OPTIMIERT: Warte bis Layout vollständig gerendert ist
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          updatePathDisplay();
+        });
+      });
     }
 
     elements.copyBtn.style.display = "inline-block";

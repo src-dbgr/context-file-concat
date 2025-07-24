@@ -154,18 +154,31 @@ body.sidebar-resizing {
   min-height: 100px;
 }
 
-/* SPEZIFISCH: Nur der Preview-Panel bekommt die neue Logik */
 .preview-panel .panel-header #preview-title {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 0; /* KRITISCH: Ermöglicht Shrinking */
-  flex: 1; /* KRITISCH: Nimmt verfügbaren Platz */
+  min-width: 0;
+  flex: 1;
   overflow: hidden;
   margin: 0;
+  width: 100%;
 }
 
-/* SPEZIFISCH: Nur Preview-Titel bekommt Ellipsis-Behandlung */
+.preview-panel .panel-header > div {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.preview-panel .panel-header button {
+  font-size: 0.8em; /* Etwas kleiner */
+  padding: 4px 6px; /* Kompakter */
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .preview-panel .preview-main-title {
   font-size: 1em;
   font-weight: normal;
@@ -173,14 +186,13 @@ body.sidebar-resizing {
   overflow: hidden;
   min-width: 0;
   cursor: help;
-
-  /* Monospace Font für bessere Pfad-Lesbarkeit */
+  width: 100%;
+  display: block;
   font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Monaco,
     "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
   letter-spacing: -0.02em;
 }
 
-/* SPEZIFISCH: Nur Preview-Stats */
 .preview-panel .preview-stats {
   font-size: 0.8em;
   color: var(--text-color-muted);
@@ -267,7 +279,7 @@ body.vertical-resizing {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 10px;
-  gap: 15px;
+  gap: 10px; /* Reduziert von 15px */
   min-height: 40px;
   overflow: hidden;
 }
@@ -276,6 +288,7 @@ body.vertical-resizing {
   margin: 0;
   font-size: 1em;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* Updated files header layout */
