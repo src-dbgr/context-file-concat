@@ -120,10 +120,227 @@ document.addEventListener("DOMContentLoaded", () => {
       wordWrap: "on",
     });
 
-    // FIX 1: Komplette Blockierung aller problematischen Tastenkombinationen
-    // Wir fangen Events auf mehreren Ebenen ab
+    // DEFINIERE HILFSFUNKTIONEN ZUERST (vor Event Listeners!)
 
-    // Globaler Document Event Listener (höchste Priorität)
+    // Verbesserte Monaco Find Widget Erkennung
+    function isInMonacoFindWidget() {
+      const activeEl = document.activeElement;
+      if (!activeEl) {
+        return false;
+      }
+
+      // Debug: Schaue nach allen möglichen Selektoren
+      const possibleSelectors = [
+        ".find-widget",
+        ".find-part",
+        ".monaco-findInput",
+        ".find-box",
+        ".editor-widget",
+        ".find-input",
+        ".monaco-find-input",
+      ];
+
+      for (const selector of possibleSelectors) {
+        if (activeEl.closest(selector)) {
+          return true;
+        }
+      }
+
+      // Prüfe auch aria-label
+      const ariaLabel =
+        activeEl.getAttribute && activeEl.getAttribute("aria-label");
+      if (ariaLabel && ariaLabel.toLowerCase().includes("find")) {
+        return true;
+      }
+
+      // Prüfe Class-Namen des aktiven Elements
+      if (activeEl.className && activeEl.className.includes("find")) {
+        return true;
+      }
+      return false;
+    }
+
+    // ERSETZE die handleSafePaste Funktion mit dieser erweiterten Debug-Version:
+
+    // ERSETZE die komplette handleSafePaste Funktion mit dieser direkteren Version:
+
+    // ERSETZE die handleSafePaste Funktion mit dieser zuverlässigen Version:
+
+    function handleSafePaste() {
+      const activeEl = document.activeElement;
+
+      // VERBESSERTE ERKENNUNG WO WIR SIND
+      const isInNormalInputField =
+        activeEl &&
+        (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA") &&
+        !activeEl.closest(".monaco-editor");
+
+      const isInMonacoFind = isInMonacoFindWidget();
+
+      const isEditorFocused =
+        activeEl && activeEl.closest(".monaco-editor") && !isInMonacoFind;
+
+      // VERBESSERTE Legacy-Methode mit TEXTAREA für Multi-line Support
+      const getClipboardViaLegacy = () => {
+        return new Promise((resolve, reject) => {
+          // WICHTIG: Verwende TEXTAREA statt INPUT um Zeilenumbrüche zu erhalten
+          const tempTextarea = document.createElement("textarea");
+          tempTextarea.style.position = "fixed";
+          tempTextarea.style.left = "-9999px";
+          tempTextarea.style.top = "-9999px";
+          tempTextarea.style.width = "1px";
+          tempTextarea.style.height = "1px";
+          tempTextarea.style.opacity = "0";
+          tempTextarea.style.pointerEvents = "none";
+
+          document.body.appendChild(tempTextarea);
+
+          // Focus und Select
+          tempTextarea.focus();
+          tempTextarea.select();
+
+          // Versuche execCommand paste
+          const success = document.execCommand("paste");
+          const value = tempTextarea.value;
+
+          // Cleanup
+          document.body.removeChild(tempTextarea);
+
+          if (success && value) {
+            // Prüfe auf Multi-line
+            const hasLineBreaks = value.includes("\n") || value.includes("\r");
+            const lineCount = hasLineBreaks
+              ? value.split(/\r\n|\r|\n/).length
+              : 1;
+
+            resolve(value);
+          } else {
+            reject(new Error("Legacy clipboard failed"));
+          }
+        });
+      };
+
+      // Führe zuverlässige Legacy-Methode aus
+      getClipboardViaLegacy()
+        .then((clipboardText) => {
+          if (!clipboardText || clipboardText.trim() === "") {
+            elements.statusBar.textContent = "Clipboard is empty.";
+            return;
+          }
+
+          // Multi-line Analyse
+          const hasLineBreaks =
+            clipboardText.includes("\n") || clipboardText.includes("\r");
+          const lineCount = hasLineBreaks
+            ? clipboardText.split(/\r\n|\r|\n/).length
+            : 1;
+
+          if (isInNormalInputField) {
+            insertTextIntoElement(activeEl, clipboardText);
+            elements.statusBar.textContent = `✅ Text pasted into input field.`;
+          } else if (isInMonacoFind) {
+            // SIMPEL: Paste Rohtext direkt - Monaco kann Multi-line Suche!
+            if (hasLineBreaks) {
+              const lineCount = clipboardText.split(/\r\n|\r|\n/).length;
+              elements.statusBar.textContent = `✅ Multi-line search text pasted (${lineCount} lines).`;
+            } else {
+              elements.statusBar.textContent = `✅ Text pasted into Monaco search field.`;
+            }
+
+            // Direkt den rohen Clipboard-Text einfügen
+            insertTextIntoElement(activeEl, clipboardText, true);
+          } else if (isEditorFocused && editor) {
+            const selection = editor.getSelection();
+            const range = selection || editor.getModel().getFullModelRange();
+
+            editor.executeEdits("paste", [
+              {
+                range: range,
+                text: clipboardText,
+              },
+            ]);
+
+            elements.statusBar.textContent = `✅ Text pasted into editor.`;
+          } else {
+            elements.statusBar.textContent = `❌ Paste not supported here.`;
+          }
+        })
+        .catch((error) => {
+          // Fallback: User Prompt
+          const userText = prompt(
+            "Clipboard access failed. Please paste your text here:"
+          );
+          if (userText) {
+            if (isInMonacoFind) {
+              // Auch hier Multi-line behandeln
+              const hasUserLineBreaks =
+                userText.includes("\n") || userText.includes("\r");
+              let processedUserText = userText;
+
+              if (hasUserLineBreaks) {
+                const userLineCount = userText.split(/\r\n|\r|\n/).length;
+                processedUserText = userText
+                  .replace(/\r\n/g, " ")
+                  .replace(/\n/g, " ")
+                  .replace(/\r/g, " ")
+                  .replace(/\s+/g, " ")
+                  .trim();
+                elements.statusBar.textContent = `⚠️ User text (${userLineCount} lines) converted to single line.`;
+              } else {
+                elements.statusBar.textContent = `✅ User text entered manually.`;
+              }
+
+              insertTextIntoElement(activeEl, processedUserText, true);
+            } else {
+              insertTextIntoElement(activeEl, userText);
+              elements.statusBar.textContent = `✅ User text entered manually.`;
+            }
+          } else {
+            elements.statusBar.textContent = "❌ No text provided.";
+          }
+        });
+    }
+
+    // BEHALTE die insertTextIntoElement Funktion (bleibt gleich)
+    function insertTextIntoElement(element, text, triggerMonacoEvents = false) {
+      if (!element) {
+        return;
+      }
+
+      const start = element.selectionStart || 0;
+      const end = element.selectionEnd || 0;
+      const value = element.value || "";
+
+      // Text einfügen
+      element.value = value.slice(0, start) + text + value.slice(end);
+      element.selectionStart = element.selectionEnd = start + text.length;
+
+      // Standard Events triggern
+      const standardEvents = ["input", "change"];
+      standardEvents.forEach((eventType) => {
+        try {
+          element.dispatchEvent(new Event(eventType, { bubbles: true }));
+        } catch (e) {}
+      });
+
+      // Monaco Events falls benötigt
+      if (triggerMonacoEvents) {
+        try {
+          element.dispatchEvent(
+            new InputEvent("beforeinput", {
+              bubbles: true,
+              data: text,
+              inputType: "insertText",
+            })
+          );
+        } catch (e) {}
+      }
+
+      element.focus();
+    }
+
+    // JETZT DIE EVENT LISTENERS (nach den Funktionsdefinitionen)
+
     document.addEventListener(
       "keydown",
       (e) => {
@@ -145,39 +362,114 @@ document.addEventListener("DOMContentLoaded", () => {
           // Funktionstasten
           (e.key.startsWith("F") && e.key.length <= 3); // F1-F12
 
-        // ALLOW CMD+F for search functionality in editor
-        const isEditorFocused =
-          document.activeElement &&
-          document.activeElement.closest(".monaco-editor");
+        // VERBESSERTE FOKUS-ERKENNUNG
+        const activeEl = document.activeElement;
+
+        const isEditorFocused = activeEl && activeEl.closest(".monaco-editor");
+        const isInMonacoFind = isInMonacoFindWidget();
+        const isInNormalInputField =
+          activeEl &&
+          (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA") &&
+          !isInMonacoFind && // Nicht das Monaco Find Widget
+          !activeEl.closest(".monaco-editor"); // Nicht im Editor
+
         const isFindCommand =
           (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f";
+        const isCopyCommand =
+          (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c";
+        const isPasteCommand =
+          (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v";
+        const isSelectAllCommand =
+          (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a";
 
-        if (shouldBlock && !(isEditorFocused && isFindCommand)) {
+        // KORRIGIERTE Prüfung ob Text im Editor selektiert ist
+        const hasEditorSelection =
+          editor &&
+          isEditorFocused &&
+          !isInMonacoFind && // WICHTIG: Nicht wenn wir im Find Widget sind
+          !editor.getSelection().isEmpty();
+
+        // COPY-Behandlung: Unterscheide zwischen Selektion und vollem File
+        if (isCopyCommand) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
 
-          // Spezielle Behandlung für nützliche Shortcuts
-          if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
+          if (hasEditorSelection) {
+            // Text ist selektiert - kopiere nur Selektion
+            copySelectedTextToClipboard();
+          } else {
+            // Kein Text selektiert - kopiere das gesamte File
             copyToClipboard();
-          } else if (
-            (e.metaKey || e.ctrlKey) &&
-            e.key.toLowerCase() === "a" &&
-            editor &&
-            document.activeElement &&
-            document.activeElement.closest(".monaco-editor")
-          ) {
+          }
+          return false;
+        }
+
+        // PASTE-Behandlung: IMMER blockieren, aber manuelle Implementierung für sichere Bereiche
+        if (isPasteCommand) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+
+          // Manuelle Paste-Implementierung für sichere Bereiche
+          handleSafePaste();
+          return false;
+        }
+
+        // SELECT ALL-Behandlung: Kontextabhängig
+        if (isSelectAllCommand) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+
+          console.log("=== SELECT ALL DEBUG ===");
+          console.log("Context detection:", {
+            isInMonacoFind,
+            isInNormalInputField,
+            isEditorFocused,
+            activeElementTag: activeEl?.tagName,
+          });
+
+          if (isInMonacoFind) {
+            // Select All im Monaco Find Widget
+            console.log("Selecting all in Monaco Find Widget");
+            if (activeEl && activeEl.select) {
+              activeEl.select();
+            }
+          } else if (isInNormalInputField) {
+            // Select All in normalen Input-Feldern
+            console.log("Selecting all in normal input field");
+            if (activeEl && activeEl.select) {
+              activeEl.select();
+            }
+          } else if (isEditorFocused && editor) {
+            // Select All im Editor
+            console.log("Selecting all in editor");
             const model = editor.getModel();
             if (model) {
               editor.setSelection(model.getFullModelRange());
             }
           }
+          return false;
+        }
+
+        if (
+          shouldBlock &&
+          !(isEditorFocused && isFindCommand) &&
+          !isCopyCommand &&
+          !isPasteCommand &&
+          !isSelectAllCommand
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+
           // Home-Taste: An Zeilenanfang springen (im Editor)
-          else if (
+          if (
             e.key === "Home" &&
             editor &&
-            document.activeElement &&
-            document.activeElement.closest(".monaco-editor")
+            isEditorFocused &&
+            !isInMonacoFind
           ) {
             const position = editor.getPosition();
             if (position) {
@@ -191,8 +483,8 @@ document.addEventListener("DOMContentLoaded", () => {
           else if (
             e.key === "End" &&
             editor &&
-            document.activeElement &&
-            document.activeElement.closest(".monaco-editor")
+            isEditorFocused &&
+            !isInMonacoFind
           ) {
             const position = editor.getPosition();
             if (position) {
@@ -211,13 +503,13 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       },
       true
-    ); // Capture phase für höchste Priorität
+    );
 
     // Editor-spezifische Event-Behandlung (zusätzliche Sicherheit)
     editor.getDomNode().addEventListener(
       "keydown",
       (e) => {
-        // Gleiche Logik wie oben für doppelte Sicherheit
+        // GLEICHE LOGIK WIE BEIM ERSTEN EVENT LISTENER
         const shouldBlock =
           ((e.metaKey || e.ctrlKey) &&
             (e.key.length === 1 ||
@@ -232,24 +524,79 @@ document.addEventListener("DOMContentLoaded", () => {
           ["Home", "End", "PageUp", "PageDown"].includes(e.key) ||
           (e.key.startsWith("F") && e.key.length <= 3);
 
-        // ALLOW CMD+F for search functionality in editor
+        const isInMonacoFind = isInMonacoFindWidget();
         const isFindCommand =
           (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f";
+        const isCopyCommand =
+          (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c";
+        const isPasteCommand =
+          (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v";
+        const isSelectAllCommand =
+          (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a";
 
-        if (shouldBlock && !isFindCommand) {
+        // KORRIGIERTE Prüfung ob Text selektiert ist (nur wenn NICHT im Find Widget)
+        const hasEditorSelection =
+          editor && !isInMonacoFind && !editor.getSelection().isEmpty();
+
+        // COPY-Behandlung: Unterscheide zwischen Selektion und vollem File
+        if (isCopyCommand) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
 
-          // Custom-Implementierungen (gleich wie oben)
-          if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
+          if (hasEditorSelection) {
+            copySelectedTextToClipboard();
+          } else {
             copyToClipboard();
-          } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
+          }
+          return false;
+        }
+
+        // PASTE-Behandlung: IMMER blockieren, aber manuelle Implementierung
+        if (isPasteCommand) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+
+          handleSafePaste();
+          return false;
+        }
+
+        // SELECT ALL-Behandlung: Kontextabhängig (auch hier)
+        if (isSelectAllCommand) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+
+          const activeEl = document.activeElement;
+
+          if (isInMonacoFind) {
+            // Select All im Find Widget
+            if (activeEl && activeEl.select) {
+              activeEl.select();
+            }
+          } else if (editor) {
+            // Select All im Editor
             const model = editor.getModel();
             if (model) {
               editor.setSelection(model.getFullModelRange());
             }
-          } else if (e.key === "Home") {
+          }
+          return false;
+        }
+
+        if (
+          shouldBlock &&
+          !isFindCommand &&
+          !isCopyCommand &&
+          !isPasteCommand &&
+          !isSelectAllCommand
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+
+          if (e.key === "Home" && !isInMonacoFind) {
             const position = editor.getPosition();
             if (position) {
               editor.setPosition({
@@ -257,7 +604,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 column: 1,
               });
             }
-          } else if (e.key === "End") {
+          } else if (e.key === "End" && !isInMonacoFind) {
             const position = editor.getPosition();
             if (position) {
               const model = editor.getModel();
@@ -751,39 +1098,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
     elements.fileStats.textContent = `Files: ${selectedFiles} selected of ${totalFiles} • Folders: ${totalFolders} • Total visible: ${visibleItems}`;
 
-    // ENHANCED: File tree container with scan progress
-    elements.fileTreeContainer.innerHTML = "";
-    if (isScanning) {
-      elements.fileTreeContainer.innerHTML = createScanProgressUI();
-
-      // Add cancel scan event listener
-      const cancelBtn = document.getElementById("cancel-scan-btn");
-      if (cancelBtn) {
-        cancelBtn.addEventListener("click", () => {
-          post("cancelScan");
-          cancelBtn.disabled = true;
-          cancelBtn.innerHTML = "⏳ Cancelling...";
-        });
-      }
-
-      // Initialize progress bar
-      const progressFill = document.getElementById("scan-progress-fill");
-      if (progressFill) {
-        progressFill.style.width = "0%";
-      }
-    } else if (appState.tree.length > 0) {
-      const treeRoot = document.createElement("div");
-      treeRoot.className = "tree";
-      treeRoot.appendChild(createTreeLevel(appState.tree));
-      elements.fileTreeContainer.appendChild(treeRoot);
-    } else if (appState.current_path) {
-      elements.fileTreeContainer.innerHTML =
-        '<p class="placeholder">No files found matching filters.</p>';
-    } else {
-      elements.fileTreeContainer.innerHTML =
-        '<p class="placeholder">Select a directory to start.</p>';
-    }
-
     setupCommonPatterns();
     renderIgnorePatterns();
   }
@@ -1006,21 +1320,22 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.copyBtn.style.display = "none";
   }
 
-  // FIX 2: Vollständig überarbeitete Copy-Funktion mit garantierter Funktionalität
+  // MODIFIZIERTE VERSION der bestehenden copyToClipboard Funktion
+  // (Diese Funktion bleibt größtenteils gleich, aber mit klarerer Dokumentation)
   function copyToClipboard() {
     if (!editor) {
       elements.statusBar.textContent = "Error: Editor not available.";
       return;
     }
 
-    // Den aktuellen Editor-Inhalt holen (garantiert der neueste Stand)
+    // WICHTIG: Diese Funktion kopiert IMMER das gesamte File, unabhängig von der Selektion
     const model = editor.getModel();
     if (!model) {
       elements.statusBar.textContent = "Error: No content to copy.";
       return;
     }
 
-    const contentToCopy = model.getValue();
+    const contentToCopy = model.getValue(); // Gesamter Inhalt, nicht nur Selektion
     if (!contentToCopy || contentToCopy.trim().length === 0) {
       elements.statusBar.textContent = "Error: No content to copy.";
       return;
@@ -1088,7 +1403,7 @@ document.addEventListener("DOMContentLoaded", () => {
     tryCopyMethod()
       .then(() => {
         // Erfolg
-        elements.statusBar.textContent = `✅ Content copied to clipboard! (${contentToCopy.length} characters)`;
+        elements.statusBar.textContent = `✅ Complete file copied to clipboard! (${contentToCopy.length} characters)`;
         button.textContent = "✅ Copied!";
         button.style.backgroundColor = "#34a853";
         button.style.color = "#ffffff";
@@ -1122,6 +1437,91 @@ document.addEventListener("DOMContentLoaded", () => {
             }
           }
         }, 3000);
+      });
+  }
+
+  function copySelectedTextToClipboard() {
+    if (!editor) {
+      elements.statusBar.textContent = "Error: Editor not available.";
+      return;
+    }
+
+    const selection = editor.getSelection();
+    if (!selection || selection.isEmpty()) {
+      elements.statusBar.textContent = "No text selected.";
+      return;
+    }
+
+    const model = editor.getModel();
+    if (!model) {
+      elements.statusBar.textContent = "Error: No content available.";
+      return;
+    }
+
+    const selectedText = model.getValueInRange(selection);
+    if (!selectedText || selectedText.trim().length === 0) {
+      elements.statusBar.textContent = "No text selected.";
+      return;
+    }
+
+    // Clipboard API mit Fallback-Methoden (gleiche Logik wie in copyToClipboard)
+    const copyMethods = [
+      // Methode 1: Moderne Clipboard API
+      () => navigator.clipboard.writeText(selectedText),
+
+      // Methode 2: Fallback für ältere Browser
+      () =>
+        new Promise((resolve, reject) => {
+          const textArea = document.createElement("textarea");
+          textArea.value = selectedText;
+          textArea.style.position = "fixed";
+          textArea.style.left = "-999999px";
+          textArea.style.top = "-999999px";
+          document.body.appendChild(textArea);
+          textArea.focus();
+          textArea.select();
+
+          try {
+            const successful = document.execCommand("copy");
+            document.body.removeChild(textArea);
+            if (successful) {
+              resolve();
+            } else {
+              reject(new Error("execCommand copy failed"));
+            }
+          } catch (err) {
+            document.body.removeChild(textArea);
+            reject(err);
+          }
+        }),
+    ];
+
+    // Versuche die Kopiermethoden der Reihe nach
+    const tryCopyMethod = async (methodIndex = 0) => {
+      if (methodIndex >= copyMethods.length) {
+        throw new Error("All copy methods failed");
+      }
+
+      try {
+        await copyMethods[methodIndex]();
+        return true;
+      } catch (error) {
+        console.warn(`Copy method ${methodIndex + 1} failed:`, error);
+        return tryCopyMethod(methodIndex + 1);
+      }
+    };
+
+    tryCopyMethod()
+      .then(() => {
+        // Erfolg
+        const lines = selectedText.split("\n").length;
+        elements.statusBar.textContent = `✅ Selected text copied to clipboard! (${selectedText.length} characters, ${lines} lines)`;
+      })
+      .catch((error) => {
+        // Fehler
+        console.error("Failed to copy selected text to clipboard:", error);
+        elements.statusBar.textContent =
+          "❌ Failed to copy selected text to clipboard.";
       });
   }
 

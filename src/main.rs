@@ -511,20 +511,21 @@ fn handle_ipc_message(
                         .unwrap();
                 }
                 "generatePreview" => {
-                    let (selected, root, config, all_files) = {
+                    let (selected, root, config, visible_files) = {
+                        // <- Variable umbenannt für Klarheit
                         let state_guard = state.lock().unwrap();
                         (
                             get_selected_files_in_tree_order(&state_guard),
                             PathBuf::from(&state_guard.current_path),
                             state_guard.config.clone(),
-                            state_guard.full_file_list.clone(),
+                            state_guard.filtered_file_list.clone(), // ✅ KORREKTUR: Die gefilterte Liste verwenden
                         )
                     };
                     let result = FileHandler::generate_concatenated_content_simple(
                         &selected,
                         &root,
                         config.include_tree_by_default,
-                        all_files,
+                        visible_files, // ✅ KORREKTUR: Die gefilterte Liste übergeben
                         config.tree_ignore_patterns,
                         config.use_relative_paths,
                     )
