@@ -409,8 +409,36 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  function createScanProgressUI() {
+    return `
+    <div class="scan-progress-container">
+      <div class="scan-progress-header">
+        <div class="scan-status">
+          <div class="scan-spinner"></div>
+          <span class="scan-text">Scanning directory...</span>
+        </div>
+        <button id="cancel-scan-btn" class="cancel-scan-btn" title="Cancel current scan">
+          ❌ Cancel
+        </button>
+      </div>
+      <div class="scan-progress-bar">
+        <div class="scan-progress-fill" id="scan-progress-fill"></div>
+      </div>
+      <div class="scan-details">
+        <span id="scan-files-count">0 files processed</span>
+        <span id="scan-current-path">Starting scan...</span>
+        <span id="scan-skipped-count"></span>
+      </div>
+    </div>
+  `;
+  }
+
   // --- Global Event Handlers from Rust ---
   window.render = (newState) => {
+    const wasScanning = appState.is_scanning;
+    const isNowScanning = newState.is_scanning;
+
+    // Handle search decorations
     if (
       currentPreviewedPath &&
       editor?.getModel() &&
@@ -444,8 +472,90 @@ document.addEventListener("DOMContentLoaded", () => {
       );
     }
 
+    // Detect scan completion
+    if (wasScanning && !isNowScanning) {
+      // Scan completed - show completion animation
+      const progressFill = document.getElementById("scan-progress-fill");
+      if (progressFill) {
+        progressFill.style.width = "100%";
+        progressFill.classList.add("scan-complete");
+      }
+
+      // Show completion message briefly
+      elements.statusBar.textContent = `Status: Scan completed! Found ${newState.total_files_found} files.`;
+      elements.statusBar.classList.remove("scanning");
+
+      // Reset button states after short delay
+      setTimeout(() => {
+        elements.selectDirBtn.disabled = false;
+        elements.rescanBtn.disabled = false;
+        elements.selectDirBtn.innerHTML = "📁 Select Directory";
+        elements.rescanBtn.innerHTML = "🔄 Re-Scan";
+      }, 500);
+    }
+
+    // Detect scan start
+    if (!wasScanning && isNowScanning) {
+      // Scan started - show immediate feedback
+      elements.statusBar.textContent = "Status: Starting directory scan...";
+      elements.statusBar.classList.add("scanning");
+    }
+
     appState = newState;
     renderUI();
+  };
+
+  // Enhanced updateScanProgress function
+  window.updateScanProgress = (progress) => {
+    if (!appState.is_scanning) return;
+
+    const scanText = document.querySelector(".scan-text");
+    const scanFilesCount = document.getElementById("scan-files-count");
+    const scanCurrentPath = document.getElementById("scan-current-path");
+    const scanSkippedCount = document.getElementById("scan-skipped-count");
+    const scanProgressFill = document.getElementById("scan-progress-fill");
+
+    if (scanText) {
+      scanText.textContent = "Scanning directory...";
+    }
+
+    if (scanFilesCount) {
+      scanFilesCount.textContent = `${progress.files_scanned} files processed`;
+    }
+
+    if (scanCurrentPath) {
+      scanCurrentPath.textContent =
+        progress.current_scanning_path || "Processing...";
+    }
+
+    if (scanSkippedCount) {
+      if (progress.large_files_skipped > 0) {
+        scanSkippedCount.textContent = `${progress.large_files_skipped} large files skipped`;
+        scanSkippedCount.style.display = "inline";
+      } else {
+        scanSkippedCount.style.display = "none";
+      }
+    }
+
+    // Animate progress bar (estimated progress)
+    if (scanProgressFill && progress.files_scanned > 0) {
+      const estimatedProgress = Math.min(
+        90,
+        (progress.files_scanned / 100) * 100
+      );
+      scanProgressFill.style.width = `${estimatedProgress}%`;
+    }
+
+    // Update status bar
+    let statusText = `Scanning... ${progress.files_scanned} files processed`;
+    if (progress.large_files_skipped > 0) {
+      statusText += `, ${progress.large_files_skipped} large files skipped`;
+    }
+    if (progress.current_scanning_path) {
+      statusText += ` (${progress.current_scanning_path})`;
+    }
+
+    elements.statusBar.textContent = `Status: ${statusText}`;
   };
 
   window.showPreviewContent = (content, language, searchTerm, path) => {
@@ -581,9 +691,56 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.contentSearchQuery.value = appState.content_search_query;
 
     const hasSelection = appState.selected_files_count > 0;
-    elements.generateBtn.disabled = !hasSelection || appState.is_scanning;
-    elements.rescanBtn.disabled =
-      !appState.current_path || appState.is_scanning;
+    // ENHANCED: Scan state management
+    const isScanning = appState.is_scanning;
+
+    // Disable/Enable buttons based on scan state
+    elements.selectDirBtn.disabled = isScanning;
+    elements.rescanBtn.disabled = isScanning;
+    elements.importConfigBtn.disabled = isScanning;
+    elements.generateBtn.disabled = !hasSelection || isScanning;
+
+    // Update button text during scan
+    if (isScanning) {
+      elements.selectDirBtn.innerHTML = "⏳ Scanning...";
+      elements.rescanBtn.innerHTML = "⏳ Scanning...";
+    } else {
+      elements.selectDirBtn.innerHTML = "📁 Select Directory";
+      elements.rescanBtn.innerHTML = "🔄 Re-Scan";
+    }
+
+    // Enhanced file tree container with scan progress
+    elements.fileTreeContainer.innerHTML = "";
+    if (isScanning) {
+      elements.fileTreeContainer.innerHTML = createScanProgressUI();
+
+      // Add cancel scan event listener
+      const cancelBtn = document.getElementById("cancel-scan-btn");
+      if (cancelBtn) {
+        cancelBtn.addEventListener("click", () => {
+          post("cancelScan");
+          cancelBtn.disabled = true;
+          cancelBtn.innerHTML = "⏳ Cancelling...";
+        });
+      }
+
+      // Initialize progress bar
+      const progressFill = document.getElementById("scan-progress-fill");
+      if (progressFill) {
+        progressFill.style.width = "0%";
+      }
+    } else if (appState.tree.length > 0) {
+      const treeRoot = document.createElement("div");
+      treeRoot.className = "tree";
+      treeRoot.appendChild(createTreeLevel(appState.tree));
+      elements.fileTreeContainer.appendChild(treeRoot);
+    } else if (appState.current_path) {
+      elements.fileTreeContainer.innerHTML =
+        '<p class="placeholder">No files found matching filters.</p>';
+    } else {
+      elements.fileTreeContainer.innerHTML =
+        '<p class="placeholder">Select a directory to start.</p>';
+    }
 
     elements.statusBar.textContent = `Status: ${appState.status_message}`;
 
@@ -594,10 +751,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
     elements.fileStats.textContent = `Files: ${selectedFiles} selected of ${totalFiles} • Folders: ${totalFolders} • Total visible: ${visibleItems}`;
 
+    // ENHANCED: File tree container with scan progress
     elements.fileTreeContainer.innerHTML = "";
-    if (appState.is_scanning) {
-      elements.fileTreeContainer.innerHTML =
-        '<p class="placeholder">Scanning...</p>';
+    if (isScanning) {
+      elements.fileTreeContainer.innerHTML = createScanProgressUI();
+
+      // Add cancel scan event listener
+      const cancelBtn = document.getElementById("cancel-scan-btn");
+      if (cancelBtn) {
+        cancelBtn.addEventListener("click", () => {
+          post("cancelScan");
+          cancelBtn.disabled = true;
+          cancelBtn.innerHTML = "⏳ Cancelling...";
+        });
+      }
+
+      // Initialize progress bar
+      const progressFill = document.getElementById("scan-progress-fill");
+      if (progressFill) {
+        progressFill.style.width = "0%";
+      }
     } else if (appState.tree.length > 0) {
       const treeRoot = document.createElement("div");
       treeRoot.className = "tree";
@@ -614,6 +787,63 @@ document.addEventListener("DOMContentLoaded", () => {
     setupCommonPatterns();
     renderIgnorePatterns();
   }
+
+  // Enhanced post function with immediate UI feedback
+  const originalPost = post;
+  window.post = (command, payload = null) => {
+    // Immediate UI feedback for scan operations
+    if (command === "selectDirectory") {
+      // Show immediate feedback
+      elements.selectDirBtn.disabled = true;
+      elements.selectDirBtn.innerHTML = "⏳ Selecting...";
+      elements.statusBar.textContent = "Status: Selecting directory...";
+    } else if (command === "rescanDirectory") {
+      // Show immediate feedback
+      elements.rescanBtn.disabled = true;
+      elements.rescanBtn.innerHTML = "⏳ Starting scan...";
+      elements.statusBar.textContent = "Status: Starting directory scan...";
+    }
+
+    // Call original post function
+    originalPost(command, payload);
+  };
+
+  // Enhanced scan completion handling
+  const originalRender = window.render;
+  window.render = (newState) => {
+    const wasScanning = appState.is_scanning;
+    const isNowScanning = newState.is_scanning;
+
+    // Detect scan completion
+    if (wasScanning && !isNowScanning) {
+      // Scan completed - show completion animation
+      const progressFill = document.getElementById("scan-progress-fill");
+      if (progressFill) {
+        progressFill.style.width = "100%";
+        progressFill.classList.add("scan-complete");
+      }
+
+      // Show completion message briefly
+      elements.statusBar.textContent = `Status: Scan completed! Found ${newState.total_files_found} files.`;
+
+      // Reset button states after short delay
+      setTimeout(() => {
+        elements.selectDirBtn.disabled = false;
+        elements.rescanBtn.disabled = false;
+        elements.selectDirBtn.innerHTML = "📁 Select Directory";
+        elements.rescanBtn.innerHTML = "🔄 Re-Scan";
+      }, 500);
+    }
+
+    // Detect scan start
+    if (!wasScanning && isNowScanning) {
+      // Scan started - show immediate feedback
+      elements.statusBar.textContent = "Status: Starting directory scan...";
+    }
+
+    // Call original render
+    originalRender(newState);
+  };
 
   // Helper function to count files and folders recursively
   function countTreeItems(nodes) {

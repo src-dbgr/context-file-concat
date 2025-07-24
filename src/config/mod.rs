@@ -18,6 +18,11 @@ pub struct AppConfig {
     pub remove_empty_directories: bool,
     pub window_size: (f32, f32),
     pub window_position: Option<(f32, f32)>,
+    // NEU: Kontrolle über das automatische Laden des letzten Verzeichnisses
+    pub auto_load_last_directory: bool,
+    // NEU: Performance-Einstellungen
+    pub max_file_size_mb: u64,
+    pub scan_chunk_size: usize,
 }
 
 impl AppConfig {
@@ -85,6 +90,10 @@ impl Default for AppConfig {
             remove_empty_directories: false,
             window_size: (1200.0, 800.0),
             window_position: None,
+            // NEU: Standard-Einstellungen
+            auto_load_last_directory: false, // Kann deaktiviert werden
+            max_file_size_mb: 20,            // 20MB Standard-Limit
+            scan_chunk_size: 100,            // 100 Dateien pro Chunk
         }
     }
 }

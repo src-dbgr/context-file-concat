@@ -1,7 +1,6 @@
 use anyhow::Result;
 use directories::ProjectDirs;
 use serde_json::Value;
-use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -76,6 +75,25 @@ fn migrate_legacy_config(config_content: &str) -> Result<AppConfig> {
 
     if !obj.contains_key("use_relative_paths") {
         obj.insert("use_relative_paths".to_string(), Value::Bool(true));
+    }
+
+    // NEU: Migration für neue Felder
+    if !obj.contains_key("auto_load_last_directory") {
+        obj.insert("auto_load_last_directory".to_string(), Value::Bool(true));
+    }
+
+    if !obj.contains_key("max_file_size_mb") {
+        obj.insert(
+            "max_file_size_mb".to_string(),
+            Value::Number(serde_json::Number::from(20)),
+        );
+    }
+
+    if !obj.contains_key("scan_chunk_size") {
+        obj.insert(
+            "scan_chunk_size".to_string(),
+            Value::Number(serde_json::Number::from(100)),
+        );
     }
 
     // Convert ignore_patterns from array to the expected format if needed

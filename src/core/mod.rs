@@ -25,6 +25,9 @@ pub struct SearchFilter {
     pub ignore_patterns: std::collections::HashSet<String>,
 }
 
+// Re-export der ScanProgress aus scanner
+pub use scanner::ScanProgress;
+
 pub use file_handler::FileHandler;
 pub use ignore::build_globset_from_patterns;
 pub use scanner::DirectoryScanner;

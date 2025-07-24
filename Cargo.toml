@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 # Web-View Architecture
 wry = "0.37"
-tao = "0.26" # FIX: Menu-Feature entfernt (nicht verfügbar in 0.26)
+tao = "0.26"
 
 # Core Logic & Utilities
 tokio = { version = "1.0", features = ["full"] }
