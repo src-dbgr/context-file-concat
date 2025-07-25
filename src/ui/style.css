@@ -502,6 +502,7 @@ button:disabled:hover {
 }
 .remove-pattern-btn:hover {
   color: var(--red-accent);
+  border-radius: 50%;
 }
 
 /* Common patterns styling */

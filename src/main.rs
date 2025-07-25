@@ -120,6 +120,30 @@ impl AppState {
         };
         tracing::info!("LOG: AppState wurde auf 'cancelled' zurückgesetzt.");
     }
+
+    // NEUE METHODE ZUM ZURÜCKSETZEN
+    fn reset_directory_state(&mut self) {
+        // Zuerst einen laufenden Scan abbrechen, falls vorhanden
+        self.cancel_current_scan();
+
+        // Alle Listen und Zustände im Zusammenhang mit dem Verzeichnis leeren
+        self.current_path = String::new();
+        self.full_file_list.clear();
+        self.filtered_file_list.clear();
+        self.selected_files.clear();
+        self.expanded_dirs.clear();
+        self.search_query.clear();
+        self.extension_filter.clear();
+        self.content_search_query.clear();
+        self.content_search_results.clear();
+
+        // Fortschrittsanzeige auf den Anfangszustand zurücksetzen
+        self.scan_progress = ScanProgress {
+            files_scanned: 0,
+            large_files_skipped: 0,
+            current_scanning_path: "Ready.".to_string(),
+        };
+    }
 }
 
 #[derive(Debug)]
@@ -227,7 +251,6 @@ async fn main() {
             handle_ipc_message(message, proxy.clone(), state.clone())
         })
         .with_file_drop_handler(move |event| {
-            // The IDE was correct to suggest using the wry import.
             use wry::FileDropEvent;
             match event {
                 FileDropEvent::Hovered { .. } => {
@@ -252,7 +275,6 @@ async fn main() {
                         .send_event(UserEvent::DragStateChanged(false))
                         .unwrap();
                 }
-                // FIX: Add this wildcard arm to handle any other variants.
                 _ => (),
             }
             true
@@ -293,6 +315,18 @@ fn handle_ipc_message(
                             .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
                             .unwrap();
                     }
+                }
+                // NEU: Handler für den "Clear" Button
+                "clearDirectory" => {
+                    let mut state_guard = state.lock().unwrap();
+                    state_guard.reset_directory_state();
+                    // Optional: Auch das zuletzt genutzte Verzeichnis aus der Config entfernen
+                    state_guard.config.last_directory = None;
+                    config::settings::save_config(&state_guard.config).ok();
+                    // UI aktualisieren
+                    proxy
+                        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                        .unwrap();
                 }
                 "rescanDirectory" => {
                     let current_path_str = { state.lock().unwrap().current_path.clone() };
@@ -562,20 +596,19 @@ fn handle_ipc_message(
                 }
                 "generatePreview" => {
                     let (selected, root, config, visible_files) = {
-                        // <- Variable umbenannt für Klarheit
                         let state_guard = state.lock().unwrap();
                         (
                             get_selected_files_in_tree_order(&state_guard),
                             PathBuf::from(&state_guard.current_path),
                             state_guard.config.clone(),
-                            state_guard.filtered_file_list.clone(), // ✅ KORREKTUR: Die gefilterte Liste verwenden
+                            state_guard.filtered_file_list.clone(),
                         )
                     };
                     let result = FileHandler::generate_concatenated_content_simple(
                         &selected,
                         &root,
                         config.include_tree_by_default,
-                        visible_files, // ✅ KORREKTUR: Die gefilterte Liste übergeben
+                        visible_files,
                         config.tree_ignore_patterns,
                         config.use_relative_paths,
                     )
@@ -646,8 +679,6 @@ fn handle_ipc_message(
                                     .file_name()
                                     .and_then(|name| name.to_str())
                                     .map(|s| s.to_string());
-
-                                // Scan mit der neuen Konfiguration starten
                                 tokio::spawn(async move {
                                     let directory_to_scan = {
                                         let mut state_guard = state.lock().unwrap();
@@ -663,7 +694,6 @@ fn handle_ipc_message(
                                             start_scan_on_path(dir, proxy, state);
                                         }
                                     } else {
-                                        // Nur UI aktualisieren, wenn kein Verzeichnis zum Scannen da ist
                                         let state_guard = state.lock().unwrap();
                                         proxy
                                             .send_event(UserEvent::StateUpdate(generate_ui_state(

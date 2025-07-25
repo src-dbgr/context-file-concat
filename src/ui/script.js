@@ -8,6 +8,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const elements = {
     // Top bar
     selectDirBtn: document.getElementById("select-dir-btn"),
+    clearDirBtn: document.getElementById("clear-dir-btn"), // NEU
     currentPath: document.getElementById("current-path"),
     currentConfigFilename: document.getElementById("current-config-filename"),
     importConfigBtn: document.getElementById("import-config-btn"),
@@ -634,6 +635,7 @@ document.addEventListener("DOMContentLoaded", () => {
   elements.selectDirBtn.addEventListener("click", () =>
     post("selectDirectory")
   );
+  elements.clearDirBtn.addEventListener("click", () => post("clearDirectory")); // NEU
   elements.rescanBtn.addEventListener("click", () => post("rescanDirectory"));
   elements.importConfigBtn.addEventListener("click", () =>
     post("importConfig")
@@ -1068,6 +1070,13 @@ document.addEventListener("DOMContentLoaded", () => {
       appState.current_path || "No directory selected.";
     elements.currentPath.title = appState.current_path;
 
+    // NEU: Sichtbarkeit des Clear-Buttons steuern
+    if (appState.current_path) {
+      elements.clearDirBtn.style.display = "inline-block";
+    } else {
+      elements.clearDirBtn.style.display = "none";
+    }
+
     // Show current config filename if available
     if (appState.current_config_filename) {
       elements.currentConfigFilename.textContent =
@@ -1138,6 +1147,14 @@ document.addEventListener("DOMContentLoaded", () => {
       // GEÄNDERT: Platzhaltertext für Drag & Drop
       elements.fileTreeContainer.innerHTML =
         '<p class="placeholder">Select or drop a directory to start.</p>';
+
+      // NEU: Platzhalter klickbar machen
+      const placeholder =
+        elements.fileTreeContainer.querySelector(".placeholder");
+      if (placeholder) {
+        placeholder.style.cursor = "pointer";
+        placeholder.addEventListener("click", () => post("selectDirectory"));
+      }
     }
 
     elements.statusBar.textContent = `Status: ${appState.status_message}`;
