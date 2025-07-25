@@ -1164,7 +1164,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const visibleItems = appState.visible_files_count;
     const selectedFiles = appState.selected_files_count;
 
-    elements.fileStats.textContent = `Files: ${selectedFiles} selected of ${totalFiles} • Folders: ${totalFolders} • Total visible: ${visibleItems}`;
+    elements.fileStats.textContent = `Files: ${selectedFiles} selected of ${totalFiles} • Folders: ${totalFolders}`;
 
     setupCommonPatterns();
     renderIgnorePatterns();

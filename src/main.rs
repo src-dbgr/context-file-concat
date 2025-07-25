@@ -994,7 +994,6 @@ fn apply_filters_on_data(
     }
 }
 
-// Die alte apply_filters wird zu einem einfachen Wrapper
 fn apply_filters(state: &mut AppState) {
     let filtered_list = apply_filters_on_data(
         &state.full_file_list,
@@ -1005,6 +1004,12 @@ fn apply_filters(state: &mut AppState) {
         &state.content_search_results,
     );
     state.filtered_file_list = filtered_list;
+
+    // KORREKTUR: DIESER BLOCK WIRD VOLLSTÄNDIG ENTFERNT.
+    // Er hat fälschlicherweise die Auswahl von Dateien gelöscht, die aktuell
+    // durch den Filter nicht sichtbar waren. Die `selected_files` müssen aber
+    // immer erhalten bleiben, unabhängig vom visuellen Filter.
+    /*
     let visible_paths: HashSet<PathBuf> = state
         .filtered_file_list
         .iter()
@@ -1013,6 +1018,7 @@ fn apply_filters(state: &mut AppState) {
     state
         .selected_files
         .retain(|path| visible_paths.contains(path));
+    */
 }
 
 fn auto_expand_for_matches(state: &mut AppState) {
