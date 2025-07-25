@@ -1,21 +1,19 @@
-use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
-// *** MODIFIZIERT: Nutzt jetzt die zentrale, korrekte Ignore-Logik ***
-use super::{FileItem, build_globset_from_patterns};
+use super::{build_globset_from_patterns, FileItem};
 
 pub struct TreeGenerator;
 
 impl TreeGenerator {
     pub fn generate_tree(
-        files: &[FileItem], 
+        files: &[FileItem],
         root_path: &Path,
-        ignore_patterns: &HashSet<String>
+        ignore_patterns: &HashSet<String>,
     ) -> String {
-        // *** KORRIGIERT: Wendet die korrekte Ignore-Logik auf die Eingabedateien an ***
         // 1. Baue ein GlobSet aus den baumspezifischen Ignore-Patterns.
-        let ignore_set = build_globset_from_patterns(ignore_patterns);
-        
+        let (ignore_set, _) = build_globset_from_patterns(ignore_patterns);
+
         // 2. Filtere die übergebenen Dateien, bevor der Baum gebaut wird.
         let filtered_files: Vec<&FileItem> = files
             .iter()
@@ -23,46 +21,50 @@ impl TreeGenerator {
             .collect();
 
         let mut tree_map = HashMap::new();
-        
+
         // Build tree structure from the correctly filtered files.
         for file in filtered_files {
             // Die alte `should_ignore`-Prüfung ist hier nicht mehr nötig.
-            let relative_path = file.path.strip_prefix(root_path)
-                .unwrap_or(&file.path);
-            
+            let relative_path = file.path.strip_prefix(root_path).unwrap_or(&file.path);
+
             Self::insert_into_tree(&mut tree_map, relative_path, file.is_directory);
         }
-        
+
         // Generate ASCII representation
         let mut result = String::new();
-        result.push_str(&format!("{}/\n", root_path.file_name().unwrap_or_default().to_string_lossy()));
-        
+        result.push_str(&format!(
+            "{}/\n",
+            root_path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+
         Self::render_tree_recursive(&tree_map, &mut result, "", true);
-        
+
         result
     }
-    
+
     fn insert_into_tree(
         tree_map: &mut HashMap<PathBuf, TreeNode>,
         path: &Path,
-        is_directory: bool
+        is_directory: bool,
     ) {
         // Der Inhalt dieser Methode hat sich nicht geändert.
         let mut current_path = PathBuf::new();
-        
+
         for component in path.components() {
             current_path.push(component);
-            
+
             let is_final = current_path == path;
             let node_is_dir = if is_final { is_directory } else { true };
-            
-            tree_map.entry(current_path.clone()).or_insert_with(|| TreeNode {
-                name: component.as_os_str().to_string_lossy().to_string(),
-                is_directory: node_is_dir,
-                children: Vec::new(),
-            });
+
+            tree_map
+                .entry(current_path.clone())
+                .or_insert_with(|| TreeNode {
+                    name: component.as_os_str().to_string_lossy().to_string(),
+                    is_directory: node_is_dir,
+                    children: Vec::new(),
+                });
         }
-        
+
         // Build parent-child relationships
         let paths: Vec<PathBuf> = tree_map.keys().cloned().collect();
         for path in paths {
@@ -77,28 +79,27 @@ impl TreeGenerator {
             }
         }
     }
-    
+
     fn render_tree_recursive(
         tree_map: &HashMap<PathBuf, TreeNode>,
         result: &mut String,
         prefix: &str,
-        is_root: bool
+        is_root: bool,
     ) {
         // Der Inhalt dieser Methode hat sich nicht geändert.
         let mut root_nodes: Vec<&PathBuf> = if is_root {
-            tree_map.keys()
-                .filter(|path| {
-                    path.parent().map_or(true, |p| p == Path::new(""))
-                })
+            tree_map
+                .keys()
+                .filter(|path| path.parent().map_or(true, |p| p == Path::new("")))
                 .collect()
         } else {
             vec![]
         };
-        
+
         root_nodes.sort_by(|a, b| {
             let a_node = &tree_map[*a];
             let b_node = &tree_map[*b];
-            
+
             // Directories first, then files
             match (a_node.is_directory, b_node.is_directory) {
                 (true, false) => std::cmp::Ordering::Less,
@@ -106,17 +107,16 @@ impl TreeGenerator {
                 _ => a_node.name.cmp(&b_node.name),
             }
         });
-        
+
         for (i, path) in root_nodes.iter().enumerate() {
             let node = &tree_map[*path];
             let is_last = i == root_nodes.len() - 1;
-            
+
             let connector = if is_last { "└── " } else { "├── " };
             let icon = if node.is_directory { "📁 " } else { "📄 " };
-            
-            result.push_str(&format!("{}{}{}{}\n", 
-                prefix, connector, icon, node.name));
-            
+
+            result.push_str(&format!("{}{}{}{}\n", prefix, connector, icon, node.name));
+
             // Recursively render children
             if !node.children.is_empty() {
                 let new_prefix = if is_last {
@@ -124,24 +124,24 @@ impl TreeGenerator {
                 } else {
                     format!("{}│   ", prefix)
                 };
-                
+
                 Self::render_children(tree_map, &node.children, result, &new_prefix);
             }
         }
     }
-    
+
     fn render_children(
         tree_map: &HashMap<PathBuf, TreeNode>,
         children: &[PathBuf],
         result: &mut String,
-        prefix: &str
+        prefix: &str,
     ) {
         // Der Inhalt dieser Methode hat sich nicht geändert.
         let mut sorted_children: Vec<&PathBuf> = children.iter().collect();
         sorted_children.sort_by(|a, b| {
             let a_node = &tree_map[*a];
             let b_node = &tree_map[*b];
-            
+
             // Directories first, then files
             match (a_node.is_directory, b_node.is_directory) {
                 (true, false) => std::cmp::Ordering::Less,
@@ -149,17 +149,16 @@ impl TreeGenerator {
                 _ => a_node.name.cmp(&b_node.name),
             }
         });
-        
+
         for (i, path) in sorted_children.iter().enumerate() {
             let node = &tree_map[*path];
             let is_last = i == sorted_children.len() - 1;
-            
+
             let connector = if is_last { "└── " } else { "├── " };
             let icon = if node.is_directory { "📁 " } else { "📄 " };
-            
-            result.push_str(&format!("{}{}{}{}\n", 
-                prefix, connector, icon, node.name));
-            
+
+            result.push_str(&format!("{}{}{}{}\n", prefix, connector, icon, node.name));
+
             // Recursively render children
             if !node.children.is_empty() {
                 let new_prefix = if is_last {
@@ -167,13 +166,11 @@ impl TreeGenerator {
                 } else {
                     format!("{}│   ", prefix)
                 };
-                
+
                 Self::render_children(tree_map, &node.children, result, &new_prefix);
             }
         }
     }
-    
-    // *** ENTFERNT: Die alte, fehlerhafte should_ignore Funktion wird nicht mehr benötigt. ***
 }
 
 #[derive(Debug, Clone)]

@@ -37,6 +37,7 @@ struct UiState {
     content_search_query: String,
     current_config_filename: Option<String>,
     scan_progress: ScanProgress,
+    active_ignore_patterns: HashSet<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -71,6 +72,7 @@ struct AppState {
     previewed_file_path: Option<PathBuf>,
     scan_task: Option<JoinHandle<()>>,
     scan_cancellation_flag: Arc<AtomicBool>,
+    active_ignore_patterns: HashSet<String>,
 }
 
 impl AppState {
@@ -97,6 +99,7 @@ impl AppState {
             previewed_file_path: None, // ADD THIS
             scan_task: None,
             scan_cancellation_flag: Arc::new(AtomicBool::new(false)),
+            active_ignore_patterns: HashSet::new(),
         }
     }
 
@@ -139,6 +142,7 @@ impl AppState {
         self.content_search_query.clear();
         self.content_search_results.clear();
         self.previewed_file_path = None;
+        self.active_ignore_patterns.clear();
 
         // Fortschrittsanzeige auf den Anfangszustand zurücksetzen
         self.scan_progress = ScanProgress {
@@ -197,6 +201,7 @@ fn start_scan_on_path(
 
         let mut state_guard = state.lock().unwrap();
         state_guard.cancel_current_scan();
+        state_guard.active_ignore_patterns.clear(); // Clear active patterns for new scan
 
         state_guard.current_path = directory_path.to_string_lossy().to_string();
         state_guard.config.last_directory = Some(directory_path);
@@ -813,7 +818,7 @@ async fn scan_directory_task(
         if scan_result.is_ok() { "Ok" } else { "Err" }
     );
 
-    let final_files = match scan_result {
+    let (final_files, active_patterns) = match scan_result {
         Ok(files) => files,
         Err(e) => {
             tracing::error!("LOG: TASK:: Scan mit Fehler beendet: {}", e);
@@ -853,6 +858,7 @@ async fn scan_directory_task(
 
     state_lock.full_file_list = final_files;
     state_lock.filtered_file_list = filtered_files;
+    state_lock.active_ignore_patterns = active_patterns;
     state_lock.is_scanning = false;
     state_lock.scan_progress.current_scanning_path = format!(
         "Scan complete. Found {} visible items.",
@@ -973,6 +979,7 @@ fn generate_ui_state(state: &AppState) -> UiState {
         content_search_query: state.content_search_query.clone(),
         current_config_filename: state.current_config_filename.clone(),
         scan_progress: state.scan_progress.clone(),
+        active_ignore_patterns: state.active_ignore_patterns.clone(),
     }
 }
 

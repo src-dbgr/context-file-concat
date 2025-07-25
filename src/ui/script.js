@@ -798,7 +798,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const wasScanning = appState.is_scanning;
     const isNowScanning = newState.is_scanning;
 
-    // Handle search decorations
+    // Behandelt die Such-Markierungen im Editor
     if (
       currentPreviewedPath &&
       editor?.getModel() &&
@@ -832,20 +832,15 @@ document.addEventListener("DOMContentLoaded", () => {
       );
     }
 
-    // Detect scan completion
+    // Erkennt den Abschluss eines Scans, um die UI zu aktualisieren
     if (wasScanning && !isNowScanning) {
-      // Scan completed - show completion animation
       const progressFill = document.getElementById("scan-progress-fill");
       if (progressFill) {
         progressFill.style.width = "100%";
         progressFill.classList.add("scan-complete");
       }
-
-      // Show completion message briefly
       elements.statusBar.textContent = `Status: Scan completed! Found ${newState.total_files_found} files.`;
       elements.statusBar.classList.remove("scanning");
-
-      // Reset button states after short delay
       setTimeout(() => {
         elements.selectDirBtn.disabled = false;
         elements.rescanBtn.disabled = false;
@@ -854,13 +849,13 @@ document.addEventListener("DOMContentLoaded", () => {
       }, 500);
     }
 
-    // Detect scan start
+    // Erkennt den Start eines Scans
     if (!wasScanning && isNowScanning) {
-      // Scan started - show immediate feedback
       elements.statusBar.textContent = "Status: Starting directory scan...";
       elements.statusBar.classList.add("scanning");
     }
 
+    // Aktualisiert den globalen State und rendert die Haupt-UI
     appState = newState;
     renderUI();
   };
@@ -1190,43 +1185,6 @@ document.addEventListener("DOMContentLoaded", () => {
     originalPost(command, payload);
   };
 
-  // Enhanced scan completion handling
-  const originalRender = window.render;
-  window.render = (newState) => {
-    const wasScanning = appState.is_scanning;
-    const isNowScanning = newState.is_scanning;
-
-    // Detect scan completion
-    if (wasScanning && !isNowScanning) {
-      // Scan completed - show completion animation
-      const progressFill = document.getElementById("scan-progress-fill");
-      if (progressFill) {
-        progressFill.style.width = "100%";
-        progressFill.classList.add("scan-complete");
-      }
-
-      // Show completion message briefly
-      elements.statusBar.textContent = `Status: Scan completed! Found ${newState.total_files_found} files.`;
-
-      // Reset button states after short delay
-      setTimeout(() => {
-        elements.selectDirBtn.disabled = false;
-        elements.rescanBtn.disabled = false;
-        elements.selectDirBtn.innerHTML = "📁 Select Directory";
-        elements.rescanBtn.innerHTML = "🔄 Re-Scan";
-      }, 500);
-    }
-
-    // Detect scan start
-    if (!wasScanning && isNowScanning) {
-      // Scan started - show immediate feedback
-      elements.statusBar.textContent = "Status: Starting directory scan...";
-    }
-
-    // Call original render
-    originalRender(newState);
-  };
-
   // Helper function to count files and folders recursively
   function countTreeItems(nodes) {
     let totalFiles = 0;
@@ -1252,7 +1210,19 @@ document.addEventListener("DOMContentLoaded", () => {
   function renderIgnorePatterns() {
     elements.currentPatternsContainer.innerHTML = "";
 
-    let patterns = (appState.config.ignore_patterns || []).slice().sort();
+    const allPatterns = Array.from(appState.config.ignore_patterns || []);
+    const activePatterns = new Set(appState.active_ignore_patterns || []);
+
+    // 1. Separate into active and inactive
+    const active = allPatterns.filter((p) => activePatterns.has(p));
+    const inactive = allPatterns.filter((p) => !activePatterns.has(p));
+
+    // 2. Sort each list alphabetically
+    active.sort();
+    inactive.sort();
+
+    // 3. Combine them: active first, then inactive
+    let patterns = [...active, ...inactive];
 
     // Apply filter if active
     if (currentPatternFilter) {
@@ -1264,7 +1234,14 @@ document.addEventListener("DOMContentLoaded", () => {
     patterns.forEach((p) => {
       const chip = document.createElement("div");
       chip.className = "current-pattern-chip";
-      chip.innerHTML = `<span>${p}</span><button class="remove-pattern-btn" data-pattern="${p}">&times;</button>`;
+
+      // 4. Add 'active-pattern' class if the pattern was active
+      if (activePatterns.has(p)) {
+        chip.classList.add("active-pattern");
+        chip.title = `This pattern was active and matched one or more files/directories.`;
+      }
+
+      chip.innerHTML = `<span>${p}</span><button class="remove-pattern-btn" data-pattern="${p}">✕</button>`;
       chip.querySelector("button").addEventListener("click", (e) => {
         const patternToRemove = e.target.dataset.pattern;
         const newPatterns = appState.config.ignore_patterns.filter(
@@ -1391,7 +1368,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (previewTitle) {
       previewTitle.innerHTML = `
       <div class="preview-path-container">
-        <span class="preview-filename">👁️ Preview</span>
+        <span class="preview-filename">Preview</span>
       </div>
       <span class="preview-stats">Select a file to preview</span>
     `;

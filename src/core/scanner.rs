@@ -3,13 +3,12 @@
 use super::{build_globset_from_patterns, FileItem};
 use crate::utils::file_detection::is_text_file;
 use anyhow::Result;
-use globset::GlobSet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant}; // NEU: Import für Zeitmessung
+use std::time::{Duration, Instant};
 use walkdir::{DirEntry, WalkDir};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -20,7 +19,7 @@ pub struct ScanProgress {
 }
 
 const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024;
-const PROGRESS_UPDATE_THROTTLE: Duration = Duration::from_millis(100); // UI-Update max. alle 100ms
+const PROGRESS_UPDATE_THROTTLE: Duration = Duration::from_millis(100);
 
 pub struct DirectoryScanner {
     ignore_patterns: HashSet<String>,
@@ -34,9 +33,9 @@ impl DirectoryScanner {
     pub async fn scan_directory_with_progress<F>(
         &self,
         root_path: &Path,
-        cancel_flag: Arc<AtomicBool>, // Das Stopp-Signal aus main.rs
+        cancel_flag: Arc<AtomicBool>,
         progress_callback: F,
-    ) -> Result<Vec<FileItem>>
+    ) -> Result<(Vec<FileItem>, HashSet<String>)>
     where
         F: Fn(ScanProgress) + Send + Sync + 'static,
     {
@@ -48,7 +47,9 @@ impl DirectoryScanner {
         tracing::info!("LOG: SCANNER:: Rufe tokio::task::spawn_blocking auf.");
         let blocking_task_handle = tokio::task::spawn_blocking(move || {
             tracing::info!("LOG: BLOCKING-TASK:: Gestartet.");
-            let ignore_glob_set = build_globset_from_patterns(&ignore_patterns_clone);
+            let (ignore_glob_set, glob_patterns) =
+                build_globset_from_patterns(&ignore_patterns_clone);
+            let mut active_patterns: HashSet<String> = HashSet::new();
 
             tracing::info!("LOG: BLOCKING-TASK:: Starte WalkDir...");
             let entries = WalkDir::new(root_path_buf)
@@ -69,7 +70,7 @@ impl DirectoryScanner {
             for (i, entry) in entries.into_iter().enumerate() {
                 if cancel_flag.load(Ordering::Relaxed) {
                     tracing::warn!("LOG: BLOCKING-TASK:: Stopp-Signal erkannt! Breche Schleife ab bei Index {}.", i);
-                    return final_files;
+                    return (final_files, active_patterns);
                 }
 
                 if i > 0 && i % 2000 == 0 {
@@ -94,7 +95,24 @@ impl DirectoryScanner {
                 }
 
                 let path = entry.path();
-                if Self::should_ignore(path, &ignore_glob_set) {
+
+                let mut is_ignored = false;
+                if path.components().any(|c| c.as_os_str() == ".git") {
+                    is_ignored = true;
+                } else {
+                    let matches_indices: Vec<usize> =
+                        ignore_glob_set.matches(path).into_iter().collect();
+                    if !matches_indices.is_empty() {
+                        for &match_index in &matches_indices {
+                            if let Some(pattern) = glob_patterns.get(match_index) {
+                                active_patterns.insert(pattern.clone());
+                            }
+                        }
+                        is_ignored = true;
+                    }
+                }
+
+                if is_ignored {
                     continue;
                 }
 
@@ -123,7 +141,7 @@ impl DirectoryScanner {
                 });
             }
             tracing::info!("LOG: BLOCKING-TASK:: Verarbeitungsschleife beendet.");
-            final_files
+            (final_files, active_patterns)
         });
 
         tracing::info!("LOG: SCANNER:: Warte auf Ergebnis von spawn_blocking...");
@@ -137,12 +155,5 @@ impl DirectoryScanner {
                 Err(anyhow::anyhow!("Scan task was cancelled or failed: {}", e))
             }
         }
-    }
-
-    fn should_ignore(path: &Path, ignore_glob_set: &GlobSet) -> bool {
-        if path.components().any(|c| c.as_os_str() == ".git") {
-            return true;
-        }
-        ignore_glob_set.is_match(path)
     }
 }
