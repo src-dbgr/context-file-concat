@@ -50,6 +50,7 @@ struct TreeNode {
     selection_state: String,
     is_expanded: bool,
     is_match: bool,
+    is_previewed: bool,
 }
 
 struct AppState {
@@ -67,6 +68,7 @@ struct AppState {
     current_config_filename: Option<String>,
     scan_progress: ScanProgress,
     auto_load_last_directory: bool,
+    previewed_file_path: Option<PathBuf>,
     scan_task: Option<JoinHandle<()>>,
     scan_cancellation_flag: Arc<AtomicBool>,
 }
@@ -92,6 +94,7 @@ impl AppState {
                 current_scanning_path: "Ready.".to_string(),
             },
             auto_load_last_directory: false,
+            previewed_file_path: None, // ADD THIS
             scan_task: None,
             scan_cancellation_flag: Arc::new(AtomicBool::new(false)),
         }
@@ -121,7 +124,6 @@ impl AppState {
         tracing::info!("LOG: AppState wurde auf 'cancelled' zurückgesetzt.");
     }
 
-    // NEUE METHODE ZUM ZURÜCKSETZEN
     fn reset_directory_state(&mut self) {
         // Zuerst einen laufenden Scan abbrechen, falls vorhanden
         self.cancel_current_scan();
@@ -136,6 +138,7 @@ impl AppState {
         self.extension_filter.clear();
         self.content_search_query.clear();
         self.content_search_results.clear();
+        self.previewed_file_path = None;
 
         // Fortschrittsanzeige auf den Anfangszustand zurücksetzen
         self.scan_progress = ScanProgress {
@@ -462,13 +465,19 @@ fn handle_ipc_message(
                                 Some(state_guard.content_search_query.clone())
                             }
                         };
+                        // Update state first
+                        {
+                            let mut state_guard = state.lock().unwrap();
+                            state_guard.previewed_file_path = Some(path.clone());
+                        }
+
+                        // Send preview content event
                         match FileHandler::get_file_preview(&path, 1500) {
                             Ok(content) => {
-                                let language = get_language_from_path(&path);
                                 proxy
                                     .send_event(UserEvent::ShowFilePreview {
                                         content,
-                                        language,
+                                        language: get_language_from_path(&path),
                                         search_term,
                                         path,
                                     })
@@ -478,6 +487,12 @@ fn handle_ipc_message(
                                 .send_event(UserEvent::ShowError(e.to_string()))
                                 .unwrap(),
                         }
+                        // Send state update to re-render the tree with the new highlight
+                        proxy
+                            .send_event(UserEvent::StateUpdate(generate_ui_state(
+                                &state.lock().unwrap(),
+                            )))
+                            .unwrap();
                     }
                 }
                 "addIgnorePath" => {
@@ -596,7 +611,9 @@ fn handle_ipc_message(
                 }
                 "generatePreview" => {
                     let (selected, root, config, visible_files) = {
-                        let state_guard = state.lock().unwrap();
+                        let mut state_guard = state.lock().unwrap();
+                        // Clear the previewed file state when generating a combined preview
+                        state_guard.previewed_file_path = None;
                         (
                             get_selected_files_in_tree_order(&state_guard),
                             PathBuf::from(&state_guard.current_path),
@@ -614,13 +631,29 @@ fn handle_ipc_message(
                     )
                     .await;
                     match result {
-                        Ok(content) => proxy
-                            .send_event(UserEvent::ShowGeneratedContent(content))
-                            .unwrap(),
+                        Ok(content) => {
+                            // Send the generated content
+                            proxy
+                                .send_event(UserEvent::ShowGeneratedContent(content))
+                                .unwrap();
+                            // Send a state update to remove the highlight from the tree
+                            proxy
+                                .send_event(UserEvent::StateUpdate(generate_ui_state(
+                                    &state.lock().unwrap(),
+                                )))
+                                .unwrap();
+                        }
                         Err(e) => proxy
                             .send_event(UserEvent::ShowError(e.to_string()))
                             .unwrap(),
                     }
+                }
+                "clearPreviewState" => {
+                    let mut state_guard = state.lock().unwrap();
+                    state_guard.previewed_file_path = None;
+                    proxy
+                        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                        .unwrap();
                 }
                 "saveFile" => {
                     if let Some(content) = msg.payload.as_str() {
@@ -910,6 +943,7 @@ fn generate_ui_state(state: &AppState) -> UiState {
             &search_matches,
             &state.search_query,
             state.config.case_sensitive_search,
+            &state.previewed_file_path,
         )
     };
     let status_message = if state.is_scanning {
@@ -1129,6 +1163,7 @@ fn get_directory_selection_state(
         "partial".to_string()
     }
 }
+
 fn build_tree_nodes(
     items: &[FileItem],
     root_path: &Path,
@@ -1137,6 +1172,7 @@ fn build_tree_nodes(
     content_search_matches: &HashSet<PathBuf>,
     filename_query: &str,
     case_sensitive: bool,
+    previewed_path: &Option<PathBuf>, // MODIFIED SIGNATURE
 ) -> Vec<TreeNode> {
     let mut nodes: HashMap<PathBuf, TreeNode> = HashMap::new();
     let mut children_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
@@ -1163,6 +1199,7 @@ fn build_tree_nodes(
             false
         };
         let content_match = content_search_matches.contains(&item.path);
+        let is_previewed = previewed_path.as_ref() == Some(&item.path);
         nodes.insert(
             item.path.clone(),
             TreeNode {
@@ -1175,6 +1212,7 @@ fn build_tree_nodes(
                 selection_state,
                 is_expanded: expanded.contains(&item.path),
                 is_match: name_match || content_match,
+                is_previewed,
             },
         );
         if let Some(parent) = item.path.parent() {

@@ -1329,7 +1329,9 @@ document.addEventListener("DOMContentLoaded", () => {
       } else {
         const container = document.createElement("div");
         container.className = "tree-item-container";
-
+        if (node.is_previewed) {
+          container.classList.add("previewed");
+        }
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
         checkbox.checked = node.selection_state === "full";
@@ -1374,6 +1376,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function clearPreview() {
+    post("clearPreviewState");
     currentPreviewedPath = null;
     currentFullPath = null;
 

@@ -1012,3 +1012,10 @@ button:disabled:hover {
     width: 100%;
   }
 }
+
+.tree .tree-item-container.previewed,
+.tree .tree-item-container.previewed:hover {
+  background-color: rgba(138, 180, 248, 0.2); /* Light blue highlight */
+  border: 1px solid var(--accent-color);
+  border-radius: 3px;
+}
