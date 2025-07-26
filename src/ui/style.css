@@ -63,6 +63,10 @@ html {
   flex-shrink: 0;
 }
 
+.icon-lightning {
+  stroke: var(--yellow-accent) !important;
+}
+
 .sidebar {
   width: 350px;
   min-width: 280px;
