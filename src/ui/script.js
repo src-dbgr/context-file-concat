@@ -1024,20 +1024,19 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const pathStr = path || "Unknown File";
     const { pathPart, filename } = splitPathForDisplay(pathStr);
-    const lines = content.split("\n").length;
-    const sizeBytes = new Blob([content], { type: "text/plain" }).size;
-    const sizeFormatted = formatFileSize(sizeBytes);
+
+    // GEÄNDERT: Verwendung der neuen generateStatsString Funktion
+    const statsString = generateStatsString(content, "Read-only");
 
     const previewTitle = document.querySelector(
       ".preview-panel #preview-title"
     );
     if (previewTitle) {
-      // Relativer Pfad mit einheitlicher Schrift
       previewTitle.innerHTML = `
       <div class="preview-path-container" title="${pathStr}">
         <span class="preview-path-part">${pathPart}</span><span class="preview-filename">${filename}</span>
       </div>
-      <span class="preview-stats">${lines} lines • ${sizeFormatted} • Read-only</span>
+      <span class="preview-stats">${statsString}</span>
     `;
     }
 
@@ -1056,9 +1055,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const updateGeneratedStats = () => {
       const currentContent = editor.getValue();
-      const lines = currentContent.split("\n").length;
-      const sizeBytes = new Blob([currentContent], { type: "text/plain" }).size;
-      const sizeFormatted = formatFileSize(sizeBytes);
+
+      // GEÄNDERT: Verwendung der neuen generateStatsString Funktion
+      const statsString = generateStatsString(currentContent, "Editable");
 
       const previewTitle = document.querySelector(
         ".preview-panel #preview-title"
@@ -1073,7 +1072,7 @@ document.addEventListener("DOMContentLoaded", () => {
             Generated Preview
           </span>
         </div>
-        <span class="preview-stats">${lines} lines • ${sizeFormatted} • Editable</span>
+        <span class="preview-stats">${statsString}</span>
       `;
       }
     };
@@ -1757,6 +1756,50 @@ document.addEventListener("DOMContentLoaded", () => {
     const sizes = ["B", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+  }
+
+  function countWords(text) {
+    if (!text || text.trim() === "") return 0;
+
+    // Entferne führende/nachfolgende Leerzeichen und teile bei Leerzeichen, Tabs und Zeilenwechseln
+    const words = text.trim().split(/\s+/);
+
+    // Filtere leere Strings heraus (für den Fall von mehreren aufeinanderfolgenden Leerzeichen)
+    return words.filter((word) => word.length > 0).length;
+  }
+
+  function countCharacters(text) {
+    if (!text) return 0;
+    return text.length;
+  }
+
+  function formatNumber(num) {
+    if (num >= 1000000) {
+      return (num / 1000000).toFixed(1) + "M";
+    } else if (num >= 1000) {
+      return (num / 1000).toFixed(1) + "K";
+    } else {
+      return num.toString();
+    }
+  }
+
+  function generateStatsString(content, additionalInfo = "") {
+    const lines = content.split("\n").length;
+    const words = countWords(content);
+    const characters = countCharacters(content);
+    const sizeBytes = new Blob([content], { type: "text/plain" }).size;
+    const sizeFormatted = formatFileSize(sizeBytes);
+
+    const formattedWords = formatNumber(words);
+    const formattedChars = formatNumber(characters);
+
+    let statsString = `${lines} lines • ${formattedWords} words • ${formattedChars} chars • ${sizeFormatted}`;
+
+    if (additionalInfo) {
+      statsString += ` • ${additionalInfo}`;
+    }
+
+    return statsString;
   }
 
   // --- Resizer Logic (Vertikal) ---
