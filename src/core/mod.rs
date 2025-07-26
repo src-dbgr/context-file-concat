@@ -1,12 +1,13 @@
-pub mod scanner;
 pub mod file_handler;
+pub mod ignore;
+pub mod scanner;
 pub mod search;
 pub mod tree_generator;
-pub mod ignore; // <-- HINZUGEFÜGT
 
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileItem {
     pub path: PathBuf,
     pub is_directory: bool,
@@ -14,17 +15,6 @@ pub struct FileItem {
     pub size: u64,
     pub depth: usize,
     pub parent: Option<PathBuf>,
-    pub children: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ScanProgress {
-    pub current_file: PathBuf,
-    pub processed: usize,
-    pub total: usize,
-    pub status: String,
-    pub file_size: Option<u64>,
-    pub line_count: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,8 +25,11 @@ pub struct SearchFilter {
     pub ignore_patterns: std::collections::HashSet<String>,
 }
 
-pub use scanner::DirectoryScanner;
+// Re-export der ScanProgress aus scanner
+pub use scanner::ScanProgress;
+
 pub use file_handler::FileHandler;
+pub use ignore::build_globset_from_patterns;
+pub use scanner::DirectoryScanner;
 pub use search::SearchEngine;
 pub use tree_generator::TreeGenerator;
-pub use ignore::build_globset_from_patterns; // <-- HINZUGEFÜGT

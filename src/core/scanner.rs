@@ -1,12 +1,25 @@
-use std::path::Path;
-use std::collections::HashSet;
-use tokio::sync::mpsc;
-use walkdir::WalkDir;
-use anyhow::Result;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use globset::GlobSet; // <-- HINZUGEFÜGT
+// src/core/scanner.rs
 
-use super::{FileItem, ScanProgress, build_globset_from_patterns}; // <-- MODIFIZIERT
+use super::{build_globset_from_patterns, FileItem};
+use crate::utils::file_detection::is_text_file;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use walkdir::{DirEntry, WalkDir};
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ScanProgress {
+    pub files_scanned: usize,
+    pub large_files_skipped: usize,
+    pub current_scanning_path: String,
+}
+
+const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024;
+const PROGRESS_UPDATE_THROTTLE: Duration = Duration::from_millis(100);
 
 pub struct DirectoryScanner {
     ignore_patterns: HashSet<String>,
@@ -16,136 +29,131 @@ impl DirectoryScanner {
     pub fn new(ignore_patterns: HashSet<String>) -> Self {
         Self { ignore_patterns }
     }
-    
-    pub async fn scan_directory(
+
+    pub async fn scan_directory_with_progress<F>(
         &self,
         root_path: &Path,
-        progress_sender: mpsc::UnboundedSender<ScanProgress>,
         cancel_flag: Arc<AtomicBool>,
-    ) -> Result<(Vec<FileItem>, usize, Vec<String>)> {
-        progress_sender.send(ScanProgress {
-            current_file: root_path.to_path_buf(),
-            processed: 0, total: 0, status: "Counting files...".to_string(),
-            file_size: None, line_count: None,
-        })?;
+        progress_callback: F,
+    ) -> Result<(Vec<FileItem>, HashSet<String>)>
+    where
+        F: Fn(ScanProgress) + Send + Sync + 'static,
+    {
+        tracing::info!("LOG: SCANNER::scan_directory_with_progress aufgerufen.");
+        let root_path_buf = root_path.to_path_buf();
+        let ignore_patterns_clone = self.ignore_patterns.clone();
+        let progress_callback = Arc::new(progress_callback);
 
-        // Build the globset ONCE before the loops for maximum performance.
-        let ignore_glob_set = build_globset_from_patterns(&self.ignore_patterns);
+        tracing::info!("LOG: SCANNER:: Rufe tokio::task::spawn_blocking auf.");
+        let blocking_task_handle = tokio::task::spawn_blocking(move || {
+            tracing::info!("LOG: BLOCKING-TASK:: Gestartet.");
+            let (ignore_glob_set, glob_patterns) =
+                build_globset_from_patterns(&ignore_patterns_clone);
+            let mut active_patterns: HashSet<String> = HashSet::new();
 
-        let mut total = 0;
-        for (i, entry) in WalkDir::new(root_path).into_iter().filter_map(Result::ok).enumerate() {
-            if i % 1000 == 0 && cancel_flag.load(Ordering::Relaxed) {
-                return Err(anyhow::anyhow!("Scan cancelled by user during counting phase."));
-            }
-            if !Self::should_ignore(entry.path(), &ignore_glob_set) {
-                total += 1;
-            }
-        }
+            tracing::info!("LOG: BLOCKING-TASK:: Starte WalkDir...");
+            let entries = WalkDir::new(root_path_buf)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+                .collect::<Vec<DirEntry>>();
+            tracing::info!(
+                "LOG: BLOCKING-TASK:: WalkDir beendet. {} Einträge gefunden.",
+                entries.len()
+            );
 
-        if cancel_flag.load(Ordering::Relaxed) {
-             return Err(anyhow::anyhow!("Scan cancelled by user."));
-        }
-        
-        progress_sender.send(ScanProgress {
-            current_file: root_path.to_path_buf(),
-            processed: 0, total, status: "Scanning files...".to_string(),
-            file_size: None, line_count: None,
-        })?;
-        
-        let mut files = Vec::new();
-        let mut processed = 0;
-        let mut large_files_count = 0;
-        let mut large_files_names = Vec::new();
+            let total_to_process = entries.len();
+            let mut final_files = Vec::with_capacity(total_to_process);
+            let large_files_skipped_counter = AtomicUsize::new(0);
+            let mut last_update = Instant::now();
 
-        for entry in WalkDir::new(root_path).into_iter().filter_map(Result::ok) {
-            if cancel_flag.load(Ordering::Relaxed) { return Err(anyhow::anyhow!("Scan cancelled by user.")); }
+            for (i, entry) in entries.into_iter().enumerate() {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    tracing::warn!("LOG: BLOCKING-TASK:: Stopp-Signal erkannt! Breche Schleife ab bei Index {}.", i);
+                    return (final_files, active_patterns);
+                }
 
-            let path = entry.path();
-            
-            if Self::should_ignore(path, &ignore_glob_set) {
-                continue;
-            }
-            
-            processed += 1;
-            
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(e) => { tracing::warn!("Failed to get metadata for {}: {}", path.display(), e); continue; }
-            };
-            
-            if metadata.is_dir() {
-                 files.push(FileItem {
-                    path: path.to_path_buf(), is_directory: true, is_binary: false, size: 0,
-                    depth: path.strip_prefix(root_path).map(|p| p.components().count()).unwrap_or(0),
-                    parent: path.parent().map(|p| p.to_path_buf()), children: Vec::new(),
+                if i > 0 && i % 2000 == 0 {
+                    tracing::info!("LOG: BLOCKING-TASK:: Verarbeite... Index {}", i);
+                }
+
+                let now = Instant::now();
+                if now.duration_since(last_update) > PROGRESS_UPDATE_THROTTLE
+                    || i == total_to_process - 1
+                {
+                    tracing::info!(
+                        "LOG: BLOCKING-TASK:: Sende Fortschritts-Update an UI (Index {}).",
+                        i + 1
+                    );
+                    let path_str = entry.path().to_string_lossy().into_owned();
+                    progress_callback(ScanProgress {
+                        files_scanned: i + 1,
+                        large_files_skipped: large_files_skipped_counter.load(Ordering::Relaxed),
+                        current_scanning_path: path_str,
+                    });
+                    last_update = now;
+                }
+
+                let path = entry.path();
+
+                let mut is_ignored = false;
+                if path.components().any(|c| c.as_os_str() == ".git") {
+                    is_ignored = true;
+                } else {
+                    let matches_indices: Vec<usize> =
+                        ignore_glob_set.matches(path).into_iter().collect();
+                    if !matches_indices.is_empty() {
+                        for &match_index in &matches_indices {
+                            if let Some(pattern) = glob_patterns.get(match_index) {
+                                active_patterns.insert(pattern.clone());
+                            }
+                        }
+                        is_ignored = true;
+                    }
+                }
+
+                if is_ignored {
+                    continue;
+                }
+
+                let metadata = match entry.metadata() {
+                    Ok(md) => md,
+                    Err(_) => continue,
+                };
+                if !metadata.is_dir() && metadata.len() > MAX_FILE_SIZE {
+                    large_files_skipped_counter.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+
+                let is_binary = if metadata.is_file() {
+                    !is_text_file(path).unwrap_or(false)
+                } else {
+                    false
+                };
+
+                final_files.push(FileItem {
+                    path: path.to_path_buf(),
+                    is_directory: metadata.is_dir(),
+                    is_binary,
+                    size: metadata.len(),
+                    depth: entry.depth(),
+                    parent: path.parent().map(|p| p.to_path_buf()),
                 });
-                continue;
             }
+            tracing::info!("LOG: BLOCKING-TASK:: Verarbeitungsschleife beendet.");
+            (final_files, active_patterns)
+        });
 
-            let size = metadata.len();
-            if size > 20 * 1024 * 1024 {
-                large_files_count += 1;
-                large_files_names.push(path.display().to_string());
-                tracing::warn!("File {} exceeds 20MB limit, skipping", path.display());
-                continue;
+        tracing::info!("LOG: SCANNER:: Warte auf Ergebnis von spawn_blocking...");
+        match blocking_task_handle.await {
+            Ok(files) => {
+                tracing::info!("LOG: SCANNER:: spawn_blocking erfolgreich beendet.");
+                Ok(files)
             }
-            
-            files.push(FileItem {
-                path: path.to_path_buf(), is_directory: false,
-                is_binary: Self::is_likely_binary_by_extension(path), size,
-                depth: path.strip_prefix(root_path).map(|p| p.components().count()).unwrap_or(0),
-                parent: path.parent().map(|p| p.to_path_buf()), children: Vec::new(),
-            });
-            
-            if processed % 10 == 0 || processed < 100 {
-                progress_sender.send(ScanProgress {
-                    current_file: path.to_path_buf(), processed, total,
-                    status: "Scanning...".to_string(), file_size: None, line_count: None,
-                })?;
+            Err(e) => {
+                tracing::error!("LOG: SCANNER:: spawn_blocking mit Fehler beendet (wahrscheinlich abgebrochen): {}", e);
+                Err(anyhow::anyhow!("Scan task was cancelled or failed: {}", e))
             }
         }
-        
-        if !cancel_flag.load(Ordering::Relaxed) {
-            progress_sender.send(ScanProgress {
-                current_file: root_path.to_path_buf(), processed, total,
-                status: "Scan complete!".to_string(), file_size: None, line_count: None,
-            })?;
-        }
-
-        Ok((files, large_files_count, large_files_names))
-    }
-
-    fn is_likely_binary_by_extension(path: &Path) -> bool {
-        // Unchanged
-        if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
-            let ext_lower = extension.to_lowercase();
-            const DEFINITELY_TEXT: &[&str] = &["txt","md","markdown","rst","asciidoc","adoc","rs","py","js","ts","jsx","tsx","java","c","cpp","cxx","cc","h","hpp","hxx","go","rb","php","swift","kt","kts","scala","clj","cljs","hs","ml","fs","fsx","html","htm","xml","xhtml","css","scss","sass","less","svg","vue","svelte","json","yaml","yml","toml","ini","cfg","conf","config","properties","sql","sh","bash","zsh","fish","ps1","bat","cmd","dockerfile","makefile","cmake","gradle","maven","pom","build","tex","bib","r","m","pl","lua","vim","el","lisp","dart","elm","ex","exs","erl","hrl","nim","crystal","cr","zig","odin","v","log","trace","out","err","diff","patch","gitignore","gitattributes","editorconfig","env","example","sample","template","spec","test","readme","license","changelog","todo","notes","doc","docs","man","help","faq","lock","sum","mod","work","pest","ron","d.ts","mjs","cjs","coffee","graphql","gql","prisma","proto","csv","tsv","data","org","R","Rmd","jl","pyi","rakefile","gemfile","procfile","capfile","jenkinsfile","fastfile","npmignore","dockerignore","eslintrc","babelrc","nvmrc","rvmrc"];
-            const DEFINITELY_BINARY: &[&str] = &["exe","dll","so","dylib","app","deb","rpm","msi","zip","tar","gz","bz2","7z","rar","jar","war","mp3","mp4","avi","mkv","mov","wmv","flv","webm","m4a","wav","ogg","jpg","jpeg","png","gif","bmp","ico","webp","tiff","tif","raw","heic","heif","pdf","doc","docx","xls","xlsx","ppt","pptx","bin","dat","db","sqlite","sqlite3","dmg","iso","img","icns","ico","pkg","class","pyc","pyo","o","obj","lib","a","rlib"];
-            if DEFINITELY_TEXT.contains(&ext_lower.as_str()) { return false; }
-            if DEFINITELY_BINARY.contains(&ext_lower.as_str()) { return true; }
-        }
-        false
-    }
-    
-    // *** MODIFIED: Uses the pre-compiled globset for a simple, fast check ***
-    fn should_ignore(path: &Path, ignore_glob_set: &GlobSet) -> bool {
-        // A special check for `.git` is still useful for performance, as it can prune huge trees early.
-        if path.components().any(|c| c.as_os_str() == ".git") {
-            return true;
-        }
-        ignore_glob_set.is_match(path)
-    }
-}
-
-impl Default for DirectoryScanner {
-    // Unchanged
-    fn default() -> Self {
-        let mut ignore_patterns = HashSet::new();
-        ignore_patterns.insert("node_modules/".to_string());
-        ignore_patterns.insert("target/".to_string());
-        ignore_patterns.insert(".git/".to_string());
-        ignore_patterns.insert("*.log".to_string());
-        ignore_patterns.insert("*.tmp".to_string());
-        Self { ignore_patterns }
     }
 }
