@@ -1226,7 +1226,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } else {
       // GEÄNDERT: Platzhaltertext für Drag & Drop
       elements.fileTreeContainer.innerHTML =
-        '<p class="placeholder">Select or drop a directory to start.</p>';
+        '<p class="placeholder">Choose Directory</p>';
 
       // NEU: Platzhalter klickbar machen
       const placeholder =
