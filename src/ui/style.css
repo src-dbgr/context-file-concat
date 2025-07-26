@@ -1,19 +1,28 @@
 :root {
+  /* --- NEUE FARBPALETTE --- */
+  /* Neutrale Hintergründe für einen ruhigeren Look */
+  --bg-color-dark: #1e1f22; /* Dunkelster Hintergrund, fast schwarz */
+  --bg-color-medium: #2c2e33; /* Mittlerer Hintergrund für Panels etc. */
+  --bg-color-light: #3a3d44; /* Hellerer Hintergrund für UI-Elemente */
+  --border-color: #4a4d55; /* Dezente Trennlinien */
+
+  /* Textfarben für bessere Lesbarkeit */
+  --text-color: #d4d4d4; /* Heller, aber nicht reinweiß für weniger Anstrengung */
+  --text-color-muted: #9a9a9a; /* Gedämpftes Grau für sekundäre Informationen */
+
+  /* Konsistente Akzentfarben */
+  --accent-color: #3a7fd5; /* Ein klares, professionelles Blau */
+  --green-accent: #4caf50; /* Standard "Erfolg"-Grün */
+  --yellow-accent: #ffc107; /* Standard "Warnung"-Gelb/Amber */
+  --orange-accent: #fd7e14; /* Standard "Info/Scan"-Orange */
+  --red-accent: #e54b4b; /* Klares, aber nicht zu aggressives Rot */
+
+  /* Button-Farben */
+  --button-bg: #3a3d44;
+  --button-hover-bg: #4a4d55;
+  --icon-size: 16px;
   --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
-  --bg-color-dark: #202124;
-  --bg-color-medium: #282a2e;
-  --bg-color-light: #303134;
-  --border-color: #3c4043;
-  --text-color: #e8eaed;
-  --text-color-muted: #9aa0a6;
-  --accent-color: #8ab4f8; /* Blau für Hervorhebungen */
-  --green-accent: #34a853;
-  --yellow-accent: #fbbc04;
-  --orange-accent: #ffa500; /* FIX: Orange für "in progress" */
-  --red-accent: #dc3545; /* FIX: Rot für Fehler */
-  --button-bg: #4d5156;
-  --button-hover-bg: #5f6368;
 }
 
 *,
@@ -40,7 +49,20 @@ html {
   height: calc(100% - 25px);
 }
 
-/* GEÄNDERT: resize: horizontal entfernt und Cursor-Logik hinzugefügt */
+/* SVG Icon Styles */
+.icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
 .sidebar {
   width: 350px;
   min-width: 280px;
@@ -51,33 +73,27 @@ html {
   flex-direction: column;
   padding: 10px;
   gap: 10px;
-  /* resize: horizontal; <-- ENTFERNT */
   overflow-x: hidden;
   overflow-y: auto;
-  position: relative; /* NEU: Für positioning des Resize-Handles */
+  position: relative;
 }
 
-/* NEU: Resize-Handle als rechter Rand */
 .sidebar::after {
   content: "";
   position: absolute;
   top: 0;
-  right: -5px; /* 5px über den Border hinaus für größeren Hit-Bereich */
-  width: 10px; /* 10px breiter Hit-Bereich */
+  right: -5px;
+  width: 10px;
   height: 100%;
   cursor: ew-resize;
   z-index: 10;
-  /* Optional: Für Debugging sichtbar machen */
-  /* background-color: rgba(255, 0, 0, 0.1); */
 }
 
-/* NEU: Hover-Effekt für den Border */
 .sidebar.resizing {
   border-right-color: var(--accent-color);
   transition: border-right-color 0.2s ease;
 }
 
-/* NEU: Cursor für den gesamten Body während Resize */
 body.sidebar-resizing {
   cursor: ew-resize !important;
   user-select: none;
@@ -174,8 +190,9 @@ body.sidebar-resizing {
     "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
   letter-spacing: -0.02em;
   font-size: 1em;
-  font-weight: normal; /* KORRIGIERT: Keine fette Schrift */
+  font-weight: normal;
   cursor: help;
+  gap: 4px;
 }
 
 .preview-path-part {
@@ -189,10 +206,13 @@ body.sidebar-resizing {
 }
 
 .preview-filename {
-  color: var(--text-color); /* Gleiche Farbe */
+  color: var(--text-color);
   white-space: nowrap;
   flex-shrink: 0;
-  font-weight: normal; /* KORRIGIERT: Keine fette Schrift mehr */
+  font-weight: normal;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .preview-panel .panel-header > div {
@@ -203,25 +223,12 @@ body.sidebar-resizing {
 }
 
 .preview-panel .panel-header button {
-  font-size: 0.8em; /* Etwas kleiner */
-  padding: 4px 6px; /* Kompakter */
+  font-size: 0.8em;
+  padding: 6px 12px;
   white-space: nowrap;
   flex-shrink: 0;
+  min-height: 32px;
 }
-
-/* .preview-panel .preview-main-title {
-  font-size: 1em;
-  font-weight: normal;
-  white-space: nowrap;
-  overflow: hidden;
-  min-width: 0;
-  cursor: help;
-  width: 100%;
-  display: block;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Monaco,
-    "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
-  letter-spacing: -0.02em;
-} */
 
 .preview-panel .preview-stats {
   font-size: 0.8em;
@@ -236,29 +243,25 @@ body.sidebar-resizing {
   cursor: ns-resize;
   flex-shrink: 0;
   transition: all 0.2s ease;
-  position: relative; /* NEU: Für Positioning des Hit-Bereichs */
+  position: relative;
 }
 
 .resizer.resizing {
   background-color: var(--accent-color);
-  transition: all 0.2s ease; /* Smooth Übergang */
+  transition: all 0.2s ease;
 }
 
-/* NEU: Unsichtbare Hit-Zone für einfacheres Targeting */
 .resizer::before {
   content: "";
   position: absolute;
-  top: -8px; /* 8px nach oben */
+  top: -8px;
   left: 0;
   right: 0;
-  height: 18px; /* 2px sichtbar + 16px unsichtbar = 18px total Hit-Zone */
+  height: 18px;
   cursor: ns-resize;
   z-index: 1;
-  /* Optional: Für Debugging sichtbar machen */
-  /* background-color: rgba(255, 0, 0, 0.1); */
 }
 
-/* NEU: Body-Styling während vertikalem Resize */
 body.vertical-resizing {
   cursor: ns-resize !important;
   user-select: none;
@@ -274,6 +277,13 @@ body.vertical-resizing {
   background-color: var(--bg-color-medium);
   flex-shrink: 0;
 }
+
+.main-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 5px;
+}
+
 #status-bar {
   position: fixed;
   bottom: 0;
@@ -296,7 +306,6 @@ body.vertical-resizing {
   border: 1px solid var(--border-color);
 }
 
-/* Special styling for ignore patterns panel to take available space */
 .ignore-patterns-panel {
   flex-grow: 1;
   display: flex;
@@ -309,7 +318,7 @@ body.vertical-resizing {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 10px;
-  gap: 10px; /* Reduziert von 15px */
+  gap: 10px;
   min-height: 40px;
   overflow: hidden;
 }
@@ -319,9 +328,11 @@ body.vertical-resizing {
   font-size: 1em;
   white-space: nowrap;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-/* Updated files header layout */
 .files-header {
   display: flex;
   justify-content: space-between;
@@ -347,7 +358,6 @@ body.vertical-resizing {
   text-align: right;
 }
 
-/* Preview title improvements */
 #preview-title {
   display: flex;
   flex-direction: column;
@@ -367,16 +377,25 @@ body.vertical-resizing {
 
 input[type="text"] {
   width: 100%;
-  padding: 6px 8px;
+  padding: 8px 12px;
   background-color: var(--bg-color-dark);
   border: 1px solid var(--border-color);
   color: var(--text-color);
-  border-radius: 4px;
+  border-radius: 6px;
   margin-bottom: 8px;
+  font-size: 14px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
+
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px rgba(58, 127, 213, 0.25);
+}
+
 .input-group {
   display: flex;
-  gap: 5px;
+  gap: 8px;
 }
 .input-group input {
   margin-bottom: 0;
@@ -387,15 +406,23 @@ button {
   background-color: var(--button-bg);
   color: var(--text-color);
   border: 1px solid var(--border-color);
-  padding: 6px 12px;
-  border-radius: 4px;
+  padding: 8px 16px;
+  border-radius: 6px;
   cursor: pointer;
-  transition: all 0.2s ease; /* FIX: Übergang für alle Eigenschaften */
+  transition: all 0.2s ease;
   white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 button:hover:not(:disabled) {
   background-color: var(--button-hover-bg);
-  transform: translateY(-1px); /* FIX: Kleiner Hover-Effekt */
+  border-color: var(--accent-color);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 button:disabled {
   cursor: not-allowed;
@@ -403,10 +430,9 @@ button:disabled {
   pointer-events: none;
 }
 
-/* Enhanced button states during scanning */
 .button-scanning {
   background-color: var(--orange-accent) !important;
-  color: white !important;
+  color: var(--bg-color-dark) !important;
   cursor: not-allowed !important;
   animation: scanPulse 2s ease-in-out infinite;
 }
@@ -416,7 +442,6 @@ button:disabled:hover {
   background-color: var(--button-bg);
 }
 
-/* Custom scrollbar styling */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -437,9 +462,8 @@ button:disabled:hover {
   background: var(--bg-color-dark);
 }
 
-/* FIX: Spezielle Styles für Copy-Button-Feedback */
 #copy-btn {
-  min-width: 150px; /* FIX: Feste Breite damit Text nicht springt */
+  min-width: 180px;
   text-align: center;
   font-weight: 500;
 }
@@ -450,21 +474,28 @@ button:disabled:hover {
 
 .button-cta {
   background-color: var(--green-accent);
-  border-color: transparent;
-  color: #fff;
-  font-weight: 500;
+  border-color: var(--green-accent);
+  color: #ffffff; /* Weißer Text für besseren Kontrast auf Grün */
+  font-weight: 600;
 }
+
+.button-cta:hover:not(:disabled) {
+  background-color: #45a049; /* Etwas dunkleres Grün für Hover */
+  border-color: #45a049;
+}
+
 .button-secondary {
   background-color: transparent;
   border-color: var(--button-bg);
 }
 .button-group {
   display: flex;
-  gap: 5px;
+  gap: 6px;
 }
 .button-group button {
   font-size: 0.85em;
-  padding: 4px 8px;
+  padding: 6px 12px;
+  min-height: 32px;
 }
 
 .current-patterns {
@@ -478,13 +509,13 @@ button:disabled:hover {
 .current-pattern-chip {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   background-color: var(--bg-color-medium);
   border: 1px solid var(--border-color);
   font-size: 0.75em;
-  padding: 3px 6px;
-  border-radius: 10px;
-  height: 22px;
+  padding: 4px 8px;
+  border-radius: 12px;
+  height: 24px;
   flex-shrink: 0;
   transition: all 0.2s ease;
 }
@@ -496,28 +527,29 @@ button:disabled:hover {
   font-size: 1.1em;
   font-weight: bold;
   line-height: 0;
-  width: 12px;
-  height: 12px;
+  width: 16px;
+  height: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
   text-align: center;
   flex-shrink: 0;
   border-radius: 50%;
+  transition: all 0.2s ease;
 }
 
 .remove-pattern-btn:hover {
-  color: var(--text-color);
+  color: var(--red-accent);
+  background-color: rgba(229, 75, 75, 0.15); /* Angepasst an neues Rot */
 }
 
 .current-pattern-chip.active-pattern {
   border-color: var(--green-accent);
-  /*background-color: rgba(52, 168, 83, 0.15);*/
+  background-color: rgba(76, 175, 80, 0.15); /* Angepasst an neues Grün */
   font-weight: 500;
-  color: #a8d8b6;
+  color: var(--green-accent);
 }
 
-/* Common patterns styling */
 .common-patterns-section {
   margin-bottom: 10px;
 }
@@ -540,14 +572,15 @@ button:disabled:hover {
   border: 1px solid var(--border-color);
   color: var(--text-color-muted);
   font-size: 0.75em;
-  padding: 3px 6px;
-  border-radius: 10px;
+  padding: 4px 8px;
+  border-radius: 12px;
   cursor: pointer;
   transition: all 0.2s ease;
-  height: 22px;
+  height: 24px;
   display: flex;
   align-items: center;
   flex-shrink: 0;
+  min-height: unset;
 }
 .common-pattern-chip:hover {
   background-color: var(--button-bg);
@@ -556,7 +589,6 @@ button:disabled:hover {
   transform: translateY(-1px);
 }
 
-/* New ignore pattern controls */
 .ignore-options {
   display: flex;
   flex-direction: column;
@@ -581,11 +613,19 @@ button:disabled:hover {
 #delete-all-patterns-btn {
   margin-top: 5px;
   font-size: 0.8em;
-  padding: 4px 8px;
+  padding: 6px 12px;
   background-color: var(--red-accent);
   border-color: var(--red-accent);
-  color: white;
+  color: #ffffff; /* Weißer Text für Kontrast auf Rot */
+  min-height: 32px;
+  font-weight: 500;
 }
+
+#delete-all-patterns-btn:hover:not(:disabled) {
+  background-color: #d43f3f; /* Dunkleres Rot für Hover */
+  border-color: #d43f3f;
+}
+
 #filter-patterns {
   margin-bottom: 8px;
   font-size: 0.85em;
@@ -602,13 +642,8 @@ button:disabled:hover {
   flex-direction: column;
 }
 
-/* NEU: Visuelles Feedback für Drag & Drop */
-/* .file-tree-container.drag-over {
-  background-color: rgba(138, 180, 248, 0.1);
-} */
-
 .file-tree-container.drag-over .placeholder {
-  background-color: rgba(138, 180, 248, 0.1);
+  background-color: rgba(58, 127, 213, 0.1); /* Angepasst an neues Blau */
   border-color: var(--accent-color);
   color: var(--accent-color);
 }
@@ -621,6 +656,9 @@ button:disabled:hover {
   white-space: nowrap;
   min-width: 0;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .tree .file-name.is-match {
@@ -636,7 +674,7 @@ button:disabled:hover {
   list-style-type: none;
   padding-left: 0px;
   margin: 2px 0;
-  min-width: max-content; /* WICHTIG: Verhindert Wrapping */
+  min-width: max-content;
 }
 
 .tree details ul {
@@ -648,9 +686,10 @@ button:disabled:hover {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px;
-  border-radius: 3px;
+  padding: 3px 6px;
+  border-radius: 4px;
   min-width: max-content;
+  transition: background-color 0.2s ease;
 }
 
 .tree summary {
@@ -670,23 +709,23 @@ button:disabled:hover {
   font-size: 0.7em;
   transition: transform 0.1s linear;
   flex-shrink: 0;
-  width: 0.6em; /* WICHTIG: Explizite Breite setzen */
+  width: 0.6em;
+  color: var(--text-color-muted);
 }
 .tree details[open] > summary::before {
   transform: rotate(90deg);
 }
-/* NEU: Unsichtbarer Platzhalter für Files damit sie auf gleicher Höhe stehen */
 .tree .tree-item-container::before {
   content: "";
   display: inline-block;
-  width: 0.4em; /* Gleiche Breite wie das ▶ Symbol */
-  margin-right: 5px; /* Gleicher Abstand wie bei Ordnern */
+  width: 0.4em;
+  margin-right: 6px;
   flex-shrink: 0;
-  /* Unsichtbar aber nimmt Platz ein */
 }
 .tree input[type="checkbox"] {
   margin: 0;
   flex-shrink: 0;
+  accent-color: var(--accent-color);
 }
 .file-name {
   white-space: nowrap;
@@ -713,13 +752,19 @@ button:disabled:hover {
   cursor: pointer;
   margin-left: 6px;
   font-size: 0.8em;
-  padding: 0 4px;
-  border-radius: 3px;
+  padding: 2px 6px;
+  border-radius: 4px;
   flex-shrink: 0;
   background-color: var(--bg-color-light);
+  color: var(--text-color-muted);
+  transition: all 0.2s ease;
+  font-weight: 500;
+  min-width: 5px;
+  text-align: center;
 }
 .ignore-btn:hover {
   background-color: var(--button-hover-bg);
+  color: var(--text-color);
 }
 
 #editor-container {
@@ -728,30 +773,35 @@ button:disabled:hover {
   min-height: 0;
 }
 
-/* FIX: Verbesserter Such-Highlight-Style */
 .search-highlight {
   background-color: rgba(
     255,
     193,
     7,
-    0.4
-  ) !important; /* Gelb mit 40% Opazität */
-  border: 1px solid rgba(255, 193, 7, 0.8) !important;
+    0.3
+  ) !important; /* Angepasst an neues Gelb */
+  border: 1px solid rgba(255, 193, 7, 0.7) !important;
   border-radius: 2px !important;
   box-shadow: 0 0 3px rgba(255, 193, 7, 0.5) !important;
 }
 
 .output-settings summary {
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  padding: 4px 0;
 }
 .output-settings .settings-content {
   padding: 12px;
   margin-top: 8px;
   background-color: var(--bg-color-light);
-  border-radius: 4px;
+  border-radius: 6px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+  border: 1px solid var(--border-color);
 }
 .setting-row {
   display: flex;
@@ -760,13 +810,12 @@ button:disabled:hover {
 }
 .setting-row label {
   white-space: nowrap;
+  font-weight: 500;
 }
 .setting-row input[type="text"] {
   flex-grow: 1;
   margin-bottom: 0;
 }
-
-/* ENHANCED SCAN PROGRESS UI STYLES */
 
 .scan-progress-container {
   background: var(--bg-color-light);
@@ -807,24 +856,30 @@ button:disabled:hover {
 
 .cancel-scan-btn {
   background-color: var(--red-accent);
-  color: white;
+  color: #ffffff;
   border: none;
   padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
   font-size: 0.9em;
-  font-weight: 500;
+  font-weight: 600;
   transition: all 0.2s ease;
-  min-width: 100px;
+  min-width: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
 }
 
 .cancel-scan-btn:hover:not(:disabled) {
-  background-color: #c82333;
+  background-color: #d43f3f;
   transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .cancel-scan-btn:disabled {
-  background-color: #6c757d;
+  background-color: var(--text-color-muted);
   cursor: not-allowed;
   transform: none;
 }
@@ -902,7 +957,6 @@ button:disabled:hover {
   font-weight: 500;
 }
 
-/* Enhanced status bar during scanning */
 #status-bar.scanning {
   background: linear-gradient(
     90deg,
@@ -913,23 +967,23 @@ button:disabled:hover {
   animation: statusPulse 2s ease-in-out infinite;
 }
 
-/* Enhanced placeholder styling */
 .placeholder {
   text-align: center;
   align-content: center;
   color: var(--text-color-muted);
   font-style: italic;
-  /* padding: 40px 20px; */
   flex-grow: 1;
-  background: var(--bg-color-medium);
+  background: var(--bg-color-dark);
   border-radius: 8px;
   border: 1px dashed var(--border-color);
-  margin: auto 20px; /* Vertikal zentrieren */
+  margin: auto 20px;
   transition: all 0.2s ease;
+  padding: 40px 20px;
+  font-weight: 500;
 }
 
 .placeholder::before {
-  content: "📁";
+  content: "";
   display: block;
   font-size: 2em;
   margin-bottom: 10px;
@@ -937,7 +991,6 @@ button:disabled:hover {
   transition: all 0.2s ease;
 }
 
-/* Animations */
 @keyframes spin {
   0% {
     transform: rotate(0deg);
@@ -951,11 +1004,11 @@ button:disabled:hover {
   0%,
   100% {
     border-color: var(--border-color);
-    box-shadow: 0 0 0 0 rgba(138, 180, 248, 0.1);
+    box-shadow: 0 0 0 0 rgba(58, 127, 213, 0.1); /* Angepasst an neues Blau */
   }
   50% {
     border-color: var(--accent-color);
-    box-shadow: 0 0 0 4px rgba(138, 180, 248, 0.1);
+    box-shadow: 0 0 0 4px rgba(58, 127, 213, 0.1); /* Angepasst an neues Blau */
   }
 }
 
@@ -1001,7 +1054,6 @@ button:disabled:hover {
   }
 }
 
-/* Responsive design for scan progress */
 @media (max-width: 768px) {
   .scan-progress-header {
     flex-direction: column;
@@ -1027,7 +1079,7 @@ button:disabled:hover {
 
 .tree .tree-item-container.previewed,
 .tree .tree-item-container.previewed:hover {
-  background-color: rgba(138, 180, 248, 0.2); /* Light blue highlight */
+  background-color: rgba(58, 127, 213, 0.2); /* Angepasst an neues Blau */
   border: 1px solid var(--accent-color);
-  border-radius: 3px;
+  border-radius: 4px;
 }

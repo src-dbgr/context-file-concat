@@ -238,14 +238,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
           if (isInNormalInputField) {
             insertTextIntoElement(activeEl, clipboardText);
-            elements.statusBar.textContent = `✅ Text pasted into input field.`;
+            elements.statusBar.textContent = `✓ Text pasted into input field.`;
           } else if (isInMonacoFind) {
             // SIMPEL: Paste Rohtext direkt - Monaco kann Multi-line Suche!
             if (hasLineBreaks) {
               const lineCount = clipboardText.split(/\r\n|\r|\n/).length;
-              elements.statusBar.textContent = `✅ Multi-line search text pasted (${lineCount} lines).`;
+              elements.statusBar.textContent = `✓ Multi-line search text pasted (${lineCount} lines).`;
             } else {
-              elements.statusBar.textContent = `✅ Text pasted into Monaco search field.`;
+              elements.statusBar.textContent = `✓ Text pasted into Monaco search field.`;
             }
 
             // Direkt den rohen Clipboard-Text einfügen
@@ -261,9 +261,9 @@ document.addEventListener("DOMContentLoaded", () => {
               },
             ]);
 
-            elements.statusBar.textContent = `✅ Text pasted into editor.`;
+            elements.statusBar.textContent = `✓ Text pasted into editor.`;
           } else {
-            elements.statusBar.textContent = `❌ Paste not supported here.`;
+            elements.statusBar.textContent = `✗ Paste not supported here.`;
           }
         })
         .catch((error) => {
@@ -286,18 +286,18 @@ document.addEventListener("DOMContentLoaded", () => {
                   .replace(/\r/g, " ")
                   .replace(/\s+/g, " ")
                   .trim();
-                elements.statusBar.textContent = `⚠️ User text (${userLineCount} lines) converted to single line.`;
+                elements.statusBar.textContent = `⚠ User text (${userLineCount} lines) converted to single line.`;
               } else {
-                elements.statusBar.textContent = `✅ User text entered manually.`;
+                elements.statusBar.textContent = `✓ User text entered manually.`;
               }
 
               insertTextIntoElement(activeEl, processedUserText, true);
             } else {
               insertTextIntoElement(activeEl, userText);
-              elements.statusBar.textContent = `✅ User text entered manually.`;
+              elements.statusBar.textContent = `✓ User text entered manually.`;
             }
           } else {
-            elements.statusBar.textContent = "❌ No text provided.";
+            elements.statusBar.textContent = "✗ No text provided.";
           }
         });
     }
@@ -767,7 +767,11 @@ document.addEventListener("DOMContentLoaded", () => {
           <span class="scan-text">Scanning directory...</span>
         </div>
         <button id="cancel-scan-btn" class="cancel-scan-btn" title="Cancel current scan">
-          ❌ Cancel
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+          Cancel
         </button>
       </div>
       <div class="scan-progress-bar">
@@ -844,8 +848,21 @@ document.addEventListener("DOMContentLoaded", () => {
       setTimeout(() => {
         elements.selectDirBtn.disabled = false;
         elements.rescanBtn.disabled = false;
-        elements.selectDirBtn.innerHTML = "📁 Select Directory";
-        elements.rescanBtn.innerHTML = "🔄 Re-Scan";
+        elements.selectDirBtn.innerHTML = `
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>
+          </svg>
+          Select Directory
+        `;
+        elements.rescanBtn.innerHTML = `
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+            <path d="M21 3v5h-5"/>
+            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+            <path d="M3 21v-5h5"/>
+          </svg>
+          Re-Scan
+        `;
       }, 500);
     }
 
@@ -1020,7 +1037,12 @@ document.addEventListener("DOMContentLoaded", () => {
       if (previewTitle) {
         previewTitle.innerHTML = `
         <div class="preview-path-container">
-          <span class="preview-filename">🚀 Generated Preview</span>
+          <span class="preview-filename">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="13,2 3,14 12,14 11,22 21,10 12,10 13,2"/>
+            </svg>
+            Generated Preview
+          </span>
         </div>
         <span class="preview-stats">${lines} lines • ${sizeFormatted} • Editable</span>
       `;
@@ -1103,11 +1125,36 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Update button text during scan
     if (isScanning) {
-      elements.selectDirBtn.innerHTML = "⏳ Scanning...";
-      elements.rescanBtn.innerHTML = "⏳ Scanning...";
+      elements.selectDirBtn.innerHTML = `
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12,6 12,12 16,14"/>
+        </svg>
+        Scanning...
+      `;
+      elements.rescanBtn.innerHTML = `
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12,6 12,12 16,14"/>
+        </svg>
+        Scanning...
+      `;
     } else {
-      elements.selectDirBtn.innerHTML = "📁 Select Directory";
-      elements.rescanBtn.innerHTML = "🔄 Re-Scan";
+      elements.selectDirBtn.innerHTML = `
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>
+        </svg>
+        Select Directory
+      `;
+      elements.rescanBtn.innerHTML = `
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+          <path d="M21 3v5h-5"/>
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+          <path d="M3 21v-5h5"/>
+        </svg>
+        Re-Scan
+      `;
     }
 
     // Enhanced file tree container with scan progress
@@ -1121,7 +1168,13 @@ document.addEventListener("DOMContentLoaded", () => {
         cancelBtn.addEventListener("click", () => {
           post("cancelScan");
           cancelBtn.disabled = true;
-          cancelBtn.innerHTML = "⏳ Cancelling...";
+          cancelBtn.innerHTML = `
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <polyline points="12,6 12,12 16,14"/>
+            </svg>
+            Cancelling...
+          `;
         });
       }
 
@@ -1172,12 +1225,24 @@ document.addEventListener("DOMContentLoaded", () => {
     if (command === "selectDirectory") {
       // Show immediate feedback
       elements.selectDirBtn.disabled = true;
-      elements.selectDirBtn.innerHTML = "⏳ Selecting...";
+      elements.selectDirBtn.innerHTML = `
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12,6 12,12 16,14"/>
+        </svg>
+        Selecting...
+      `;
       elements.statusBar.textContent = "Status: Selecting directory...";
     } else if (command === "rescanDirectory") {
       // Show immediate feedback
       elements.rescanBtn.disabled = true;
-      elements.rescanBtn.innerHTML = "⏳ Starting scan...";
+      elements.rescanBtn.innerHTML = `
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12,6 12,12 16,14"/>
+        </svg>
+        Starting scan...
+      `;
       elements.statusBar.textContent = "Status: Starting directory scan...";
     }
 
@@ -1241,9 +1306,14 @@ document.addEventListener("DOMContentLoaded", () => {
         chip.title = `This pattern was active and matched one or more files/directories.`;
       }
 
-      chip.innerHTML = `<span>${p}</span><button class="remove-pattern-btn" data-pattern="${p}">✕</button>`;
+      chip.innerHTML = `<span>${p}</span><button class="remove-pattern-btn" data-pattern="${p}">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>`;
       chip.querySelector("button").addEventListener("click", (e) => {
-        const patternToRemove = e.target.dataset.pattern;
+        const patternToRemove = e.target.closest("button").dataset.pattern;
         const newPatterns = appState.config.ignore_patterns.filter(
           (pat) => pat !== patternToRemove
         );
@@ -1280,7 +1350,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const nameSpan = document.createElement("span");
         nameSpan.className = "file-name";
-        nameSpan.textContent = `📁 ${node.name}`;
+        nameSpan.innerHTML = `
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>
+          </svg>
+          ${node.name}
+        `;
         if (node.is_match) {
           nameSpan.classList.add("is-match");
         }
@@ -1321,7 +1396,24 @@ document.addEventListener("DOMContentLoaded", () => {
         if (node.is_match) {
           nameSpan.classList.add("is-match");
         }
-        nameSpan.textContent = `${node.is_binary ? "🔧" : "📄"} ${node.name}`;
+
+        const iconSvg = node.is_binary
+          ? `
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+          </svg>
+        `
+          : `
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14,2 14,8 20,8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+            <polyline points="10,9 9,9 8,9"/>
+          </svg>
+        `;
+
+        nameSpan.innerHTML = `${iconSvg} ${node.name}`;
         nameSpan.setAttribute("data-path", node.path);
         nameSpan.addEventListener("click", () => {
           post("loadFilePreview", node.path);
@@ -1401,15 +1493,21 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const button = elements.copyBtn;
-    const originalText = button.textContent;
+    const originalText = button.innerHTML;
     const originalStyle = {
       backgroundColor: button.style.backgroundColor,
       color: button.style.color,
     };
 
     // UI-Feedback sofort anzeigen
-    button.textContent = "⏳ Copying...";
-    button.style.backgroundColor = "#FFA500";
+    button.innerHTML = `
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="12,6 12,12 16,14"/>
+      </svg>
+      Copying...
+    `;
+    button.style.backgroundColor = "#FF6B35";
     button.disabled = true;
 
     // Clipboard API mit mehreren Fallback-Methoden
@@ -1462,24 +1560,35 @@ document.addEventListener("DOMContentLoaded", () => {
     tryCopyMethod()
       .then(() => {
         // Erfolg
-        elements.statusBar.textContent = `✅ Complete file copied to clipboard! (${contentToCopy.length} characters)`;
-        button.textContent = "✅ Copied!";
-        button.style.backgroundColor = "#34a853";
+        elements.statusBar.textContent = `✓ Complete file copied to clipboard! (${contentToCopy.length} characters)`;
+        button.innerHTML = `
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20,6 9,17 4,12"/>
+          </svg>
+          Copied!
+        `;
+        button.style.backgroundColor = "#22C55E";
         button.style.color = "#ffffff";
       })
       .catch((error) => {
         // Fehler
         console.error("Failed to copy to clipboard:", error);
         elements.statusBar.textContent =
-          "❌ Failed to copy to clipboard. Try selecting and copying manually.";
-        button.textContent = "❌ Failed";
-        button.style.backgroundColor = "#dc3545";
+          "✗ Failed to copy to clipboard. Try selecting and copying manually.";
+        button.innerHTML = `
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+          Failed
+        `;
+        button.style.backgroundColor = "#EF4444";
         button.style.color = "#ffffff";
       })
       .finally(() => {
         // UI nach 3 Sekunden zurücksetzen
         setTimeout(() => {
-          button.textContent = originalText;
+          button.innerHTML = originalText;
           button.style.backgroundColor = originalStyle.backgroundColor;
           button.style.color = originalStyle.color;
           button.disabled = false;
@@ -1574,13 +1683,13 @@ document.addEventListener("DOMContentLoaded", () => {
       .then(() => {
         // Erfolg
         const lines = selectedText.split("\n").length;
-        elements.statusBar.textContent = `✅ Selected text copied to clipboard! (${selectedText.length} characters, ${lines} lines)`;
+        elements.statusBar.textContent = `✓ Selected text copied to clipboard! (${selectedText.length} characters, ${lines} lines)`;
       })
       .catch((error) => {
         // Fehler
         console.error("Failed to copy selected text to clipboard:", error);
         elements.statusBar.textContent =
-          "❌ Failed to copy selected text to clipboard.";
+          "✗ Failed to copy selected text to clipboard.";
       });
   }
 
