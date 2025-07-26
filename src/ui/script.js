@@ -769,17 +769,36 @@ document.addEventListener("DOMContentLoaded", () => {
       (pattern) => !appState.config.ignore_patterns.includes(pattern)
     );
 
-    availablePatterns.forEach((pattern) => {
-      const chip = document.createElement("button");
-      chip.className = "common-pattern-chip";
-      chip.textContent = pattern;
-      chip.title = `Click to add "${pattern}" to ignore patterns`;
-      chip.addEventListener("click", (e) => {
-        e.preventDefault();
-        addIgnorePatternValue(pattern);
+    // Finde das Label-Element
+    const commonPatternsLabel = document.querySelector(
+      ".common-patterns-label"
+    );
+
+    // Zeige/verstecke das Label basierend auf verfügbaren Patterns
+    if (availablePatterns.length > 0) {
+      // Es gibt verfügbare Patterns - zeige das Label
+      if (commonPatternsLabel) {
+        commonPatternsLabel.style.display = "block";
+      }
+
+      // Erstelle die Pattern-Chips
+      availablePatterns.forEach((pattern) => {
+        const chip = document.createElement("button");
+        chip.className = "common-pattern-chip";
+        chip.textContent = pattern;
+        chip.title = `Click to add "${pattern}" to ignore patterns`;
+        chip.addEventListener("click", (e) => {
+          e.preventDefault();
+          addIgnorePatternValue(pattern);
+        });
+        elements.commonPatternsContainer.appendChild(chip);
       });
-      elements.commonPatternsContainer.appendChild(chip);
-    });
+    } else {
+      // Keine verfügbaren Patterns - verstecke das Label
+      if (commonPatternsLabel) {
+        commonPatternsLabel.style.display = "none";
+      }
+    }
   }
 
   function createScanProgressUI() {
