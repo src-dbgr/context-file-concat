@@ -284,6 +284,10 @@ body.vertical-resizing {
   gap: 5px;
 }
 
+/* ========================================================== */
+/* == START: DIESEN GESAMTEN BLOCK KOPIEREN UND ERSETZEN == */
+/* ========================================================== */
+
 /* NEUE/GEÄNDERTE STATUS BAR STYLES */
 #status-bar {
   position: fixed;
@@ -322,7 +326,7 @@ body.vertical-resizing {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 0.75em;
+  font-size: 1em;
   color: var(--text-color-muted);
   padding: 2px 6px;
   border-radius: 4px;
@@ -338,24 +342,24 @@ body.vertical-resizing {
 }
 
 .status-output-settings .icon {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
 }
 
 .status-output-settings .settings-content {
-  position: fixed; /* ✅ FIXED statt absolute */
-  bottom: 35px; /* ✅ Feste Position von unten */
+  position: fixed;
+  bottom: 35px;
   left: 10px;
-  width: 320px;
+  width: 450px; /* VERGRÖSSERT: Breiteres Pop-up für mehr Platz */
   background-color: var(--bg-color-medium);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
-  padding: 12px;
+  border-radius: 8px; /* Etwas grösserer Radius für ein weicheres Aussehen */
+  padding: 20px; /* VERGRÖSSERT: Mehr Innenabstand */
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  z-index: 99999 !important; /* ✅ Maximaler z-index */
+  gap: 16px; /* VERGRÖSSERT: Mehr Abstand zwischen den Zeilen */
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); /* Stärkerer Schatten für bessere Abhebung */
+  z-index: 99999 !important;
 }
 
 /* Optional: Backdrop für bessere Sichtbarkeit */
@@ -394,14 +398,49 @@ body.vertical-resizing {
   color: var(--accent-color);
 }
 
-.status-output-settings .setting-row input[type="text"] {
-  padding: 6px 8px;
-  font-size: 0.8em;
+.status-output-settings .setting-row {
+  display: flex;
+  align-items: center;
+  gap: 12px; /* Angepasster Abstand innerhalb einer Zeile */
 }
 
+/* VERBESSERT: Labels sind jetzt grösser und fetter */
 .status-output-settings .setting-row label {
-  font-size: 0.85em;
+  white-space: nowrap;
+  font-weight: 500;
+  font-size: 1em; /* GRÖSSER: Standard-Schriftgrösse für gute Lesbarkeit */
+  color: var(--text-color);
 }
+
+/* VERBESSERT: Checkbox-Labels sind besser ausgerichtet */
+.status-output-settings .setting-row label[for] {
+  flex-shrink: 0;
+}
+
+.status-output-settings .setting-row label:not([for]) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+/* VERBESSERT: Textfelder sind höher und haben eine grössere Schrift */
+.status-output-settings .setting-row input[type="text"] {
+  flex-grow: 1;
+  margin-bottom: 0;
+  padding: 10px 12px; /* Mehr Innenabstand für eine grössere Klickfläche */
+  font-size: 0.9em; /* Grössere Schrift im Feld */
+}
+
+/* VERBESSERT: Der "Browse"-Button ist ebenfalls grösser */
+.status-output-settings .setting-row button {
+  padding: 10px 16px;
+  font-size: 0.9em;
+}
+
+/* ======================================================== */
+/* == ENDE: DIESEN GESAMTEN BLOCK KOPIEREN UND ERSETZEN == */
+/* ======================================================== */
 
 .panel {
   background-color: var(--bg-color-light);

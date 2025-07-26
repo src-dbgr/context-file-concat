@@ -954,16 +954,13 @@ fn generate_ui_state(state: &AppState) -> UiState {
     };
     let status_message = if state.is_scanning {
         format!(
-            "Status: Scanning... {} files processed. {} large files skipped ({})",
+            "Scanning... {} files processed. {} large files skipped ({})",
             state.scan_progress.files_scanned,
             state.scan_progress.large_files_skipped,
             state.scan_progress.current_scanning_path
         )
     } else {
-        format!(
-            "Status: {}",
-            state.scan_progress.current_scanning_path.clone()
-        )
+        format!("{}", state.scan_progress.current_scanning_path.clone())
     };
     UiState {
         config: state.config.clone(),
