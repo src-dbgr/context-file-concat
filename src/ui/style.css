@@ -785,6 +785,12 @@ button:disabled:hover {
   flex-direction: column;
 }
 
+/* Nur zentrieren wenn AUSSCHLIESSLICH der Placeholder vorhanden ist */
+.file-tree-container:has(.placeholder:only-child) {
+  justify-content: center;
+  align-items: center;
+}
+
 .file-tree-container.drag-over .placeholder {
   background-color: rgba(58, 127, 213, 0.15);
   border-color: var(--accent-color);
@@ -1123,13 +1129,14 @@ button:disabled:hover {
 
 .placeholder {
   text-align: center;
+  align-self: center;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   color: var(--text-color-muted);
   font-style: normal;
-  flex-grow: 1;
+  flex-grow: 0;
   background: var(--bg-color-dark);
   border-radius: 12px;
   border: 2px dashed var(--border-color);
@@ -1140,6 +1147,8 @@ button:disabled:hover {
   font-size: 0.95em;
   min-height: 160px;
   max-height: 200px;
+  max-width: 800px;
+  min-width: 500px;
   position: relative;
   cursor: pointer;
 }
