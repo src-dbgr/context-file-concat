@@ -793,6 +793,7 @@ button:disabled:hover {
   font-weight: 500;
   padding: 4px 0;
 }
+
 .output-settings .settings-content {
   padding: 12px;
   margin-top: 8px;
@@ -803,6 +804,24 @@ button:disabled:hover {
   gap: 12px;
   border: 1px solid var(--border-color);
 }
+
+/* Dynamic Output Settings Icon */
+.output-settings .icon-closed {
+  display: inline-block;
+}
+
+.output-settings .icon-opened {
+  display: none;
+}
+
+.output-settings[open] .icon-closed {
+  display: none;
+}
+
+.output-settings[open] .icon-opened {
+  display: inline-block;
+}
+
 .setting-row {
   display: flex;
   align-items: center;
