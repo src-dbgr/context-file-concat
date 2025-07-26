@@ -954,7 +954,8 @@ button:disabled:hover {
   padding: 20px;
   margin: 10px 0;
   border: 1px solid var(--border-color);
-  animation: scanPulse 2s ease-in-out infinite;
+  /* NEU: Die pulsierende Animation wird dezenter, indem sie nur den Schatten und nicht den Rand ändert. */
+  animation: scanPulseSubtle 2s ease-in-out infinite;
 }
 
 .scan-progress-header {
@@ -986,16 +987,17 @@ button:disabled:hover {
 }
 
 .cancel-scan-btn {
-  background-color: var(--red-accent);
-  color: #ffffff;
-  border: none;
+  /* NEU: Der Button ist jetzt neutral und passt zu den anderen sekundären Buttons. */
+  background-color: var(--bg-color-dark);
+  color: var(--red-accent);
+  border: 1px solid var(--border-color);
   padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
   font-size: 0.9em;
   font-weight: 600;
   transition: all 0.2s ease;
-  min-width: 120px;
+  min-width: 30px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1004,13 +1006,17 @@ button:disabled:hover {
 }
 
 .cancel-scan-btn:hover:not(:disabled) {
-  background-color: #d43f3f;
+  /* NEU: Der Hover-Effekt ist jetzt konsistent und nutzt die Akzentfarbe für den Hintergrund. */
+  background-color: var(--red-accent);
+  color: #ffffff;
+  border-color: var(--red-accent);
   transform: translateY(-1px);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .cancel-scan-btn:disabled {
   background-color: var(--text-color-muted);
+  color: #ffffff;
   cursor: not-allowed;
   transform: none;
 }
@@ -1027,7 +1033,8 @@ button:disabled:hover {
 
 .scan-progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--accent-color), var(--green-accent));
+  /* NEU: Kein bunter Farbverlauf mehr, sondern eine solide, konsistente Akzentfarbe. */
+  background: var(--accent-color);
   border-radius: 4px;
   width: 0%;
   transition: width 0.3s ease;
@@ -1041,11 +1048,14 @@ button:disabled:hover {
   right: 0;
   width: 20px;
   height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3));
+  /* NEU: Der Schimmer ist subtiler und heller. */
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.15));
   animation: shimmer 2s ease-in-out infinite;
 }
 
 .scan-progress-fill.scan-complete {
+  /* ALT: background: var(--green-accent); */
+  /* NEU: Die Erfolgsfarbe wird beibehalten, da sie ein klares Feedback gibt. */
   background: var(--green-accent);
   animation: scanComplete 0.5s ease;
 }
@@ -1084,8 +1094,10 @@ button:disabled:hover {
 }
 
 #scan-skipped-count {
-  color: var(--yellow-accent);
+  /* NEU: Kein grelles Gelb mehr. Die Farbe ist jetzt gedämpft und zur Differenzierung kursiv. */
+  color: var(--text-color-muted);
   font-weight: 500;
+  font-style: italic;
 }
 
 #status-bar.scanning {
@@ -1131,15 +1143,14 @@ button:disabled:hover {
   }
 }
 
-@keyframes scanPulse {
+/* NEU: Dezenterer Puls-Effekt */
+@keyframes scanPulseSubtle {
   0%,
   100% {
-    border-color: var(--border-color);
-    box-shadow: 0 0 0 0 rgba(58, 127, 213, 0.1); /* Angepasst an neues Blau */
+    box-shadow: 0 0 0 0 rgba(58, 127, 213, 0);
   }
   50% {
-    border-color: var(--accent-color);
-    box-shadow: 0 0 0 4px rgba(58, 127, 213, 0.1); /* Angepasst an neues Blau */
+    box-shadow: 0 0 0 4px rgba(58, 127, 213, 0.1);
   }
 }
 
