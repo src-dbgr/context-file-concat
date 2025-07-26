@@ -855,17 +855,23 @@ button:disabled:hover {
   all: unset;
   cursor: pointer;
   margin-left: 6px;
-  font-size: 0.8em;
   padding: 2px 6px;
   border-radius: 4px;
   flex-shrink: 0;
   background-color: var(--bg-color-light);
   color: var(--text-color-muted);
   transition: all 0.2s ease;
-  font-weight: 500;
-  min-width: 5px;
-  text-align: center;
+  height: 12px !important;
+  width: 5px !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
+
+.ignore-btn .ignore-icon {
+  height: 10px;
+}
+
 .ignore-btn:hover {
   background-color: var(--button-hover-bg);
   color: var(--text-color);

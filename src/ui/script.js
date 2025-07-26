@@ -678,7 +678,13 @@ document.addEventListener("DOMContentLoaded", () => {
   elements.browseOutputDirBtn.addEventListener("click", () =>
     post("pickOutputDirectory")
   );
-
+  elements.outputDir.addEventListener("change", () => {
+    const newConfig = {
+      ...appState.config,
+      output_directory: elements.outputDir.value,
+    };
+    post("updateConfig", newConfig);
+  });
   const onConfigChange = () => {
     const newConfig = {
       ...appState.config,
@@ -1131,7 +1137,9 @@ document.addEventListener("DOMContentLoaded", () => {
     elements.includeTree.checked = config.include_tree_by_default;
     elements.relativePaths.checked = config.use_relative_paths;
     elements.removeEmptyDirs.checked = config.remove_empty_directories || false;
-    elements.outputDir.value = config.output_directory?.toString() || "Not set";
+    elements.outputDir.value = config.output_directory?.toString() || "";
+    elements.outputDir.placeholder =
+      "Enter output directory path or click Browse...";
     elements.outputFilename.value = config.output_filename;
     elements.searchQuery.value = appState.search_query;
     elements.extensionFilter.value = appState.extension_filter;
@@ -1391,7 +1399,12 @@ document.addEventListener("DOMContentLoaded", () => {
         const ignoreBtn = document.createElement("button");
         ignoreBtn.className = "ignore-btn";
         ignoreBtn.title = "Add this directory to ignore patterns";
-        ignoreBtn.textContent = "i";
+        ignoreBtn.innerHTML = `
+  <svg class="icon ignore-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <circle cx="12" cy="12" r="10" />
+    <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+  </svg>
+`;
 
         ignoreBtn.addEventListener("click", (e) => {
           e.preventDefault();
@@ -1450,7 +1463,12 @@ document.addEventListener("DOMContentLoaded", () => {
         const ignoreBtn = document.createElement("button");
         ignoreBtn.className = "ignore-btn";
         ignoreBtn.title = "Add this file to ignore patterns";
-        ignoreBtn.textContent = "i";
+        ignoreBtn.innerHTML = `
+  <svg class="icon ignore-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <circle cx="12" cy="12" r="10" />
+    <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+  </svg>
+`;
         ignoreBtn.addEventListener("click", (e) => {
           e.stopPropagation();
           post("addIgnorePath", node.path);
