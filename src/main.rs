@@ -248,7 +248,7 @@ async fn main() {
 
     let html_content = include_str!("ui/index.html")
         .replace("/*INJECT_CSS*/", include_str!("ui/style.css"))
-        .replace("/*INJECT_JS*/", include_str!("ui/script.js"));
+        .replace("/*INJECT_JS*/", include_str!("ui/dist/bundle.js"));
 
     let proxy_clone_for_drop = proxy.clone();
     let state_clone_for_drop = state.clone();
@@ -505,13 +505,23 @@ fn handle_ipc_message(
                         let path_to_ignore = PathBuf::from(path_str);
                         let mut state_guard = state.lock().unwrap();
                         let root_path = PathBuf::from(&state_guard.current_path);
+
                         if let Ok(relative_path) = path_to_ignore.strip_prefix(&root_path) {
                             let mut pattern = relative_path.to_string_lossy().to_string();
                             if path_to_ignore.is_dir() {
                                 pattern.push('/');
                             }
+                            // Entferne das ignorierte Element (und seine Kinder, falls es ein Ordner ist)
+                            // aus der Liste der ausgewählten Dateien.
+                            state_guard.selected_files.retain(|selected_path| {
+                                !selected_path.starts_with(&path_to_ignore)
+                            });
+
+                            // Füge das Muster zur Konfiguration hinzu
                             state_guard.config.ignore_patterns.insert(pattern);
                             config::settings::save_config(&state_guard.config).ok();
+
+                            // Wende Filter neu an und aktualisiere die UI
                             apply_filters(&mut state_guard);
                             proxy
                                 .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))

@@ -160,3 +160,84 @@ project-root/
 ## Lizenz
 
 MIT License - Nutze es frei für deine Projekte!
+
+# CFC - Context File Concatenator: Entwicklungs-Anleitung
+
+Dieses Dokument beschreibt, wie die Entwicklungsumgebung für dieses Projekt eingerichtet und gestartet wird. Die Anwendung besteht aus einem Rust-Backend und einem JavaScript-Frontend (HTML/CSS/JS), das in einer WebView läuft.
+
+## Projektstruktur
+
+Die wichtigsten Teile für die Entwicklung sind:
+
+- `/src`: Enthält den gesamten Rust-Source-Code.
+- `/src/main.rs`: Der Haupteinstiegspunkt der Rust-Anwendung.
+- `/src/ui`: Enthält alle Frontend-Dateien.
+  - `/src/ui/js`: Der Source-Code für das JavaScript-Frontend, aufgeteilt in ES-Module.
+  - `/src/ui/dist`: Das Verzeichnis für die gebündelte JavaScript-Datei.
+  - `/src/ui/package.json`: Die Konfigurationsdatei für die JavaScript-Entwicklungsumgebung.
+
+## Voraussetzungen
+
+1.  **Rust:** Stelle sicher, dass die [Rust-Toolchain](https://www.rust-lang.org/tools/install) installiert ist.
+2.  **Node.js:** Stelle sicher, dass [Node.js](https://nodejs.org/) (welches npm beinhaltet) installiert ist. Dies wird für das Bündeln des JavaScript-Codes benötigt.
+
+## Einmalige Einrichtung
+
+Bevor du mit der Entwicklung beginnst, musst du die JavaScript-Abhängigkeiten installieren.
+
+1.  Öffne ein Terminal.
+2.  Navigiere in das UI-Verzeichnis:
+    ```bash
+    cd src/ui
+    ```
+3.  Installiere die nötigen Pakete mit npm:
+    ```bash
+    npm install
+    ```
+    Dieser Befehl liest die `package.json` und installiert `esbuild` und `concurrently` im `node_modules`-Ordner.
+
+## Entwicklung starten
+
+Um die Anwendung im Entwicklungsmodus zu starten, benötigst du nur noch einen einzigen Befehl.
+
+1.  Stelle sicher, dass du dich im Terminal im Verzeichnis `src/ui` befindest.
+2.  Führe den folgenden Befehl aus:
+    ```bash
+    npm run dev
+    ```
+
+### Was passiert im Hintergrund?
+
+Der `npm run dev`-Befehl ist ein Skript, das in der `package.json` definiert ist. Es nutzt das Werkzeug `concurrently`, um zwei Prozesse gleichzeitig zu starten:
+
+1.  **`npm run watch`**:
+
+    - Dieser Prozess startet den `esbuild`-Bundler im "Watch"-Modus.
+    - `esbuild` liest die `js/main.js`, folgt allen `import`-Anweisungen und bündelt den gesamten JavaScript-Code in eine einzige Datei: `dist/bundle.js`.
+    - Er überwacht kontinuierlich alle `.js`-Dateien. Sobald du eine Änderung speicherst, wird die `dist/bundle.js` automatisch und blitzschnell neu erstellt.
+
+2.  **`cargo run`**:
+    - Dieser Prozess kompiliert und startet die Rust-Anwendung.
+    - Die `main.rs` liest den Inhalt der `dist/bundle.js` und injiziert ihn zur Laufzeit in die WebView.
+
+Durch diesen Aufbau kannst du einfach deinen JavaScript-Code ändern, und die Änderungen werden nach einem Neuladen der WebView (oft `Ctrl+R` oder `Cmd+R`) sofort sichtbar, ohne dass du die Rust-Anwendung neu starten musst.
+
+## Produktions-Build erstellen
+
+Wenn du eine finale, optimierte Version der Anwendung erstellen möchtest, gehst du wie folgt vor:
+
+1.  **JavaScript bündeln und minifizieren:**
+    Führe im `src/ui`-Verzeichnis aus:
+
+    ```bash
+    npm run build
+    ```
+
+    Dies erstellt eine optimierte und verkleinerte `dist/bundle.js`.
+
+2.  **Rust-Anwendung kompilieren:**
+    Führe im Hauptverzeichnis des Projekts aus:
+    ```bash
+    cargo build --release
+    ```
+    Die fertige ausführbare Datei befindet sich dann im `/target/release`-Verzeichnis.
