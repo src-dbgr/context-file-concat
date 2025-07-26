@@ -225,7 +225,8 @@ document.addEventListener("DOMContentLoaded", () => {
       getClipboardViaLegacy()
         .then((clipboardText) => {
           if (!clipboardText || clipboardText.trim() === "") {
-            elements.statusBar.textContent = "Clipboard is empty.";
+            document.querySelector(".status-text").textContent =
+              "Clipboard is empty.";
             return;
           }
 
@@ -238,14 +239,20 @@ document.addEventListener("DOMContentLoaded", () => {
 
           if (isInNormalInputField) {
             insertTextIntoElement(activeEl, clipboardText);
-            elements.statusBar.textContent = `✓ Text pasted into input field.`;
+            document.querySelector(
+              ".status-text"
+            ).textContent = `✓ Text pasted into input field.`;
           } else if (isInMonacoFind) {
             // SIMPEL: Paste Rohtext direkt - Monaco kann Multi-line Suche!
             if (hasLineBreaks) {
               const lineCount = clipboardText.split(/\r\n|\r|\n/).length;
-              elements.statusBar.textContent = `✓ Multi-line search text pasted (${lineCount} lines).`;
+              document.querySelector(
+                ".status-text"
+              ).textContent = `✓ Multi-line search text pasted (${lineCount} lines).`;
             } else {
-              elements.statusBar.textContent = `✓ Text pasted into Monaco search field.`;
+              document.querySelector(
+                ".status-text"
+              ).textContent = `✓ Text pasted into Monaco search field.`;
             }
 
             // Direkt den rohen Clipboard-Text einfügen
@@ -261,9 +268,13 @@ document.addEventListener("DOMContentLoaded", () => {
               },
             ]);
 
-            elements.statusBar.textContent = `✓ Text pasted into editor.`;
+            document.querySelector(
+              ".status-text"
+            ).textContent = `✓ Text pasted into editor.`;
           } else {
-            elements.statusBar.textContent = `✗ Paste not supported here.`;
+            document.querySelector(
+              ".status-text"
+            ).textContent = `✗ Paste not supported here.`;
           }
         })
         .catch((error) => {
@@ -286,18 +297,25 @@ document.addEventListener("DOMContentLoaded", () => {
                   .replace(/\r/g, " ")
                   .replace(/\s+/g, " ")
                   .trim();
-                elements.statusBar.textContent = `⚠ User text (${userLineCount} lines) converted to single line.`;
+                document.querySelector(
+                  ".status-text"
+                ).textContent = `⚠ User text (${userLineCount} lines) converted to single line.`;
               } else {
-                elements.statusBar.textContent = `✓ User text entered manually.`;
+                document.querySelector(
+                  ".status-text"
+                ).textContent = `✓ User text entered manually.`;
               }
 
               insertTextIntoElement(activeEl, processedUserText, true);
             } else {
               insertTextIntoElement(activeEl, userText);
-              elements.statusBar.textContent = `✓ User text entered manually.`;
+              document.querySelector(
+                ".status-text"
+              ).textContent = `✓ User text entered manually.`;
             }
           } else {
-            elements.statusBar.textContent = "✗ No text provided.";
+            document.querySelector(".status-text").textContent =
+              "✗ No text provided.";
           }
         });
     }
@@ -843,7 +861,9 @@ document.addEventListener("DOMContentLoaded", () => {
         progressFill.style.width = "100%";
         progressFill.classList.add("scan-complete");
       }
-      elements.statusBar.textContent = `Status: Scan completed! Found ${newState.total_files_found} files.`;
+      document.querySelector(
+        ".status-text"
+      ).textContent = `Status: Scan completed! Found ${newState.total_files_found} files.`;
       elements.statusBar.classList.remove("scanning");
       setTimeout(() => {
         elements.selectDirBtn.disabled = false;
@@ -868,7 +888,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Erkennt den Start eines Scans
     if (!wasScanning && isNowScanning) {
-      elements.statusBar.textContent = "Status: Starting directory scan...";
+      document.querySelector(".status-text").textContent =
+        "Status: Starting directory scan...";
       elements.statusBar.classList.add("scanning");
     }
 
@@ -927,7 +948,9 @@ document.addEventListener("DOMContentLoaded", () => {
       statusText += ` (${progress.current_scanning_path})`;
     }
 
-    elements.statusBar.textContent = `Status: ${statusText}`;
+    document.querySelector(
+      ".status-text"
+    ).textContent = `Status: ${statusText}`;
   };
 
   function splitPathForDisplay(fullPath) {
@@ -1064,18 +1087,19 @@ document.addEventListener("DOMContentLoaded", () => {
   };
 
   window.showError = (msg) => {
-    elements.statusBar.textContent = `Error: ${msg}`;
+    document.querySelector(".status-text").textContent = `Error: ${msg}`;
   };
 
   window.showStatus = (msg) => {
-    elements.statusBar.textContent = `Status: ${msg}`;
+    document.querySelector(".status-text").textContent = `Status: ${msg}`;
   };
 
   window.fileSaveStatus = (success, path) => {
     if (path === "cancelled") {
-      elements.statusBar.textContent = "Status: Save cancelled.";
+      document.querySelector(".status-text").textContent =
+        "Status: Save cancelled.";
     } else {
-      elements.statusBar.textContent = success
+      document.querySelector(".status-text").textContent = success
         ? `Status: Saved to ${path}`
         : `Error: Failed to save file.`;
     }
@@ -1205,7 +1229,9 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    elements.statusBar.textContent = `Status: ${appState.status_message}`;
+    document.querySelector(
+      ".status-text"
+    ).textContent = `Status: ${appState.status_message}`;
 
     // Calculate file statistics more clearly
     const { totalFiles, totalFolders } = countTreeItems(appState.tree);
@@ -1232,7 +1258,8 @@ document.addEventListener("DOMContentLoaded", () => {
         </svg>
         Selecting...
       `;
-      elements.statusBar.textContent = "Status: Selecting directory...";
+      document.querySelector(".status-text").textContent =
+        "Status: Selecting directory...";
     } else if (command === "rescanDirectory") {
       // Show immediate feedback
       elements.rescanBtn.disabled = true;
@@ -1243,7 +1270,8 @@ document.addEventListener("DOMContentLoaded", () => {
         </svg>
         Starting scan...
       `;
-      elements.statusBar.textContent = "Status: Starting directory scan...";
+      document.querySelector(".status-text").textContent =
+        "Status: Starting directory scan...";
     }
 
     // Call original post function
@@ -1475,20 +1503,23 @@ document.addEventListener("DOMContentLoaded", () => {
   // (Diese Funktion bleibt größtenteils gleich, aber mit klarerer Dokumentation)
   function copyToClipboard() {
     if (!editor) {
-      elements.statusBar.textContent = "Error: Editor not available.";
+      document.querySelector(".status-text").textContent =
+        "Error: Editor not available.";
       return;
     }
 
     // WICHTIG: Diese Funktion kopiert IMMER das gesamte File, unabhängig von der Selektion
     const model = editor.getModel();
     if (!model) {
-      elements.statusBar.textContent = "Error: No content to copy.";
+      document.querySelector(".status-text").textContent =
+        "Error: No content to copy.";
       return;
     }
 
     const contentToCopy = model.getValue(); // Gesamter Inhalt, nicht nur Selektion
     if (!contentToCopy || contentToCopy.trim().length === 0) {
-      elements.statusBar.textContent = "Error: No content to copy.";
+      document.querySelector(".status-text").textContent =
+        "Error: No content to copy.";
       return;
     }
 
@@ -1560,7 +1591,9 @@ document.addEventListener("DOMContentLoaded", () => {
     tryCopyMethod()
       .then(() => {
         // Erfolg
-        elements.statusBar.textContent = `✓ Complete file copied to clipboard! (${contentToCopy.length} characters)`;
+        document.querySelector(
+          ".status-text"
+        ).textContent = `✓ Complete file copied to clipboard! (${contentToCopy.length} characters)`;
         button.innerHTML = `
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="20,6 9,17 4,12"/>
@@ -1569,11 +1602,12 @@ document.addEventListener("DOMContentLoaded", () => {
         `;
         button.style.backgroundColor = "#22C55E";
         button.style.color = "#ffffff";
+        button.style.opacity = "1";
       })
       .catch((error) => {
         // Fehler
         console.error("Failed to copy to clipboard:", error);
-        elements.statusBar.textContent =
+        document.querySelector(".status-text").textContent =
           "✗ Failed to copy to clipboard. Try selecting and copying manually.";
         button.innerHTML = `
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1599,9 +1633,11 @@ document.addEventListener("DOMContentLoaded", () => {
             elements.statusBar.textContent.includes("Failed to copy")
           ) {
             if (appState && appState.status_message) {
-              elements.statusBar.textContent = `Status: ${appState.status_message}`;
+              document.querySelector(
+                ".status-text"
+              ).textContent = `Status: ${appState.status_message}`;
             } else {
-              elements.statusBar.textContent = "Status: Ready.";
+              document.querySelector(".status-text").textContent = "Ready.";
             }
           }
         }, 1000);
@@ -1610,25 +1646,27 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function copySelectedTextToClipboard() {
     if (!editor) {
-      elements.statusBar.textContent = "Error: Editor not available.";
+      document.querySelector(".status-text").textContent =
+        "Error: Editor not available.";
       return;
     }
 
     const selection = editor.getSelection();
     if (!selection || selection.isEmpty()) {
-      elements.statusBar.textContent = "No text selected.";
+      document.querySelector(".status-text").textContent = "No text selected.";
       return;
     }
 
     const model = editor.getModel();
     if (!model) {
-      elements.statusBar.textContent = "Error: No content available.";
+      document.querySelector(".status-text").textContent =
+        "Error: No content available.";
       return;
     }
 
     const selectedText = model.getValueInRange(selection);
     if (!selectedText || selectedText.trim().length === 0) {
-      elements.statusBar.textContent = "No text selected.";
+      document.querySelector(".status-text").textContent = "No text selected.";
       return;
     }
 
@@ -1683,12 +1721,14 @@ document.addEventListener("DOMContentLoaded", () => {
       .then(() => {
         // Erfolg
         const lines = selectedText.split("\n").length;
-        elements.statusBar.textContent = `✓ Selected text copied to clipboard! (${selectedText.length} characters, ${lines} lines)`;
+        document.querySelector(
+          ".status-text"
+        ).textContent = `✓ Selected text copied to clipboard! (${selectedText.length} characters, ${lines} lines)`;
       })
       .catch((error) => {
         // Fehler
         console.error("Failed to copy selected text to clipboard:", error);
-        elements.statusBar.textContent =
+        document.querySelector(".status-text").textContent =
           "✗ Failed to copy selected text to clipboard.";
       });
   }
