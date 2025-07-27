@@ -9,6 +9,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Add permissions for GITHUB_TOKEN
+permissions:
+  contents: write
+  actions: read
+  packages: write
+
 jobs:
   create-release:
     runs-on: ubuntu-latest
@@ -28,6 +34,18 @@ jobs:
         with:
           tag_name: ${{ github.ref }}
           release_name: Context File Concatenator v${{ steps.get_version.outputs.version }}
+          body: |
+            ## 🎉 Context File Concatenator v${{ steps.get_version.outputs.version }}
+
+            **Cross-platform desktop application for LLM context preparation**
+
+            ### 📦 Downloads
+            - **macOS**: Download the `.dmg` file below
+            - **Windows**: Download the `.zip` file below  
+            - **Linux**: Download the `.tar.gz` file below
+
+            ### ✨ What's New
+            See [CHANGELOG.md](https://github.com/src-dbgr/context-file-concat/blob/main/CHANGELOG.md) for details.
           draft: false
           prerelease: ${{ contains(steps.get_version.outputs.version, 'alpha') || contains(steps.get_version.outputs.version, 'beta') || contains(steps.get_version.outputs.version, 'rc') }}
 
