@@ -33,7 +33,7 @@ pub struct UiState {
 }
 
 /// A serializable representation of a single node in the file tree for the UI.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct TreeNode {
     pub name: String,
     pub path: PathBuf,
@@ -59,6 +59,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
             expanded: &state.expanded_dirs,
             content_search_matches: &state.content_search_results,
             filename_query: &state.search_query,
+            extension_filter: &state.extension_filter,
             case_sensitive: state.config.case_sensitive_search,
             previewed_path: &state.previewed_file_path,
         };
@@ -102,6 +103,7 @@ pub fn apply_filters(state: &mut AppState) {
         &state.config,
         &state.search_query,
         &state.extension_filter,
+        &state.content_search_query,
         &state.content_search_results,
     );
     state.filtered_file_list = filtered_list;
@@ -114,8 +116,14 @@ fn apply_filters_on_data(
     config: &AppConfig,
     search_query: &str,
     extension_filter: &str,
+    content_search_query: &str,
     content_search_results: &HashSet<PathBuf>,
 ) -> Vec<FileItem> {
+    // Check if content search is active but has no results
+    if !content_search_query.trim().is_empty() && content_search_results.is_empty() {
+        return Vec::new(); // Return empty list when content search finds nothing
+    }
+
     let filter = SearchFilter {
         query: search_query.to_string(),
         extension: extension_filter.to_string(),
@@ -211,6 +219,7 @@ struct BuildTreeArgs<'a> {
     expanded: &'a HashSet<PathBuf>,
     content_search_matches: &'a HashSet<PathBuf>,
     filename_query: &'a str,
+    extension_filter: &'a str,
     case_sensitive: bool,
     previewed_path: &'a Option<PathBuf>,
 }
@@ -230,6 +239,8 @@ fn build_tree_nodes(args: BuildTreeArgs) -> Vec<TreeNode> {
         };
 
         let file_name = item.path.file_name().unwrap_or_default().to_string_lossy();
+
+        // Filename search match
         let name_match = if !args.filename_query.is_empty() {
             if args.case_sensitive {
                 file_name.contains(args.filename_query)
@@ -242,7 +253,16 @@ fn build_tree_nodes(args: BuildTreeArgs) -> Vec<TreeNode> {
             false
         };
 
+        // Extension filter match
+        let extension_match = if !args.extension_filter.is_empty() {
+            matches_extension(&item.path, args.extension_filter)
+        } else {
+            false
+        };
+
+        // Content search match
         let content_match = args.content_search_matches.contains(&item.path);
+
         let is_previewed = args.previewed_path.as_ref() == Some(&item.path);
 
         nodes.insert(
@@ -256,7 +276,7 @@ fn build_tree_nodes(args: BuildTreeArgs) -> Vec<TreeNode> {
                 children: Vec::new(),
                 selection_state,
                 is_expanded: args.expanded.contains(&item.path),
-                is_match: name_match || content_match,
+                is_match: name_match || extension_match || content_match,
                 is_previewed,
             },
         );
@@ -284,12 +304,14 @@ fn build_tree_nodes(args: BuildTreeArgs) -> Vec<TreeNode> {
         children_map: &HashMap<PathBuf, Vec<PathBuf>>,
     ) -> Vec<TreeNode> {
         paths.sort_by(|a, b| {
-            let node_a = nodes.get(a).unwrap();
-            let node_b = nodes.get(b).unwrap();
-            match (node_a.is_directory, node_b.is_directory) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.file_name().cmp(&b.file_name()),
+            if let (Some(node_a), Some(node_b)) = (nodes.get(a), nodes.get(b)) {
+                match (node_a.is_directory, node_b.is_directory) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.file_name().cmp(&b.file_name()),
+                }
+            } else {
+                a.cmp(b) // Fallback sorting if a node is missing (should not happen)
             }
         });
 
@@ -306,6 +328,19 @@ fn build_tree_nodes(args: BuildTreeArgs) -> Vec<TreeNode> {
     }
 
     build_level(&mut root_nodes_paths, &mut nodes, &children_map)
+}
+
+/// Checks if a path's extension matches the extension filter.
+/// This is a copy of the logic from SearchEngine::matches_extension to avoid circular dependencies.
+fn matches_extension(path: &Path, extension_filter: &str) -> bool {
+    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+        let filter = extension_filter
+            .strip_prefix('.')
+            .unwrap_or(extension_filter);
+        ext.eq_ignore_ascii_case(filter)
+    } else {
+        extension_filter.is_empty() || extension_filter == "no extension"
+    }
 }
 
 /// Determines the selection state of a directory ('none', 'partial', 'full').
@@ -374,4 +409,224 @@ pub fn get_language_from_path(path: &Path) -> String {
         _ => "plaintext",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::AppState;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    /// Creates a test `FileItem` with the specified path and directory flag.
+    fn create_test_file_item(path_str: &str, is_dir: bool) -> FileItem {
+        FileItem {
+            path: PathBuf::from(path_str),
+            is_directory: is_dir,
+            is_binary: false,
+            size: if is_dir { 0 } else { 100 },
+            depth: path_str.matches('/').count(),
+            parent: PathBuf::from(path_str).parent().map(|p| p.to_path_buf()),
+        }
+    }
+
+    /// Creates a clean test configuration without any ignore patterns.
+    ///
+    /// This ensures that test files are not filtered out by production ignore patterns
+    /// that might exclude common test file extensions or directories.
+    fn create_test_config() -> AppConfig {
+        AppConfig {
+            ignore_patterns: HashSet::new(),
+            case_sensitive_search: false,
+            remove_empty_directories: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_generate_ui_state_initial_empty() {
+        let state = AppState::default();
+        let ui_state = generate_ui_state(&state);
+
+        assert!(ui_state.tree.is_empty());
+        assert_eq!(ui_state.total_files_found, 0);
+        assert_eq!(ui_state.visible_files_count, 0);
+        assert_eq!(ui_state.selected_files_count, 0);
+        assert_eq!(ui_state.status_message, "Ready.");
+    }
+
+    #[test]
+    fn test_generate_ui_state_after_scan() {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            create_test_file_item("/project/src", true),
+            create_test_file_item("/project/src/main.rs", false),
+            create_test_file_item("/project/Cargo.toml", false),
+        ];
+        state.filtered_file_list = state.full_file_list.clone();
+
+        let ui_state = generate_ui_state(&state);
+
+        assert_eq!(ui_state.total_files_found, 3);
+        assert_eq!(ui_state.visible_files_count, 3);
+        assert_eq!(ui_state.tree.len(), 2); // src dir and Cargo.toml file
+
+        let cargo_toml_node = ui_state
+            .tree
+            .iter()
+            .find(|n| n.name == "Cargo.toml")
+            .unwrap();
+        assert!(!cargo_toml_node.is_directory);
+
+        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
+        assert!(src_node.is_directory);
+        assert_eq!(src_node.children.len(), 1);
+        assert_eq!(src_node.children[0].name, "main.rs");
+    }
+
+    #[test]
+    fn test_generate_ui_state_with_search_query() {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            create_test_file_item("/project/src", true),
+            create_test_file_item("/project/src/main.rs", false),
+            create_test_file_item("/project/src/lib.rs", false),
+        ];
+        state.filtered_file_list = state.full_file_list.clone();
+        state.search_query = "main".to_string();
+        apply_filters(&mut state);
+
+        let ui_state = generate_ui_state(&state);
+
+        // The filtered list should contain `src` (parent dir) and `main.rs`.
+        assert_eq!(ui_state.visible_files_count, 2);
+        assert_eq!(ui_state.tree.len(), 1); // Only `src` directory at root
+
+        let src_node = &ui_state.tree[0];
+        assert_eq!(src_node.name, "src");
+        assert_eq!(src_node.children.len(), 1);
+
+        let main_rs_node = &src_node.children[0];
+        assert_eq!(main_rs_node.name, "main.rs");
+        assert!(main_rs_node.is_match); // Check if match flag is set
+    }
+
+    #[test]
+    fn test_generate_ui_state_with_extension_filter() {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            create_test_file_item("/project/src", true),
+            create_test_file_item("/project/src/main.rs", false),
+            create_test_file_item("/project/README.md", false),
+        ];
+        state.extension_filter = "md".to_string();
+        apply_filters(&mut state);
+
+        let ui_state = generate_ui_state(&state);
+
+        assert_eq!(ui_state.visible_files_count, 1);
+        assert_eq!(ui_state.tree.len(), 1);
+        assert_eq!(ui_state.tree[0].name, "README.md");
+        assert!(ui_state.tree[0].is_match); // Extension match should be highlighted
+    }
+
+    #[test]
+    fn test_content_search_with_no_results() {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            create_test_file_item("/project/src", true),
+            create_test_file_item("/project/src/main.rs", false),
+            create_test_file_item("/project/README.md", false),
+        ];
+        state.content_search_query = "nonexistent".to_string();
+        state.content_search_results = HashSet::new(); // No matches
+        apply_filters(&mut state);
+
+        let ui_state = generate_ui_state(&state);
+
+        // Should return empty tree when content search is active but finds nothing
+        assert_eq!(ui_state.visible_files_count, 0);
+        assert_eq!(ui_state.tree.len(), 0);
+    }
+
+    #[test]
+    fn test_stats_and_node_properties() {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        let src_path = PathBuf::from("/project/src");
+        let main_rs_path = PathBuf::from("/project/src/main.rs");
+        let lib_rs_path = PathBuf::from("/project/src/lib.rs");
+        let preview_path = main_rs_path.clone();
+
+        state.full_file_list = vec![
+            create_test_file_item("/project/src", true),
+            create_test_file_item("/project/src/main.rs", false),
+            create_test_file_item("/project/src/lib.rs", false),
+        ];
+        state.filtered_file_list = state.full_file_list.clone();
+        state.selected_files = HashSet::from([main_rs_path.clone()]);
+        state.expanded_dirs = HashSet::from([src_path.clone()]);
+        state.previewed_file_path = Some(preview_path);
+
+        let ui_state = generate_ui_state(&state);
+
+        assert_eq!(ui_state.selected_files_count, 1);
+
+        let src_node = ui_state.tree.iter().find(|n| n.path == src_path).unwrap();
+        assert!(src_node.is_expanded);
+        assert_eq!(src_node.selection_state, "partial");
+
+        let main_rs_node = src_node
+            .children
+            .iter()
+            .find(|n| n.path == main_rs_path)
+            .unwrap();
+        assert!(main_rs_node.is_previewed);
+        assert_eq!(main_rs_node.selection_state, "full");
+
+        let lib_rs_node = src_node
+            .children
+            .iter()
+            .find(|n| n.path == lib_rs_path)
+            .unwrap();
+        assert!(!lib_rs_node.is_previewed);
+        assert_eq!(lib_rs_node.selection_state, "none");
+    }
+
+    #[test]
+    fn test_ignore_patterns_functionality() {
+        let mut state = AppState::default();
+
+        // Set up configuration with specific ignore patterns for this test
+        let mut config = AppConfig::default();
+        config.ignore_patterns.insert("*.md".to_string());
+        config.ignore_patterns.insert("src/".to_string());
+        state.config = config;
+
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            create_test_file_item("/project/src", true),
+            create_test_file_item("/project/src/main.rs", false),
+            create_test_file_item("/project/README.md", false),
+            create_test_file_item("/project/Cargo.toml", false),
+        ];
+
+        apply_filters(&mut state);
+
+        let ui_state = generate_ui_state(&state);
+
+        // Only Cargo.toml should remain after applying ignore patterns
+        assert_eq!(ui_state.visible_files_count, 1);
+        assert_eq!(ui_state.tree.len(), 1);
+        assert_eq!(ui_state.tree[0].name, "Cargo.toml");
+    }
 }

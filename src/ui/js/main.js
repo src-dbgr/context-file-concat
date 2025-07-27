@@ -15,8 +15,18 @@ import { setupResizerListeners } from "./modules/resizer.js";
 // ==================================================================
 window.render = (newState) => {
   const wasScanning = state.get().is_scanning;
+  const previousPath = state.get().current_path;
+
   state.set(newState);
   renderUI();
+
+  // Update search inputs state when directory selection changes
+  if (
+    previousPath !== newState.current_path &&
+    window.updateSearchInputsState
+  ) {
+    window.updateSearchInputsState();
+  }
 
   // Additional logic after rendering
   const editor = state.getEditor();

@@ -7,9 +7,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tao::event_loop::EventLoopProxy;
 
 use super::events::UserEvent;
+use super::helpers::with_state_and_notify;
+use super::proxy::EventProxy;
 use super::state::AppState;
 use super::tasks::{search_in_files, start_scan_on_path};
 use super::view_model::{
@@ -20,69 +21,74 @@ use crate::config;
 use crate::core::FileHandler;
 
 /// Opens a file dialog for the user to select a directory to scan.
-pub fn select_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
+pub fn select_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     if let Some(path) = rfd::FileDialog::new().pick_folder() {
         start_scan_on_path(path, proxy, state);
     } else {
         tracing::info!("LOG: User cancelled directory selection.");
-        let mut state_guard = state.lock().unwrap();
+        // Manually notify on cancellation as no state mutation happens that would trigger the helper
+        let mut state_guard = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
         state_guard.is_scanning = false;
-        proxy
-            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                &state_guard,
-            ))))
-            .unwrap();
+        let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+        proxy.send_event(event);
     }
 }
 
 /// Clears the currently loaded directory and resets the application state.
-pub fn clear_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    let mut state_guard = state.lock().unwrap();
-    state_guard.reset_directory_state();
-    state_guard.config.last_directory = None;
-    config::settings::save_config(&state_guard.config).ok();
-    proxy
-        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_guard,
-        ))))
-        .unwrap();
+pub fn clear_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    with_state_and_notify(&state, &proxy, |s| {
+        s.reset_directory_state();
+        s.config.last_directory = None;
+        if let Err(e) = config::settings::save_config(&s.config) {
+            tracing::warn!("Failed to save config after clearing directory: {}", e);
+        }
+    });
 }
 
 /// Re-scans the currently loaded directory path.
-pub fn rescan_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    let current_path_str = { state.lock().unwrap().current_path.clone() };
+pub fn rescan_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    let current_path_str = {
+        state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.")
+            .current_path
+            .clone()
+    };
     if !current_path_str.is_empty() {
         start_scan_on_path(PathBuf::from(current_path_str), proxy, state);
     }
 }
 
 /// Cancels the ongoing directory scan.
-pub fn cancel_scan(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    tracing::info!("LOG: IPC 'cancelScan' received.");
-    let mut state_guard = state.lock().unwrap();
-    state_guard.cancel_current_scan();
-    proxy
-        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_guard,
-        ))))
-        .unwrap();
+pub fn cancel_scan<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    with_state_and_notify(&state, &proxy, |s| {
+        tracing::info!("LOG: IPC 'cancelScan' received.");
+        s.cancel_current_scan();
+    });
 }
 
 /// Updates the application configuration and persists it.
 ///
 /// If ignore patterns have changed, a re-scan of the current directory is triggered.
 /// Otherwise, filters are just re-applied to the existing file list.
-pub fn update_config(
+pub fn update_config<P: EventProxy>(
     payload: serde_json::Value,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(new_config) = serde_json::from_value(payload) {
         let (should_restart_scan, path_if_needed) = {
-            let mut state_guard = state.lock().unwrap();
+            let mut state_guard = state
+                .lock()
+                .expect("Mutex was poisoned. This should not happen.");
             let old_ignore_patterns = state_guard.config.ignore_patterns.clone();
             state_guard.config = new_config;
-            config::settings::save_config(&state_guard.config).ok();
+
+            if let Err(e) = config::settings::save_config(&state_guard.config) {
+                tracing::warn!("Failed to save config on update: {}", e);
+            }
 
             let ignore_patterns_changed = old_ignore_patterns != state_guard.config.ignore_patterns;
             if ignore_patterns_changed && !state_guard.current_path.is_empty() {
@@ -98,39 +104,36 @@ pub fn update_config(
                 start_scan_on_path(path, proxy, state);
             }
         } else {
-            let mut state_guard = state.lock().unwrap();
-            apply_filters(&mut state_guard);
-            proxy
-                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                    &state_guard,
-                ))))
-                .unwrap();
+            with_state_and_notify(&state, &proxy, |s| {
+                apply_filters(s);
+            });
         }
     }
 }
 
 /// Handles the initial request for state from the frontend when it loads.
-pub fn initialize(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    let state_guard = state.lock().unwrap();
-    proxy
-        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_guard,
-        ))))
-        .unwrap();
+pub fn initialize<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    let state_guard = state
+        .lock()
+        .expect("Mutex was poisoned. This should not happen.");
+    let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+    proxy.send_event(event);
 }
 
 /// Updates the filename, extension, and content search filters.
 ///
 /// If the content search query has changed, it triggers a new content search.
 /// Otherwise, it just re-applies the filename and extension filters.
-pub async fn update_filters(
+pub async fn update_filters<P: EventProxy>(
     payload: serde_json::Value,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(filters) = serde_json::from_value::<HashMap<String, String>>(payload) {
         let should_search_content = {
-            let mut state_guard = state.lock().unwrap();
+            let mut state_guard = state
+                .lock()
+                .expect("Mutex was poisoned. This should not happen.");
             state_guard.search_query = filters.get("searchQuery").cloned().unwrap_or_default();
             state_guard.extension_filter =
                 filters.get("extensionFilter").cloned().unwrap_or_default();
@@ -150,30 +153,28 @@ pub async fn update_filters(
         if should_search_content {
             search_in_files(proxy, state).await;
         } else {
-            let mut state_guard = state.lock().unwrap();
-            apply_filters(&mut state_guard);
-            if !state_guard.search_query.is_empty() {
-                auto_expand_for_matches(&mut state_guard);
-            }
-            proxy
-                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                    &state_guard,
-                ))))
-                .unwrap();
+            with_state_and_notify(&state, &proxy, |s| {
+                apply_filters(s);
+                if !s.search_query.is_empty() {
+                    auto_expand_for_matches(s);
+                }
+            });
         }
     }
 }
 
 /// Loads a file's content and sends it to the UI for preview.
-pub fn load_file_preview(
+pub fn load_file_preview<P: EventProxy>(
     payload: serde_json::Value,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload) {
         let path = PathBuf::from(path_str);
         let search_term = {
-            let state_guard = state.lock().unwrap();
+            let state_guard = state
+                .lock()
+                .expect("Mutex was poisoned. This should not happen.");
             if state_guard.content_search_query.is_empty() {
                 None
             } else {
@@ -181,213 +182,190 @@ pub fn load_file_preview(
             }
         };
 
+        // This command sends multiple, different events, so it doesn't fit the helper.
         {
-            state.lock().unwrap().previewed_file_path = Some(path.clone());
+            state
+                .lock()
+                .expect("Mutex was poisoned. This should not happen.")
+                .previewed_file_path = Some(path.clone());
         }
 
         match FileHandler::get_file_preview(&path, 1500) {
             Ok(content) => {
-                proxy
-                    .send_event(UserEvent::ShowFilePreview {
-                        content,
-                        language: get_language_from_path(&path),
-                        search_term,
-                        path: path.clone(),
-                    })
-                    .unwrap();
+                let event = UserEvent::ShowFilePreview {
+                    content,
+                    language: get_language_from_path(&path),
+                    search_term,
+                    path: path.clone(),
+                };
+                proxy.send_event(event);
             }
-            Err(e) => proxy
-                .send_event(UserEvent::ShowError(e.to_string()))
-                .unwrap(),
+            Err(e) => {
+                proxy.send_event(UserEvent::ShowError(e.to_string()));
+            }
         }
 
-        proxy
-            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                &state.lock().unwrap(),
-            ))))
-            .unwrap();
+        // Send a state update to reflect the `previewed_file_path` change
+        let state_guard = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
+        let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+        proxy.send_event(event);
     }
 }
 
 /// Adds a new ignore pattern to the configuration from a specific file path.
-pub fn add_ignore_path(
+pub fn add_ignore_path<P: EventProxy>(
     payload: serde_json::Value,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload) {
-        let path_to_ignore = PathBuf::from(path_str);
-        let mut state_guard = state.lock().unwrap();
-        let root_path = PathBuf::from(&state_guard.current_path);
+        with_state_and_notify(&state, &proxy, |s| {
+            let path_to_ignore = PathBuf::from(path_str);
+            let root_path = PathBuf::from(&s.current_path);
 
-        if let Ok(relative_path) = path_to_ignore.strip_prefix(&root_path) {
-            let mut pattern = relative_path.to_string_lossy().to_string();
-            if path_to_ignore.is_dir() {
-                pattern.push('/');
+            if let Ok(relative_path) = path_to_ignore.strip_prefix(&root_path) {
+                let mut pattern = relative_path.to_string_lossy().to_string();
+                if path_to_ignore.is_dir() {
+                    pattern.push('/');
+                }
+                s.selected_files.retain(|p| !p.starts_with(&path_to_ignore));
+                s.config.ignore_patterns.insert(pattern);
+                if let Err(e) = config::settings::save_config(&s.config) {
+                    tracing::warn!("Failed to save config after adding ignore path: {}", e);
+                }
+                apply_filters(s);
             }
-            state_guard
-                .selected_files
-                .retain(|p| !p.starts_with(&path_to_ignore));
-            state_guard.config.ignore_patterns.insert(pattern);
-            config::settings::save_config(&state_guard.config).ok();
-            apply_filters(&mut state_guard);
-            proxy
-                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                    &state_guard,
-                ))))
-                .unwrap();
-        }
+        });
     }
 }
 
 /// Toggles the selection state of a single file.
-pub fn toggle_selection(
+pub fn toggle_selection<P: EventProxy>(
     payload: serde_json::Value,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload) {
-        let path = PathBuf::from(path_str);
-        let mut state_guard = state.lock().unwrap();
-        if state_guard.selected_files.contains(&path) {
-            state_guard.selected_files.remove(&path);
-        } else {
-            state_guard.selected_files.insert(path);
-        }
-        proxy
-            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                &state_guard,
-            ))))
-            .unwrap();
+        with_state_and_notify(&state, &proxy, |s| {
+            let path = PathBuf::from(path_str);
+            if s.selected_files.contains(&path) {
+                s.selected_files.remove(&path);
+            } else {
+                s.selected_files.insert(path);
+            }
+        });
     }
 }
 
 /// Toggles the selection state of all files within a directory.
-pub fn toggle_directory_selection(
+pub fn toggle_directory_selection<P: EventProxy>(
     payload: serde_json::Value,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload) {
-        let dir_path = PathBuf::from(path_str);
-        let mut state_guard = state.lock().unwrap();
+        with_state_and_notify(&state, &proxy, |s| {
+            let dir_path = PathBuf::from(path_str);
+            let selection_state = super::view_model::get_directory_selection_state(
+                &dir_path,
+                &s.filtered_file_list,
+                &s.selected_files,
+            );
 
-        let selection_state = super::view_model::get_directory_selection_state(
-            &dir_path,
-            &state_guard.filtered_file_list,
-            &state_guard.selected_files,
-        );
+            let files_in_dir: Vec<PathBuf> = s
+                .filtered_file_list
+                .iter()
+                .filter(|item| !item.is_directory && item.path.starts_with(&dir_path))
+                .map(|item| item.path.clone())
+                .collect();
 
-        let files_in_dir: Vec<PathBuf> = state_guard
-            .filtered_file_list
-            .iter()
-            .filter(|item| !item.is_directory && item.path.starts_with(&dir_path))
-            .map(|item| item.path.clone())
-            .collect();
-
-        if selection_state == "full" {
-            for file in files_in_dir {
-                state_guard.selected_files.remove(&file);
+            if selection_state == "full" {
+                for file in files_in_dir {
+                    s.selected_files.remove(&file);
+                }
+            } else {
+                for file in files_in_dir {
+                    s.selected_files.insert(file);
+                }
             }
-        } else {
-            for file in files_in_dir {
-                state_guard.selected_files.insert(file);
-            }
-        }
-        proxy
-            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                &state_guard,
-            ))))
-            .unwrap();
+        });
     }
 }
 
 /// Toggles the expanded/collapsed state of a directory in the UI tree.
-pub fn toggle_expansion(
+pub fn toggle_expansion<P: EventProxy>(
     payload: serde_json::Value,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload) {
-        let path = PathBuf::from(path_str);
-        let mut state_guard = state.lock().unwrap();
-        if state_guard.expanded_dirs.contains(&path) {
-            state_guard.expanded_dirs.remove(&path);
-        } else {
-            state_guard.expanded_dirs.insert(path);
-        }
-        proxy
-            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                &state_guard,
-            ))))
-            .unwrap();
+        with_state_and_notify(&state, &proxy, |s| {
+            let path = PathBuf::from(path_str);
+            if s.expanded_dirs.contains(&path) {
+                s.expanded_dirs.remove(&path);
+            } else {
+                s.expanded_dirs.insert(path);
+            }
+        });
     }
 }
 
 /// Expands or collapses all directories in the file tree.
-pub fn expand_collapse_all(
+pub fn expand_collapse_all<P: EventProxy>(
     payload: serde_json::Value,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(expand) = serde_json::from_value::<bool>(payload) {
-        let mut state_guard = state.lock().unwrap();
-        if expand {
-            state_guard.expanded_dirs = state_guard
-                .filtered_file_list
-                .iter()
-                .filter(|i| i.is_directory)
-                .map(|i| i.path.clone())
-                .collect();
-        } else {
-            state_guard.expanded_dirs.clear();
-        }
-        proxy
-            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                &state_guard,
-            ))))
-            .unwrap();
+        with_state_and_notify(&state, &proxy, |s| {
+            if expand {
+                s.expanded_dirs = s
+                    .filtered_file_list
+                    .iter()
+                    .filter(|i| i.is_directory)
+                    .map(|i| i.path.clone())
+                    .collect();
+            } else {
+                s.expanded_dirs.clear();
+            }
+        });
     }
 }
 
 /// Selects all currently visible files in the file tree.
-pub fn select_all(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    let mut state_guard = state.lock().unwrap();
-    let paths_to_select: Vec<PathBuf> = state_guard
-        .filtered_file_list
-        .iter()
-        .filter(|item| !item.is_directory)
-        .map(|item| item.path.clone())
-        .collect();
-    state_guard.selected_files.extend(paths_to_select);
-    proxy
-        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_guard,
-        ))))
-        .unwrap();
+pub fn select_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    with_state_and_notify(&state, &proxy, |s| {
+        let paths_to_select: Vec<PathBuf> = s
+            .filtered_file_list
+            .iter()
+            .filter(|item| !item.is_directory)
+            .map(|item| item.path.clone())
+            .collect();
+        s.selected_files.extend(paths_to_select);
+    });
 }
 
 /// Deselects all files.
-pub fn deselect_all(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    let mut state_guard = state.lock().unwrap();
-    state_guard.selected_files.clear();
-    proxy
-        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_guard,
-        ))))
-        .unwrap();
+pub fn deselect_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    with_state_and_notify(&state, &proxy, |s| {
+        s.selected_files.clear();
+    });
 }
 
 /// Generates the final concatenated output from selected files and sends it to the UI.
-pub async fn generate_preview(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    let (selected, root, config, visible_files) = {
-        let mut state_guard = state.lock().unwrap();
+pub async fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    let (selected, root, config, all_scanned_files) = {
+        let mut state_guard = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
         state_guard.previewed_file_path = None;
         (
             get_selected_files_in_tree_order(&state_guard),
             PathBuf::from(&state_guard.current_path),
             state_guard.config.clone(),
-            state_guard.filtered_file_list.clone(),
+            state_guard.full_file_list.clone(),
         )
     };
 
@@ -395,7 +373,7 @@ pub async fn generate_preview(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex
         &selected,
         &root,
         config.include_tree_by_default,
-        visible_files,
+        all_scanned_files,
         config.tree_ignore_patterns,
         config.use_relative_paths,
     )
@@ -403,42 +381,35 @@ pub async fn generate_preview(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex
 
     match result {
         Ok(content) => {
-            proxy
-                .send_event(UserEvent::ShowGeneratedContent(content))
-                .unwrap();
-            proxy
-                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                    &state.lock().unwrap(),
-                ))))
-                .unwrap();
+            proxy.send_event(UserEvent::ShowGeneratedContent(content));
+            // Send state update to clear previewed path highlight
+            let state_guard = state
+                .lock()
+                .expect("Mutex was poisoned. This should not happen.");
+            let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+            proxy.send_event(event);
         }
-        Err(e) => proxy
-            .send_event(UserEvent::ShowError(e.to_string()))
-            .unwrap(),
+        Err(e) => {
+            proxy.send_event(UserEvent::ShowError(e.to_string()));
+        }
     }
 }
 
 /// Resets the preview state in the UI.
-pub fn clear_preview_state(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    let mut state_guard = state.lock().unwrap();
-    state_guard.previewed_file_path = None;
-    proxy
-        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_guard,
-        ))))
-        .unwrap();
+pub fn clear_preview_state<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    with_state_and_notify(&state, &proxy, |s| {
+        s.previewed_file_path = None;
+    });
 }
 
 /// Saves the provided content to a file, prompting the user for a location.
-pub fn save_file(
-    payload: serde_json::Value,
-    proxy: EventLoopProxy<UserEvent>,
-    state: Arc<Mutex<AppState>>,
-) {
+pub fn save_file<P: EventProxy>(payload: serde_json::Value, proxy: P, state: Arc<Mutex<AppState>>) {
     if let Some(content) = payload.as_str() {
         let content_clone = content.to_string();
         let (output_dir, filename) = {
-            let state_guard = state.lock().unwrap();
+            let state_guard = state
+                .lock()
+                .expect("Mutex was poisoned. This should not happen.");
             (
                 state_guard.config.output_directory.clone(),
                 state_guard.config.output_filename.clone(),
@@ -454,39 +425,33 @@ pub fn save_file(
 
         if let Some(path) = dialog.save_file() {
             match std::fs::write(&path, content_clone) {
-                Ok(_) => proxy
-                    .send_event(UserEvent::SaveComplete(
-                        true,
-                        path.to_string_lossy().to_string(),
-                    ))
-                    .unwrap(),
-                Err(e) => proxy
-                    .send_event(UserEvent::SaveComplete(false, e.to_string()))
-                    .unwrap(),
+                Ok(_) => {
+                    let event = UserEvent::SaveComplete(true, path.to_string_lossy().to_string());
+                    proxy.send_event(event);
+                }
+                Err(e) => {
+                    let event = UserEvent::SaveComplete(false, e.to_string());
+                    proxy.send_event(event);
+                }
             };
         } else {
-            proxy
-                .send_event(UserEvent::SaveComplete(false, "cancelled".to_string()))
-                .unwrap();
+            let event = UserEvent::SaveComplete(false, "cancelled".to_string());
+            proxy.send_event(event);
         }
     }
 }
 
 /// Opens a file dialog for the user to select a default output directory.
-pub fn pick_output_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
+pub fn pick_output_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     if let Some(path) = rfd::FileDialog::new().pick_folder() {
-        let mut state_guard = state.lock().unwrap();
-        state_guard.config.output_directory = Some(path);
-        proxy
-            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                &state_guard,
-            ))))
-            .unwrap();
+        with_state_and_notify(&state, &proxy, |s| {
+            s.config.output_directory = Some(path);
+        });
     }
 }
 
 /// Imports an application configuration from a JSON file.
-pub fn import_config(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
+pub fn import_config<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("JSON", &["json"])
         .pick_file()
@@ -495,11 +460,15 @@ pub fn import_config(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState
             Ok(new_config) => {
                 let filename = path.file_name().and_then(|n| n.to_str()).map(String::from);
                 let dir_to_scan = {
-                    let mut state_guard = state.lock().unwrap();
+                    let mut state_guard = state
+                        .lock()
+                        .expect("Mutex was poisoned. This should not happen.");
                     state_guard.cancel_current_scan();
                     state_guard.config = new_config;
                     state_guard.current_config_filename = filename;
-                    config::settings::save_config(&state_guard.config).ok();
+                    if let Err(e) = config::settings::save_config(&state_guard.config) {
+                        tracing::warn!("Failed to save imported config: {}", e);
+                    }
                     state_guard.config.last_directory.clone()
                 };
 
@@ -508,33 +477,32 @@ pub fn import_config(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState
                         start_scan_on_path(dir, proxy, state);
                     }
                 } else {
-                    proxy
-                        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                            &state.lock().unwrap(),
-                        ))))
-                        .unwrap();
+                    let state_guard = state
+                        .lock()
+                        .expect("Mutex was poisoned. This should not happen.");
+                    let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+                    proxy.send_event(event);
                 }
             }
             Err(e) => {
-                proxy
-                    .send_event(UserEvent::ShowError(format!(
-                        "Failed to import config: {e}"
-                    )))
-                    .unwrap();
+                let event = UserEvent::ShowError(format!("Failed to import config: {e}"));
+                proxy.send_event(event);
             }
         }
     }
 }
 
 /// Exports the current application configuration to a JSON file.
-pub fn export_config(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
+pub fn export_config<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("JSON", &["json"])
         .set_file_name("cfc-config.json")
         .save_file()
     {
-        let state_guard = state.lock().unwrap();
+        let state_guard = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
         let result = config::settings::export_config(&state_guard.config, &path).is_ok();
-        proxy.send_event(UserEvent::ConfigExported(result)).unwrap();
+        proxy.send_event(UserEvent::ConfigExported(result));
     }
 }

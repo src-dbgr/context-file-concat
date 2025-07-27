@@ -5,14 +5,16 @@
 
 pub mod commands;
 pub mod events;
+mod helpers;
+pub mod proxy;
 pub mod state;
 pub mod tasks;
 pub mod view_model;
 
 use std::sync::{Arc, Mutex};
-use tao::event_loop::EventLoopProxy;
 use wry::WebView;
 
+use crate::app::proxy::EventProxy;
 use events::{IpcMessage, UserEvent};
 use state::AppState;
 
@@ -20,37 +22,40 @@ use state::AppState;
 ///
 /// It parses the message and delegates to the appropriate command handler function
 /// in the `commands` module. Each command is spawned as a separate Tokio task.
-pub fn handle_ipc_message(
-    message: String,
-    proxy: EventLoopProxy<UserEvent>,
-    state: Arc<Mutex<AppState>>,
-) {
+pub fn handle_ipc_message<P: EventProxy>(message: String, proxy: P, state: Arc<Mutex<AppState>>) {
     if let Ok(msg) = serde_json::from_str::<IpcMessage>(&message) {
+        // Clone the proxy for use in the async task
+        let proxy = proxy.clone();
         tokio::spawn(async move {
+            // Now, clone the proxy *again* for each command call
             match msg.command.as_str() {
-                "selectDirectory" => commands::select_directory(proxy, state),
-                "clearDirectory" => commands::clear_directory(proxy, state),
-                "rescanDirectory" => commands::rescan_directory(proxy, state),
-                "cancelScan" => commands::cancel_scan(proxy, state),
-                "updateConfig" => commands::update_config(msg.payload, proxy, state),
-                "initialize" => commands::initialize(proxy, state),
-                "updateFilters" => commands::update_filters(msg.payload, proxy, state).await,
-                "loadFilePreview" => commands::load_file_preview(msg.payload, proxy, state),
-                "addIgnorePath" => commands::add_ignore_path(msg.payload, proxy, state),
-                "toggleSelection" => commands::toggle_selection(msg.payload, proxy, state),
-                "toggleDirectorySelection" => {
-                    commands::toggle_directory_selection(msg.payload, proxy, state)
+                "selectDirectory" => commands::select_directory(proxy.clone(), state),
+                "clearDirectory" => commands::clear_directory(proxy.clone(), state),
+                "rescanDirectory" => commands::rescan_directory(proxy.clone(), state),
+                "cancelScan" => commands::cancel_scan(proxy.clone(), state),
+                "updateConfig" => commands::update_config(msg.payload, proxy.clone(), state),
+                "initialize" => commands::initialize(proxy.clone(), state),
+                "updateFilters" => {
+                    commands::update_filters(msg.payload, proxy.clone(), state).await
                 }
-                "toggleExpansion" => commands::toggle_expansion(msg.payload, proxy, state),
-                "expandCollapseAll" => commands::expand_collapse_all(msg.payload, proxy, state),
-                "selectAll" => commands::select_all(proxy, state),
-                "deselectAll" => commands::deselect_all(proxy, state),
-                "generatePreview" => commands::generate_preview(proxy, state).await,
-                "clearPreviewState" => commands::clear_preview_state(proxy, state),
-                "saveFile" => commands::save_file(msg.payload, proxy, state),
-                "pickOutputDirectory" => commands::pick_output_directory(proxy, state),
-                "importConfig" => commands::import_config(proxy, state),
-                "exportConfig" => commands::export_config(proxy, state),
+                "loadFilePreview" => commands::load_file_preview(msg.payload, proxy.clone(), state),
+                "addIgnorePath" => commands::add_ignore_path(msg.payload, proxy.clone(), state),
+                "toggleSelection" => commands::toggle_selection(msg.payload, proxy.clone(), state),
+                "toggleDirectorySelection" => {
+                    commands::toggle_directory_selection(msg.payload, proxy.clone(), state)
+                }
+                "toggleExpansion" => commands::toggle_expansion(msg.payload, proxy.clone(), state),
+                "expandCollapseAll" => {
+                    commands::expand_collapse_all(msg.payload, proxy.clone(), state)
+                }
+                "selectAll" => commands::select_all(proxy.clone(), state),
+                "deselectAll" => commands::deselect_all(proxy.clone(), state),
+                "generatePreview" => commands::generate_preview(proxy.clone(), state).await,
+                "clearPreviewState" => commands::clear_preview_state(proxy.clone(), state),
+                "saveFile" => commands::save_file(msg.payload, proxy.clone(), state),
+                "pickOutputDirectory" => commands::pick_output_directory(proxy.clone(), state),
+                "importConfig" => commands::import_config(proxy.clone(), state),
+                "exportConfig" => commands::export_config(proxy.clone(), state),
                 _ => tracing::warn!("Unknown IPC command: {}", msg.command),
             }
         });

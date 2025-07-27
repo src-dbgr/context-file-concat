@@ -49,9 +49,9 @@ pub struct AppState {
     pub active_ignore_patterns: HashSet<String>,
 }
 
-impl AppState {
-    /// Creates a new `AppState` instance, loading the configuration from disk.
-    pub fn new() -> Self {
+impl Default for AppState {
+    /// Creates a default `AppState` instance, loading the configuration from disk.
+    fn default() -> Self {
         Self {
             config: AppConfig::load().unwrap_or_default(),
             current_path: String::new(),
@@ -76,7 +76,9 @@ impl AppState {
             active_ignore_patterns: HashSet::new(),
         }
     }
+}
 
+impl AppState {
     /// Cancels the current scan task, if any, and resets the scanning state.
     pub fn cancel_current_scan(&mut self) {
         tracing::info!("LOG: AppState::cancel_current_scan called.");

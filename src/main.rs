@@ -1,10 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
-mod app;
-mod config;
-mod core;
-mod utils;
-
+use context_file_concat::app;
 use std::sync::{Arc, Mutex};
 use tao::{
     event::{Event, WindowEvent},
@@ -29,7 +23,7 @@ async fn main() {
 
     // Create the shared application state and the event loop proxy
     let proxy = event_loop.create_proxy();
-    let state = Arc::new(Mutex::new(app::state::AppState::new()));
+    let state = Arc::new(Mutex::new(app::state::AppState::default()));
 
     // Load and prepare the HTML content for the WebView by injecting CSS and JS
     let html_content = include_str!("ui/index.html")

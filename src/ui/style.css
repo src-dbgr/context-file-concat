@@ -493,11 +493,13 @@ body.vertical-resizing {
   margin-bottom: 10px;
   gap: 15px;
 }
+
 .files-title-section {
   display: flex;
   align-items: center;
   gap: 15px;
 }
+
 .files-title-section h3 {
   margin: 0;
   font-size: 1em;
@@ -550,9 +552,65 @@ input[type="text"]:focus {
   display: flex;
   gap: 8px;
 }
+
 .input-group input {
   margin-bottom: 0;
   flex-grow: 1;
+}
+
+/* Message Display Component - for non-interactive messages */
+.message-display {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 20px;
+  margin: 20px;
+  background-color: var(--bg-color-light);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  color: var(--text-color-muted);
+  max-width: 600px;
+  align-self: center;
+  text-align: center;
+}
+
+.message-icon {
+  margin-bottom: 12px;
+  opacity: 0.6;
+}
+
+.message-icon .icon {
+  width: 32px;
+  height: 32px;
+  stroke: var(--text-color-muted);
+}
+
+.message-text {
+  margin: 0;
+  font-size: 0.95em;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+/* Enhanced file tree container to properly center message displays */
+.file-tree-container:has(.message-display) {
+  justify-content: center;
+  align-items: center;
+}
+
+/* Disabled state styles for search inputs */
+input[type="text"]:disabled {
+  background-color: var(--bg-color-dark);
+  color: var(--text-color-muted);
+  border-color: var(--border-color);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+input[type="text"]:disabled::placeholder {
+  color: var(--text-color-muted);
+  opacity: 0.8;
 }
 
 button {
@@ -572,11 +630,13 @@ button {
   justify-content: center;
   gap: 6px;
 }
+
 button:hover:not(:disabled) {
   background-color: var(--button-hover-bg);
   border-color: var(--accent-color);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.5;

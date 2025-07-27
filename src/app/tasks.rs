@@ -9,9 +9,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use tao::event_loop::EventLoopProxy;
 
 use super::events::UserEvent;
+use super::proxy::EventProxy;
 use super::state::AppState;
 use super::view_model::{apply_filters, auto_expand_for_matches, generate_ui_state};
 
@@ -20,11 +20,7 @@ use crate::core::{DirectoryScanner, ScanProgress};
 /// Initiates a directory scan for a given path.
 ///
 /// This function sets up the application state for the scan and spawns the `scan_directory_task`.
-pub fn start_scan_on_path(
-    path: PathBuf,
-    proxy: EventLoopProxy<UserEvent>,
-    state: Arc<Mutex<AppState>>,
-) {
+pub fn start_scan_on_path<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<Mutex<AppState>>) {
     tokio::spawn(async move {
         let directory_path = if path.is_dir() {
             path
@@ -33,15 +29,14 @@ pub fn start_scan_on_path(
         };
 
         if !directory_path.is_dir() {
-            proxy
-                .send_event(UserEvent::ShowError(
-                    "Dropped item is not a valid directory.".to_string(),
-                ))
-                .ok();
+            let event = UserEvent::ShowError("Dropped item is not a valid directory.".to_string());
+            proxy.send_event(event);
             return;
         }
 
-        let mut state_guard = state.lock().unwrap();
+        let mut state_guard = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
         state_guard.cancel_current_scan();
         state_guard.active_ignore_patterns.clear();
 
@@ -68,11 +63,8 @@ pub fn start_scan_on_path(
         });
         state_guard.scan_task = Some(handle);
 
-        proxy
-            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                &state_guard,
-            ))))
-            .unwrap();
+        let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+        proxy.send_event(event);
     });
 }
 
@@ -80,14 +72,16 @@ pub fn start_scan_on_path(
 ///
 /// This function performs the core scanning logic and updates the application state
 /// with the results or any errors that occur.
-async fn scan_directory_task(
-    proxy: EventLoopProxy<UserEvent>,
+async fn scan_directory_task<P: EventProxy>(
+    proxy: P,
     state: Arc<Mutex<AppState>>,
     cancel_flag: Arc<AtomicBool>,
 ) {
     tracing::info!("LOG: TASK:: scan_directory_task started.");
     let (path_str, ignore_patterns) = {
-        let state_lock = state.lock().unwrap();
+        let state_lock = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
         (
             state_lock.current_path.clone(),
             state_lock.config.ignore_patterns.clone(),
@@ -96,25 +90,22 @@ async fn scan_directory_task(
 
     let path = PathBuf::from(&path_str);
     if !path.is_dir() {
-        proxy
-            .send_event(UserEvent::ShowError(
-                "Selected path is not a valid directory.".to_string(),
-            ))
-            .unwrap();
-        let mut state_lock = state.lock().unwrap();
+        let event = UserEvent::ShowError("Selected path is not a valid directory.".to_string());
+        proxy.send_event(event);
+
+        let mut state_lock = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
         state_lock.cancel_current_scan();
-        proxy
-            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                &state_lock,
-            ))))
-            .unwrap();
+        let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_lock)));
+        proxy.send_event(event);
         return;
     }
 
     let scanner = DirectoryScanner::new(ignore_patterns);
     let progress_proxy = proxy.clone();
     let progress_callback = move |progress: ScanProgress| {
-        let _ = progress_proxy.send_event(UserEvent::ScanProgress(progress));
+        progress_proxy.send_event(UserEvent::ScanProgress(progress));
     };
 
     tracing::info!("LOG: TASK:: Calling scanner.scan_directory_with_progress...");
@@ -127,18 +118,17 @@ async fn scan_directory_task(
         Ok(files) => files,
         Err(e) => {
             tracing::error!("LOG: TASK:: Scan finished with error: {e}");
-            let mut state_lock = state.lock().unwrap();
+            let mut state_lock = state
+                .lock()
+                .expect("Mutex was poisoned. This should not happen.");
             if !state_lock.is_scanning {
                 return;
             }
             state_lock.scan_progress.current_scanning_path = format!("Scan failed: {e}");
             state_lock.is_scanning = false;
             state_lock.scan_task = None;
-            proxy
-                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                    &state_lock,
-                ))))
-                .unwrap();
+            let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_lock)));
+            proxy.send_event(event);
             return;
         }
     };
@@ -148,7 +138,9 @@ async fn scan_directory_task(
         final_files.len()
     );
 
-    let mut state_lock = state.lock().unwrap();
+    let mut state_lock = state
+        .lock()
+        .expect("Mutex was poisoned. This should not happen.");
     if !state_lock.is_scanning {
         tracing::warn!("LOG: TASK:: Scan was cancelled in the meantime. Discarding results.");
         return;
@@ -163,28 +155,24 @@ async fn scan_directory_task(
         state_lock.filtered_file_list.len()
     );
     state_lock.scan_task = None;
-    proxy
-        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_lock,
-        ))))
-        .unwrap();
+    let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_lock)));
+    proxy.send_event(event);
     tracing::info!("LOG: TASK:: Final state has been updated and sent to UI.");
 }
 
 /// Performs a content search across all non-binary files.
 ///
 /// This function runs in parallel using Rayon for performance.
-pub async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
+pub async fn search_in_files<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     let (files_to_search, query, case_sensitive) = {
-        let mut state_guard = state.lock().unwrap();
+        let mut state_guard = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
         if state_guard.content_search_query.is_empty() {
             state_guard.content_search_results.clear();
             apply_filters(&mut state_guard);
-            proxy
-                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                    &state_guard,
-                ))))
-                .unwrap();
+            let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+            proxy.send_event(event);
             return;
         }
         (
@@ -217,13 +205,12 @@ pub async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<
         })
         .collect();
 
-    let mut state_guard = state.lock().unwrap();
+    let mut state_guard = state
+        .lock()
+        .expect("Mutex was poisoned. This should not happen.");
     state_guard.content_search_results = matching_paths;
     apply_filters(&mut state_guard);
     auto_expand_for_matches(&mut state_guard);
-    proxy
-        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_guard,
-        ))))
-        .unwrap();
+    let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+    proxy.send_event(event);
 }
