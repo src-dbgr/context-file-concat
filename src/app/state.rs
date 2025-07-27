@@ -1,3 +1,5 @@
+//! Defines the central, mutable state of the application.
+
 use crate::config::AppConfig;
 use crate::core::{FileItem, ScanProgress};
 use std::collections::HashSet;
@@ -6,33 +8,52 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
-/// Hält den kompletten, veränderbaren Zustand der Anwendung.
+/// Holds the complete, mutable state of the application.
+///
+/// This struct is wrapped in an `Arc<Mutex<...>>` to allow for safe, shared access
+/// from different threads (e.g., the main event loop, IPC handlers, and async tasks).
 pub struct AppState {
+    /// The application's configuration settings.
     pub config: AppConfig,
+    /// The absolute path to the currently loaded directory.
     pub current_path: String,
+    /// The complete, unfiltered list of all files and directories found in the scan.
     pub full_file_list: Vec<FileItem>,
+    /// The list of files and directories visible in the UI after applying filters.
     pub filtered_file_list: Vec<FileItem>,
+    /// The set of absolute paths to files that are currently selected by the user.
     pub selected_files: HashSet<PathBuf>,
+    /// The set of absolute paths to directories that are expanded in the UI tree.
     pub expanded_dirs: HashSet<PathBuf>,
+    /// `true` if a directory scan is currently in progress.
     pub is_scanning: bool,
+    /// The current search query for filenames.
     pub search_query: String,
+    /// The current filter for file extensions.
     pub extension_filter: String,
+    /// The current search query for file content.
     pub content_search_query: String,
+    /// The set of paths that match the current content search query.
     pub content_search_results: HashSet<PathBuf>,
+    /// The filename of the currently loaded configuration file, if any.
     pub current_config_filename: Option<String>,
+    /// The current progress of the directory scan.
     pub scan_progress: ScanProgress,
-    // pub auto_load_last_directory: bool, // <-- DIESE ZEILE LÖSCHEN
+    /// The path of the file currently being previewed in the editor.
     pub previewed_file_path: Option<PathBuf>,
+    /// A handle to the currently running scan task, allowing it to be aborted.
     pub scan_task: Option<JoinHandle<()>>,
+    /// A flag used to signal cancellation to the scan task.
     pub scan_cancellation_flag: Arc<AtomicBool>,
+    /// The set of ignore patterns that were actually matched during the last scan.
     pub active_ignore_patterns: HashSet<String>,
 }
 
 impl AppState {
+    /// Creates a new `AppState` instance, loading the configuration from disk.
     pub fn new() -> Self {
         Self {
             config: AppConfig::load().unwrap_or_default(),
-            // auto_load_last_directory, // <-- DIESE ZEILE LÖSCHEN
             current_path: String::new(),
             full_file_list: Vec::new(),
             filtered_file_list: Vec::new(),
@@ -56,20 +77,18 @@ impl AppState {
         }
     }
 
-    /// Bricht den aktuellen Scan-Task ab, falls vorhanden, und setzt den Scan-Zustand zurück.
+    /// Cancels the current scan task, if any, and resets the scanning state.
     pub fn cancel_current_scan(&mut self) {
-        tracing::info!("LOG: AppState::cancel_current_scan aufgerufen.");
+        tracing::info!("LOG: AppState::cancel_current_scan called.");
         if let Some(handle) = self.scan_task.take() {
-            tracing::info!("LOG: Aktiver Scan-Task gefunden. Rufe handle.abort() auf...");
+            tracing::info!("LOG: Active scan task found. Calling handle.abort()...");
             handle.abort();
-            tracing::info!("LOG: handle.abort() wurde aufgerufen.");
+            tracing::info!("LOG: handle.abort() was called.");
         } else {
-            tracing::warn!(
-                "LOG: cancel_current_scan aufgerufen, aber kein aktiver Scan-Task gefunden."
-            );
+            tracing::warn!("LOG: cancel_current_scan called, but no active scan task found.");
         }
 
-        tracing::info!("LOG: Setze Stopp-Signal (AtomicBool) auf true.");
+        tracing::info!("LOG: Setting cancellation flag (AtomicBool) to true.");
         self.scan_cancellation_flag.store(true, Ordering::Relaxed);
 
         self.is_scanning = false;
@@ -78,10 +97,10 @@ impl AppState {
             large_files_skipped: 0,
             current_scanning_path: "Scan cancelled.".to_string(),
         };
-        tracing::info!("LOG: AppState wurde auf 'cancelled' zurückgesetzt.");
+        tracing::info!("LOG: AppState has been reset to 'cancelled' state.");
     }
 
-    /// Setzt den gesamten Zustand zurück, der sich auf ein geladenes Verzeichnis bezieht.
+    /// Resets all state related to a loaded directory.
     pub fn reset_directory_state(&mut self) {
         self.cancel_current_scan();
 

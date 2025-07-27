@@ -1,38 +1,44 @@
+//! Defines the event and message structures for communication between the backend and frontend.
+
 use serde::Deserialize;
 use std::path::PathBuf;
 
 use super::view_model::UiState;
 use crate::core::ScanProgress;
 
-/// Events, die vom Rust-Backend an die WebView (UI-Thread) gesendet werden.
+/// Events sent from the Rust backend to the WebView (UI thread).
+///
+/// Each variant corresponds to a specific JavaScript function (`window.*`) that will be called in the frontend.
 #[derive(Debug)]
 pub enum UserEvent {
-    /// Ein komplettes Zustandsupdate, um die UI neu zu rendern.
+    /// A complete state update to re-render the UI.
     StateUpdate(UiState),
-    /// Inhalt für die Dateivorschau.
+    /// Content for the file preview panel.
     ShowFilePreview {
         content: String,
         language: String,
         search_term: Option<String>,
         path: PathBuf,
     },
-    /// Der generierte, zusammengefügte Inhalt für die Hauptvorschau.
+    /// The generated, concatenated content for the main preview.
     ShowGeneratedContent(String),
-    /// Eine Fehlermeldung, die dem Benutzer angezeigt werden soll.
+    /// An error message to be displayed to the user.
     ShowError(String),
-    /// Das Ergebnis einer Dateispeicheroperation.
+    /// The result of a file save operation.
     SaveComplete(bool, String),
-    /// Das Ergebnis eines Konfigurationsexports.
+    /// The result of a configuration export.
     ConfigExported(bool),
-    /// Ein Fortschrittsupdate während eines Verzeichnisscans.
+    /// A progress update during a directory scan.
     ScanProgress(ScanProgress),
-    /// Zeigt an, dass eine Datei über das Fenster gezogen wird.
+    /// Indicates that a file is being dragged over the window.
     DragStateChanged(bool),
 }
 
-/// Eine Nachricht, die von der WebView über den IPC-Kanal empfangen wird.
+/// A message received from the WebView via the IPC channel.
 #[derive(Deserialize, Debug)]
 pub struct IpcMessage {
+    /// The name of the command to execute.
     pub command: String,
+    /// The payload associated with the command, as a JSON value.
     pub payload: serde_json::Value,
 }

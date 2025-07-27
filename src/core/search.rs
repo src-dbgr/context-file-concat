@@ -1,12 +1,19 @@
+//! Provides logic for filtering and searching lists of `FileItem`s.
+
 use super::{build_globset_from_patterns, FileItem, SearchFilter};
 use rayon::prelude::*;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf}; // MODIFIED
+use std::path::{Path, PathBuf};
 
+/// A utility struct for searching and filtering file lists.
+///
+/// This struct is stateless and provides methods as associated functions.
 pub struct SearchEngine;
 
 impl SearchEngine {
-    // Stellt die Logik zum Filtern nach Ignore-Patterns wieder her.
+    /// Filters a slice of `FileItem`s based on the provided `SearchFilter`.
+    ///
+    /// This is the main entry point for applying all filters (name, extension, ignore patterns).
     pub fn filter_files(files: &[FileItem], filter: &SearchFilter) -> Vec<FileItem> {
         let (ignore_glob_set, _) = build_globset_from_patterns(&filter.ignore_patterns);
 
@@ -17,13 +24,13 @@ impl SearchEngine {
             .collect()
     }
 
-    // Berücksichtigt wieder das ignore_glob_set.
+    /// Checks if a single `FileItem` matches the given filter criteria.
     fn matches_filter(
         file: &FileItem,
         filter: &SearchFilter,
         ignore_glob_set: &globset::GlobSet,
     ) -> bool {
-        // Die Prüfung ist zurück, um die UI-Filterung in Echtzeit zu ermöglichen.
+        // This check enables real-time filtering in the UI based on ignore patterns.
         if file.path.components().any(|c| c.as_os_str() == ".git")
             || ignore_glob_set.is_match(&file.path)
         {
@@ -43,7 +50,7 @@ impl SearchEngine {
         true
     }
 
-    // Die restlichen Methoden bleiben unverändert.
+    /// Checks if a path's filename contains the search query.
     fn matches_search_query(path: &Path, query: &str, case_sensitive: bool) -> bool {
         let file_name = path
             .file_name()
@@ -58,6 +65,7 @@ impl SearchEngine {
         }
     }
 
+    /// Checks if a path's extension matches the extension filter.
     fn matches_extension(path: &Path, extension_filter: &str) -> bool {
         if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
             let filter = if extension_filter.starts_with('.') {
@@ -72,6 +80,9 @@ impl SearchEngine {
         }
     }
 
+    /// Recursively removes directories from a list that do not contain any files.
+    ///
+    /// Returns the pruned list of `FileItem`s and a set of the paths that were removed.
     pub fn remove_empty_directories(mut files: Vec<FileItem>) -> (Vec<FileItem>, HashSet<PathBuf>) {
         let mut has_changes = true;
         let mut all_removed_dirs = HashSet::new();
@@ -98,7 +109,7 @@ impl SearchEngine {
                 files.retain(|item| !dirs_to_remove.contains(&item.path));
                 if files.len() != files_before_len {
                     has_changes = true;
-                    // Füge die in dieser Runde entfernten Verzeichnisse zum Gesamtset hinzu.
+                    // Add the directories removed in this round to the total set.
                     all_removed_dirs.extend(dirs_to_remove);
                 }
             }
@@ -239,10 +250,9 @@ mod tests {
         assert!(!paths.contains(&"docs/README.md"));
         assert!(!paths.contains(&"README.md"));
         assert!(!paths.contains(&"target/app.exe"));
-        assert!(!paths.contains(&"target")); // Das Verzeichnis selbst sollte auch weg sein
+        assert!(!paths.contains(&"target"));
         assert!(paths.contains(&"src/main.rs"));
 
-        // KORREKTE ERWARTUNG: 6 Elemente bleiben übrig (inkl. dem 'docs' Verzeichnis)
         assert_eq!(result.len(), 6, "Expected 6 items to remain: src, src/main.rs, src/lib.rs, src/module, src/module/component.rs, and docs");
     }
 }

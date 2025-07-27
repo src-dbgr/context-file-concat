@@ -1,3 +1,9 @@
+//! Contains all the command handlers that are callable from the frontend via IPC.
+//!
+//! Each function in this module corresponds to a specific `IpcMessage::command`.
+//! These handlers are responsible for interacting with the `AppState` and the `core`
+//! logic, and for sending `UserEvent`s back to the UI.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -13,13 +19,12 @@ use super::view_model::{
 use crate::config;
 use crate::core::FileHandler;
 
-// Jede Funktion hier entspricht einem IpcMessage-Befehl.
-
+/// Opens a file dialog for the user to select a directory to scan.
 pub fn select_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     if let Some(path) = rfd::FileDialog::new().pick_folder() {
         start_scan_on_path(path, proxy, state);
     } else {
-        tracing::info!("LOG: Benutzer hat Verzeichnisauswahl abgebrochen.");
+        tracing::info!("LOG: User cancelled directory selection.");
         let mut state_guard = state.lock().unwrap();
         state_guard.is_scanning = false;
         proxy
@@ -28,6 +33,7 @@ pub fn select_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppSt
     }
 }
 
+/// Clears the currently loaded directory and resets the application state.
 pub fn clear_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     let mut state_guard = state.lock().unwrap();
     state_guard.reset_directory_state();
@@ -38,6 +44,7 @@ pub fn clear_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppSta
         .unwrap();
 }
 
+/// Re-scans the currently loaded directory path.
 pub fn rescan_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     let current_path_str = { state.lock().unwrap().current_path.clone() };
     if !current_path_str.is_empty() {
@@ -45,8 +52,9 @@ pub fn rescan_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppSt
     }
 }
 
+/// Cancels the ongoing directory scan.
 pub fn cancel_scan(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    tracing::info!("LOG: IPC 'cancelScan' erhalten.");
+    tracing::info!("LOG: IPC 'cancelScan' received.");
     let mut state_guard = state.lock().unwrap();
     state_guard.cancel_current_scan();
     proxy
@@ -54,6 +62,10 @@ pub fn cancel_scan(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>
         .unwrap();
 }
 
+/// Updates the application configuration and persists it.
+///
+/// If ignore patterns have changed, a re-scan of the current directory is triggered.
+/// Otherwise, filters are just re-applied to the existing file list.
 pub fn update_config(
     payload: serde_json::Value,
     proxy: EventLoopProxy<UserEvent>,
@@ -89,17 +101,18 @@ pub fn update_config(
     }
 }
 
-// Ersetze diese Funktion in src/app/commands.rs
-
+/// Handles the initial request for state from the frontend when it loads.
 pub fn initialize(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
-    // Das ursprüngliche, "immer deaktivierte" Verhalten wird hier wiederhergestellt.
-    // Wir scannen nicht automatisch und senden nur den initialen UI-Zustand.
     let state_guard = state.lock().unwrap();
     proxy
         .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
         .unwrap();
 }
 
+/// Updates the filename, extension, and content search filters.
+///
+/// If the content search query has changed, it triggers a new content search.
+/// Otherwise, it just re-applies the filename and extension filters.
 pub async fn update_filters(
     payload: serde_json::Value,
     proxy: EventLoopProxy<UserEvent>,
@@ -139,6 +152,7 @@ pub async fn update_filters(
     }
 }
 
+/// Loads a file's content and sends it to the UI for preview.
 pub fn load_file_preview(
     payload: serde_json::Value,
     proxy: EventLoopProxy<UserEvent>,
@@ -183,6 +197,7 @@ pub fn load_file_preview(
     }
 }
 
+/// Adds a new ignore pattern to the configuration from a specific file path.
 pub fn add_ignore_path(
     payload: serde_json::Value,
     proxy: EventLoopProxy<UserEvent>,
@@ -211,6 +226,7 @@ pub fn add_ignore_path(
     }
 }
 
+/// Toggles the selection state of a single file.
 pub fn toggle_selection(
     payload: serde_json::Value,
     proxy: EventLoopProxy<UserEvent>,
@@ -230,6 +246,7 @@ pub fn toggle_selection(
     }
 }
 
+/// Toggles the selection state of all files within a directory.
 pub fn toggle_directory_selection(
     payload: serde_json::Value,
     proxy: EventLoopProxy<UserEvent>,
@@ -267,6 +284,7 @@ pub fn toggle_directory_selection(
     }
 }
 
+/// Toggles the expanded/collapsed state of a directory in the UI tree.
 pub fn toggle_expansion(
     payload: serde_json::Value,
     proxy: EventLoopProxy<UserEvent>,
@@ -286,6 +304,7 @@ pub fn toggle_expansion(
     }
 }
 
+/// Expands or collapses all directories in the file tree.
 pub fn expand_collapse_all(
     payload: serde_json::Value,
     proxy: EventLoopProxy<UserEvent>,
@@ -309,6 +328,7 @@ pub fn expand_collapse_all(
     }
 }
 
+/// Selects all currently visible files in the file tree.
 pub fn select_all(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     let mut state_guard = state.lock().unwrap();
     let paths_to_select: Vec<PathBuf> = state_guard
@@ -323,6 +343,7 @@ pub fn select_all(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>)
         .unwrap();
 }
 
+/// Deselects all files.
 pub fn deselect_all(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     let mut state_guard = state.lock().unwrap();
     state_guard.selected_files.clear();
@@ -331,6 +352,7 @@ pub fn deselect_all(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>
         .unwrap();
 }
 
+/// Generates the final concatenated output from selected files and sends it to the UI.
 pub async fn generate_preview(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     let (selected, root, config, visible_files) = {
         let mut state_guard = state.lock().unwrap();
@@ -370,6 +392,7 @@ pub async fn generate_preview(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex
     }
 }
 
+/// Resets the preview state in the UI.
 pub fn clear_preview_state(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     let mut state_guard = state.lock().unwrap();
     state_guard.previewed_file_path = None;
@@ -378,6 +401,7 @@ pub fn clear_preview_state(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<Ap
         .unwrap();
 }
 
+/// Saves the provided content to a file, prompting the user for a location.
 pub fn save_file(
     payload: serde_json::Value,
     proxy: EventLoopProxy<UserEvent>,
@@ -420,6 +444,7 @@ pub fn save_file(
     }
 }
 
+/// Opens a file dialog for the user to select a default output directory.
 pub fn pick_output_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     if let Some(path) = rfd::FileDialog::new().pick_folder() {
         let mut state_guard = state.lock().unwrap();
@@ -430,6 +455,7 @@ pub fn pick_output_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<
     }
 }
 
+/// Imports an application configuration from a JSON file.
 pub fn import_config(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("JSON", &["json"])
@@ -471,6 +497,7 @@ pub fn import_config(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState
     }
 }
 
+/// Exports the current application configuration to a JSON file.
 pub fn export_config(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("JSON", &["json"])

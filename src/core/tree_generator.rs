@@ -1,20 +1,28 @@
+//! Generates an ASCII representation of a directory tree.
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::{build_globset_from_patterns, FileItem};
 
+/// A utility struct for generating an ASCII directory tree.
+///
+/// This struct is stateless and provides methods as associated functions.
 pub struct TreeGenerator;
 
 impl TreeGenerator {
+    /// Generates a string representing the directory tree from a list of `FileItem`s.
+    ///
+    /// It filters the items based on tree-specific ignore patterns before rendering.
     pub fn generate_tree(
         files: &[FileItem],
         root_path: &Path,
         ignore_patterns: &HashSet<String>,
     ) -> String {
-        // 1. Baue ein GlobSet aus den baumspezifischen Ignore-Patterns.
+        // 1. Build a GlobSet from the tree-specific ignore patterns.
         let (ignore_set, _) = build_globset_from_patterns(ignore_patterns);
 
-        // 2. Filtere die übergebenen Dateien, bevor der Baum gebaut wird.
+        // 2. Filter the provided files before building the tree.
         let filtered_files: Vec<&FileItem> = files
             .iter()
             .filter(|file| !ignore_set.is_match(&file.path))
@@ -24,9 +32,7 @@ impl TreeGenerator {
 
         // Build tree structure from the correctly filtered files.
         for file in filtered_files {
-            // Die alte `should_ignore`-Prüfung ist hier nicht mehr nötig.
             let relative_path = file.path.strip_prefix(root_path).unwrap_or(&file.path);
-
             Self::insert_into_tree(&mut tree_map, relative_path, file.is_directory);
         }
 
@@ -42,12 +48,12 @@ impl TreeGenerator {
         result
     }
 
+    /// Inserts a path into the tree map structure.
     fn insert_into_tree(
         tree_map: &mut HashMap<PathBuf, TreeNode>,
         path: &Path,
         is_directory: bool,
     ) {
-        // Der Inhalt dieser Methode hat sich nicht geändert.
         let mut current_path = PathBuf::new();
 
         for component in path.components() {
@@ -80,13 +86,13 @@ impl TreeGenerator {
         }
     }
 
+    /// Recursively renders the tree structure into a string.
     fn render_tree_recursive(
         tree_map: &HashMap<PathBuf, TreeNode>,
         result: &mut String,
         prefix: &str,
         is_root: bool,
     ) {
-        // Der Inhalt dieser Methode hat sich nicht geändert.
         let mut root_nodes: Vec<&PathBuf> = if is_root {
             tree_map
                 .keys()
@@ -130,13 +136,13 @@ impl TreeGenerator {
         }
     }
 
+    /// Renders the children of a tree node.
     fn render_children(
         tree_map: &HashMap<PathBuf, TreeNode>,
         children: &[PathBuf],
         result: &mut String,
         prefix: &str,
     ) {
-        // Der Inhalt dieser Methode hat sich nicht geändert.
         let mut sorted_children: Vec<&PathBuf> = children.iter().collect();
         sorted_children.sort_by(|a, b| {
             let a_node = &tree_map[*a];
@@ -173,6 +179,7 @@ impl TreeGenerator {
     }
 }
 
+/// A transient node used for building the ASCII tree.
 #[derive(Debug, Clone)]
 struct TreeNode {
     name: String,

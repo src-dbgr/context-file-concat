@@ -1,3 +1,8 @@
+//! The `app` module orchestrates the interaction between the `core` logic and the `ui`.
+//!
+//! It manages the application state, handles events from the WebView (IPC messages),
+//! and sends updates back to the UI. It acts as the "controller" in an MVC-like pattern.
+
 pub mod commands;
 pub mod events;
 pub mod state;
@@ -11,8 +16,10 @@ use wry::WebView;
 use events::{IpcMessage, UserEvent};
 use state::AppState;
 
-/// Der Haupt-Handler für IPC-Nachrichten. Er parst die Nachricht von der WebView
-/// und delegiert an die entsprechende Befehls-Handler-Funktion.
+/// The main handler for IPC messages from the WebView.
+///
+/// It parses the message and delegates to the appropriate command handler function
+/// in the `commands` module. Each command is spawned as a separate Tokio task.
 pub fn handle_ipc_message(
     message: String,
     proxy: EventLoopProxy<UserEvent>,
@@ -31,7 +38,9 @@ pub fn handle_ipc_message(
                 "loadFilePreview" => commands::load_file_preview(msg.payload, proxy, state),
                 "addIgnorePath" => commands::add_ignore_path(msg.payload, proxy, state),
                 "toggleSelection" => commands::toggle_selection(msg.payload, proxy, state),
-                "toggleDirectorySelection" => commands::toggle_directory_selection(msg.payload, proxy, state),
+                "toggleDirectorySelection" => {
+                    commands::toggle_directory_selection(msg.payload, proxy, state)
+                }
                 "toggleExpansion" => commands::toggle_expansion(msg.payload, proxy, state),
                 "expandCollapseAll" => commands::expand_collapse_all(msg.payload, proxy, state),
                 "selectAll" => commands::select_all(proxy, state),
@@ -50,14 +59,23 @@ pub fn handle_ipc_message(
     }
 }
 
-/// Verarbeitet Events, die vom Backend an den UI-Thread gesendet werden.
-/// Übersetzt jedes `UserEvent` in einen JavaScript-Aufruf in der WebView.
+/// Processes events sent from the backend to the UI thread.
+///
+/// It translates each `UserEvent` into a JavaScript call in the WebView to update the UI.
 pub fn handle_user_event(event: UserEvent, webview: &WebView) {
     let script = match event {
         UserEvent::StateUpdate(state) => {
-            format!("window.render({});", serde_json::to_string(&state).unwrap_or_default())
+            format!(
+                "window.render({});",
+                serde_json::to_string(&state).unwrap_or_default()
+            )
         }
-        UserEvent::ShowFilePreview { content, language, search_term, path } => format!(
+        UserEvent::ShowFilePreview {
+            content,
+            language,
+            search_term,
+            path,
+        } => format!(
             "window.showPreviewContent({}, {}, {}, {});",
             serde_json::to_string(&content).unwrap_or_default(),
             serde_json::to_string(&language).unwrap_or_default(),
@@ -65,20 +83,33 @@ pub fn handle_user_event(event: UserEvent, webview: &WebView) {
             serde_json::to_string(&path).unwrap_or_default()
         ),
         UserEvent::ShowGeneratedContent(content) => format!(
-            "window.showGeneratedContent({});", serde_json::to_string(&content).unwrap_or_default()
+            "window.showGeneratedContent({});",
+            serde_json::to_string(&content).unwrap_or_default()
         ),
         UserEvent::ShowError(msg) => {
-            format!("window.showError({});", serde_json::to_string(&msg).unwrap_or_default())
+            format!(
+                "window.showError({});",
+                serde_json::to_string(&msg).unwrap_or_default()
+            )
         }
         UserEvent::SaveComplete(success, path) => format!(
-            "window.fileSaveStatus({}, {});", success, serde_json::to_string(&path).unwrap_or_default()
+            "window.fileSaveStatus({}, {});",
+            success,
+            serde_json::to_string(&path).unwrap_or_default()
         ),
         UserEvent::ConfigExported(success) => format!(
             "window.showStatus('{}');",
-            if success { "Config exported successfully." } else { "Failed to export config." }
+            if success {
+                "Config exported successfully."
+            } else {
+                "Failed to export config."
+            }
         ),
         UserEvent::ScanProgress(progress) => {
-            format!("window.updateScanProgress({});", serde_json::to_string(&progress).unwrap_or_default())
+            format!(
+                "window.updateScanProgress({});",
+                serde_json::to_string(&progress).unwrap_or_default()
+            )
         }
         UserEvent::DragStateChanged(is_dragging) => {
             format!("window.setDragState({});", is_dragging)

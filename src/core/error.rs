@@ -1,3 +1,5 @@
+//! Defines the custom error type for the `core` module.
+
 use std::path::{PathBuf, StripPrefixError};
 use thiserror::Error;
 

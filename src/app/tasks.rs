@@ -1,3 +1,9 @@
+//! Contains long-running, asynchronous tasks that the application can perform.
+//!
+//! These tasks, such as scanning a directory or searching file contents, are designed
+//! to run in the background without blocking the UI. They communicate their progress
+//! and results back to the main application thread via `UserEvent`s.
+
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -11,8 +17,9 @@ use super::view_model::{apply_filters, auto_expand_for_matches, generate_ui_stat
 
 use crate::core::{DirectoryScanner, ScanProgress};
 
-/// Initiert einen Verzeichnisscan für einen gegebenen Pfad.
-/// Diese Funktion bereitet den Zustand für den Scan vor und startet den `scan_directory_task`.
+/// Initiates a directory scan for a given path.
+///
+/// This function sets up the application state for the scan and spawns the `scan_directory_task`.
 pub fn start_scan_on_path(
     path: PathBuf,
     proxy: EventLoopProxy<UserEvent>,
@@ -55,7 +62,7 @@ pub fn start_scan_on_path(
         let proxy_clone = proxy.clone();
         let state_clone = state.clone();
 
-        tracing::info!("LOG: Spawne neuen scan_directory_task.");
+        tracing::info!("LOG: Spawning new scan_directory_task.");
         let handle = tokio::spawn(async move {
             scan_directory_task(proxy_clone, state_clone, new_cancel_flag).await;
         });
@@ -67,13 +74,16 @@ pub fn start_scan_on_path(
     });
 }
 
-/// Der asynchrone Haupt-Task zum Scannen eines Verzeichnisses.
+/// The main asynchronous task for scanning a directory.
+///
+/// This function performs the core scanning logic and updates the application state
+/// with the results or any errors that occur.
 async fn scan_directory_task(
     proxy: EventLoopProxy<UserEvent>,
     state: Arc<Mutex<AppState>>,
     cancel_flag: Arc<AtomicBool>,
 ) {
-    tracing::info!("LOG: TASK:: scan_directory_task gestartet.");
+    tracing::info!("LOG: TASK:: scan_directory_task started.");
     let (path_str, ignore_patterns) = {
         let state_lock = state.lock().unwrap();
         (
@@ -103,16 +113,16 @@ async fn scan_directory_task(
         let _ = progress_proxy.send_event(UserEvent::ScanProgress(progress));
     };
 
-    tracing::info!("LOG: TASK:: Rufe scanner.scan_directory_with_progress auf...");
+    tracing::info!("LOG: TASK:: Calling scanner.scan_directory_with_progress...");
     let scan_result = scanner
         .scan_directory_with_progress(&path, cancel_flag, progress_callback)
         .await;
-    tracing::info!("LOG: TASK:: scanner.scan_directory_with_progress ist zurückgekehrt.");
+    tracing::info!("LOG: TASK:: scanner.scan_directory_with_progress has returned.");
 
     let (final_files, active_patterns) = match scan_result {
         Ok(files) => files,
         Err(e) => {
-            tracing::error!("LOG: TASK:: Scan mit Fehler beendet: {}", e);
+            tracing::error!("LOG: TASK:: Scan finished with error: {}", e);
             let mut state_lock = state.lock().unwrap();
             if !state_lock.is_scanning {
                 return;
@@ -129,13 +139,13 @@ async fn scan_directory_task(
     };
 
     tracing::info!(
-        "LOG: TASK:: Scan erfolgreich. {} Dateien gefunden.",
+        "LOG: TASK:: Scan successful. {} files found.",
         final_files.len()
     );
 
     let mut state_lock = state.lock().unwrap();
     if !state_lock.is_scanning {
-        tracing::warn!("LOG: TASK:: Scan wurde zwischenzeitlich abgebrochen. Verwerfe Ergebnisse.");
+        tracing::warn!("LOG: TASK:: Scan was cancelled in the meantime. Discarding results.");
         return;
     }
 
@@ -151,10 +161,12 @@ async fn scan_directory_task(
     proxy
         .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
         .unwrap();
-    tracing::info!("LOG: TASK:: Finaler Zustand wurde aktualisiert und an die UI gesendet.");
+    tracing::info!("LOG: TASK:: Final state has been updated and sent to UI.");
 }
 
-/// Führt eine Inhaltssuche in allen nicht-binären Dateien durch.
+/// Performs a content search across all non-binary files.
+///
+/// This function runs in parallel using Rayon for performance.
 pub async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     let (files_to_search, query, case_sensitive) = {
         let mut state_guard = state.lock().unwrap();

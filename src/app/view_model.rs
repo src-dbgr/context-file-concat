@@ -1,3 +1,9 @@
+//! Responsible for transforming the `AppState` into a `UiState` view model.
+//!
+//! This module acts as a presentation layer, preparing data specifically for consumption
+//! by the UI. It builds the file tree structure, applies filters, and computes various
+//! display-related properties.
+
 use crate::config::AppConfig;
 use crate::core::{FileItem, SearchEngine, SearchFilter};
 use rayon::prelude::*;
@@ -7,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use super::state::AppState;
 
-/// Eine serialisierbare Darstellung des Anwendungszustands für die UI.
+/// A serializable representation of the application state for the UI.
 #[derive(Serialize, Clone, Debug)]
 pub struct UiState {
     pub config: AppConfig,
@@ -26,7 +32,7 @@ pub struct UiState {
     pub active_ignore_patterns: HashSet<String>,
 }
 
-/// Eine serialisierbare Darstellung eines einzelnen Knotens im Dateibaum für die UI.
+/// A serializable representation of a single node in the file tree for the UI.
 #[derive(Serialize, Clone, Debug)]
 pub struct TreeNode {
     pub name: String,
@@ -41,7 +47,7 @@ pub struct TreeNode {
     pub is_previewed: bool,
 }
 
-/// Erstellt den vollständigen `UiState` aus dem aktuellen `AppState`.
+/// Creates the complete `UiState` from the current `AppState`.
 pub fn generate_ui_state(state: &AppState) -> UiState {
     let root = PathBuf::from(&state.current_path);
     let search_matches = if !state.content_search_query.is_empty() {
@@ -92,7 +98,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
     }
 }
 
-/// Wendet alle aktuellen Filter auf die vollständige Dateiliste an, um die sichtbare Liste zu erzeugen.
+/// Applies all current filters to the full file list to generate the visible list.
 pub fn apply_filters(state: &mut AppState) {
     let filtered_list = apply_filters_on_data(
         &state.full_file_list,
@@ -105,7 +111,7 @@ pub fn apply_filters(state: &mut AppState) {
     state.filtered_file_list = filtered_list;
 }
 
-/// Eine "reine" Funktion, die Daten entgegennimmt und eine gefilterte Liste von `FileItem`s zurückgibt.
+/// A "pure" function that takes data and returns a filtered list of `FileItem`s.
 fn apply_filters_on_data(
     full_file_list: &[FileItem],
     root_path: &Path,
@@ -163,7 +169,7 @@ fn apply_filters_on_data(
     }
 }
 
-/// Erweitert die übergeordneten Verzeichnisse von Dateien, die den aktuellen Suchkriterien entsprechen.
+/// Expands the parent directories of files that match the current search criteria.
 pub fn auto_expand_for_matches(state: &mut AppState) {
     let root_path = PathBuf::from(&state.current_path);
     let matches: Vec<PathBuf> = state
@@ -201,7 +207,7 @@ pub fn auto_expand_for_matches(state: &mut AppState) {
     }
 }
 
-/// Baut rekursiv die `TreeNode`-Struktur für die UI aus einer flachen Liste von `FileItem`s auf.
+/// Recursively builds the `TreeNode` structure for the UI from a flat list of `FileItem`s.
 fn build_tree_nodes(
     items: &[FileItem],
     root_path: &Path,
@@ -302,7 +308,7 @@ fn build_tree_nodes(
     build_level(&mut root_nodes_paths, &mut nodes, &children_map)
 }
 
-/// Bestimmt den Auswahlzustand eines Verzeichnisses ('none', 'partial', 'full').
+/// Determines the selection state of a directory ('none', 'partial', 'full').
 pub fn get_directory_selection_state(
     dir_path: &Path,
     all_items: &[FileItem],
@@ -331,7 +337,7 @@ pub fn get_directory_selection_state(
     }
 }
 
-/// Gibt eine Liste der ausgewählten Dateipfade in natürlicher Baumreihenfolge zurück.
+/// Returns a list of the selected file paths in natural tree order.
 pub fn get_selected_files_in_tree_order(state: &AppState) -> Vec<PathBuf> {
     let mut selected_file_items: Vec<&FileItem> = state
         .full_file_list
@@ -347,7 +353,7 @@ pub fn get_selected_files_in_tree_order(state: &AppState) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Bestimmt die Programmiersprache aus einem Dateipfad für die Syntaxhervorhebung.
+/// Determines the programming language from a file path for syntax highlighting.
 pub fn get_language_from_path(path: &Path) -> String {
     match path.extension().and_then(|s| s.to_str()) {
         Some("rs") => "rust",

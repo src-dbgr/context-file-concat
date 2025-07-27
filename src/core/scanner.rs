@@ -1,3 +1,5 @@
+//! Provides the functionality for recursively scanning directories.
+
 use super::{build_globset_from_patterns, CoreError, FileItem};
 use crate::utils::file_detection::is_text_file;
 use serde::{Deserialize, Serialize};
@@ -8,25 +10,35 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use walkdir::{DirEntry, WalkDir};
 
+/// Represents the progress of a directory scan.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ScanProgress {
+    /// The number of files and directories processed so far.
     pub files_scanned: usize,
+    /// The number of files skipped because they exceeded the size limit.
     pub large_files_skipped: usize,
+    /// The path of the item currently being processed.
     pub current_scanning_path: String,
 }
 
 const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024;
 const PROGRESS_UPDATE_THROTTLE: Duration = Duration::from_millis(100);
 
+/// Scans a directory for files and subdirectories, respecting ignore patterns.
 pub struct DirectoryScanner {
     ignore_patterns: HashSet<String>,
 }
 
 impl DirectoryScanner {
+    /// Creates a new `DirectoryScanner` with a given set of ignore patterns.
     pub fn new(ignore_patterns: HashSet<String>) -> Self {
         Self { ignore_patterns }
     }
 
+    /// Scans a directory asynchronously, providing progress updates via a callback.
+    ///
+    /// This function performs the scan in a blocking thread to avoid blocking the async runtime,
+    /// while allowing for cancellation and progress reporting.
     pub async fn scan_directory_with_progress<F>(
         &self,
         root_path: &Path,

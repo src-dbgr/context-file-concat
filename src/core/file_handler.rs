@@ -1,3 +1,5 @@
+//! Handles file content operations like reading, previewing, and concatenation.
+
 use super::{CoreError, FileItem, TreeGenerator};
 use crate::utils::file_detection::is_text_file;
 use std::collections::HashSet;
@@ -5,9 +7,16 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+/// A utility struct for handling file-related operations.
+///
+/// This struct is stateless and provides methods as associated functions.
 pub struct FileHandler;
 
 impl FileHandler {
+    /// Generates a single string by concatenating the content of selected files.
+    ///
+    /// It includes a header with metadata, an optional directory tree, and formatted
+    /// content blocks for each selected file.
     pub async fn generate_concatenated_content_simple(
         selected_files: &[PathBuf],
         root_path: &Path,
@@ -37,17 +46,13 @@ impl FileHandler {
                 continue;
             }
 
-            // KORRIGIERTE PFAD-LOGIK
             let display_path = if use_relative_paths {
-                // Relativer Pfad: Beinhaltet das Hauptverzeichnis
-                // z.B. context-file-concat/src/main.rs
                 if let Some(parent) = root_path.parent() {
                     file_path.strip_prefix(parent)?.display().to_string()
                 } else {
                     file_path.display().to_string()
                 }
             } else {
-                // Absoluter Pfad
                 file_path.display().to_string()
             };
 
@@ -71,6 +76,7 @@ impl FileHandler {
         Ok(content)
     }
 
+    /// Reads the content of a file, with safeguards for large or binary files.
     fn read_file_content(file_path: &Path) -> Result<String, CoreError> {
         let metadata =
             fs::metadata(file_path).map_err(|e| CoreError::Io(e, file_path.to_path_buf()))?;
@@ -96,6 +102,9 @@ impl FileHandler {
         }
     }
 
+    /// Retrieves a truncated preview of a text file's content.
+    ///
+    /// Reads up to a specified maximum number of lines. Identifies directories and binary files.
     pub fn get_file_preview(file_path: &Path, max_lines: usize) -> Result<String, CoreError> {
         if file_path.is_dir() {
             return Ok("[DIRECTORY]".to_string());
