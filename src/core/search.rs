@@ -107,3 +107,142 @@ impl SearchEngine {
         (files, all_removed_dirs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn file(path: &str) -> FileItem {
+        FileItem {
+            path: PathBuf::from(path),
+            is_directory: false,
+            is_binary: false,
+            size: 100,
+            depth: path.split('/').count(),
+            parent: PathBuf::from(path).parent().map(|p| p.to_path_buf()),
+        }
+    }
+
+    fn dir(path: &str) -> FileItem {
+        FileItem {
+            path: PathBuf::from(path),
+            is_directory: true,
+            is_binary: false,
+            size: 0,
+            depth: path.split('/').count(),
+            parent: PathBuf::from(path).parent().map(|p| p.to_path_buf()),
+        }
+    }
+
+    fn create_test_files() -> Vec<FileItem> {
+        vec![
+            dir("src"),
+            file("src/main.rs"),
+            file("src/lib.rs"),
+            dir("src/module"),
+            file("src/module/component.rs"),
+            dir("docs"),
+            file("docs/README.md"),
+            file("README.md"),
+            dir("target"),
+            file("target/app.exe"),
+        ]
+    }
+
+    #[test]
+    fn test_filter_by_name_case_sensitive() {
+        let files = create_test_files();
+        let filter = SearchFilter {
+            query: "README".to_string(),
+            extension: String::new(),
+            case_sensitive: true,
+            ignore_patterns: HashSet::new(),
+        };
+        let result = SearchEngine::filter_files(&files, &filter);
+        assert_eq!(result.len(), 2);
+        assert!(result
+            .iter()
+            .any(|f| f.path.to_str() == Some("docs/README.md")));
+        assert!(result.iter().any(|f| f.path.to_str() == Some("README.md")));
+    }
+
+    #[test]
+    fn test_filter_by_name_case_insensitive() {
+        let files = create_test_files();
+        let filter = SearchFilter {
+            query: "readme".to_string(),
+            extension: String::new(),
+            case_sensitive: false,
+            ignore_patterns: HashSet::new(),
+        };
+        let result = SearchEngine::filter_files(&files, &filter);
+        assert_eq!(result.len(), 2);
+        assert!(result
+            .iter()
+            .any(|f| f.path.to_str() == Some("docs/README.md")));
+        assert!(result.iter().any(|f| f.path.to_str() == Some("README.md")));
+    }
+
+    #[test]
+    fn test_filter_by_extension() {
+        let files = create_test_files();
+        let filter = SearchFilter {
+            query: String::new(),
+            extension: "rs".to_string(),
+            case_sensitive: false,
+            ignore_patterns: HashSet::new(),
+        };
+        let result = SearchEngine::filter_files(&files, &filter);
+        assert_eq!(result.len(), 3);
+        assert!(result
+            .iter()
+            .any(|f| f.path.to_str() == Some("src/main.rs")));
+        assert!(result.iter().any(|f| f.path.to_str() == Some("src/lib.rs")));
+        assert!(result
+            .iter()
+            .any(|f| f.path.to_str() == Some("src/module/component.rs")));
+    }
+
+    #[test]
+    fn test_filter_by_name_and_extension() {
+        let files = create_test_files();
+        let filter = SearchFilter {
+            query: "main".to_string(),
+            extension: "rs".to_string(),
+            case_sensitive: false,
+            ignore_patterns: HashSet::new(),
+        };
+        let result = SearchEngine::filter_files(&files, &filter);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path.to_str(), Some("src/main.rs"));
+    }
+
+    #[test]
+    fn test_filter_with_ignore_patterns() {
+        let files = create_test_files();
+        let mut ignore_patterns = HashSet::new();
+        ignore_patterns.insert("target/".to_string());
+        ignore_patterns.insert("*.md".to_string());
+
+        let filter = SearchFilter {
+            query: String::new(),
+            extension: String::new(),
+            case_sensitive: false,
+            ignore_patterns,
+        };
+
+        let result = SearchEngine::filter_files(&files, &filter);
+        let paths: Vec<_> = result.iter().map(|f| f.path.to_str().unwrap()).collect();
+
+        assert!(!paths.contains(&"docs/README.md"));
+        assert!(!paths.contains(&"README.md"));
+        assert!(!paths.contains(&"target/app.exe"));
+        assert!(!paths.contains(&"target")); // Das Verzeichnis selbst sollte auch weg sein
+        assert!(paths.contains(&"src/main.rs"));
+
+        // KORREKTE ERWARTUNG: 6 Elemente bleiben übrig (inkl. dem 'docs' Verzeichnis)
+        assert_eq!(result.len(), 6, "Expected 6 items to remain: src, src/main.rs, src/lib.rs, src/module, src/module/component.rs, and docs");
+    }
+}

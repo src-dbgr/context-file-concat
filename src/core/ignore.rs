@@ -52,3 +52,71 @@ pub fn build_globset_from_patterns(patterns: &HashSet<String>) -> (GlobSet, Vec<
 
     (glob_set, glob_patterns_list)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_simple_file_pattern() {
+        let mut patterns = HashSet::new();
+        patterns.insert("*.log".to_string());
+
+        let (glob_set, _) = build_globset_from_patterns(&patterns);
+
+        assert!(glob_set.is_match(Path::new("project/app.log")));
+        assert!(glob_set.is_match(Path::new("app.log")));
+        assert!(glob_set.is_match(Path::new("deep/nested/path/to/error.log")));
+        assert!(!glob_set.is_match(Path::new("project/app.txt")));
+        assert!(!glob_set.is_match(Path::new("project/log.txt")));
+    }
+
+    #[test]
+    fn test_directory_pattern() {
+        let mut patterns = HashSet::new();
+        patterns.insert("target/".to_string());
+
+        let (glob_set, _) = build_globset_from_patterns(&patterns);
+
+        assert!(glob_set.is_match(Path::new("my_project/target")));
+        assert!(glob_set.is_match(Path::new("target")));
+        assert!(glob_set.is_match(Path::new("my_project/target/debug/app")));
+        assert!(glob_set.is_match(Path::new("target/release/lib.rlib")));
+        assert!(!glob_set.is_match(Path::new("my_project/src/target.rs")));
+        assert!(!glob_set.is_match(Path::new("my_project/src")));
+        assert!(!glob_set.is_match(Path::new("other_target/file")));
+    }
+
+    #[test]
+    fn test_deep_directory_pattern() {
+        let mut patterns = HashSet::new();
+        patterns.insert("__pycache__".to_string());
+
+        let (glob_set, _) = build_globset_from_patterns(&patterns);
+
+        assert!(glob_set.is_match(Path::new("src/app/__pycache__")));
+        assert!(glob_set.is_match(Path::new("src/app/__pycache__/some_file.pyc")));
+        assert!(glob_set.is_match(Path::new("__pycache__")));
+        assert!(!glob_set.is_match(Path::new("src/pycache")));
+        assert!(!glob_set.is_match(Path::new("src/app_pycache/file")));
+    }
+
+    #[test]
+    fn test_multiple_and_complex_patterns() {
+        let mut patterns = HashSet::new();
+        patterns.insert("node_modules/".to_string());
+        patterns.insert("*.tmp".to_string());
+        patterns.insert("build".to_string());
+
+        let (glob_set, _) = build_globset_from_patterns(&patterns);
+
+        assert!(glob_set.is_match(Path::new("node_modules")));
+        assert!(glob_set.is_match(Path::new("project/node_modules/library/index.js")));
+        assert!(glob_set.is_match(Path::new("session.tmp")));
+        assert!(glob_set.is_match(Path::new("logs/user.tmp")));
+        assert!(glob_set.is_match(Path::new("dist/build")));
+        assert!(glob_set.is_match(Path::new("dist/build/output.js")));
+        assert!(!glob_set.is_match(Path::new("project/src/builder.rs")));
+    }
+}
