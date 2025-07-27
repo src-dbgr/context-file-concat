@@ -1,0 +1,136 @@
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Get version from tag
+        id: get_version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Context File Concatenator v${{ steps.get_version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.get_version.outputs.version, 'alpha') || contains(steps.get_version.outputs.version, 'beta') || contains(steps.get_version.outputs.version, 'rc') }}
+
+  build:
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+            binary_name: context-file-concat
+            bundle_name: context-file-concat-${{ needs.create-release.outputs.version }}-linux-x86_64.tar.gz
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+            binary_name: context-file-concat.exe
+            bundle_name: context-file-concat-${{ needs.create-release.outputs.version }}-windows-x86_64.zip
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x86_64
+            binary_name: context-file-concat
+            bundle_name: context-file-concat-${{ needs.create-release.outputs.version }}-macos-x86_64.dmg
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-aarch64
+            binary_name: context-file-concat
+            bundle_name: context-file-concat-${{ needs.create-release.outputs.version }}-macos-aarch64.dmg
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install npm dependencies
+        run: npm install
+        working-directory: ./src/ui
+
+      - name: Build JavaScript bundle
+        run: npm run build
+        working-directory: ./src/ui
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Install cargo-bundle (macOS)
+        if: matrix.os == 'macos-latest'
+        run: cargo install cargo-bundle
+
+      - name: Create macOS app bundle
+        if: matrix.os == 'macos-latest'
+        run: |
+          cargo bundle --release --target ${{ matrix.target }}
+          # Create DMG
+          hdiutil create -volname "Context File Concatenator" -srcfolder target/${{ matrix.target }}/release/bundle/osx -ov -format UDZO ${{ matrix.bundle_name }}
+
+      - name: Create Linux archive
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf ../../../${{ matrix.bundle_name }} ${{ matrix.binary_name }}
+
+      - name: Create Windows archive
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.bundle_name }} ${{ matrix.binary_name }}
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./${{ matrix.bundle_name }}
+          asset_name: ${{ matrix.bundle_name }}
+          asset_content_type: application/octet-stream

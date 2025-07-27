@@ -77,3 +77,5 @@ $RECYCLE.BIN/
 # Editor backup files
 *.bak
 *.tmp
+scripts/*-test.sh
+.github/workflows/test-*.yml

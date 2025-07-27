@@ -1,7 +1,14 @@
 [package]
 name = "context-file-concat"
-version = "0.2.0"
+version = "0.1.0"  # Start with 0.1.0 as requested
 edition = "2021"
+description = "Context File Concatenator - Intelligently select, filter, and combine project files for LLM context"
+authors = ["src dbgr"]
+license = "TODO"
+repository = "https://github.com/src-dbgr/context-file-concat"
+homepage = "https://github.com/src-dbgr/context-file-concat"
+keywords = ["llm", "context", "files", "concatenation", "development"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 # Web-View Architecture
@@ -36,10 +43,31 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+strip = true  # Remove debug symbols for smaller binaries
 
 # BUNDLE INFORMATION
 [package.metadata.bundle]
-name = "CFC - Context File Concatenator"
+name = "Context File Concatenator"
 identifier = "io.devsam.contextfileconcat"
-version = "0.2.0"
-icon = ["assets/icon.icns"]
+version = "0.1.0"
+short_description = "Context File Concatenator for LLMs"
+long_description = "A desktop application to intelligently select, filter, and combine project files into a single text file optimized for Large Language Models."
+icon = ["assets/icons/icon.icns"]  # macOS
+resources = ["assets/icons/"]
+category = "DeveloperTool"
+copyright = "Copyright © 2025 src-dbgr. All rights reserved."
+
+# macOS specific settings
+[package.metadata.bundle.osx]
+minimum_system_version = "10.15"
+frameworks = ["WebKit"]
+info_plist_path = "assets/Info.plist"
+
+# Windows specific settings  
+[package.metadata.bundle.windows]
+wix_language = "en-US"
+wix_template = "assets/main.wxs"
+
+# Linux specific settings
+[package.metadata.bundle.linux]
+depends = ["libwebkit2gtk-4.1-dev", "libgtk-3-0"]
