@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tao::event_loop::EventLoopProxy;
 
+use super::events::UserEvent;
 use super::state::AppState;
 use super::view_model::{apply_filters, auto_expand_for_matches, generate_ui_state};
-use super::events::UserEvent;
 
 use crate::core::{DirectoryScanner, ScanProgress};
 
@@ -84,10 +84,16 @@ async fn scan_directory_task(
 
     let path = PathBuf::from(&path_str);
     if !path.is_dir() {
-        proxy.send_event(UserEvent::ShowError("Selected path is not a valid directory.".to_string())).unwrap();
+        proxy
+            .send_event(UserEvent::ShowError(
+                "Selected path is not a valid directory.".to_string(),
+            ))
+            .unwrap();
         let mut state_lock = state.lock().unwrap();
         state_lock.cancel_current_scan();
-        proxy.send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock))).unwrap();
+        proxy
+            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+            .unwrap();
         return;
     }
 
@@ -108,17 +114,25 @@ async fn scan_directory_task(
         Err(e) => {
             tracing::error!("LOG: TASK:: Scan mit Fehler beendet: {}", e);
             let mut state_lock = state.lock().unwrap();
-            if !state_lock.is_scanning { return; }
-            state_lock.scan_progress.current_scanning_path = format!("Scan failed: {}", e);
+            if !state_lock.is_scanning {
+                return;
+            }
+            state_lock.scan_progress.current_scanning_path =
+                format!("Scan failed: {}", e.to_string());
             state_lock.is_scanning = false;
             state_lock.scan_task = None;
-            proxy.send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock))).unwrap();
+            proxy
+                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+                .unwrap();
             return;
         }
     };
-    
-    tracing::info!("LOG: TASK:: Scan erfolgreich. {} Dateien gefunden.", final_files.len());
-    
+
+    tracing::info!(
+        "LOG: TASK:: Scan erfolgreich. {} Dateien gefunden.",
+        final_files.len()
+    );
+
     let mut state_lock = state.lock().unwrap();
     if !state_lock.is_scanning {
         tracing::warn!("LOG: TASK:: Scan wurde zwischenzeitlich abgebrochen. Verwerfe Ergebnisse.");
@@ -134,10 +148,11 @@ async fn scan_directory_task(
         state_lock.filtered_file_list.len()
     );
     state_lock.scan_task = None;
-    proxy.send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock))).unwrap();
+    proxy
+        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+        .unwrap();
     tracing::info!("LOG: TASK:: Finaler Zustand wurde aktualisiert und an die UI gesendet.");
 }
-
 
 /// Führt eine Inhaltssuche in allen nicht-binären Dateien durch.
 pub async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
@@ -146,7 +161,9 @@ pub async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<
         if state_guard.content_search_query.is_empty() {
             state_guard.content_search_results.clear();
             apply_filters(&mut state_guard);
-            proxy.send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard))).unwrap();
+            proxy
+                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                .unwrap();
             return;
         }
         (
@@ -159,14 +176,20 @@ pub async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<
     let matching_paths: HashSet<PathBuf> = files_to_search
         .into_par_iter()
         .filter_map(|item| {
-            if item.is_directory || item.is_binary { return None; }
+            if item.is_directory || item.is_binary {
+                return None;
+            }
             if let Ok(content) = std::fs::read_to_string(&item.path) {
                 let found = if case_sensitive {
                     content.contains(&query)
                 } else {
                     content.to_lowercase().contains(&query.to_lowercase())
                 };
-                if found { Some(item.path) } else { None }
+                if found {
+                    Some(item.path)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -177,5 +200,7 @@ pub async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<
     state_guard.content_search_results = matching_paths;
     apply_filters(&mut state_guard);
     auto_expand_for_matches(&mut state_guard);
-    proxy.send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard))).unwrap();
+    proxy
+        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+        .unwrap();
 }

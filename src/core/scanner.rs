@@ -1,8 +1,5 @@
-// src/core/scanner.rs
-
-use super::{build_globset_from_patterns, FileItem};
+use super::{build_globset_from_patterns, CoreError, FileItem};
 use crate::utils::file_detection::is_text_file;
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -35,7 +32,7 @@ impl DirectoryScanner {
         root_path: &Path,
         cancel_flag: Arc<AtomicBool>,
         progress_callback: F,
-    ) -> Result<(Vec<FileItem>, HashSet<String>)>
+    ) -> Result<(Vec<FileItem>, HashSet<String>), CoreError>
     where
         F: Fn(ScanProgress) + Send + Sync + 'static,
     {
@@ -145,15 +142,8 @@ impl DirectoryScanner {
         });
 
         tracing::info!("LOG: SCANNER:: Warte auf Ergebnis von spawn_blocking...");
-        match blocking_task_handle.await {
-            Ok(files) => {
-                tracing::info!("LOG: SCANNER:: spawn_blocking erfolgreich beendet.");
-                Ok(files)
-            }
-            Err(e) => {
-                tracing::error!("LOG: SCANNER:: spawn_blocking mit Fehler beendet (wahrscheinlich abgebrochen): {}", e);
-                Err(anyhow::anyhow!("Scan task was cancelled or failed: {}", e))
-            }
-        }
+        let result = blocking_task_handle.await?; // This converts JoinError into CoreError
+        tracing::info!("LOG: SCANNER:: spawn_blocking erfolgreich beendet.");
+        Ok(result)
     }
 }

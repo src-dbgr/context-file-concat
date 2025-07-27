@@ -1,3 +1,4 @@
+pub mod error;
 pub mod file_handler;
 pub mod ignore;
 pub mod scanner;
@@ -6,6 +7,9 @@ pub mod tree_generator;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+// Re-export CoreError to make it accessible from the app module.
+pub use error::CoreError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileItem {

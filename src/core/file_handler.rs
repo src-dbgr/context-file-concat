@@ -1,6 +1,5 @@
-use super::{FileItem, TreeGenerator};
+use super::{CoreError, FileItem, TreeGenerator};
 use crate::utils::file_detection::is_text_file;
-use anyhow::Result;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -16,7 +15,7 @@ impl FileHandler {
         items_for_tree: Vec<FileItem>,
         tree_ignore_patterns: HashSet<String>,
         use_relative_paths: bool,
-    ) -> Result<String> {
+    ) -> Result<String, CoreError> {
         let mut content = String::new();
         content.push_str(&format!(
             "# CFC Output - Generated: {}\n",
@@ -43,11 +42,7 @@ impl FileHandler {
                 // Relativer Pfad: Beinhaltet das Hauptverzeichnis
                 // z.B. context-file-concat/src/main.rs
                 if let Some(parent) = root_path.parent() {
-                    file_path
-                        .strip_prefix(parent)
-                        .unwrap_or(file_path)
-                        .display()
-                        .to_string()
+                    file_path.strip_prefix(parent)?.display().to_string()
                 } else {
                     file_path.display().to_string()
                 }
@@ -66,7 +61,8 @@ impl FileHandler {
                         content.push('\n');
                     }
                 }
-                Err(_) => {
+                Err(e) => {
+                    tracing::warn!("Skipping unreadable file {}: {}", file_path.display(), e);
                     content.push_str("[BINARY OR UNREADABLE FILE - CONTENT SKIPPED]\n");
                 }
             }
@@ -75,8 +71,9 @@ impl FileHandler {
         Ok(content)
     }
 
-    fn read_file_content(file_path: &Path) -> Result<String> {
-        let metadata = fs::metadata(file_path)?;
+    fn read_file_content(file_path: &Path) -> Result<String, CoreError> {
+        let metadata =
+            fs::metadata(file_path).map_err(|e| CoreError::Io(e, file_path.to_path_buf()))?;
         if metadata.len() > 20 * 1024 * 1024 {
             return Ok(format!(
                 "[FILE TOO LARGE: {} bytes - CONTENT SKIPPED]",
@@ -87,7 +84,8 @@ impl FileHandler {
         match fs::read_to_string(file_path) {
             Ok(content) => Ok(content),
             Err(_) => {
-                let bytes = fs::read(file_path)?;
+                let bytes =
+                    fs::read(file_path).map_err(|e| CoreError::Io(e, file_path.to_path_buf()))?;
                 match String::from_utf8_lossy(&bytes) {
                     content if content.contains('\u{FFFD}') => {
                         Ok("[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]".to_string())
@@ -98,16 +96,22 @@ impl FileHandler {
         }
     }
 
-    pub fn get_file_preview(file_path: &Path, max_lines: usize) -> Result<String> {
+    pub fn get_file_preview(file_path: &Path, max_lines: usize) -> Result<String, CoreError> {
         if file_path.is_dir() {
             return Ok("[DIRECTORY]".to_string());
         }
 
-        if !is_text_file(file_path).unwrap_or(false) {
+        if !is_text_file(file_path).map_err(|e| {
+            CoreError::Io(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                file_path.to_path_buf(),
+            )
+        })? {
             return Ok("[BINARY FILE]".to_string());
         }
 
-        let file = fs::File::open(file_path)?;
+        let file =
+            fs::File::open(file_path).map_err(|e| CoreError::Io(e, file_path.to_path_buf()))?;
         let reader = BufReader::new(file);
         let mut preview = String::new();
         let mut line_count = 0;
