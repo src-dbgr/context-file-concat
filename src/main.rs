@@ -15,10 +15,10 @@ use wry::WebViewBuilder;
 
 #[tokio::main]
 async fn main() {
-    // Initialisiere Logging
+    // Initialize logging
     tracing_subscriber::fmt::init();
 
-    // Erstelle Event-Loop und Fenster
+    // Create the event loop and window
     let event_loop = EventLoopBuilder::<app::events::UserEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title("CFC - Context File Concatenator")
@@ -27,20 +27,20 @@ async fn main() {
         .build(&event_loop)
         .expect("Failed to build Window");
 
-    // Erstelle den geteilten Anwendungszustand und den Event-Loop-Proxy
+    // Create the shared application state and the event loop proxy
     let proxy = event_loop.create_proxy();
     let state = Arc::new(Mutex::new(app::state::AppState::new()));
 
-    // Lade und präpariere den HTML-Inhalt für die WebView
+    // Load and prepare the HTML content for the WebView by injecting CSS and JS
     let html_content = include_str!("ui/index.html")
         .replace("/*INJECT_CSS*/", include_str!("ui/style.css"))
         .replace("/*INJECT_JS*/", include_str!("ui/dist/bundle.js"));
 
-    // Klone Ressourcen, die für den File-Drop-Handler benötigt werden
+    // Clone resources needed for the file drop handler
     let proxy_for_drop = proxy.clone();
     let state_for_drop = state.clone();
 
-    // Erstelle die WebView
+    // Create the WebView
     let webview = WebViewBuilder::new(&window)
         .with_html(html_content)
         .with_ipc_handler(move |message: String| {
@@ -70,13 +70,13 @@ async fn main() {
                 }
                 _ => (),
             }
-            true // Zeigt an, dass das Event behandelt wurde
+            true // Indicates that the event has been handled
         })
         .with_devtools(true)
         .build()
         .expect("Failed to build WebView");
 
-    // Starte den Event-Loop
+    // Start the event loop
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 

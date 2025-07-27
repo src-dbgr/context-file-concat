@@ -1,4 +1,4 @@
-// Zentraler Speicher für den Anwendungszustand.
+// Central store for the application state.
 let appState = {
   is_scanning: false,
   config: {
@@ -19,8 +19,7 @@ let currentDecorations = [];
 let currentPreviewedPath = null;
 let currentPatternFilter = "";
 
-// Wir exportieren ein Objekt mit Gettern und Settern,
-// um den Zugriff auf den Zustand zu kontrollieren.
+// We export an object with getters and setters to control access to the state.
 export const state = {
   get: () => appState,
   set: (newState) => {
@@ -41,5 +40,5 @@ export const state = {
   getPatternFilter: () => currentPatternFilter,
   setPatternFilter: (filter) => {
     currentPatternFilter = filter;
-  }
+  },
 };

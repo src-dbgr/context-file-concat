@@ -336,7 +336,7 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "flatpak",
 ];
 
-// PERFORMANCE: Statische Sets für O(1) Lookups erstellen
+// PERFORMANCE: Static Sets for O(1) lookups
 static TEXT_EXT_SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
 static BINARY_EXT_SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
 static IMAGE_EXT_SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();

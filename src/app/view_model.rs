@@ -278,7 +278,6 @@ fn build_tree_nodes(args: BuildTreeArgs) -> Vec<TreeNode> {
         .map(|item| item.path.clone())
         .collect();
 
-    // ... (build_level function bleibt gleich, aber verwendet nun die neuen 'args')
     fn build_level(
         paths: &mut Vec<PathBuf>,
         nodes: &mut HashMap<PathBuf, TreeNode>,

@@ -1,12 +1,79 @@
-/target
-/cfc_output
-.DS_Store
+# #################################
+# ## Rust / Cargo Dependencies & Build Artifacts
+# #################################
+# Ignore the main build directory
+target/
+# Ignore build-related files in the root
+/build
+
+# #################################
+# ## Node.js / Frontend Dependencies & Build Artifacts
+# #################################
+# Ignore local node packages
+node_modules/
+# Ignore frontend build output directory
+src/ui/dist/
+# Log files from package managers
+npm-debug.log*
+yarn-error.log
+pnpm-debug.log
+# Yarn 2+ lockfile and cache
+.pnp.*
+.yarn/*
+!.yarn/releases
+!.yarn/plugins
+
+# #################################
+# ## Application-specific Ignores
+# #################################
+# Custom output from the CFC application itself
+cfc_output/
 output.txt
 cfc_output*.txt
-refactor.sh
-node_modules
-index.html.bak
-src/ui/dist/
-blabla.json
+# General log files
+*.log
+
+# #################################
+# ## Local Configuration & Secrets
+# #################################
+# Environment variables file
 .env
-README_PRIV.md
+.env.*
+# Local application settings that should not be committed
+cfc-config.json
+# Private docu
+README_*.md
+
+# #################################
+# ## IDE / Editor Configuration
+# #################################
+# VSCode
+.vscode/
+# JetBrains (IntelliJ, CLion, RustRover, etc.)
+.idea/
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+# Vim
+*.sw[op]
+
+# #################################
+# ## Operating System Specific Files
+# #################################
+# macOS
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# #################################
+# ## Temporary & Personal Files
+# #################################
+# Editor backup files
+*.bak
+*.tmp

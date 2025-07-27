@@ -11,17 +11,17 @@ import { setupGlobalKeyboardListeners } from "./modules/keyboard.js";
 import { setupResizerListeners } from "./modules/resizer.js";
 
 // ==================================================================
-//  API für die Rust-Seite (globale window.* Funktionen)
+//  API for the Rust backend (global window.* functions)
 // ==================================================================
 window.render = (newState) => {
   const wasScanning = state.get().is_scanning;
   state.set(newState);
   renderUI();
 
-  // Zusätzliche Logik nach dem Rendern
+  // Additional logic after rendering
   const editor = state.getEditor();
   if (editor && state.getPreviewedPath()) {
-    // Wenn sich Suchbegriffe geändert haben, Highlights im Editor aktualisieren
+    // If search terms have changed, update highlights in the editor
     const model = editor.getModel();
     const searchTerm = newState.content_search_query;
     const matchCase = newState.config.case_sensitive_search;
@@ -53,7 +53,8 @@ window.render = (newState) => {
       progressFill.style.width = "100%";
       progressFill.classList.add("scan-complete");
     }
-    setTimeout(renderUI, 500); // UI nach kurzer Zeit erneut rendern, um Buttons zurückzusetzen
+    // Re-render UI after a short delay to reset buttons
+    setTimeout(renderUI, 500);
   }
 };
 
@@ -62,7 +63,7 @@ window.updateScanProgress = (progress) => {
   const { files_scanned, current_scanning_path, large_files_skipped } =
     progress;
 
-  // KORREKTUR: Erst Element suchen, dann prüfen, dann zuweisen.
+  // Find all necessary DOM elements for progress updates.
   const scanTextEl = document.querySelector(".scan-text");
   if (scanTextEl) scanTextEl.textContent = "Scanning directory...";
 
@@ -85,7 +86,6 @@ window.updateScanProgress = (progress) => {
 
   const fillEl = document.getElementById("scan-progress-fill");
   if (fillEl && files_scanned > 0) {
-    // Die Logik hier war schon korrekt und kann bleiben.
     fillEl.style.width = `${Math.min(90, (files_scanned / 100) * 100)}%`;
   }
 };
@@ -116,19 +116,19 @@ window.setDragState = (isDragging) => {
 };
 
 // ==================================================================
-//  Initialisierung der App
+//  App Initialization
 // ==================================================================
 function initialize() {
   console.log("App initializing...");
   setupEventListeners();
   setupResizerListeners();
   initEditor(() => {
-    // Dieser Code wird ausgeführt, sobald der Monaco-Editor geladen und bereit ist.
+    // This code executes as soon as the Monaco editor is loaded and ready.
     console.log("Monaco Editor is ready.");
     setupGlobalKeyboardListeners();
   });
 
-  // Fordere den initialen Zustand vom Backend an.
+  // Request the initial state from the backend.
   post("initialize");
 }
 

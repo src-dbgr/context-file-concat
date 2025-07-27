@@ -64,7 +64,13 @@ html {
 }
 
 .icon-lightning {
-  stroke: var(--yellow-accent) !important;
+  fill: var(--yellow-accent) !important;
+  stroke: none !important;
+}
+
+.icon-lightning-light {
+  fill: #ffffff !important;
+  stroke: none !important;
 }
 
 .sidebar {

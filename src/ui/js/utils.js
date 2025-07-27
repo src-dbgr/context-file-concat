@@ -1,4 +1,3 @@
-// Reine Hilfsfunktionen ohne Seiteneffekte.
 export function formatFileSize(bytes) {
   if (bytes === 0) return "0 B";
   const k = 1024;
@@ -38,20 +37,20 @@ export function generateStatsString(content, additionalInfo = "") {
 }
 
 export function splitPathForDisplay(fullPath, currentDir) {
-    if (!fullPath) return { pathPart: "", filename: "Unknown File" };
-    let relativePath = fullPath;
+  if (!fullPath) return { pathPart: "", filename: "Unknown File" };
+  let relativePath = fullPath;
 
-    if (currentDir && fullPath.startsWith(currentDir)) {
-      relativePath = fullPath.substring(currentDir.length);
-      relativePath = relativePath.replace(/^[\/\\]+/, "");
-    }
+  if (currentDir && fullPath.startsWith(currentDir)) {
+    relativePath = fullPath.substring(currentDir.length);
+    relativePath = relativePath.replace(/^[\/\\]+/, "");
+  }
 
-    const parts = relativePath.replace(/\\/g, "/").split("/");
-    if (parts.length <= 1) {
-      return { pathPart: "", filename: relativePath };
-    }
+  const parts = relativePath.replace(/\\/g, "/").split("/");
+  if (parts.length <= 1) {
+    return { pathPart: "", filename: relativePath };
+  }
 
-    const filename = parts[parts.length - 1];
-    const pathPart = parts.slice(0, -1).join("/") + "/";
-    return { pathPart, filename };
+  const filename = parts[parts.length - 1];
+  const pathPart = parts.slice(0, -1).join("/") + "/";
+  return { pathPart, filename };
 }

@@ -77,7 +77,6 @@ fn migrate_legacy_config(config_content: &str) -> Result<AppConfig> {
         obj.insert("use_relative_paths".to_string(), Value::Bool(true));
     }
 
-    // NEU: Migration für neue Felder
     if !obj.contains_key("auto_load_last_directory") {
         obj.insert("auto_load_last_directory".to_string(), Value::Bool(true));
     }

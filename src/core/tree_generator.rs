@@ -143,7 +143,6 @@ impl TreeGenerator {
         result: &mut String,
         prefix: &str,
     ) {
-        // ... (unverändert bis auf format!)
         let mut sorted_children: Vec<&PathBuf> = children.iter().collect();
         sorted_children.sort_by(|a, b| {
             let a_node = &tree_map[*a];

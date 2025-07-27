@@ -78,7 +78,6 @@ impl FileHandler {
 
     /// Reads the content of a file, with safeguards for large or binary files.
     fn read_file_content(file_path: &Path) -> Result<String, CoreError> {
-        // ... (unverändert)
         let metadata =
             fs::metadata(file_path).map_err(|e| CoreError::Io(e, file_path.to_path_buf()))?;
         if metadata.len() > 20 * 1024 * 1024 {

@@ -1,162 +1,71 @@
-# ContextFileConcat
+<table>
+<tr>
+<td><img src="assets/text_flash_logo.svg" alt="CFC Logo" width="100"/></td>
+<td><h1>Context File Concatenator</h1></td>
+</tr>
+</table>
 
-Eine performante Rust-Anwendung zum Zusammenfassen von Dateien in ein einziges Text-Dokument - perfekt für KI-Context-Generierung.
+CFC (Context File Concatenator) is a desktop application designed to intelligently select, filter, and combine project files into a single text file. This output is optimized for use with Large Language Models (LLMs), providing them with the necessary context to understand and analyze a codebase.
 
-## Features
+## Key Features
 
-✅ **Intuitive GUI** - Modernes Interface mit macOS-Integration  
-✅ **Async Directory Scanning** - Responsive UI auch bei großen Projekten  
-✅ **Smart File Detection** - Automatische Erkennung von Text/Binary-Dateien  
-✅ **Flexible Suche & Filter** - Regex-Support, Case-Sensitivity, Extension-Filter  
-✅ **Ignore Patterns** - .gitignore-style Patterns (node_modules/, target/, etc.)  
-✅ **File Preview** - Vorschau der ersten Zeilen direkt in der GUI  
-✅ **ASCII Directory Tree** - Optionale Verzeichnisstruktur-Ausgabe  
-✅ **Cross-Platform Config** - Automatische Konfigurationsspeicherung  
-✅ **Progress Tracking** - Echtzeit-Fortschrittsanzeige  
-✅ **Large File Handling** - 100MB Limit mit Warning-System
+- **Directory Selection**: Easily select a project directory using a native file dialog or by dragging and dropping it into the application.
+- **Interactive File Tree**: View your project structure in a familiar tree view. Select or deselect individual files or entire directories.
+- **Flexible Filtering**:
+  - Filter files by name (case-sensitive or insensitive).
+  - Filter by file extension (e.g., show only `.rs` or `.py` files).
+  - Search for text content within files.
+- **Powerful Ignore System**:
+  - Uses `.gitignore`-style patterns to exclude unwanted files and directories (like `node_modules/`, `target/`, or `*.log`).
+  - Add and remove patterns dynamically.
+  - Right-click any file or folder in the tree to ignore it instantly.
+- **Syntax Highlighting**: Preview individual files or the final concatenated output with syntax highlighting in a built-in Monaco editor.
+- **Configuration Management**:
+  - Import and export your settings (including ignore patterns) as a JSON file to share configurations across projects or teams.
+  - Settings are automatically saved between sessions.
+- **Customizable Output**:
+  - Choose to include an ASCII directory tree at the start of the output file.
+  - Use relative or absolute file paths in the output headers.
 
-## Installation & Setup
+## Architecture Overview
 
-### 1. Rust installieren (falls noch nicht gemacht)
+CFC uses a modern hybrid architecture that combines a powerful Rust backend with a web-based frontend for a flexible and performant user experience.
 
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
-```
+- **Backend (Rust)**: The core logic is written in Rust, leveraging its performance, safety, and concurrency features. It handles all file system operations, scanning, filtering, and content processing. The backend is structured into three main layers:
 
-### 2. Projekt erstellen
+  - `core`: Contains the pure, reusable business logic (scanning, filtering, file handling) with no dependencies on the application or UI layers. It uses a robust, typed error handling system with `thiserror`.
+  - `app`: Acts as the orchestrator, managing the application state, handling events from the UI, and executing commands.
+  - `main.rs`: The entry point that sets up the window, WebView, and event loop.
 
-```bash
-cargo new context-file-concat
-cd context-file-concat
-```
+- **Frontend (HTML/CSS/JS)**: The user interface is built with standard web technologies and rendered in a WebView.
+  - **Wry & Tao**: We use the `wry` crate for the WebView and `tao` for windowing and the event loop, providing a lightweight cross-platform solution.
+  - **Monaco Editor**: The same editor that powers VS Code is integrated for a high-quality code preview experience.
+  - **IPC**: The frontend communicates with the Rust backend via an Inter-Process Communication (IPC) channel, sending JSON messages to trigger commands and receiving events to update the UI.
 
-### 3. Dateien erstellen
+## Building from Source
 
-Erstelle folgende Verzeichnisstruktur:
+To build and run the application locally, you need [Node.js/npm](https://nodejs.org/) and the [Rust toolchain](https://www.rust-lang.org/tools/install).
 
-```
-src/
-├── main.rs
-├── app/
-│   ├── mod.rs
-│   └── main_window.rs
-├── core/
-│   ├── mod.rs
-│   ├── scanner.rs
-│   ├── file_handler.rs
-│   ├── search.rs
-│   └── tree_generator.rs
-├── config/
-│   ├── mod.rs
-│   └── settings.rs
-└── utils/
-    ├── mod.rs
-    └── file_detection.rs
-```
+1.  **Prepare the Frontend Dependencies:**
+    Navigate to the `src/ui` directory and install the necessary JavaScript packages.
 
-Kopiere alle Dateien aus den Artifacts in die entsprechenden Ordner.
+    ```bash
+    cd src/ui
+    npm install
+    ```
 
-### 4. Programm kompilieren und ausführen
+2.  **Build the Frontend Bundle:**
+    This command uses `esbuild` to bundle all JavaScript modules into a single file that will be injected into the HTML.
 
-**Debug-Version (für Entwicklung):**
+    ```bash
+    npm run build
+    ```
 
-```bash
-cargo run
-```
+    For development, you can use `npm run watch` to have `esbuild` automatically rebuild the bundle whenever you change a frontend file.
 
-**Release-Version (optimiert):**
-
-```bash
-cargo build --release
-./target/release/context-file-concat
-```
-
-**Cross-Platform kompilieren:**
-
-```bash
-# Für Windows (von macOS/Linux aus)
-cargo build --release --target x86_64-pc-windows-gnu
-
-# Für Linux (von macOS aus)
-cargo build --release --target x86_64-unknown-linux-gnu
-```
-
-## Verwendung
-
-1. **Directory auswählen**: Klicke auf "Select Directory" oder gib den Pfad manuell ein
-2. **Scannen**: Klicke "Scan" um alle Dateien zu erfassen
-3. **Filtern**: Nutze Search-Box, Extension-Filter oder Ignore-Patterns
-4. **Auswählen**: Wähle Dateien mit Checkboxes aus (oder "Select All")
-5. **Output konfigurieren**: Setze Ausgabepfad und Dateiname
-6. **Generieren**: Klicke "Generate" für das finale concatenated File
-
-## Konfiguration
-
-Die App speichert Einstellungen automatisch in:
-
-- **macOS**: `~/Library/Application Support/ContextFileConcat/`
-- **Linux**: `~/.config/ContextFileConcat/`
-- **Windows**: `%APPDATA%/ContextFileConcat/`
-
-Du kannst Configs auch manuell exportieren/importieren über die GUI-Buttons.
-
-## Ausgabe-Format
-
-```
-# ContextFileConcat Output
-# Generated: 2025-07-14 15:30:45
-# Total files: 42
-
-/path/to/file1.rs
-----------------------------------------------------
-// File content here...
-----------------------------------------------------
-
-/path/to/file2.py
-----------------------------------------------------
-# File content here...
-----------------------------------------------------
-
-# DIRECTORY TREE (optional)
-====================================================
-project-root/
-├── 📁 src/
-│   ├── 📄 main.rs
-│   └── 📁 components/
-│       └── 📄 button.rs
-└── 📄 README.md
-====================================================
-```
-
-## Performance
-
-- **Async scanning** für responsive UI
-- **Smart memory management** für große Dateien
-- **Optimierte Release builds** mit LTO
-- **Cross-platform** dank Rust
-
-## Troubleshooting
-
-**Problem**: Kompilier-Fehler bei Dependencies  
-**Lösung**: `cargo clean && cargo build`
-
-**Problem**: GUI startet nicht auf Linux  
-**Lösung**: Installiere X11-Development-Libraries
-
-**Problem**: Langsames Scannen großer Verzeichnisse  
-**Lösung**: Nutze mehr Ignore-Patterns (node_modules/, target/, etc.)
-
-## Dependencies
-
-- `egui` - Modern GUI Framework
-- `tokio` - Async Runtime
-- `walkdir` - Directory Traversal
-- `rfd` - Native File Dialogs
-- `serde` - Serialization
-- `regex` - Pattern Matching
-- `directories` - Cross-Platform Paths
-
-## Lizenz
-
-MIT License - Nutze es frei für deine Projekte!
+3.  **Run the Rust Application:**
+    Navigate back to the project root directory and run the application using Cargo. This will build and launch the desktop application.
+    ```bash
+    cd ../..
+    cargo run
+    ```
