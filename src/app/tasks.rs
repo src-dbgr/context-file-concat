@@ -69,7 +69,9 @@ pub fn start_scan_on_path(
         state_guard.scan_task = Some(handle);
 
         proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_guard,
+            ))))
             .unwrap();
     });
 }
@@ -102,7 +104,9 @@ async fn scan_directory_task(
         let mut state_lock = state.lock().unwrap();
         state_lock.cancel_current_scan();
         proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_lock,
+            ))))
             .unwrap();
         return;
     }
@@ -122,17 +126,18 @@ async fn scan_directory_task(
     let (final_files, active_patterns) = match scan_result {
         Ok(files) => files,
         Err(e) => {
-            tracing::error!("LOG: TASK:: Scan finished with error: {}", e);
+            tracing::error!("LOG: TASK:: Scan finished with error: {e}");
             let mut state_lock = state.lock().unwrap();
             if !state_lock.is_scanning {
                 return;
             }
-            state_lock.scan_progress.current_scanning_path =
-                format!("Scan failed: {}", e.to_string());
+            state_lock.scan_progress.current_scanning_path = format!("Scan failed: {e}");
             state_lock.is_scanning = false;
             state_lock.scan_task = None;
             proxy
-                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                    &state_lock,
+                ))))
                 .unwrap();
             return;
         }
@@ -159,7 +164,9 @@ async fn scan_directory_task(
     );
     state_lock.scan_task = None;
     proxy
-        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_lock)))
+        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+            &state_lock,
+        ))))
         .unwrap();
     tracing::info!("LOG: TASK:: Final state has been updated and sent to UI.");
 }
@@ -174,7 +181,9 @@ pub async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<
             state_guard.content_search_results.clear();
             apply_filters(&mut state_guard);
             proxy
-                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                    &state_guard,
+                ))))
                 .unwrap();
             return;
         }
@@ -213,6 +222,8 @@ pub async fn search_in_files(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<
     apply_filters(&mut state_guard);
     auto_expand_for_matches(&mut state_guard);
     proxy
-        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+            &state_guard,
+        ))))
         .unwrap();
 }

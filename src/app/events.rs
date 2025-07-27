@@ -12,7 +12,7 @@ use crate::core::ScanProgress;
 #[derive(Debug)]
 pub enum UserEvent {
     /// A complete state update to re-render the UI.
-    StateUpdate(UiState),
+    StateUpdate(Box<UiState>),
     /// Content for the file preview panel.
     ShowFilePreview {
         content: String,

@@ -50,10 +50,12 @@ async fn main() {
             use wry::FileDropEvent;
             match event {
                 FileDropEvent::Hovered { .. } => {
-                    let _ = proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(true));
+                    let _ =
+                        proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(true));
                 }
                 FileDropEvent::Dropped { paths, .. } => {
-                    let _ = proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(false));
+                    let _ =
+                        proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(false));
                     if let Some(path) = paths.first() {
                         app::tasks::start_scan_on_path(
                             path.clone(),
@@ -63,7 +65,8 @@ async fn main() {
                     }
                 }
                 FileDropEvent::Cancelled => {
-                    let _ = proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(false));
+                    let _ =
+                        proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(false));
                 }
                 _ => (),
             }
@@ -78,7 +81,10 @@ async fn main() {
         *control_flow = ControlFlow::Wait;
 
         match event {
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(user_event) => {

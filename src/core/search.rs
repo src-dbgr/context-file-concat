@@ -68,12 +68,9 @@ impl SearchEngine {
     /// Checks if a path's extension matches the extension filter.
     fn matches_extension(path: &Path, extension_filter: &str) -> bool {
         if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-            let filter = if extension_filter.starts_with('.') {
-                &extension_filter[1..]
-            } else {
-                extension_filter
-            };
-
+            let filter = extension_filter
+                .strip_prefix('.')
+                .unwrap_or(extension_filter);
             ext.eq_ignore_ascii_case(filter)
         } else {
             extension_filter.is_empty() || extension_filter == "no extension"

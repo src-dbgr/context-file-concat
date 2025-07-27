@@ -26,19 +26,19 @@ pub fn build_globset_from_patterns(patterns: &HashSet<String>) -> (GlobSet, Vec<
             };
 
             // 1. Glob, um das Verzeichnis/die Datei selbst zu matchen (z.B. `**/target`).
-            if let Ok(glob) = Glob::new(&format!("**/{}", base_pattern)) {
+            if let Ok(glob) = Glob::new(&format!("**/{base_pattern}")) {
                 builder.add(glob);
                 glob_patterns_list.push(pattern.clone());
             }
             // 2. Glob, um alles INNERHALB des Verzeichnisses zu matchen (z.B. `**/target/**`).
-            if let Ok(glob) = Glob::new(&format!("**/{}/**", base_pattern)) {
+            if let Ok(glob) = Glob::new(&format!("**/{base_pattern}/**")) {
                 builder.add(glob);
                 glob_patterns_list.push(pattern.clone());
             }
         } else {
             // Alle anderen Patterns (wie `*.log` oder `src/*.rs`) werden als normale Globs behandelt.
             // Das `**/` Präfix stellt sicher, dass sie in jeder Tiefe gefunden werden.
-            if let Ok(glob) = Glob::new(&format!("**/{}", trimmed_pattern)) {
+            if let Ok(glob) = Glob::new(&format!("**/{trimmed_pattern}")) {
                 builder.add(glob);
                 glob_patterns_list.push(pattern.clone());
             }

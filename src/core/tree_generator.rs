@@ -96,7 +96,7 @@ impl TreeGenerator {
         let mut root_nodes: Vec<&PathBuf> = if is_root {
             tree_map
                 .keys()
-                .filter(|path| path.parent().map_or(true, |p| p == Path::new("")))
+                .filter(|path| path.parent().is_none_or(|p| p == Path::new("")))
                 .collect()
         } else {
             vec![]
@@ -121,14 +121,14 @@ impl TreeGenerator {
             let connector = if is_last { "└── " } else { "├── " };
             let icon = if node.is_directory { "📁 " } else { "📄 " };
 
-            result.push_str(&format!("{}{}{}{}\n", prefix, connector, icon, node.name));
+            result.push_str(&format!("{prefix}{connector}{icon}{}\n", node.name));
 
             // Recursively render children
             if !node.children.is_empty() {
                 let new_prefix = if is_last {
-                    format!("{}    ", prefix)
+                    format!("{prefix}    ")
                 } else {
-                    format!("{}│   ", prefix)
+                    format!("{prefix}│   ")
                 };
 
                 Self::render_children(tree_map, &node.children, result, &new_prefix);
@@ -143,12 +143,12 @@ impl TreeGenerator {
         result: &mut String,
         prefix: &str,
     ) {
+        // ... (unverändert bis auf format!)
         let mut sorted_children: Vec<&PathBuf> = children.iter().collect();
         sorted_children.sort_by(|a, b| {
             let a_node = &tree_map[*a];
             let b_node = &tree_map[*b];
 
-            // Directories first, then files
             match (a_node.is_directory, b_node.is_directory) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
@@ -163,14 +163,14 @@ impl TreeGenerator {
             let connector = if is_last { "└── " } else { "├── " };
             let icon = if node.is_directory { "📁 " } else { "📄 " };
 
-            result.push_str(&format!("{}{}{}{}\n", prefix, connector, icon, node.name));
+            result.push_str(&format!("{prefix}{connector}{icon}{}\n", node.name));
 
             // Recursively render children
             if !node.children.is_empty() {
                 let new_prefix = if is_last {
-                    format!("{}    ", prefix)
+                    format!("{prefix}    ")
                 } else {
-                    format!("{}│   ", prefix)
+                    format!("{prefix}│   ")
                 };
 
                 Self::render_children(tree_map, &node.children, result, &new_prefix);

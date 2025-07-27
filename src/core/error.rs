@@ -23,6 +23,7 @@ pub enum CoreError {
     GlobPattern(#[from] globset::Error),
 
     /// Represents a path that was expected to be a directory but was not.
+    #[allow(dead_code)]
     #[error("Path is not a valid directory: {0}")]
     NotADirectory(PathBuf),
 

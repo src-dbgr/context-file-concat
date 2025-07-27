@@ -28,7 +28,9 @@ pub fn select_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppSt
         let mut state_guard = state.lock().unwrap();
         state_guard.is_scanning = false;
         proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_guard,
+            ))))
             .unwrap();
     }
 }
@@ -40,7 +42,9 @@ pub fn clear_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppSta
     state_guard.config.last_directory = None;
     config::settings::save_config(&state_guard.config).ok();
     proxy
-        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+            &state_guard,
+        ))))
         .unwrap();
 }
 
@@ -58,7 +62,9 @@ pub fn cancel_scan(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>
     let mut state_guard = state.lock().unwrap();
     state_guard.cancel_current_scan();
     proxy
-        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+            &state_guard,
+        ))))
         .unwrap();
 }
 
@@ -95,7 +101,9 @@ pub fn update_config(
             let mut state_guard = state.lock().unwrap();
             apply_filters(&mut state_guard);
             proxy
-                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                    &state_guard,
+                ))))
                 .unwrap();
         }
     }
@@ -105,7 +113,9 @@ pub fn update_config(
 pub fn initialize(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>) {
     let state_guard = state.lock().unwrap();
     proxy
-        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+            &state_guard,
+        ))))
         .unwrap();
 }
 
@@ -146,7 +156,9 @@ pub async fn update_filters(
                 auto_expand_for_matches(&mut state_guard);
             }
             proxy
-                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                    &state_guard,
+                ))))
                 .unwrap();
         }
     }
@@ -190,9 +202,9 @@ pub fn load_file_preview(
         }
 
         proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(
+            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
                 &state.lock().unwrap(),
-            )))
+            ))))
             .unwrap();
     }
 }
@@ -220,7 +232,9 @@ pub fn add_ignore_path(
             config::settings::save_config(&state_guard.config).ok();
             apply_filters(&mut state_guard);
             proxy
-                .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                    &state_guard,
+                ))))
                 .unwrap();
         }
     }
@@ -241,7 +255,9 @@ pub fn toggle_selection(
             state_guard.selected_files.insert(path);
         }
         proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_guard,
+            ))))
             .unwrap();
     }
 }
@@ -279,7 +295,9 @@ pub fn toggle_directory_selection(
             }
         }
         proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_guard,
+            ))))
             .unwrap();
     }
 }
@@ -299,7 +317,9 @@ pub fn toggle_expansion(
             state_guard.expanded_dirs.insert(path);
         }
         proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_guard,
+            ))))
             .unwrap();
     }
 }
@@ -323,7 +343,9 @@ pub fn expand_collapse_all(
             state_guard.expanded_dirs.clear();
         }
         proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_guard,
+            ))))
             .unwrap();
     }
 }
@@ -339,7 +361,9 @@ pub fn select_all(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>>)
         .collect();
     state_guard.selected_files.extend(paths_to_select);
     proxy
-        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+            &state_guard,
+        ))))
         .unwrap();
 }
 
@@ -348,7 +372,9 @@ pub fn deselect_all(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState>
     let mut state_guard = state.lock().unwrap();
     state_guard.selected_files.clear();
     proxy
-        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+            &state_guard,
+        ))))
         .unwrap();
 }
 
@@ -381,9 +407,9 @@ pub async fn generate_preview(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex
                 .send_event(UserEvent::ShowGeneratedContent(content))
                 .unwrap();
             proxy
-                .send_event(UserEvent::StateUpdate(generate_ui_state(
+                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
                     &state.lock().unwrap(),
-                )))
+                ))))
                 .unwrap();
         }
         Err(e) => proxy
@@ -397,7 +423,9 @@ pub fn clear_preview_state(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<Ap
     let mut state_guard = state.lock().unwrap();
     state_guard.previewed_file_path = None;
     proxy
-        .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+            &state_guard,
+        ))))
         .unwrap();
 }
 
@@ -450,7 +478,9 @@ pub fn pick_output_directory(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<
         let mut state_guard = state.lock().unwrap();
         state_guard.config.output_directory = Some(path);
         proxy
-            .send_event(UserEvent::StateUpdate(generate_ui_state(&state_guard)))
+            .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_guard,
+            ))))
             .unwrap();
     }
 }
@@ -479,17 +509,16 @@ pub fn import_config(proxy: EventLoopProxy<UserEvent>, state: Arc<Mutex<AppState
                     }
                 } else {
                     proxy
-                        .send_event(UserEvent::StateUpdate(generate_ui_state(
+                        .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
                             &state.lock().unwrap(),
-                        )))
+                        ))))
                         .unwrap();
                 }
             }
             Err(e) => {
                 proxy
                     .send_event(UserEvent::ShowError(format!(
-                        "Failed to import config: {}",
-                        e
+                        "Failed to import config: {e}"
                     )))
                     .unwrap();
             }

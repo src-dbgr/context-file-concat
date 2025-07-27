@@ -56,7 +56,7 @@ impl FileHandler {
                 file_path.display().to_string()
             };
 
-            content.push_str(&format!("{}\n", display_path));
+            content.push_str(&format!("{display_path}\n"));
             content.push_str("=====================FILE-START==================\n");
 
             match Self::read_file_content(file_path) {
@@ -78,6 +78,7 @@ impl FileHandler {
 
     /// Reads the content of a file, with safeguards for large or binary files.
     fn read_file_content(file_path: &Path) -> Result<String, CoreError> {
+        // ... (unverändert)
         let metadata =
             fs::metadata(file_path).map_err(|e| CoreError::Io(e, file_path.to_path_buf()))?;
         if metadata.len() > 20 * 1024 * 1024 {
@@ -110,12 +111,9 @@ impl FileHandler {
             return Ok("[DIRECTORY]".to_string());
         }
 
-        if !is_text_file(file_path).map_err(|e| {
-            CoreError::Io(
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-                file_path.to_path_buf(),
-            )
-        })? {
+        if !is_text_file(file_path)
+            .map_err(|e| CoreError::Io(std::io::Error::other(e), file_path.to_path_buf()))?
+        {
             return Ok("[BINARY FILE]".to_string());
         }
 
@@ -123,10 +121,9 @@ impl FileHandler {
             fs::File::open(file_path).map_err(|e| CoreError::Io(e, file_path.to_path_buf()))?;
         let reader = BufReader::new(file);
         let mut preview = String::new();
-        let mut line_count = 0;
 
-        for line in reader.lines() {
-            if line_count >= max_lines {
+        for (i, line) in reader.lines().enumerate() {
+            if i >= max_lines {
                 preview.push_str("...\n[Preview truncated]");
                 break;
             }
@@ -139,7 +136,6 @@ impl FileHandler {
                     preview.push_str("[ERROR READING LINE]\n");
                 }
             }
-            line_count += 1;
         }
         Ok(preview)
     }

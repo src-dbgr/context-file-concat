@@ -67,7 +67,7 @@ pub fn handle_user_event(event: UserEvent, webview: &WebView) {
         UserEvent::StateUpdate(state) => {
             format!(
                 "window.render({});",
-                serde_json::to_string(&state).unwrap_or_default()
+                serde_json::to_string(&*state).unwrap_or_default()
             )
         }
         UserEvent::ShowFilePreview {
@@ -112,7 +112,7 @@ pub fn handle_user_event(event: UserEvent, webview: &WebView) {
             )
         }
         UserEvent::DragStateChanged(is_dragging) => {
-            format!("window.setDragState({});", is_dragging)
+            format!("window.setDragState({is_dragging});")
         }
     };
     if let Err(e) = webview.evaluate_script(&script) {

@@ -203,62 +203,61 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "wasm",
     "wat",
     "wit",
-    "component", // WebAssembly text formats
+    "component",
     "pest",
     "lalrpop",
     "y",
     "l",
     "lex",
-    "yacc", // Parser generators
+    "yacc",
     "capnp",
     "fbs",
     "schema",
     "avdl",
-    "thrift", // Schema definitions
     "gn",
     "gni",
     "bp",
     "BUILD",
     "WORKSPACE",
-    "bzl", // Build files
+    "bzl",
     "nix",
     "drv",
-    "store-path", // Nix files
+    "store-path",
     "dhall",
     "purescript",
     "purs",
     "elm",
-    "roc", // Functional languages
+    "roc",
     "gleam",
     "grain",
     "hx",
     "hxml",
     "moon",
-    "zig", // Modern languages
+    "zig",
     "just",
     "justfile",
     "task",
-    "taskfile", // Task runners
+    "taskfile",
     "editorconfig",
     "clang-format",
-    "rustfmt", // Editor configs
+    "rustfmt",
     "modulemap",
     "def",
     "exports",
-    "version", // Module definitions
+    "version",
     "in",
     "am",
     "ac",
     "m4",
     "cmake",
-    "ctest", // Build system templates
+    "ctest",
     "service",
     "socket",
     "timer",
-    "mount", // Systemd files
+    "mount",
     "desktop",
     "appdata",
-    "metainfo", // Desktop files
+    "metainfo",
 ];
 
 const IMAGE_EXTENSIONS: &[&str] = &[
@@ -355,16 +354,13 @@ fn get_image_ext_set() -> &'static std::collections::HashSet<&'static str> {
 }
 
 const MAX_CONTENT_CHECK_SIZE: u64 = 20 * 1024 * 1024; // 20MB
-const CONTENT_CHECK_BUFFER_SIZE: usize = 1024; // 1KB für Content-Check
+const CONTENT_CHECK_BUFFER_SIZE: usize = 1024; // 1KB for Content-Check
 
-/// Determines if a file is likely to be a text file
-/// OPTIMIERT für bessere Performance bei großen Directory-Scans
+/// Determines if a file is likely to be a text file.
 pub fn is_text_file(path: &Path) -> Result<bool> {
-    // PERFORMANCE: Frühe Extension-Checks mit HashSet-Lookups
     if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
         let ext_lower = extension.to_lowercase();
 
-        // O(1) Lookups statt linearer Suche
         if get_text_ext_set().contains(ext_lower.as_str()) {
             return Ok(true);
         }
@@ -377,28 +373,23 @@ pub fn is_text_file(path: &Path) -> Result<bool> {
             return Ok(false);
         }
     }
-
-    // PERFORMANCE: Frühe Größen-Prüfung ohne File-Handle
     match std::fs::metadata(path) {
         Ok(metadata) => {
             if metadata.len() > MAX_CONTENT_CHECK_SIZE {
-                return Ok(false); // Große unbekannte Dateien = binär
+                return Ok(false);
             }
 
-            // Leere Dateien sind Text
             if metadata.len() == 0 {
                 return Ok(true);
             }
         }
-        Err(_) => return Ok(false), // Nicht lesbare Dateien = binär
+        Err(_) => return Ok(false),
     }
-
-    // Content-Check nur für kleine, unbekannte Extensions
     check_file_content_optimized(path)
 }
 
-/// Determines if a file is an image file (für Icon-Anzeige)
-/// OPTIMIERT mit HashSet-Lookup
+/// Determines if a file is an image file.
+#[allow(dead_code)]
 pub fn is_image_file(path: &Path) -> bool {
     if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
         let ext_lower = extension.to_lowercase();
@@ -408,35 +399,26 @@ pub fn is_image_file(path: &Path) -> bool {
     }
 }
 
-/// OPTIMIERTE Version des Content-Checks
-/// Reduziert I/O und verbessert Performance
+/// Checks the initial bytes of a file to guess if it's text.
 fn check_file_content_optimized(path: &Path) -> Result<bool> {
-    // PERFORMANCE: Kleinerer Buffer für schnelleren I/O
     let mut buffer = [0u8; CONTENT_CHECK_BUFFER_SIZE];
-
     let file = File::open(path)?;
     let mut reader = BufReader::with_capacity(CONTENT_CHECK_BUFFER_SIZE, file);
-
     let bytes_read = reader.read(&mut buffer)?;
-
     if bytes_read == 0 {
-        return Ok(true); // Leere Dateien sind Text
+        return Ok(true);
     }
-
-    // PERFORMANCE: Früher Null-Byte-Check (häufigster Indikator für binär)
     if buffer[..bytes_read].contains(&0) {
         return Ok(false);
     }
-
-    // PERFORMANCE: Schneller UTF-8-Check ohne String-Allocation
     match std::str::from_utf8(&buffer[..bytes_read]) {
         Ok(_) => Ok(true),
         Err(_) => {
-            // Fallback: Prüfe auf häufige nicht-UTF8 aber text-ähnliche Encodings
-            // Wenn > 95% der Bytes druckbare ASCII-Zeichen sind, behandle als Text
+            // Fallback: Check for frequent non-UTF8 but text-similar encodings
+            // If > 95% of Bytes are ASCII-Symbols, treat them as text
             let printable_count = buffer[..bytes_read]
                 .iter()
-                .filter(|&&b| b >= 32 && b <= 126 || b == 9 || b == 10 || b == 13)
+                .filter(|&&b| (32..=126).contains(&b) || b == 9 || b == 10 || b == 13)
                 .count();
 
             let ratio = printable_count as f32 / bytes_read as f32;
@@ -445,9 +427,9 @@ fn check_file_content_optimized(path: &Path) -> Result<bool> {
     }
 }
 
-/// NEUE FUNKTION: Batch-Processing für bessere Performance bei vielen Dateien
+/// Classifies a batch of files as text or image.
+#[allow(dead_code)]
 pub fn batch_classify_files(paths: &[&Path]) -> Vec<(bool, bool)> {
-    // Rückgabe: (is_text, is_image) für jeden Pfad
     paths
         .iter()
         .map(|path| {

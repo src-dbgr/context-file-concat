@@ -49,26 +49,22 @@ pub struct TreeNode {
 
 /// Creates the complete `UiState` from the current `AppState`.
 pub fn generate_ui_state(state: &AppState) -> UiState {
-    let root = PathBuf::from(&state.current_path);
-    let search_matches = if !state.content_search_query.is_empty() {
-        state.content_search_results.clone()
-    } else {
-        HashSet::new()
-    };
     let tree = if state.is_scanning {
         Vec::new()
     } else {
-        build_tree_nodes(
-            &state.filtered_file_list,
-            &root,
-            &state.selected_files,
-            &state.expanded_dirs,
-            &search_matches,
-            &state.search_query,
-            state.config.case_sensitive_search,
-            &state.previewed_file_path,
-        )
+        let args = BuildTreeArgs {
+            items: &state.filtered_file_list,
+            root_path: &PathBuf::from(&state.current_path),
+            selected: &state.selected_files,
+            expanded: &state.expanded_dirs,
+            content_search_matches: &state.content_search_results,
+            filename_query: &state.search_query,
+            case_sensitive: state.config.case_sensitive_search,
+            previewed_path: &state.previewed_file_path,
+        };
+        build_tree_nodes(args)
     };
+
     let status_message = if state.is_scanning {
         format!(
             "Scanning... {} files processed. {} large files skipped ({})",
@@ -207,44 +203,47 @@ pub fn auto_expand_for_matches(state: &mut AppState) {
     }
 }
 
-/// Recursively builds the `TreeNode` structure for the UI from a flat list of `FileItem`s.
-fn build_tree_nodes(
-    items: &[FileItem],
-    root_path: &Path,
-    selected: &HashSet<PathBuf>,
-    expanded: &HashSet<PathBuf>,
-    content_search_matches: &HashSet<PathBuf>,
-    filename_query: &str,
+/// Arguments for the `build_tree_nodes` function.
+struct BuildTreeArgs<'a> {
+    items: &'a [FileItem],
+    root_path: &'a Path,
+    selected: &'a HashSet<PathBuf>,
+    expanded: &'a HashSet<PathBuf>,
+    content_search_matches: &'a HashSet<PathBuf>,
+    filename_query: &'a str,
     case_sensitive: bool,
-    previewed_path: &Option<PathBuf>,
-) -> Vec<TreeNode> {
+    previewed_path: &'a Option<PathBuf>,
+}
+
+/// Recursively builds the `TreeNode` structure for the UI from a flat list of `FileItem`s.
+fn build_tree_nodes(args: BuildTreeArgs) -> Vec<TreeNode> {
     let mut nodes: HashMap<PathBuf, TreeNode> = HashMap::new();
     let mut children_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
 
-    for item in items {
+    for item in args.items {
         let selection_state = if item.is_directory {
-            get_directory_selection_state(&item.path, items, selected)
-        } else if selected.contains(&item.path) {
+            get_directory_selection_state(&item.path, args.items, args.selected)
+        } else if args.selected.contains(&item.path) {
             "full".to_string()
         } else {
             "none".to_string()
         };
 
         let file_name = item.path.file_name().unwrap_or_default().to_string_lossy();
-        let name_match = if !filename_query.is_empty() {
-            if case_sensitive {
-                file_name.contains(filename_query)
+        let name_match = if !args.filename_query.is_empty() {
+            if args.case_sensitive {
+                file_name.contains(args.filename_query)
             } else {
                 file_name
                     .to_lowercase()
-                    .contains(&filename_query.to_lowercase())
+                    .contains(&args.filename_query.to_lowercase())
             }
         } else {
             false
         };
 
-        let content_match = content_search_matches.contains(&item.path);
-        let is_previewed = previewed_path.as_ref() == Some(&item.path);
+        let content_match = args.content_search_matches.contains(&item.path);
+        let is_previewed = args.previewed_path.as_ref() == Some(&item.path);
 
         nodes.insert(
             item.path.clone(),
@@ -256,14 +255,14 @@ fn build_tree_nodes(
                 size: item.size,
                 children: Vec::new(),
                 selection_state,
-                is_expanded: expanded.contains(&item.path),
+                is_expanded: args.expanded.contains(&item.path),
                 is_match: name_match || content_match,
                 is_previewed,
             },
         );
 
         if let Some(parent) = item.path.parent() {
-            if parent.starts_with(root_path) {
+            if parent.starts_with(args.root_path) {
                 children_map
                     .entry(parent.to_path_buf())
                     .or_default()
@@ -272,12 +271,14 @@ fn build_tree_nodes(
         }
     }
 
-    let mut root_nodes_paths: Vec<PathBuf> = items
+    let mut root_nodes_paths: Vec<PathBuf> = args
+        .items
         .iter()
-        .filter(|item| item.path.parent() == Some(root_path))
+        .filter(|item| item.path.parent() == Some(args.root_path))
         .map(|item| item.path.clone())
         .collect();
 
+    // ... (build_level function bleibt gleich, aber verwendet nun die neuen 'args')
     fn build_level(
         paths: &mut Vec<PathBuf>,
         nodes: &mut HashMap<PathBuf, TreeNode>,

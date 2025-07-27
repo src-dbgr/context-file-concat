@@ -8,3 +8,5 @@ node_modules
 index.html.bak
 src/ui/dist/
 blabla.json
+.env
+README_PRIV.md
