@@ -2,7 +2,7 @@ use super::{build_globset_from_patterns, CoreError, FileItem};
 use crate::utils::file_detection::is_text_file;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

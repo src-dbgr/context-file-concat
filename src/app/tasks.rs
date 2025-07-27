@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tao::event_loop::EventLoopProxy;
 
