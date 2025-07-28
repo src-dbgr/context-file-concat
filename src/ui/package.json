@@ -1,17 +1,29 @@
 {
-  "name": "ui",
-  "version": "1.0.0",
-  "description": "",
-  "main": "script.js",
+  "name": "context-file-concat-ui",
+  "version": "0.1.0",
+  "description": "Frontend UI for Context File Concatenator - Web-based interface built with modern JavaScript",
+  "main": "js/main.js",
   "scripts": {
     "build": "esbuild js/main.js --bundle --outfile=dist/bundle.js --minify",
     "watch": "esbuild js/main.js --bundle --outfile=dist/bundle.js --watch",
     "dev": "concurrently \"npm:watch\" \"cargo run --manifest-path=../../Cargo.toml\""
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "llm",
+    "context",
+    "files",
+    "ui",
+    "frontend",
+    "webview"
+  ],
+  "author": "src-dbgr",
+  "license": "MIT",
   "type": "commonjs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/src-dbgr/context-file-concat",
+    "directory": "src/ui"
+  },
   "devDependencies": {
     "concurrently": "^9.2.0",
     "esbuild": "^0.25.8"
