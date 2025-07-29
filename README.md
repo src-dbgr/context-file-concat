@@ -1,9 +1,8 @@
-<table>
-<tr>
-<td><img src="assets/text_flash_logo.svg" alt="CFC Logo" width="100"/></td>
-<td><h1>Context File Concatenator</h1></td>
-</tr>
-</table>
+<div align="center">
+  <img src="assets/text_flash_logo.svg" alt="Project Logo" width="200"/>
+</div>
+
+# Context File Concatenator
 
 CFC (Context File Concatenator) is a desktop application designed to intelligently select, filter, and combine project files into a single text file. This output is optimized for use with Large Language Models (LLMs), providing them with the necessary context to understand and analyze a codebase.
 

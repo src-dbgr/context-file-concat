@@ -27,6 +27,8 @@ pub struct AppState {
     pub expanded_dirs: HashSet<PathBuf>,
     /// `true` if a directory scan is currently in progress.
     pub is_scanning: bool,
+    /// `true` if the concatenation process is currently running.
+    pub is_generating: bool,
     /// The current search query for filenames.
     pub search_query: String,
     /// The current filter for file extensions.
@@ -45,6 +47,10 @@ pub struct AppState {
     pub scan_task: Option<JoinHandle<()>>,
     /// A flag used to signal cancellation to the scan task.
     pub scan_cancellation_flag: Arc<AtomicBool>,
+    /// A handle to the currently running generation task, allowing it to be aborted.
+    pub generation_task: Option<JoinHandle<()>>,
+    /// A flag used to signal cancellation to the generation task.
+    pub generation_cancellation_flag: Arc<AtomicBool>,
     /// The set of ignore patterns that were actually matched during the last scan.
     pub active_ignore_patterns: HashSet<String>,
 }
@@ -60,6 +66,7 @@ impl Default for AppState {
             selected_files: HashSet::new(),
             expanded_dirs: HashSet::new(),
             is_scanning: false,
+            is_generating: false,
             search_query: String::new(),
             extension_filter: String::new(),
             content_search_query: String::new(),
@@ -73,6 +80,8 @@ impl Default for AppState {
             previewed_file_path: None,
             scan_task: None,
             scan_cancellation_flag: Arc::new(AtomicBool::new(false)),
+            generation_task: None,
+            generation_cancellation_flag: Arc::new(AtomicBool::new(false)),
             active_ignore_patterns: HashSet::new(),
         }
     }
@@ -102,9 +111,20 @@ impl AppState {
         tracing::info!("LOG: AppState has been reset to 'cancelled' state.");
     }
 
+    /// Cancels the current generation task, if any.
+    pub fn cancel_current_generation(&mut self) {
+        if let Some(handle) = self.generation_task.take() {
+            handle.abort();
+        }
+        self.generation_cancellation_flag
+            .store(true, Ordering::Relaxed);
+        self.is_generating = false;
+    }
+
     /// Resets all state related to a loaded directory.
     pub fn reset_directory_state(&mut self) {
         self.cancel_current_scan();
+        self.cancel_current_generation();
 
         self.current_path = String::new();
         self.full_file_list.clear();
@@ -117,6 +137,7 @@ impl AppState {
         self.content_search_results.clear();
         self.previewed_file_path = None;
         self.active_ignore_patterns.clear();
+        self.is_generating = false;
 
         self.scan_progress = ScanProgress {
             files_scanned: 0,

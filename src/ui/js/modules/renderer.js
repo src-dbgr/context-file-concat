@@ -297,9 +297,11 @@ function setupCommonPatterns() {
   });
 }
 
+let generatingIntervalId = null;
+
 export function renderUI() {
   const appState = state.get();
-  const { config, is_scanning } = appState;
+  const { config, is_scanning, is_generating } = appState;
 
   elements.currentPath.textContent =
     appState.current_path || "No directory selected.";
@@ -324,11 +326,12 @@ export function renderUI() {
   elements.selectDirBtn.disabled = is_scanning;
   elements.rescanBtn.disabled = is_scanning;
   elements.importConfigBtn.disabled = is_scanning;
-  elements.generateBtn.disabled = !hasSelection || is_scanning;
 
   const iconFolder = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>`;
   const iconScan = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>`;
   const iconScanning = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>`;
+  const iconGenerate = `<svg class="icon icon-lightning-light" viewBox="0 0 24 24"><path d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"></path></svg>`;
+  const iconCancel = `<svg class="icon" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
 
   if (is_scanning) {
     elements.selectDirBtn.innerHTML = `${iconScanning} Scanning...`;
@@ -336,6 +339,54 @@ export function renderUI() {
   } else {
     elements.selectDirBtn.innerHTML = `${iconFolder} Select Directory`;
     elements.rescanBtn.innerHTML = `${iconScan} Re-Scan`;
+  }
+
+  const wasGenerating =
+    elements.generateBtn.classList.contains("is-generating");
+
+  if (is_generating) {
+    // State is generating.
+    if (!wasGenerating) {
+      // This is the first render in the generating state. Set up the interval.
+      clearInterval(generatingIntervalId); // Clear any old timers just in case.
+
+      elements.generateBtn.classList.remove("button-cta");
+      elements.generateBtn.classList.add("is-generating");
+
+      elements.generateBtn.innerHTML = `
+          <span class="generating-content">
+              ${iconGenerate}
+              <span class="generating-text">Concat</span>
+          </span>
+          <span class="cancel-content">${iconCancel} Cancel</span>
+      `;
+
+      const textElement =
+        elements.generateBtn.querySelector(".generating-text");
+      let dotCount = 0;
+      generatingIntervalId = setInterval(() => {
+        dotCount = (dotCount + 1) % 4; // Cycle 0, 1, 2, 3
+
+        const dots = ".".repeat(dotCount);
+        const spaces = "\u00A0".repeat(3 - dotCount); // \u00A0 -> whitespace
+        if (textElement) {
+          textElement.textContent = `Concat${dots}${spaces}`;
+        }
+      }, 500);
+    }
+    elements.generateBtn.disabled = false; // Enable button for cancellation click
+  } else {
+    // State is NOT generating.
+    if (wasGenerating) {
+      // This is the first render after generating has stopped. Clean up.
+      clearInterval(generatingIntervalId);
+      generatingIntervalId = null;
+
+      elements.generateBtn.classList.remove("is-generating");
+      elements.generateBtn.classList.add("button-cta");
+      elements.generateBtn.innerHTML = `${iconGenerate} Generate`;
+    }
+    elements.generateBtn.disabled = !hasSelection || is_scanning;
   }
 
   // Clear the file tree container

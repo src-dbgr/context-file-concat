@@ -50,7 +50,8 @@ pub fn handle_ipc_message<P: EventProxy>(message: String, proxy: P, state: Arc<M
                 }
                 "selectAll" => commands::select_all(proxy.clone(), state),
                 "deselectAll" => commands::deselect_all(proxy.clone(), state),
-                "generatePreview" => commands::generate_preview(proxy.clone(), state).await,
+                "generatePreview" => commands::generate_preview(proxy.clone(), state),
+                "cancelGeneration" => commands::cancel_generation(proxy.clone(), state),
                 "clearPreviewState" => commands::clear_preview_state(proxy.clone(), state),
                 "saveFile" => commands::save_file(msg.payload, proxy.clone(), state),
                 "pickOutputDirectory" => commands::pick_output_directory(proxy.clone(), state),

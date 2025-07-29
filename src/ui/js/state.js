@@ -3,6 +3,7 @@ export const state = (() => {
   // --- Private State ---
   let _appState = {
     is_scanning: false,
+    is_generating: false,
     config: {
       ignore_patterns: [],
       case_sensitive_search: false,

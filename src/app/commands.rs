@@ -6,16 +6,16 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use super::events::UserEvent;
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
 use super::state::AppState;
-use super::tasks::{search_in_files, start_scan_on_path};
+use super::tasks::{generation_task, search_in_files, start_scan_on_path};
 use super::view_model::{
     apply_filters, auto_expand_for_matches, generate_ui_state, get_language_from_path,
-    get_selected_files_in_tree_order,
 };
 use crate::config;
 use crate::core::FileHandler;
@@ -226,16 +226,21 @@ pub fn add_ignore_path<P: EventProxy>(
             let root_path = PathBuf::from(&s.current_path);
 
             if let Ok(relative_path) = path_to_ignore.strip_prefix(&root_path) {
-                let mut pattern = relative_path.to_string_lossy().to_string();
+                let mut pattern_to_add = relative_path.to_string_lossy().to_string();
                 if path_to_ignore.is_dir() {
-                    pattern.push('/');
+                    pattern_to_add.push('/');
                 }
                 s.selected_files.retain(|p| !p.starts_with(&path_to_ignore));
-                s.config.ignore_patterns.insert(pattern);
+
+                // Add the pattern to both the configuration and the set of active patterns.
+                // This ensures it immediately appears as "active" (green) in the UI.
+                s.config.ignore_patterns.insert(pattern_to_add.clone());
+                s.active_ignore_patterns.insert(pattern_to_add);
+
                 if let Err(e) = config::settings::save_config(&s.config) {
                     tracing::warn!("Failed to save config after adding ignore path: {}", e);
                 }
-                apply_filters(s);
+                apply_filters(s); // Re-apply filters to update the view
             }
         });
     }
@@ -354,45 +359,42 @@ pub fn deselect_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     });
 }
 
-/// Generates the final concatenated output from selected files and sends it to the UI.
-pub async fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
-    let (selected, root, config, all_scanned_files) = {
-        let mut state_guard = state
-            .lock()
-            .expect("Mutex was poisoned. This should not happen.");
-        state_guard.previewed_file_path = None;
-        (
-            get_selected_files_in_tree_order(&state_guard),
-            PathBuf::from(&state_guard.current_path),
-            state_guard.config.clone(),
-            state_guard.full_file_list.clone(),
-        )
-    };
+/// Generates the final concatenated output from selected files by spawning a cancellable task.
+pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    let mut state_guard = state
+        .lock()
+        .expect("Mutex was poisoned. This should not happen.");
 
-    let result = FileHandler::generate_concatenated_content_simple(
-        &selected,
-        &root,
-        config.include_tree_by_default,
-        all_scanned_files,
-        config.tree_ignore_patterns,
-        config.use_relative_paths,
-    )
-    .await;
+    // Ensure any previous generation task is cancelled before starting a new one.
+    state_guard.cancel_current_generation();
 
-    match result {
-        Ok(content) => {
-            proxy.send_event(UserEvent::ShowGeneratedContent(content));
-            // Send state update to clear previewed path highlight
-            let state_guard = state
-                .lock()
-                .expect("Mutex was poisoned. This should not happen.");
-            let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
-            proxy.send_event(event);
-        }
-        Err(e) => {
-            proxy.send_event(UserEvent::ShowError(e.to_string()));
-        }
-    }
+    state_guard.is_generating = true;
+    state_guard.previewed_file_path = None;
+
+    let new_cancel_flag = Arc::new(AtomicBool::new(false));
+    state_guard.generation_cancellation_flag = new_cancel_flag.clone();
+
+    // Send an immediate state update to the UI to show the 'generating' state.
+    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+        &state_guard,
+    ))));
+
+    let proxy_clone = proxy.clone();
+    let state_clone = state.clone();
+
+    // Spawn the actual generation logic as a separate, managed task.
+    let handle = tokio::spawn(async move {
+        generation_task(proxy_clone, state_clone, new_cancel_flag).await;
+    });
+
+    state_guard.generation_task = Some(handle);
+}
+
+/// Cancels the ongoing file content generation task.
+pub fn cancel_generation<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    with_state_and_notify(&state, &proxy, |s| {
+        s.cancel_current_generation();
+    });
 }
 
 /// Resets the preview state in the UI.

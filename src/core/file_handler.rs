@@ -6,6 +6,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// A utility struct for handling file-related operations.
 ///
@@ -16,7 +18,7 @@ impl FileHandler {
     /// Generates a single string by concatenating the content of selected files.
     ///
     /// It includes a header with metadata, an optional directory tree, and formatted
-    /// content blocks for each selected file.
+    /// content blocks for each selected file. This operation is cancellable.
     pub async fn generate_concatenated_content_simple(
         selected_files: &[PathBuf],
         root_path: &Path,
@@ -24,6 +26,7 @@ impl FileHandler {
         items_for_tree: Vec<FileItem>,
         tree_ignore_patterns: HashSet<String>,
         use_relative_paths: bool,
+        cancel_flag: Arc<AtomicBool>,
     ) -> Result<String, CoreError> {
         let mut content = String::new();
         content.push_str(&format!(
@@ -42,6 +45,9 @@ impl FileHandler {
         }
 
         for file_path in selected_files {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err(CoreError::Cancelled);
+            }
             if file_path.is_dir() {
                 continue;
             }

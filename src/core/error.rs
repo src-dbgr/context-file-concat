@@ -30,4 +30,8 @@ pub enum CoreError {
     /// Represents a failure to strip a path prefix.
     #[error("Failed to strip prefix from path: {0}")]
     PathStrip(#[from] StripPrefixError),
+
+    /// Represents a user-initiated cancellation of an operation.
+    #[error("Operation was cancelled by the user")]
+    Cancelled,
 }

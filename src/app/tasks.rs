@@ -13,9 +13,11 @@ use std::sync::{Arc, Mutex};
 use super::events::UserEvent;
 use super::proxy::EventProxy;
 use super::state::AppState;
-use super::view_model::{apply_filters, auto_expand_for_matches, generate_ui_state};
+use super::view_model::{
+    apply_filters, auto_expand_for_matches, generate_ui_state, get_selected_files_in_tree_order,
+};
 
-use crate::core::{DirectoryScanner, ScanProgress};
+use crate::core::{CoreError, DirectoryScanner, FileHandler, ScanProgress};
 
 /// Initiates a directory scan for a given path.
 ///
@@ -213,4 +215,67 @@ pub async fn search_in_files<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>
     auto_expand_for_matches(&mut state_guard);
     let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
     proxy.send_event(event);
+}
+
+/// The main asynchronous task for generating the concatenated file content.
+///
+/// This function performs the core file reading and concatenation logic and updates
+/// the application state with the results or any errors that occur. It is cancellable.
+pub async fn generation_task<P: EventProxy>(
+    proxy: P,
+    state: Arc<Mutex<AppState>>,
+    cancel_flag: Arc<AtomicBool>,
+) {
+    // Get the necessary data for the task from the main state.
+    let (selected, root, config, all_scanned_files) = {
+        let state_guard = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
+        (
+            get_selected_files_in_tree_order(&state_guard),
+            PathBuf::from(&state_guard.current_path),
+            state_guard.config.clone(),
+            state_guard.full_file_list.clone(),
+        )
+    };
+
+    // Perform the potentially long-running file I/O operations.
+    let result = FileHandler::generate_concatenated_content_simple(
+        &selected,
+        &root,
+        config.include_tree_by_default,
+        all_scanned_files,
+        config.tree_ignore_patterns,
+        config.use_relative_paths,
+        cancel_flag,
+    )
+    .await;
+
+    // Lock the state again to update it after the task is done.
+    let mut state_guard = state
+        .lock()
+        .expect("Mutex was poisoned. This should not happen.");
+
+    // The task is finished, so we can clear the handle.
+    state_guard.generation_task = None;
+
+    // Check if the operation was cancelled. If so, we don't show an error.
+    // The UI state will be updated in any case.
+    match result {
+        Ok(content) => {
+            proxy.send_event(UserEvent::ShowGeneratedContent(content));
+        }
+        Err(CoreError::Cancelled) => {
+            state_guard.scan_progress.current_scanning_path = "Generation cancelled.".to_string();
+        }
+        Err(e) => {
+            proxy.send_event(UserEvent::ShowError(e.to_string()));
+        }
+    }
+
+    // This is now the single point of truth for resetting the generating state.
+    state_guard.is_generating = false;
+    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+        &state_guard,
+    ))));
 }

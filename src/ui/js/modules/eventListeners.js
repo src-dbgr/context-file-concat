@@ -103,7 +103,14 @@ export function setupEventListeners() {
   elements.collapseAllBtn.addEventListener("click", () =>
     post("expandCollapseAll", false)
   );
-  elements.generateBtn.addEventListener("click", () => post("generatePreview"));
+  elements.generateBtn.addEventListener("click", () => {
+    const appState = state.get();
+    if (appState.is_generating) {
+      post("cancelGeneration");
+    } else {
+      post("generatePreview");
+    }
+  });
   elements.saveBtn.addEventListener("click", () =>
     post("saveFile", state.getEditor().getValue())
   );
