@@ -80,39 +80,60 @@ impl SearchEngine {
     /// Recursively removes directories from a list that do not contain any files.
     ///
     /// Returns the pruned list of `FileItem`s and a set of the paths that were removed.
-    pub fn remove_empty_directories(mut files: Vec<FileItem>) -> (Vec<FileItem>, HashSet<PathBuf>) {
-        let mut has_changes = true;
-        let mut all_removed_dirs = HashSet::new();
+    /// Recursively removes directories from a list that do not contain any files.
+    ///
+    /// This implementation is optimized to run in near-linear time O(N) by using HashSets
+    /// to avoid nested loops, which would result in O(N^2) complexity.
+    pub fn remove_empty_directories(files: Vec<FileItem>) -> (Vec<FileItem>, HashSet<PathBuf>) {
+        if files.is_empty() {
+            return (files, HashSet::new());
+        }
 
-        while has_changes {
-            has_changes = false;
-            let files_before_len = files.len();
-
-            let mut dirs_to_remove = Vec::new();
-
-            for item in &files {
-                if item.is_directory {
-                    let has_children = files
-                        .iter()
-                        .any(|other| other.path != item.path && other.path.starts_with(&item.path));
-
-                    if !has_children {
-                        dirs_to_remove.push(item.path.clone());
-                    }
-                }
+        // 1. Collect all directories and files into separate sets for efficient lookup.
+        let mut directories = HashSet::new();
+        let mut file_paths = HashSet::new();
+        for item in &files {
+            if item.is_directory {
+                directories.insert(item.path.clone());
+            } else {
+                file_paths.insert(item.path.clone());
             }
+        }
 
-            if !dirs_to_remove.is_empty() {
-                files.retain(|item| !dirs_to_remove.contains(&item.path));
-                if files.len() != files_before_len {
-                    has_changes = true;
-                    // Add the directories removed in this round to the total set.
-                    all_removed_dirs.extend(dirs_to_remove);
+        // 2. Build a set of all directories that are ancestors of at least one file.
+        let mut essential_dirs = HashSet::new();
+        for file_path in &file_paths {
+            let mut current = file_path.parent();
+            while let Some(parent) = current {
+                if directories.contains(parent) {
+                    essential_dirs.insert(parent.to_path_buf());
+                    current = parent.parent();
+                } else {
+                    // Stop if we go above the known directory structure
+                    break;
                 }
             }
         }
 
-        (files, all_removed_dirs)
+        // 3. Filter the original list: keep all files and all essential directories.
+        let mut removed_dirs_set = HashSet::new();
+        let final_list: Vec<FileItem> = files
+            .into_iter()
+            .filter(|item| {
+                if item.is_directory {
+                    if essential_dirs.contains(&item.path) {
+                        true // Keep this directory
+                    } else {
+                        removed_dirs_set.insert(item.path.clone());
+                        false // Remove this directory
+                    }
+                } else {
+                    true // Always keep files
+                }
+            })
+            .collect();
+
+        (final_list, removed_dirs_set)
     }
 }
 

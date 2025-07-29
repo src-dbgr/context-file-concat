@@ -441,6 +441,15 @@ export function renderUI() {
   const { totalFiles, totalFolders } = countTreeItems(appState.tree);
   elements.fileStats.textContent = `Files: ${appState.selected_files_count} selected of ${totalFiles} • Folders: ${totalFolders}`;
 
+  let statusMessage = appState.status_message;
+  if (statusMessage.startsWith("Scan complete.")) {
+    const totalItemsInTree = totalFiles + totalFolders;
+    statusMessage = `Scan complete. Found ${totalItemsInTree} visible items.`;
+  }
+  document.querySelector(
+    ".status-text"
+  ).textContent = `Status: ${statusMessage}`;
+
   setupCommonPatterns();
   renderIgnorePatterns();
 

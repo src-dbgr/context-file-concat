@@ -95,20 +95,20 @@ impl AppState {
             tracing::info!("LOG: Active scan task found. Calling handle.abort()...");
             handle.abort();
             tracing::info!("LOG: handle.abort() was called.");
+
+            tracing::info!("LOG: Setting cancellation flag (AtomicBool) to true.");
+            self.scan_cancellation_flag.store(true, Ordering::Relaxed);
+
+            self.is_scanning = false;
+            self.scan_progress = ScanProgress {
+                files_scanned: 0,
+                large_files_skipped: 0,
+                current_scanning_path: "Scan cancelled.".to_string(),
+            };
+            tracing::info!("LOG: AppState has been reset to 'cancelled' state.");
         } else {
             tracing::warn!("LOG: cancel_current_scan called, but no active scan task found.");
         }
-
-        tracing::info!("LOG: Setting cancellation flag (AtomicBool) to true.");
-        self.scan_cancellation_flag.store(true, Ordering::Relaxed);
-
-        self.is_scanning = false;
-        self.scan_progress = ScanProgress {
-            files_scanned: 0,
-            large_files_skipped: 0,
-            current_scanning_path: "Scan cancelled.".to_string(),
-        };
-        tracing::info!("LOG: AppState has been reset to 'cancelled' state.");
     }
 
     /// Cancels the current generation task, if any.
