@@ -64,8 +64,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
             case_sensitive: state.config.case_sensitive_search,
             previewed_path: &state.previewed_file_path,
         };
-        let result = build_tree_nodes(args);
-        result
+        build_tree_nodes(args)
     };
 
     let status_message = if state.is_scanning {
