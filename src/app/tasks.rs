@@ -17,7 +17,8 @@ use super::view_model::{
     apply_filters, auto_expand_for_matches, generate_ui_state, get_selected_files_in_tree_order,
 };
 
-use crate::core::{CoreError, DirectoryScanner, FileHandler, ScanProgress};
+use crate::app::view_model::TreeNode;
+use crate::core::{CoreError, DirectoryScanner, FileHandler, FileItem, ScanProgress};
 
 /// Initiates a directory scan for a given path.
 ///
@@ -70,6 +71,13 @@ pub fn start_scan_on_path<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<Mut
     });
 }
 
+struct PostProcessingResult {
+    full_file_list: Vec<FileItem>,
+    filtered_file_list: Vec<FileItem>,
+    active_ignore_patterns: HashSet<String>,
+    tree: Vec<TreeNode>, // Wir geben nur den berechneten Baum zurück
+}
+
 /// The main asynchronous task for scanning a directory.
 ///
 /// This function performs the core scanning logic and updates the application state
@@ -116,50 +124,108 @@ async fn scan_directory_task<P: EventProxy>(
         .await;
     tracing::info!("LOG: TASK:: scanner.scan_directory_with_progress has returned.");
 
-    let (final_files, active_patterns) = match scan_result {
-        Ok(files) => files,
-        Err(e) => {
-            tracing::error!("LOG: TASK:: Scan finished with error: {e}");
-            let mut state_lock = state
-                .lock()
-                .expect("Mutex was poisoned. This should not happen.");
-            if !state_lock.is_scanning {
-                return;
+    if let Ok((scan_files, scan_patterns)) = scan_result {
+        tracing::info!(
+            "LOG: TASK:: Scan successful. {} files found. Offloading post-processing.",
+            scan_files.len()
+        );
+
+        let (
+            config,
+            current_path,
+            search_query,
+            ext_filter,
+            content_query,
+            content_results,
+            selected,
+            expanded,
+            previewed,
+        ) = {
+            let s = state.lock().expect("Mutex was poisoned.");
+            (
+                s.config.clone(),
+                s.current_path.clone(),
+                s.search_query.clone(),
+                s.extension_filter.clone(),
+                s.content_search_query.clone(),
+                s.content_search_results.clone(),
+                s.selected_files.clone(),
+                s.expanded_dirs.clone(),
+                s.previewed_file_path.clone(),
+            )
+        };
+
+        let post_processing_task = tokio::task::spawn_blocking(move || {
+            let mut state_for_processing = AppState {
+                full_file_list: scan_files,
+                config,
+                current_path,
+                search_query,
+                extension_filter: ext_filter,
+                content_search_query: content_query,
+                content_search_results: content_results,
+                selected_files: selected,
+                expanded_dirs: expanded,
+                previewed_file_path: previewed,
+                ..Default::default()
+            };
+
+            apply_filters(&mut state_for_processing);
+
+            // Berechne nur den Baum, nicht das ganze UiState
+            let tree = generate_ui_state(&state_for_processing).tree;
+
+            PostProcessingResult {
+                full_file_list: state_for_processing.full_file_list,
+                filtered_file_list: state_for_processing.filtered_file_list,
+                active_ignore_patterns: scan_patterns,
+                tree,
             }
-            state_lock.scan_progress.current_scanning_path = format!("Scan failed: {e}");
-            state_lock.is_scanning = false;
-            state_lock.scan_task = None;
-            let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_lock)));
-            proxy.send_event(event);
+        });
+
+        match post_processing_task.await {
+            Ok(result) => {
+                let mut s = state.lock().expect("Mutex was poisoned.");
+                if !s.is_scanning {
+                    tracing::warn!("LOG: TASK:: Scan was cancelled during post-processing. Discarding results.");
+                    return;
+                }
+
+                s.full_file_list = result.full_file_list;
+                s.filtered_file_list = result.filtered_file_list;
+                s.active_ignore_patterns = result.active_ignore_patterns;
+                s.is_scanning = false;
+                s.scan_task = None;
+                s.scan_progress.current_scanning_path = format!(
+                    "Scan complete. Found {} visible items.",
+                    s.filtered_file_list.len()
+                );
+
+                // KORREKTUR: Erstelle das finale UiState HIER aus dem finalen AppState
+                let mut final_ui_state = generate_ui_state(&s);
+                final_ui_state.tree = result.tree; // Setze den bereits berechneten Baum ein
+
+                proxy.send_event(UserEvent::StateUpdate(Box::new(final_ui_state)));
+                tracing::info!("LOG: TASK:: Post-processing complete. Final state sent to UI.");
+            }
+            Err(e) => {
+                tracing::error!("Post-processing task failed: {}", e);
+            }
+        }
+    } else if let Err(e) = scan_result {
+        tracing::error!("LOG: TASK:: Scan finished with error: {e}");
+        let mut state_lock = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
+        if !state_lock.is_scanning {
             return;
         }
-    };
-
-    tracing::info!(
-        "LOG: TASK:: Scan successful. {} files found.",
-        final_files.len()
-    );
-
-    let mut state_lock = state
-        .lock()
-        .expect("Mutex was poisoned. This should not happen.");
-    if !state_lock.is_scanning {
-        tracing::warn!("LOG: TASK:: Scan was cancelled in the meantime. Discarding results.");
-        return;
+        state_lock.scan_progress.current_scanning_path = format!("Scan failed: {e}");
+        state_lock.is_scanning = false;
+        state_lock.scan_task = None;
+        let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_lock)));
+        proxy.send_event(event);
     }
-
-    state_lock.full_file_list = final_files;
-    apply_filters(&mut state_lock);
-    state_lock.active_ignore_patterns = active_patterns;
-    state_lock.is_scanning = false;
-    state_lock.scan_progress.current_scanning_path = format!(
-        "Scan complete. Found {} visible items.",
-        state_lock.filtered_file_list.len()
-    );
-    state_lock.scan_task = None;
-    let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_lock)));
-    proxy.send_event(event);
-    tracing::info!("LOG: TASK:: Final state has been updated and sent to UI.");
 }
 
 /// Performs a content search across all non-binary files.
