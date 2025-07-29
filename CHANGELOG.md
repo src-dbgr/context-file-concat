@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 -
 
+## [0.1.1] - 2025-07-30
+
+### Fixed
+
+- 🚀 **Major performance optimization** to prevent UI freezes on large directories.
+- ✅ **Instant UI feedback** for newly added ignore patterns.
+- 🧮 **Consistent file and folder counts** in the UI status panel.
+
+### Technical
+
+- 🏗️ **Improved code quality** by resolving all clippy lints for a cleaner CI build.
+
 ## [0.1.0] - 2025-07-28
 
 ### Added
@@ -56,4 +68,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🔄 Continuous Integration with GitHub Actions
 - 📦 Automated release workflow with semantic versioning
 
+[0.1.1]: https://github.com/src-dbgr/context-file-concat/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/src-dbgr/context-file-concat/releases/tag/v0.1.0
