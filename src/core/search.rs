@@ -1,6 +1,6 @@
 //! Provides logic for filtering and searching lists of `FileItem`s.
 
-use super::{build_globset_from_patterns, FileItem, SearchFilter};
+use super::{FileItem, SearchFilter};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -13,29 +13,22 @@ pub struct SearchEngine;
 impl SearchEngine {
     /// Filters a slice of `FileItem`s based on the provided `SearchFilter`.
     ///
-    /// This is the main entry point for applying all filters (name, extension, ignore patterns).
+    /// This is the main entry point for applying dynamic UI filters (name, extension).
+    /// Ignore patterns are handled during the initial scan by the `scanner` module.
     pub fn filter_files(files: &[FileItem], filter: &SearchFilter) -> Vec<FileItem> {
-        let (ignore_glob_set, _) = build_globset_from_patterns(&filter.ignore_patterns);
-
+        // Die `ignore_glob_set`-Logik wurde entfernt. Das Filtern nach Ignore-Mustern
+        // wurde bereits vom `scanner` mit der `ignore`-Crate durchgeführt.
         files
             .par_iter()
-            .filter(|file| Self::matches_filter(file, filter, &ignore_glob_set))
+            .filter(|file| Self::matches_filter(file, filter))
             .cloned()
             .collect()
     }
 
     /// Checks if a single `FileItem` matches the given filter criteria.
-    fn matches_filter(
-        file: &FileItem,
-        filter: &SearchFilter,
-        ignore_glob_set: &globset::GlobSet,
-    ) -> bool {
-        // This check enables real-time filtering in the UI based on ignore patterns.
-        if file.path.components().any(|c| c.as_os_str() == ".git")
-            || ignore_glob_set.is_match(&file.path)
-        {
-            return false;
-        }
+    fn matches_filter(file: &FileItem, filter: &SearchFilter) -> bool {
+        // Die Prüfung auf ignore-Muster und .git wurde entfernt.
+        // Diese Funktion kümmert sich nur noch um dynamische UI-Filter.
 
         if !filter.query.is_empty()
             && !Self::matches_search_query(&file.path, &filter.query, filter.case_sensitive)
@@ -73,13 +66,11 @@ impl SearchEngine {
                 .unwrap_or(extension_filter);
             ext.eq_ignore_ascii_case(filter)
         } else {
-            extension_filter.is_empty() || extension_filter == "no extension"
+            // Diese Logik behandelt Dateien ohne Extension korrekt
+            extension_filter.is_empty() || extension_filter.eq_ignore_ascii_case("no extension")
         }
     }
 
-    /// Recursively removes directories from a list that do not contain any files.
-    ///
-    /// Returns the pruned list of `FileItem`s and a set of the paths that were removed.
     /// Recursively removes directories from a list that do not contain any files.
     ///
     /// This implementation is optimized to run in near-linear time O(N) by using HashSets
@@ -140,7 +131,6 @@ impl SearchEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use std::path::PathBuf;
 
     fn file(path: &str) -> FileItem {
@@ -187,7 +177,6 @@ mod tests {
             query: "README".to_string(),
             extension: String::new(),
             case_sensitive: true,
-            ignore_patterns: HashSet::new(),
         };
         let result = SearchEngine::filter_files(&files, &filter);
         assert_eq!(result.len(), 2);
@@ -204,7 +193,6 @@ mod tests {
             query: "readme".to_string(),
             extension: String::new(),
             case_sensitive: false,
-            ignore_patterns: HashSet::new(),
         };
         let result = SearchEngine::filter_files(&files, &filter);
         assert_eq!(result.len(), 2);
@@ -221,7 +209,6 @@ mod tests {
             query: String::new(),
             extension: "rs".to_string(),
             case_sensitive: false,
-            ignore_patterns: HashSet::new(),
         };
         let result = SearchEngine::filter_files(&files, &filter);
         assert_eq!(result.len(), 3);
@@ -241,36 +228,14 @@ mod tests {
             query: "main".to_string(),
             extension: "rs".to_string(),
             case_sensitive: false,
-            ignore_patterns: HashSet::new(),
         };
         let result = SearchEngine::filter_files(&files, &filter);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].path.to_str(), Some("src/main.rs"));
     }
 
-    #[test]
-    fn test_filter_with_ignore_patterns() {
-        let files = create_test_files();
-        let mut ignore_patterns = HashSet::new();
-        ignore_patterns.insert("target/".to_string());
-        ignore_patterns.insert("*.md".to_string());
-
-        let filter = SearchFilter {
-            query: String::new(),
-            extension: String::new(),
-            case_sensitive: false,
-            ignore_patterns,
-        };
-
-        let result = SearchEngine::filter_files(&files, &filter);
-        let paths: Vec<_> = result.iter().map(|f| f.path.to_str().unwrap()).collect();
-
-        assert!(!paths.contains(&"docs/README.md"));
-        assert!(!paths.contains(&"README.md"));
-        assert!(!paths.contains(&"target/app.exe"));
-        assert!(!paths.contains(&"target"));
-        assert!(paths.contains(&"src/main.rs"));
-
-        assert_eq!(result.len(), 6, "Expected 6 items to remain: src, src/main.rs, src/lib.rs, src/module, src/module/component.rs, and docs");
-    }
+    // `test_filter_with_ignore_patterns` wurde entfernt, da diese Funktionalität
+    // nicht mehr in der Verantwortung des `SearchEngine` liegt. Sie wird vom
+    // `DirectoryScanner` während des initialen Scans übernommen. Die Integrationstests
+    // decken das Verhalten des Scanners mit Ignore-Patterns bereits ab.
 }

@@ -1,14 +1,14 @@
 //! Provides the functionality for recursively scanning directories.
 
-use super::{build_globset_from_patterns, CoreError, FileItem};
+use super::{CoreError, FileItem};
 use crate::utils::file_detection::is_text_file;
+use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use walkdir::{DirEntry, WalkDir};
 
 /// Represents the progress of a directory scan.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -38,7 +38,8 @@ impl DirectoryScanner {
     /// Scans a directory asynchronously, providing progress updates via a callback.
     ///
     /// This function performs the scan in a blocking thread to avoid blocking the async runtime,
-    /// while allowing for cancellation and progress reporting.
+    /// while allowing for cancellation and progress reporting. It uses the `ignore` crate
+    /// for high-performance, gitignore-aware directory traversal.
     pub async fn scan_directory_with_progress<F>(
         &self,
         root_path: &Path,
@@ -48,80 +49,89 @@ impl DirectoryScanner {
     where
         F: Fn(ScanProgress) + Send + Sync + 'static,
     {
-        tracing::info!("LOG: SCANNER::scan_directory_with_progress aufgerufen.");
+        tracing::info!("LOG: SCANNER::scan_directory_with_progress called.");
         let root_path_buf = root_path.to_path_buf();
         let ignore_patterns_clone = self.ignore_patterns.clone();
-        let progress_callback = Arc::new(progress_callback);
 
-        tracing::info!("LOG: SCANNER:: Rufe tokio::task::spawn_blocking auf.");
         let blocking_task_handle = tokio::task::spawn_blocking(move || {
-            tracing::info!("LOG: BLOCKING-TASK:: Gestartet.");
-            let (ignore_glob_set, glob_patterns) =
-                build_globset_from_patterns(&ignore_patterns_clone);
-            let mut active_patterns: HashSet<String> = HashSet::new();
-
-            tracing::info!("LOG: BLOCKING-TASK:: Starte WalkDir...");
-            let entries = WalkDir::new(root_path_buf)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(Result::ok)
-                .collect::<Vec<DirEntry>>();
-            tracing::info!(
-                "LOG: BLOCKING-TASK:: WalkDir beendet. {} Einträge gefunden.",
-                entries.len()
-            );
-
-            let total_to_process = entries.len();
-            let mut final_files = Vec::with_capacity(total_to_process);
+            let mut final_files = Vec::new();
+            let active_patterns = Arc::new(Mutex::new(HashSet::<String>::new()));
             let large_files_skipped_counter = AtomicUsize::new(0);
+            let files_scanned_counter = AtomicUsize::new(0);
             let mut last_update = Instant::now();
 
-            for (i, entry) in entries.into_iter().enumerate() {
-                if cancel_flag.load(Ordering::Relaxed) {
-                    tracing::warn!("LOG: BLOCKING-TASK:: Stopp-Signal erkannt! Breche Schleife ab bei Index {}.", i);
-                    return (final_files, active_patterns);
-                }
+            // Create a list of individual matchers, one for each user-defined pattern.
+            // This allows us to know exactly which pattern matched.
+            let custom_matchers: Vec<(String, ignore::gitignore::Gitignore)> =
+                ignore_patterns_clone
+                    .iter()
+                    .filter_map(|pattern| {
+                        let mut builder = ignore::gitignore::GitignoreBuilder::new(&root_path_buf);
+                        builder.add_line(None, pattern).ok()?;
+                        builder
+                            .build()
+                            .ok()
+                            .map(|matcher| (pattern.clone(), matcher))
+                    })
+                    .collect();
 
-                if i > 0 && i % 2000 == 0 {
-                    tracing::info!("LOG: BLOCKING-TASK:: Verarbeite... Index {}", i);
-                }
+            let mut walker_builder = WalkBuilder::new(&root_path_buf);
+            walker_builder
+                .hidden(false)
+                .parents(false)
+                .git_global(true)
+                .git_ignore(true)
+                .git_exclude(true)
+                .follow_links(false);
 
-                let now = Instant::now();
-                if now.duration_since(last_update) > PROGRESS_UPDATE_THROTTLE
-                    || i == total_to_process - 1
-                {
-                    tracing::info!(
-                        "LOG: BLOCKING-TASK:: Sende Fortschritts-Update an UI (Index {}).",
-                        i + 1
-                    );
-                    let path_str = entry.path().to_string_lossy().into_owned();
-                    progress_callback(ScanProgress {
-                        files_scanned: i + 1,
-                        large_files_skipped: large_files_skipped_counter.load(Ordering::Relaxed),
-                        current_scanning_path: path_str,
-                    });
-                    last_update = now;
-                }
+            let active_patterns_clone = active_patterns.clone();
+            walker_builder.filter_entry(move |entry| {
+                let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
 
-                let path = entry.path();
-
-                let mut is_ignored = false;
-                if path.components().any(|c| c.as_os_str() == ".git") {
-                    is_ignored = true;
-                } else {
-                    let matches_indices: Vec<usize> =
-                        ignore_glob_set.matches(path).into_iter().collect();
-                    if !matches_indices.is_empty() {
-                        for &match_index in &matches_indices {
-                            if let Some(pattern) = glob_patterns.get(match_index) {
-                                active_patterns.insert(pattern.clone());
-                            }
-                        }
-                        is_ignored = true;
+                // Check against our custom patterns first.
+                for (pattern, matcher) in &custom_matchers {
+                    if matcher.matched(entry.path(), is_dir).is_ignore() {
+                        active_patterns_clone
+                            .lock()
+                            .unwrap()
+                            .insert(pattern.clone());
+                        return false; // Exclude this entry from the walk.
                     }
                 }
 
-                if is_ignored {
+                // If our custom patterns didn't match, let the walker proceed with its own
+                // standard gitignore/hidden file filtering.
+                true
+            });
+
+            let walker = walker_builder.build();
+
+            for result in walker {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    tracing::warn!("LOG: BLOCKING-TASK:: Cancellation detected, stopping walk.");
+                    break;
+                }
+
+                let entry = match result {
+                    Ok(e) => e,
+                    Err(err) => {
+                        tracing::warn!("Error walking directory: {}", err);
+                        continue;
+                    }
+                };
+
+                let count = files_scanned_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if Instant::now().duration_since(last_update) > PROGRESS_UPDATE_THROTTLE {
+                    let path_str = entry.path().to_string_lossy().into_owned();
+                    progress_callback(ScanProgress {
+                        files_scanned: count,
+                        large_files_skipped: large_files_skipped_counter.load(Ordering::Relaxed),
+                        current_scanning_path: path_str,
+                    });
+                    last_update = Instant::now();
+                }
+
+                if entry.depth() == 0 {
                     continue;
                 }
 
@@ -129,33 +139,35 @@ impl DirectoryScanner {
                     Ok(md) => md,
                     Err(_) => continue,
                 };
+
                 if !metadata.is_dir() && metadata.len() > MAX_FILE_SIZE {
                     large_files_skipped_counter.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
 
                 let is_binary = if metadata.is_file() {
-                    !is_text_file(path).unwrap_or(false)
+                    !is_text_file(entry.path()).unwrap_or(false)
                 } else {
                     false
                 };
 
                 final_files.push(FileItem {
-                    path: path.to_path_buf(),
+                    path: entry.path().to_path_buf(),
                     is_directory: metadata.is_dir(),
                     is_binary,
                     size: metadata.len(),
                     depth: entry.depth(),
-                    parent: path.parent().map(|p| p.to_path_buf()),
+                    parent: entry.path().parent().map(|p| p.to_path_buf()),
                 });
             }
-            tracing::info!("LOG: BLOCKING-TASK:: Verarbeitungsschleife beendet.");
-            (final_files, active_patterns)
+
+            tracing::info!("LOG: BLOCKING-TASK:: Processing loop finished.");
+            let final_active_patterns = active_patterns.lock().unwrap().clone();
+
+            Ok((final_files, final_active_patterns))
         });
 
-        tracing::info!("LOG: SCANNER:: Warte auf Ergebnis von spawn_blocking...");
-        let result = blocking_task_handle.await?; // This converts JoinError into CoreError
-        tracing::info!("LOG: SCANNER:: spawn_blocking erfolgreich beendet.");
-        Ok(result)
+        tracing::info!("LOG: SCANNER:: Waiting for spawn_blocking result...");
+        blocking_task_handle.await?
     }
 }

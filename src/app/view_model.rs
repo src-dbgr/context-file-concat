@@ -129,7 +129,6 @@ fn apply_filters_on_data(
         query: search_query.to_string(),
         extension: extension_filter.to_string(),
         case_sensitive: config.case_sensitive_search,
-        ignore_patterns: config.ignore_patterns.clone(),
     };
 
     let mut filtered = SearchEngine::filter_files(full_file_list, &filter);
@@ -684,33 +683,5 @@ mod tests {
             .unwrap();
         assert!(!lib_rs_node.is_previewed);
         assert_eq!(lib_rs_node.selection_state, "none");
-    }
-
-    #[test]
-    fn test_ignore_patterns_functionality() {
-        let mut state = AppState::default();
-
-        // Set up configuration with specific ignore patterns for this test
-        let mut config = AppConfig::default();
-        config.ignore_patterns.insert("*.md".to_string());
-        config.ignore_patterns.insert("src/".to_string());
-        state.config = config;
-
-        state.current_path = "/project".to_string();
-        state.full_file_list = vec![
-            create_test_file_item("/project/src", true),
-            create_test_file_item("/project/src/main.rs", false),
-            create_test_file_item("/project/README.md", false),
-            create_test_file_item("/project/Cargo.toml", false),
-        ];
-
-        apply_filters(&mut state);
-
-        let ui_state = generate_ui_state(&state);
-
-        // Only Cargo.toml should remain after applying ignore patterns
-        assert_eq!(ui_state.visible_files_count, 1);
-        assert_eq!(ui_state.tree.len(), 1);
-        assert_eq!(ui_state.tree[0].name, "Cargo.toml");
     }
 }
