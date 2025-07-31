@@ -110,7 +110,8 @@ pub fn apply_filters(state: &mut AppState) {
     let unloaded_dirs: HashSet<PathBuf> =
         all_dirs.difference(&state.loaded_dirs).cloned().collect();
 
-    let filtered_list = apply_filters_on_data(
+    // First, get the list with all filters applied, including potential removal of empty dirs.
+    let mut filtered_list = apply_filters_on_data(
         &state.full_file_list,
         &PathBuf::from(&state.current_path),
         &state.config,
@@ -121,29 +122,29 @@ pub fn apply_filters(state: &mut AppState) {
         &unloaded_dirs,
     );
 
+    // "Safety Net" logic: If enabled, ensure that any directory explicitly expanded
+    // by the user is never hidden, even if it becomes empty after filtering.
     if state.config.remove_empty_directories {
-        // *** FIX STARTS HERE ***
-        // Ensure that any directory explicitly expanded by the user is never hidden,
-        // even if it appears empty after its children are ignored/filtered.
-        let mut final_list = filtered_list;
-        let final_paths: HashSet<_> = final_list.iter().map(|i| i.path.clone()).collect();
+        // By cloning the paths, we create an owned HashSet and drop the immutable borrow on `filtered_list`.
+        let current_filtered_paths: HashSet<_> =
+            filtered_list.iter().map(|i| i.path.clone()).collect();
 
         for expanded_dir_path in &state.expanded_dirs {
-            if !final_paths.contains(expanded_dir_path) {
-                if let Some(item) = state
+            if !current_filtered_paths.contains(expanded_dir_path) {
+                // This expanded dir was removed. Find it in the master list and add it back.
+                if let Some(item_from_full_list) = state
                     .full_file_list
                     .iter()
                     .find(|i| i.path == *expanded_dir_path)
                 {
-                    final_list.push(item.clone());
+                    // Now we can mutably borrow `filtered_list` because the immutable borrow is gone.
+                    filtered_list.push(item_from_full_list.clone());
                 }
             }
         }
-        state.filtered_file_list = final_list;
-        // *** FIX ENDS HERE ***
-    } else {
-        state.filtered_file_list = filtered_list;
     }
+
+    state.filtered_file_list = filtered_list;
 }
 
 /// A "pure" function that takes data and returns a filtered list of `FileItem`s.
@@ -680,6 +681,48 @@ mod tests {
         // Should return empty tree when content search is active but finds nothing
         assert_eq!(ui_state.visible_files_count, 0);
         assert_eq!(ui_state.tree.len(), 0);
+    }
+
+    #[test]
+    fn test_expanded_empty_dir_is_preserved() {
+        let mut state = AppState::default();
+        state.config = create_test_config(); // uses remove_empty_directories = true
+        state.current_path = "/project".to_string();
+
+        let empty_dir_path = PathBuf::from("/project/empty_dir");
+        let file_path = PathBuf::from("/project/file.txt");
+
+        state.full_file_list = vec![
+            create_test_file_item("/project/empty_dir", true),
+            create_test_file_item("/project/file.txt", false),
+        ];
+        // Mark as loaded so it can be considered "empty" since it has no children in the list.
+        state.loaded_dirs.insert(empty_dir_path.clone());
+
+        // Expand the directory that would normally be removed.
+        state.expanded_dirs.insert(empty_dir_path.clone());
+
+        apply_filters(&mut state);
+
+        let visible_paths: HashSet<_> = state
+            .filtered_file_list
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+
+        assert!(
+            visible_paths.contains(&empty_dir_path),
+            "Expanded empty directory should be preserved"
+        );
+        assert!(
+            visible_paths.contains(&file_path),
+            "Regular file should still be visible"
+        );
+        assert_eq!(
+            state.filtered_file_list.len(),
+            2,
+            "Expected 2 items in final list"
+        );
     }
 
     #[test]

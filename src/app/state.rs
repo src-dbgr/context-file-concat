@@ -55,6 +55,8 @@ pub struct AppState {
     pub generation_cancellation_flag: Arc<AtomicBool>,
     /// The set of ignore patterns that were actually matched during the last scan.
     pub active_ignore_patterns: HashSet<String>,
+    /// `true` if a full, non-lazy scan has been completed successfully.
+    pub is_fully_scanned: bool,
 }
 
 impl Default for AppState {
@@ -86,6 +88,7 @@ impl Default for AppState {
             generation_task: None,
             generation_cancellation_flag: Arc::new(AtomicBool::new(false)),
             active_ignore_patterns: HashSet::new(),
+            is_fully_scanned: false,
         }
     }
 }
@@ -142,6 +145,7 @@ impl AppState {
         self.previewed_file_path = None;
         self.active_ignore_patterns.clear();
         self.is_generating = false;
+        self.is_fully_scanned = false; // Reset the flag here
 
         self.scan_progress = ScanProgress {
             files_scanned: 0,

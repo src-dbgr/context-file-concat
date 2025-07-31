@@ -60,6 +60,9 @@ pub fn handle_ipc_message<P: EventProxy>(message: String, proxy: P, state: Arc<M
                 "pickOutputDirectory" => commands::pick_output_directory(proxy.clone(), state),
                 "importConfig" => commands::import_config(proxy.clone(), state),
                 "exportConfig" => commands::export_config(proxy.clone(), state),
+                // --- NEW COMMANDS ---
+                "expand_all_fully" => commands::expand_all_fully(proxy.clone(), state),
+                "select_all_fully" => commands::select_all_fully(proxy.clone(), state),
                 _ => tracing::warn!("Unknown IPC command: {}", msg.command),
             }
         });

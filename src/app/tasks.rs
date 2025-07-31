@@ -17,8 +17,14 @@ use super::view_model::{
     apply_filters, auto_expand_for_matches, generate_ui_state, get_selected_files_in_tree_order,
 };
 
-use crate::app::view_model::TreeNode;
 use crate::core::{CoreError, DirectoryScanner, FileHandler, FileItem, ScanProgress};
+
+/// Defines the action to be performed after a full scan is completed.
+#[derive(Clone)]
+pub enum FullScanAction {
+    ExpandAll,
+    SelectAll,
+}
 
 /// Initiates a directory scan for a given path.
 ///
@@ -63,7 +69,7 @@ pub fn start_scan_on_path<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<Mut
         tracing::info!("LOG: Spawning new scan_directory_task (initial load, depth=1).");
         // Initial scan is always depth 1 for lazy loading.
         let handle = tokio::spawn(async move {
-            scan_directory_task(proxy_clone, state_clone, new_cancel_flag, Some(1)).await;
+            scan_directory_task(proxy_clone, state_clone, new_cancel_flag, Some(1), None).await;
         });
         state_guard.scan_task = Some(handle);
 
@@ -72,11 +78,53 @@ pub fn start_scan_on_path<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<Mut
     });
 }
 
+/// Initiates a full, recursive directory scan for global actions like 'Expand All'.
+pub fn start_full_scan<P: EventProxy>(
+    proxy: P,
+    state: Arc<Mutex<AppState>>,
+    action: FullScanAction,
+) {
+    tokio::spawn(async move {
+        let mut state_guard = state
+            .lock()
+            .expect("Mutex was poisoned. This should not happen.");
+
+        state_guard.is_scanning = true;
+        state_guard.scan_progress = ScanProgress {
+            files_scanned: 0,
+            large_files_skipped: 0,
+            current_scanning_path: "Initializing full scan...".to_string(),
+        };
+
+        let new_cancel_flag = Arc::new(AtomicBool::new(false));
+        state_guard.scan_cancellation_flag = new_cancel_flag.clone();
+
+        let proxy_clone = proxy.clone();
+        let state_clone = state.clone();
+
+        tracing::info!("LOG: Spawning new scan_directory_task (full scan).");
+        let handle = tokio::spawn(async move {
+            scan_directory_task(
+                proxy_clone,
+                state_clone,
+                new_cancel_flag,
+                None, // No max_depth for a full scan
+                Some(action),
+            )
+            .await;
+        });
+        state_guard.scan_task = Some(handle);
+
+        let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+        proxy.send_event(event);
+    });
+}
+
+// A simplified result struct from the heavy blocking task.
 struct PostProcessingResult {
     full_file_list: Vec<FileItem>,
     filtered_file_list: Vec<FileItem>,
     active_ignore_patterns: HashSet<String>,
-    tree: Vec<TreeNode>, // Wir geben nur den berechneten Baum zurück
 }
 
 /// The main asynchronous task for scanning a directory.
@@ -88,15 +136,17 @@ async fn scan_directory_task<P: EventProxy>(
     state: Arc<Mutex<AppState>>,
     cancel_flag: Arc<AtomicBool>,
     max_depth: Option<usize>,
+    post_scan_action: Option<FullScanAction>,
 ) {
     tracing::info!("LOG: TASK:: scan_directory_task started.");
-    let (path_str, ignore_patterns) = {
+    let (path_str, ignore_patterns, config) = {
         let state_lock = state
             .lock()
             .expect("Mutex was poisoned. This should not happen.");
         (
             state_lock.current_path.clone(),
             state_lock.config.ignore_patterns.clone(),
+            state_lock.config.clone(),
         )
     };
 
@@ -104,7 +154,6 @@ async fn scan_directory_task<P: EventProxy>(
     if !path.is_dir() {
         let event = UserEvent::ShowError("Selected path is not a valid directory.".to_string());
         proxy.send_event(event);
-
         let mut state_lock = state
             .lock()
             .expect("Mutex was poisoned. This should not happen.");
@@ -120,11 +169,9 @@ async fn scan_directory_task<P: EventProxy>(
         progress_proxy.send_event(UserEvent::ScanProgress(progress));
     };
 
-    tracing::info!("LOG: TASK:: Calling scanner.scan_directory_with_progress...");
     let scan_result = scanner
         .scan_directory_with_progress(&path, max_depth, cancel_flag, progress_callback)
         .await;
-    tracing::info!("LOG: TASK:: scanner.scan_directory_with_progress has returned.");
 
     if let Ok((scan_files, scan_patterns)) = scan_result {
         tracing::info!(
@@ -132,59 +179,35 @@ async fn scan_directory_task<P: EventProxy>(
             scan_files.len()
         );
 
-        let (
-            config,
-            current_path,
-            search_query,
-            ext_filter,
-            content_query,
-            content_results,
-            selected,
-            expanded,
-            loaded_dirs,
-            previewed,
-        ) = {
+        let (current_path, search_query, ext_filter, content_query, content_results) = {
             let s = state.lock().expect("Mutex was poisoned.");
             (
-                s.config.clone(),
                 s.current_path.clone(),
                 s.search_query.clone(),
                 s.extension_filter.clone(),
                 s.content_search_query.clone(),
                 s.content_search_results.clone(),
-                s.selected_files.clone(),
-                s.expanded_dirs.clone(),
-                s.loaded_dirs.clone(),
-                s.previewed_file_path.clone(),
             )
         };
 
-        let path_clone_for_task = path.clone();
+        // This task now ONLY does scanning and filtering. No state logic.
         let post_processing_task = tokio::task::spawn_blocking(move || {
-            let mut state_for_processing = AppState {
-                full_file_list: scan_files,
+            let mut temp_state = AppState {
                 config,
+                full_file_list: scan_files,
                 current_path,
                 search_query,
                 extension_filter: ext_filter,
                 content_search_query: content_query,
                 content_search_results: content_results,
-                selected_files: selected,
-                expanded_dirs: expanded,
-                loaded_dirs,
-                previewed_file_path: previewed,
                 ..Default::default()
             };
-
-            apply_filters(&mut state_for_processing);
-
-            let tree = generate_ui_state(&state_for_processing).tree;
+            apply_filters(&mut temp_state);
 
             PostProcessingResult {
-                full_file_list: state_for_processing.full_file_list,
-                filtered_file_list: state_for_processing.filtered_file_list,
+                full_file_list: temp_state.full_file_list,
+                filtered_file_list: temp_state.filtered_file_list,
                 active_ignore_patterns: scan_patterns,
-                tree,
             }
         });
 
@@ -192,14 +215,54 @@ async fn scan_directory_task<P: EventProxy>(
             Ok(result) => {
                 let mut s = state.lock().expect("Mutex was poisoned.");
                 if !s.is_scanning {
-                    tracing::warn!("LOG: TASK:: Scan was cancelled during post-processing. Discarding results.");
+                    tracing::warn!(
+                        "Scan was cancelled during post-processing. Discarding results."
+                    );
                     return;
                 }
 
+                // Apply the scan results to the main state
                 s.full_file_list = result.full_file_list;
                 s.filtered_file_list = result.filtered_file_list;
                 s.active_ignore_patterns = result.active_ignore_patterns;
-                s.loaded_dirs.insert(path_clone_for_task);
+
+                // If it was a full scan, update flags and apply the specific action
+                if max_depth.is_none() {
+                    s.is_fully_scanned = true;
+                    s.loaded_dirs = s
+                        .full_file_list
+                        .iter()
+                        .filter(|i| i.is_directory)
+                        .map(|i| i.path.clone())
+                        .collect();
+
+                    // Apply the action cleanly to the main state
+                    if let Some(action) = post_scan_action {
+                        match action {
+                            FullScanAction::ExpandAll => {
+                                s.expanded_dirs = s
+                                    .filtered_file_list // Use filtered list for expansion
+                                    .iter()
+                                    .filter(|i| i.is_directory)
+                                    .map(|i| i.path.clone())
+                                    .collect();
+                            }
+                            FullScanAction::SelectAll => {
+                                // First, collect the paths to avoid the borrow checker error.
+                                let paths_to_select: Vec<PathBuf> = s
+                                    .filtered_file_list
+                                    .iter()
+                                    .filter(|i| !i.is_directory)
+                                    .map(|i| i.path.clone())
+                                    .collect();
+                                // Then, extend the selection.
+                                s.selected_files.extend(paths_to_select);
+                            }
+                        }
+                    }
+                }
+
+                s.loaded_dirs.insert(path);
                 s.is_scanning = false;
                 s.scan_task = None;
                 s.scan_progress.current_scanning_path = format!(
@@ -207,11 +270,10 @@ async fn scan_directory_task<P: EventProxy>(
                     s.filtered_file_list.len()
                 );
 
-                let mut final_ui_state = generate_ui_state(&s);
-                final_ui_state.tree = result.tree;
-
+                // Generate the UI state from the FINAL, fully updated state `s`
+                let final_ui_state = generate_ui_state(&s);
                 proxy.send_event(UserEvent::StateUpdate(Box::new(final_ui_state)));
-                tracing::info!("LOG: TASK:: Post-processing complete. Final state sent to UI.");
+                tracing::info!("Post-processing complete. Final state sent to UI.");
             }
             Err(e) => {
                 tracing::error!("Post-processing task failed: {}", e);

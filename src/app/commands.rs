@@ -13,7 +13,9 @@ use super::events::UserEvent;
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
 use super::state::AppState;
-use super::tasks::{generation_task, search_in_files, start_lazy_load_scan, start_scan_on_path};
+use super::tasks::{
+    self, generation_task, search_in_files, start_lazy_load_scan, start_scan_on_path,
+};
 use super::view_model::{
     apply_filters, auto_expand_for_matches, generate_ui_state, get_language_from_path,
 };
@@ -91,8 +93,13 @@ pub fn update_config<P: EventProxy>(
             }
 
             let ignore_patterns_changed = old_ignore_patterns != state_guard.config.ignore_patterns;
-            if ignore_patterns_changed && !state_guard.current_path.is_empty() {
-                (true, Some(PathBuf::from(state_guard.current_path.clone())))
+            if ignore_patterns_changed {
+                state_guard.is_fully_scanned = false; // Invalidate full scan on pattern change
+                if !state_guard.current_path.is_empty() {
+                    (true, Some(PathBuf::from(state_guard.current_path.clone())))
+                } else {
+                    (false, None)
+                }
             } else {
                 (false, None)
             }
@@ -182,7 +189,6 @@ pub fn load_file_preview<P: EventProxy>(
             }
         };
 
-        // This command sends multiple, different events, so it doesn't fit the helper.
         {
             state
                 .lock()
@@ -205,7 +211,6 @@ pub fn load_file_preview<P: EventProxy>(
             }
         }
 
-        // Send a state update to reflect the `previewed_file_path` change
         let state_guard = state
             .lock()
             .expect("Mutex was poisoned. This should not happen.");
@@ -226,14 +231,21 @@ pub fn load_directory_level<P: EventProxy>(
     }
 }
 
-/// Adds a new ignore pattern to the configuration from a specific file path.
+/// Adds a new ignore pattern from a specific file path and triggers a rescan.
 pub fn add_ignore_path<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload) {
-        with_state_and_notify(&state, &proxy, |s| {
+        let root_path_string = {
+            let mut s = state
+                .lock()
+                .expect("Mutex was poisoned. This should not happen.");
+            if s.current_path.is_empty() {
+                return;
+            }
+
             let path_to_ignore = PathBuf::from(path_str);
             let root_path = PathBuf::from(&s.current_path);
 
@@ -244,17 +256,17 @@ pub fn add_ignore_path<P: EventProxy>(
                 }
                 s.selected_files.retain(|p| !p.starts_with(&path_to_ignore));
 
-                // Add the pattern to both the configuration and the set of active patterns.
-                // This ensures it immediately appears as "active" (green) in the UI.
-                s.config.ignore_patterns.insert(pattern_to_add.clone());
-                s.active_ignore_patterns.insert(pattern_to_add);
+                s.config.ignore_patterns.insert(pattern_to_add);
 
                 if let Err(e) = config::settings::save_config(&s.config) {
                     tracing::warn!("Failed to save config after adding ignore path: {}", e);
                 }
-                apply_filters(s); // Re-apply filters to update the view
             }
-        });
+            s.current_path.clone()
+        };
+
+        // Triggering a rescan is necessary for the new ignore pattern to be applied correctly.
+        start_scan_on_path(PathBuf::from(root_path_string), proxy, state);
     }
 }
 
@@ -329,7 +341,7 @@ pub fn toggle_expansion<P: EventProxy>(
     }
 }
 
-/// Expands or collapses all directories in the file tree.
+/// Expands or collapses all *currently visible* directories in the file tree.
 pub fn expand_collapse_all<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
@@ -351,7 +363,7 @@ pub fn expand_collapse_all<P: EventProxy>(
     }
 }
 
-/// Selects all currently visible files in the file tree.
+/// Selects all *currently visible* files in the file tree.
 pub fn select_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     with_state_and_notify(&state, &proxy, |s| {
         let paths_to_select: Vec<PathBuf> = s
@@ -369,6 +381,55 @@ pub fn deselect_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     with_state_and_notify(&state, &proxy, |s| {
         s.selected_files.clear();
     });
+}
+
+/// Starts a full, recursive scan of the entire project to expand all directories.
+pub fn expand_all_fully<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    let is_scanned = {
+        let state_guard = state.lock().unwrap();
+        state_guard.is_fully_scanned && !state_guard.is_scanning
+    };
+
+    if is_scanned {
+        // Optimization: If already fully scanned, just expand without a new scan.
+        with_state_and_notify(&state, &proxy, |s| {
+            apply_filters(s); // Ensure filters are current
+            s.expanded_dirs = s
+                .filtered_file_list
+                .iter()
+                .filter(|i| i.is_directory)
+                .map(|i| i.path.clone())
+                .collect();
+        });
+    } else {
+        // Trigger a full scan, which will then expand all directories upon completion.
+        tasks::start_full_scan(proxy, state, tasks::FullScanAction::ExpandAll);
+    }
+}
+
+/// Starts a full scan (if needed) and selects all filter-conformant files.
+pub fn select_all_fully<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+    let is_scanned = {
+        let state_guard = state.lock().unwrap();
+        state_guard.is_fully_scanned && !state_guard.is_scanning
+    };
+
+    if is_scanned {
+        // Optimization: If already fully scanned, just apply filters and select.
+        with_state_and_notify(&state, &proxy, |s| {
+            apply_filters(s); // Re-apply filters to be safe
+            let paths_to_select: Vec<PathBuf> = s
+                .filtered_file_list
+                .iter()
+                .filter(|item| !item.is_directory)
+                .map(|item| item.path.clone())
+                .collect();
+            s.selected_files.extend(paths_to_select);
+        });
+    } else {
+        // Trigger a full scan, which will then select all files upon completion.
+        tasks::start_full_scan(proxy, state, tasks::FullScanAction::SelectAll);
+    }
 }
 
 /// Generates the final concatenated output from selected files by spawning a cancellable task.

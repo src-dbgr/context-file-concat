@@ -337,9 +337,14 @@ export function renderUI() {
   elements.contentSearchQuery.value = appState.content_search_query;
 
   const hasSelection = appState.selected_files_count > 0;
+
   elements.selectDirBtn.disabled = is_scanning;
   elements.rescanBtn.disabled = is_scanning;
   elements.importConfigBtn.disabled = is_scanning;
+  elements.expandAllBtn.disabled = is_scanning;
+  elements.collapseAllBtn.disabled = is_scanning;
+  elements.selectAllBtn.disabled = is_scanning;
+  elements.deselectAllBtn.disabled = is_scanning;
 
   const iconFolder = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>`;
   const iconScan = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>`;
@@ -350,9 +355,13 @@ export function renderUI() {
   if (is_scanning) {
     elements.selectDirBtn.innerHTML = `${iconScanning} Scanning...`;
     elements.rescanBtn.innerHTML = `${iconScanning} Scanning...`;
+    elements.expandAllBtn.textContent = "Scanning...";
+    elements.selectAllBtn.textContent = "Scanning...";
   } else {
     elements.selectDirBtn.innerHTML = `${iconFolder} Select Directory`;
     elements.rescanBtn.innerHTML = `${iconScan} Re-Scan`;
+    elements.expandAllBtn.textContent = "Expand All";
+    elements.selectAllBtn.textContent = "Select All";
   }
 
   const wasGenerating =

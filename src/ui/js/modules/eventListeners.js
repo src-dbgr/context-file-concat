@@ -95,11 +95,17 @@ export function setupEventListeners() {
   elements.exportConfigBtn.addEventListener("click", () =>
     post("exportConfig")
   );
-  elements.selectAllBtn.addEventListener("click", () => post("selectAll"));
-  elements.deselectAllBtn.addEventListener("click", () => post("deselectAll"));
-  elements.expandAllBtn.addEventListener("click", () =>
-    post("expandCollapseAll", true)
+
+  // --- MODIFIED ---
+  elements.selectAllBtn.addEventListener("click", () =>
+    post("select_all_fully")
   );
+  elements.expandAllBtn.addEventListener("click", () =>
+    post("expand_all_fully")
+  );
+  // --- END MODIFIED ---
+
+  elements.deselectAllBtn.addEventListener("click", () => post("deselectAll"));
   elements.collapseAllBtn.addEventListener("click", () =>
     post("expandCollapseAll", false)
   );
