@@ -39,6 +39,9 @@ pub fn handle_ipc_message<P: EventProxy>(message: String, proxy: P, state: Arc<M
                     commands::update_filters(msg.payload, proxy.clone(), state).await
                 }
                 "loadFilePreview" => commands::load_file_preview(msg.payload, proxy.clone(), state),
+                "loadDirectoryLevel" => {
+                    commands::load_directory_level(msg.payload, proxy.clone(), state)
+                }
                 "addIgnorePath" => commands::add_ignore_path(msg.payload, proxy.clone(), state),
                 "toggleSelection" => commands::toggle_selection(msg.payload, proxy.clone(), state),
                 "toggleDirectorySelection" => {

@@ -117,14 +117,28 @@ function createTreeLevel(nodes) {
     if (node.is_directory) {
       const details = document.createElement("details");
       details.open = node.is_expanded;
+
+      // This 'toggle' event handles EXPANSION state changes after children are loaded.
       details.addEventListener("toggle", (e) => {
-        // This check prevents sending redundant events on programmatic open/close
         if (e.target.open !== node.is_expanded) {
           post("toggleExpansion", node.path);
         }
       });
 
       const summary = document.createElement("summary");
+
+      // This 'click' event intercepts the default open/close behavior.
+      summary.addEventListener("click", (e) => {
+        // If children are not loaded, we prevent the default toggle
+        // and instead trigger a backend command to load them.
+        if (!node.children_loaded) {
+          e.preventDefault();
+          summary.classList.add("loading"); // Optional: show loading indicator
+          post("loadDirectoryLevel", node.path);
+        }
+        // If children ARE loaded, we do nothing and let the default
+        // 'details' toggle behavior proceed, which will fire the 'toggle' event above.
+      });
 
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
@@ -164,10 +178,13 @@ function createTreeLevel(nodes) {
       summary.appendChild(ignoreBtn);
       details.appendChild(summary);
 
-      details.appendChild(createTreeLevel(node.children));
+      if (node.children_loaded) {
+        details.appendChild(createTreeLevel(node.children));
+      }
+
       li.appendChild(details);
     } else {
-      // It's a file
+      // It's a file (this logic remains unchanged)
       const container = document.createElement("div");
       container.className = "tree-item-container";
       if (node.is_previewed) container.classList.add("previewed");
@@ -264,7 +281,6 @@ function renderIgnorePatterns() {
     elements.currentPatternsContainer.appendChild(chip);
   });
 }
-
 function setupCommonPatterns() {
   elements.commonPatternsContainer.innerHTML = "";
   const appState = state.get();
@@ -296,9 +312,7 @@ function setupCommonPatterns() {
     elements.commonPatternsContainer.appendChild(chip);
   });
 }
-
 let generatingIntervalId = null;
-
 export function renderUI() {
   const appState = state.get();
   const { config, is_scanning, is_generating } = appState;

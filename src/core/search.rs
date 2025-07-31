@@ -75,7 +75,11 @@ impl SearchEngine {
     ///
     /// This implementation is optimized to run in near-linear time O(N) by using HashSets
     /// to avoid nested loops, which would result in O(N^2) complexity.
-    pub fn remove_empty_directories(files: Vec<FileItem>) -> (Vec<FileItem>, HashSet<PathBuf>) {
+    /// It preserves any directory specified in `unloaded_dirs`.
+    pub fn remove_empty_directories(
+        files: Vec<FileItem>,
+        unloaded_dirs: &HashSet<PathBuf>,
+    ) -> (Vec<FileItem>, HashSet<PathBuf>) {
         if files.is_empty() {
             return (files, HashSet::new());
         }
@@ -106,13 +110,14 @@ impl SearchEngine {
             }
         }
 
-        // 3. Filter the original list: keep all files and all essential directories.
+        // 3. Filter the original list: keep all files and all essential/unloaded directories.
         let mut removed_dirs_set = HashSet::new();
         let final_list: Vec<FileItem> = files
             .into_iter()
             .filter(|item| {
                 if item.is_directory {
-                    if essential_dirs.contains(&item.path) {
+                    // Keep if it contains files OR its children are not loaded yet.
+                    if essential_dirs.contains(&item.path) || unloaded_dirs.contains(&item.path) {
                         true // Keep this directory
                     } else {
                         removed_dirs_set.insert(item.path.clone());
@@ -233,9 +238,4 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].path.to_str(), Some("src/main.rs"));
     }
-
-    // `test_filter_with_ignore_patterns` wurde entfernt, da diese Funktionalität
-    // nicht mehr in der Verantwortung des `SearchEngine` liegt. Sie wird vom
-    // `DirectoryScanner` während des initialen Scans übernommen. Die Integrationstests
-    // decken das Verhalten des Scanners mit Ignore-Patterns bereits ab.
 }

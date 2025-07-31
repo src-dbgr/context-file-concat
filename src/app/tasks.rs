@@ -40,9 +40,9 @@ pub fn start_scan_on_path<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<Mut
         let mut state_guard = state
             .lock()
             .expect("Mutex was poisoned. This should not happen.");
-        state_guard.cancel_current_scan();
-        state_guard.active_ignore_patterns.clear();
 
+        // Before starting a new root scan, completely reset the directory state.
+        state_guard.reset_directory_state();
         state_guard.current_path = directory_path.to_string_lossy().to_string();
         state_guard.config.last_directory = Some(directory_path);
         crate::config::settings::save_config(&state_guard.config).ok();
@@ -60,9 +60,10 @@ pub fn start_scan_on_path<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<Mut
         let proxy_clone = proxy.clone();
         let state_clone = state.clone();
 
-        tracing::info!("LOG: Spawning new scan_directory_task.");
+        tracing::info!("LOG: Spawning new scan_directory_task (initial load, depth=1).");
+        // Initial scan is always depth 1 for lazy loading.
         let handle = tokio::spawn(async move {
-            scan_directory_task(proxy_clone, state_clone, new_cancel_flag).await;
+            scan_directory_task(proxy_clone, state_clone, new_cancel_flag, Some(1)).await;
         });
         state_guard.scan_task = Some(handle);
 
@@ -86,6 +87,7 @@ async fn scan_directory_task<P: EventProxy>(
     proxy: P,
     state: Arc<Mutex<AppState>>,
     cancel_flag: Arc<AtomicBool>,
+    max_depth: Option<usize>,
 ) {
     tracing::info!("LOG: TASK:: scan_directory_task started.");
     let (path_str, ignore_patterns) = {
@@ -120,7 +122,7 @@ async fn scan_directory_task<P: EventProxy>(
 
     tracing::info!("LOG: TASK:: Calling scanner.scan_directory_with_progress...");
     let scan_result = scanner
-        .scan_directory_with_progress(&path, cancel_flag, progress_callback)
+        .scan_directory_with_progress(&path, max_depth, cancel_flag, progress_callback)
         .await;
     tracing::info!("LOG: TASK:: scanner.scan_directory_with_progress has returned.");
 
@@ -139,6 +141,7 @@ async fn scan_directory_task<P: EventProxy>(
             content_results,
             selected,
             expanded,
+            loaded_dirs,
             previewed,
         ) = {
             let s = state.lock().expect("Mutex was poisoned.");
@@ -151,10 +154,12 @@ async fn scan_directory_task<P: EventProxy>(
                 s.content_search_results.clone(),
                 s.selected_files.clone(),
                 s.expanded_dirs.clone(),
+                s.loaded_dirs.clone(),
                 s.previewed_file_path.clone(),
             )
         };
 
+        let path_clone_for_task = path.clone();
         let post_processing_task = tokio::task::spawn_blocking(move || {
             let mut state_for_processing = AppState {
                 full_file_list: scan_files,
@@ -166,13 +171,13 @@ async fn scan_directory_task<P: EventProxy>(
                 content_search_results: content_results,
                 selected_files: selected,
                 expanded_dirs: expanded,
+                loaded_dirs,
                 previewed_file_path: previewed,
                 ..Default::default()
             };
 
             apply_filters(&mut state_for_processing);
 
-            // Berechne nur den Baum, nicht das ganze UiState
             let tree = generate_ui_state(&state_for_processing).tree;
 
             PostProcessingResult {
@@ -194,6 +199,7 @@ async fn scan_directory_task<P: EventProxy>(
                 s.full_file_list = result.full_file_list;
                 s.filtered_file_list = result.filtered_file_list;
                 s.active_ignore_patterns = result.active_ignore_patterns;
+                s.loaded_dirs.insert(path_clone_for_task);
                 s.is_scanning = false;
                 s.scan_task = None;
                 s.scan_progress.current_scanning_path = format!(
@@ -201,9 +207,8 @@ async fn scan_directory_task<P: EventProxy>(
                     s.filtered_file_list.len()
                 );
 
-                // KORREKTUR: Erstelle das finale UiState HIER aus dem finalen AppState
                 let mut final_ui_state = generate_ui_state(&s);
-                final_ui_state.tree = result.tree; // Setze den bereits berechneten Baum ein
+                final_ui_state.tree = result.tree;
 
                 proxy.send_event(UserEvent::StateUpdate(Box::new(final_ui_state)));
                 tracing::info!("LOG: TASK:: Post-processing complete. Final state sent to UI.");
@@ -228,9 +233,100 @@ async fn scan_directory_task<P: EventProxy>(
     }
 }
 
-/// Performs a content search across all non-binary files.
-///
-/// This function runs in parallel using Rayon for performance.
+/// Initiates a scan for a specific subdirectory level (lazy loading).
+pub fn start_lazy_load_scan<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<Mutex<AppState>>) {
+    tokio::spawn(async move {
+        let (ignore_patterns, is_scanning) = {
+            let state_guard = state
+                .lock()
+                .expect("Mutex was poisoned. This should not happen.");
+            (
+                state_guard.config.ignore_patterns.clone(),
+                state_guard.is_scanning,
+            )
+        };
+
+        if is_scanning {
+            tracing::warn!("Attempted to lazy load while a full scan was in progress. Ignoring.");
+            return;
+        }
+
+        let new_cancel_flag = Arc::new(AtomicBool::new(false));
+        let proxy_clone = proxy.clone();
+        let state_clone = state.clone();
+
+        tracing::info!("LOG: Spawning new lazy_load_task for path: {:?}", path);
+
+        tokio::spawn(async move {
+            lazy_load_task(
+                path,
+                ignore_patterns,
+                proxy_clone,
+                state_clone,
+                new_cancel_flag,
+            )
+            .await;
+        });
+    });
+}
+
+/// The asynchronous task for scanning a single directory level and appending the results.
+async fn lazy_load_task<P: EventProxy>(
+    path_to_load: PathBuf,
+    ignore_patterns: HashSet<String>,
+    proxy: P,
+    state: Arc<Mutex<AppState>>,
+    cancel_flag: Arc<AtomicBool>,
+) {
+    let scanner = DirectoryScanner::new(ignore_patterns);
+
+    let scan_result = scanner
+        .scan_directory_with_progress(&path_to_load, Some(1), cancel_flag, |_| {})
+        .await;
+
+    match scan_result {
+        Ok((new_items, new_active_patterns)) => {
+            tracing::info!(
+                "LOG: TASK:: Lazy load successful. {} new items found for {:?}.",
+                new_items.len(),
+                path_to_load
+            );
+
+            super::helpers::with_state_and_notify(&state, &proxy, |s| {
+                // *** FIX STARTS HERE ***
+                // 1. Mark as loaded to prevent re-loading.
+                s.loaded_dirs.insert(path_to_load.clone());
+                // 2. Automatically expand the directory to solve the double-click issue.
+                s.expanded_dirs.insert(path_to_load);
+                // *** FIX ENDS HERE ***
+
+                s.active_ignore_patterns.extend(new_active_patterns);
+
+                let existing_paths: HashSet<PathBuf> = s
+                    .full_file_list
+                    .iter()
+                    .map(|item| item.path.clone())
+                    .collect();
+                for item in new_items {
+                    if !existing_paths.contains(&item.path) {
+                        s.full_file_list.push(item);
+                    }
+                }
+
+                apply_filters(s);
+            });
+        }
+        Err(e) => {
+            tracing::error!("LOG: TASK:: Lazy load failed for {:?}: {}", path_to_load, e);
+            proxy.send_event(UserEvent::ShowError(format!(
+                "Failed to load directory {}: {}",
+                path_to_load.display(),
+                e
+            )));
+        }
+    }
+}
+
 pub async fn search_in_files<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     let (files_to_search, query, case_sensitive) = {
         let mut state_guard = state

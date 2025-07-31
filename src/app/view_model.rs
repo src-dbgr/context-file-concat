@@ -46,11 +46,12 @@ pub struct TreeNode {
     pub is_expanded: bool,
     pub is_match: bool,
     pub is_previewed: bool,
+    pub children_loaded: bool,
 }
 
 /// Creates the complete `UiState` from the current `AppState`.
 pub fn generate_ui_state(state: &AppState) -> UiState {
-    let tree = if state.is_scanning {
+    let tree = if state.is_scanning && state.full_file_list.is_empty() {
         Vec::new()
     } else {
         let args = BuildTreeArgs {
@@ -58,6 +59,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
             root_path: &PathBuf::from(&state.current_path),
             selected: &state.selected_files,
             expanded: &state.expanded_dirs,
+            loaded_dirs: &state.loaded_dirs,
             content_search_matches: &state.content_search_results,
             filename_query: &state.search_query,
             extension_filter: &state.extension_filter,
@@ -99,6 +101,15 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
 
 /// Applies all current filters to the full file list to generate the visible list.
 pub fn apply_filters(state: &mut AppState) {
+    let all_dirs: HashSet<PathBuf> = state
+        .full_file_list
+        .iter()
+        .filter(|i| i.is_directory)
+        .map(|i| i.path.clone())
+        .collect();
+    let unloaded_dirs: HashSet<PathBuf> =
+        all_dirs.difference(&state.loaded_dirs).cloned().collect();
+
     let filtered_list = apply_filters_on_data(
         &state.full_file_list,
         &PathBuf::from(&state.current_path),
@@ -107,8 +118,32 @@ pub fn apply_filters(state: &mut AppState) {
         &state.extension_filter,
         &state.content_search_query,
         &state.content_search_results,
+        &unloaded_dirs,
     );
-    state.filtered_file_list = filtered_list;
+
+    if state.config.remove_empty_directories {
+        // *** FIX STARTS HERE ***
+        // Ensure that any directory explicitly expanded by the user is never hidden,
+        // even if it appears empty after its children are ignored/filtered.
+        let mut final_list = filtered_list;
+        let final_paths: HashSet<_> = final_list.iter().map(|i| i.path.clone()).collect();
+
+        for expanded_dir_path in &state.expanded_dirs {
+            if !final_paths.contains(expanded_dir_path) {
+                if let Some(item) = state
+                    .full_file_list
+                    .iter()
+                    .find(|i| i.path == *expanded_dir_path)
+                {
+                    final_list.push(item.clone());
+                }
+            }
+        }
+        state.filtered_file_list = final_list;
+        // *** FIX ENDS HERE ***
+    } else {
+        state.filtered_file_list = filtered_list;
+    }
 }
 
 /// A "pure" function that takes data and returns a filtered list of `FileItem`s.
@@ -120,6 +155,7 @@ fn apply_filters_on_data(
     extension_filter: &str,
     content_search_query: &str,
     content_search_results: &HashSet<PathBuf>,
+    unloaded_dirs: &HashSet<PathBuf>,
 ) -> Vec<FileItem> {
     if !content_search_query.trim().is_empty() && content_search_results.is_empty() {
         return Vec::new();
@@ -166,7 +202,9 @@ fn apply_filters_on_data(
     }
 
     if config.remove_empty_directories {
-        let (filtered_without_empty, _) = SearchEngine::remove_empty_directories(filtered);
+        // We now pass the unloaded_dirs to the core function.
+        let (filtered_without_empty, _) =
+            SearchEngine::remove_empty_directories(filtered, unloaded_dirs);
         filtered_without_empty
     } else {
         filtered
@@ -217,6 +255,7 @@ struct BuildTreeArgs<'a> {
     root_path: &'a Path,
     selected: &'a HashSet<PathBuf>,
     expanded: &'a HashSet<PathBuf>,
+    loaded_dirs: &'a HashSet<PathBuf>,
     content_search_matches: &'a HashSet<PathBuf>,
     filename_query: &'a str,
     extension_filter: &'a str,
@@ -364,6 +403,7 @@ fn build_node_recursive(
         is_expanded: args.expanded.contains(&item.path),
         is_match: name_match || extension_match || content_match,
         is_previewed,
+        children_loaded: !item.is_directory || args.loaded_dirs.contains(&item.path),
     }
 }
 
@@ -549,6 +589,7 @@ mod tests {
             create_test_file_item("/project/Cargo.toml", false),
         ];
         state.filtered_file_list = state.full_file_list.clone();
+        state.loaded_dirs.insert(PathBuf::from("/project/src"));
 
         let ui_state = generate_ui_state(&state);
 
@@ -565,6 +606,7 @@ mod tests {
 
         let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
         assert!(src_node.is_directory);
+        assert!(src_node.children_loaded);
         assert_eq!(src_node.children.len(), 1);
         assert_eq!(src_node.children[0].name, "main.rs");
     }
@@ -658,6 +700,7 @@ mod tests {
         state.filtered_file_list = state.full_file_list.clone();
         state.selected_files = HashSet::from([main_rs_path.clone()]);
         state.expanded_dirs = HashSet::from([src_path.clone()]);
+        state.loaded_dirs = HashSet::from([src_path.clone()]);
         state.previewed_file_path = Some(preview_path);
 
         let ui_state = generate_ui_state(&state);
@@ -666,6 +709,7 @@ mod tests {
 
         let src_node = ui_state.tree.iter().find(|n| n.path == src_path).unwrap();
         assert!(src_node.is_expanded);
+        assert!(src_node.children_loaded);
         assert_eq!(src_node.selection_state, "partial");
 
         let main_rs_node = src_node

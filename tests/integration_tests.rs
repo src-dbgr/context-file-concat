@@ -108,14 +108,27 @@ mod helpers {
                 }
             }
         }
+
+        /// Waits for any StateUpdate event. Useful for lazy loading.
+        pub async fn wait_for_state_update(&mut self) {
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), self.event_rx.recv()).await {
+                    Ok(Some(UserEvent::StateUpdate(_))) => {
+                        return; // Got the update
+                    }
+                    Ok(Some(_)) => { /* Ignore other events */ }
+                    _ => panic!("Did not receive StateUpdate within timeout or channel closed"),
+                }
+            }
+        }
     }
 }
 
 #[tokio::test]
-async fn test_scan_and_initial_state() {
+async fn test_scan_and_initial_state_is_lazy() {
     // --- ARRANGE ---
     let mut harness = helpers::TestHarness::new();
-    harness.setup_basic_project();
+    harness.setup_basic_project(); // Creates src/main.rs, src/lib.rs, README.md, etc.
 
     // --- ACT ---
     app::tasks::start_scan_on_path(
@@ -130,7 +143,7 @@ async fn test_scan_and_initial_state() {
     assert!(!state.is_scanning, "Scan should be finished");
 
     let visible_paths: HashSet<_> = state
-        .filtered_file_list
+        .full_file_list // Check the full list, as filters aren't the focus here.
         .iter()
         .map(|item| {
             item.path
@@ -140,23 +153,111 @@ async fn test_scan_and_initial_state() {
         })
         .collect();
 
-    // Verify expected files are present (no ignore patterns active)
-    assert!(visible_paths.contains(&PathBuf::from("src/main.rs")));
-    assert!(visible_paths.contains(&PathBuf::from("src/lib.rs")));
-    assert!(visible_paths.contains(&PathBuf::from("README.md")));
-    assert!(visible_paths.contains(&PathBuf::from("Cargo.toml")));
-    assert!(visible_paths.contains(&PathBuf::from("docs/guide.txt")));
+    // Only top-level items should be present.
+    assert!(
+        visible_paths.contains(&PathBuf::from("src")),
+        "Top-level 'src' directory should be present"
+    );
+    assert!(
+        visible_paths.contains(&PathBuf::from("docs")),
+        "Top-level 'docs' directory should be present"
+    );
+    assert!(
+        visible_paths.contains(&PathBuf::from("README.md")),
+        "Top-level 'README.md' file should be present"
+    );
+    assert!(
+        visible_paths.contains(&PathBuf::from("Cargo.toml")),
+        "Top-level 'Cargo.toml' file should be present"
+    );
+
+    // Nested items should NOT be present.
+    assert!(
+        !visible_paths.contains(&PathBuf::from("src/main.rs")),
+        "'src/main.rs' should not be loaded initially"
+    );
+    assert!(
+        !visible_paths.contains(&PathBuf::from("docs/guide.txt")),
+        "'docs/guide.txt' should not be loaded initially"
+    );
+
+    assert_eq!(visible_paths.len(), 4, "Should only have 4 top-level items");
+
+    // Also check the loaded_dirs set
+    assert!(state.loaded_dirs.contains(&harness.root_path));
+}
+
+#[tokio::test]
+async fn test_lazy_load_directory_level() {
+    // --- ARRANGE ---
+    let mut harness = helpers::TestHarness::new();
+    harness.setup_basic_project();
+
+    // Perform initial scan
+    app::tasks::start_scan_on_path(
+        harness.root_path.clone(),
+        harness.proxy.clone(),
+        harness.state.clone(),
+    );
+    harness.wait_for_scan_completion().await;
+
+    // --- ACT ---
+    // Simulate user clicking on the 'src' directory to lazy load it.
+    let src_dir_path = harness.root_path.join("src");
+    app::commands::load_directory_level(
+        serde_json::to_value(src_dir_path.to_string_lossy()).unwrap(),
+        harness.proxy.clone(),
+        harness.state.clone(),
+    );
+    harness.wait_for_state_update().await;
+
+    // --- ASSERT ---
+    let state = harness.state.lock().unwrap();
+
+    let full_list_paths: HashSet<_> = state
+        .full_file_list
+        .iter()
+        .map(|item| {
+            item.path
+                .strip_prefix(&harness.root_path)
+                .unwrap()
+                .to_path_buf()
+        })
+        .collect();
+
+    // Check that the original top-level items are still there.
+    assert!(full_list_paths.contains(&PathBuf::from("src")));
+    assert!(full_list_paths.contains(&PathBuf::from("README.md")));
+
+    // Check that the newly loaded items are now present.
+    assert!(
+        full_list_paths.contains(&PathBuf::from("src/main.rs")),
+        "'src/main.rs' should now be loaded"
+    );
+    assert!(
+        full_list_paths.contains(&PathBuf::from("src/lib.rs")),
+        "'src/lib.rs' should now be loaded"
+    );
+
+    // Check that items from other unloaded directories are still not present.
+    assert!(
+        !full_list_paths.contains(&PathBuf::from("docs/guide.txt")),
+        "'docs/guide.txt' should still not be loaded"
+    );
+
+    // Check that the 'src' directory is now marked as loaded.
+    assert!(state.loaded_dirs.contains(&src_dir_path));
 }
 
 #[tokio::test]
 async fn test_ignore_patterns_are_applied_on_scan() {
     // --- ARRANGE ---
     let mut harness = helpers::TestHarness::new();
-    harness.setup_basic_project();
+    harness.setup_basic_project(); // has README.md, Cargo.toml
 
-    // Add specific ignore patterns to test
     {
         let mut state = harness.state.lock().unwrap();
+        // Ignore a top-level directory and a top-level file pattern
         state.config.ignore_patterns.insert("src/".to_string());
         state.config.ignore_patterns.insert("*.md".to_string());
     }
@@ -173,7 +274,7 @@ async fn test_ignore_patterns_are_applied_on_scan() {
     let state = harness.state.lock().unwrap();
 
     let visible_paths: HashSet<_> = state
-        .filtered_file_list
+        .full_file_list // test against full list
         .iter()
         .map(|item| {
             item.path
@@ -183,28 +284,24 @@ async fn test_ignore_patterns_are_applied_on_scan() {
         })
         .collect();
 
-    // Verify that ignored patterns are not present
+    // Verify that ignored top-level patterns are not present
     assert!(
-        !visible_paths.contains(&PathBuf::from("src/main.rs")),
-        "src/main.rs should be filtered out by src/ pattern"
-    );
-    assert!(
-        !visible_paths.contains(&PathBuf::from("src/lib.rs")),
-        "src/lib.rs should be filtered out by src/ pattern"
+        !visible_paths.contains(&PathBuf::from("src")),
+        "src directory should be filtered out by src/ pattern"
     );
     assert!(
         !visible_paths.contains(&PathBuf::from("README.md")),
         "README.md should be filtered out by *.md pattern"
     );
 
-    // Verify that non-ignored files are still present
+    // Verify that non-ignored top-level files are still present
     assert!(
         visible_paths.contains(&PathBuf::from("Cargo.toml")),
         "Cargo.toml should not be filtered out"
     );
     assert!(
-        visible_paths.contains(&PathBuf::from("docs/guide.txt")),
-        "docs/guide.txt should not be filtered out"
+        visible_paths.contains(&PathBuf::from("docs")),
+        "docs directory should not be filtered out"
     );
 
     // Verify that ignore patterns were activated

@@ -25,6 +25,8 @@ pub struct AppState {
     pub selected_files: HashSet<PathBuf>,
     /// The set of absolute paths to directories that are expanded in the UI tree.
     pub expanded_dirs: HashSet<PathBuf>,
+    /// The set of absolute paths to directories whose children have been loaded.
+    pub loaded_dirs: HashSet<PathBuf>,
     /// `true` if a directory scan is currently in progress.
     pub is_scanning: bool,
     /// `true` if the concatenation process is currently running.
@@ -65,6 +67,7 @@ impl Default for AppState {
             filtered_file_list: Vec::new(),
             selected_files: HashSet::new(),
             expanded_dirs: HashSet::new(),
+            loaded_dirs: HashSet::new(),
             is_scanning: false,
             is_generating: false,
             search_query: String::new(),
@@ -131,6 +134,7 @@ impl AppState {
         self.filtered_file_list.clear();
         self.selected_files.clear();
         self.expanded_dirs.clear();
+        self.loaded_dirs.clear();
         self.search_query.clear();
         self.extension_filter.clear();
         self.content_search_query.clear();

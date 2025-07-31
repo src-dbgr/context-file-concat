@@ -13,7 +13,7 @@ use super::events::UserEvent;
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
 use super::state::AppState;
-use super::tasks::{generation_task, search_in_files, start_scan_on_path};
+use super::tasks::{generation_task, search_in_files, start_lazy_load_scan, start_scan_on_path};
 use super::view_model::{
     apply_filters, auto_expand_for_matches, generate_ui_state, get_language_from_path,
 };
@@ -211,6 +211,18 @@ pub fn load_file_preview<P: EventProxy>(
             .expect("Mutex was poisoned. This should not happen.");
         let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
         proxy.send_event(event);
+    }
+}
+
+/// Loads the children of a specific directory for lazy loading.
+pub fn load_directory_level<P: EventProxy>(
+    payload: serde_json::Value,
+    proxy: P,
+    state: Arc<Mutex<AppState>>,
+) {
+    if let Ok(path_str) = serde_json::from_value::<String>(payload) {
+        let path = PathBuf::from(path_str);
+        start_lazy_load_scan(path, proxy, state);
     }
 }
 
