@@ -52,7 +52,9 @@ pub struct TreeNode {
 
 /// Creates the complete `UiState` from the current `AppState`.
 pub fn generate_ui_state(state: &AppState) -> UiState {
-    let tree = if state.is_scanning && state.full_file_list.is_empty() {
+    let tree = if (state.is_scanning && state.full_file_list.is_empty())
+        || (!state.content_search_query.is_empty() && state.content_search_results.is_empty())
+    {
         Vec::new()
     } else {
         let args = BuildTreeArgs {
@@ -103,17 +105,25 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
 
 /// Applies all current filters to the full file list to generate the visible list.
 pub fn apply_filters(state: &mut AppState) {
-    let all_dirs: HashSet<PathBuf> = state
+    // Determine which directories need to be preserved in the filtered view.
+    // This includes directories that the user has explicitly expanded, and directories
+    // whose contents have not yet been loaded (lazy-loading).
+    let all_dirs_in_full_list: HashSet<PathBuf> = state
         .full_file_list
         .iter()
         .filter(|i| i.is_directory)
         .map(|i| i.path.clone())
         .collect();
-    let unloaded_dirs: HashSet<PathBuf> =
-        all_dirs.difference(&state.loaded_dirs).cloned().collect();
 
-    // First, get the list with all filters applied, including potential removal of empty dirs.
-    let mut filtered_list = apply_filters_on_data(
+    let unloaded_dirs: HashSet<PathBuf> = all_dirs_in_full_list
+        .difference(&state.loaded_dirs)
+        .cloned()
+        .collect();
+
+    let mut dirs_to_preserve = state.expanded_dirs.clone();
+    dirs_to_preserve.extend(unloaded_dirs);
+
+    state.filtered_file_list = apply_filters_on_data(
         &state.full_file_list,
         &PathBuf::from(&state.current_path),
         &state.config,
@@ -121,32 +131,8 @@ pub fn apply_filters(state: &mut AppState) {
         &state.extension_filter,
         &state.content_search_query,
         &state.content_search_results,
-        &unloaded_dirs,
+        &dirs_to_preserve,
     );
-
-    // "Safety Net" logic: If enabled, ensure that any directory explicitly expanded
-    // by the user is never hidden, even if it becomes empty after filtering.
-    if state.config.remove_empty_directories {
-        // By cloning the paths, we create an owned HashSet and drop the immutable borrow on `filtered_list`.
-        let current_filtered_paths: HashSet<_> =
-            filtered_list.iter().map(|i| i.path.clone()).collect();
-
-        for expanded_dir_path in &state.expanded_dirs {
-            if !current_filtered_paths.contains(expanded_dir_path) {
-                // This expanded dir was removed. Find it in the master list and add it back.
-                if let Some(item_from_full_list) = state
-                    .full_file_list
-                    .iter()
-                    .find(|i| i.path == *expanded_dir_path)
-                {
-                    // Now we can mutably borrow `filtered_list` because the immutable borrow is gone.
-                    filtered_list.push(item_from_full_list.clone());
-                }
-            }
-        }
-    }
-
-    state.filtered_file_list = filtered_list;
 }
 
 /// A "pure" function that takes data and returns a filtered list of `FileItem`s.
@@ -158,25 +144,54 @@ fn apply_filters_on_data(
     extension_filter: &str,
     content_search_query: &str,
     content_search_results: &HashSet<PathBuf>,
-    unloaded_dirs: &HashSet<PathBuf>,
+    dirs_to_preserve: &HashSet<PathBuf>,
 ) -> Vec<FileItem> {
-    if !content_search_query.trim().is_empty() && content_search_results.is_empty() {
+    let has_filename_filter = !search_query.trim().is_empty();
+    let has_extension_filter = !extension_filter.trim().is_empty();
+    let has_content_filter = !content_search_query.trim().is_empty();
+
+    // Early exit if a content search is active but has yielded no results.
+    if has_content_filter && content_search_results.is_empty() {
         return Vec::new();
     }
 
+    // Determine the base set of files to work with.
+    // If there's a content filter, start with those results. Otherwise, start with all files.
+    let base_files: Vec<FileItem> = if has_content_filter {
+        let results_set = content_search_results;
+        full_file_list
+            .iter()
+            .filter(|item| results_set.contains(&item.path))
+            .cloned()
+            .collect()
+    } else {
+        full_file_list.to_vec()
+    };
+
+    // Apply filename and extension filters on the base set.
     let filter = SearchFilter {
         query: search_query.to_string(),
         extension: extension_filter.to_string(),
         case_sensitive: config.case_sensitive_search,
     };
+    let mut matching_files = if has_filename_filter || has_extension_filter {
+        SearchEngine::filter_files(&base_files, &filter)
+    } else {
+        base_files
+            .into_iter()
+            .filter(|item| !item.is_directory)
+            .collect()
+    };
 
-    let mut filtered = SearchEngine::filter_files(full_file_list, &filter);
-
-    if !content_search_results.is_empty() {
-        filtered.retain(|item| content_search_results.contains(&item.path));
+    // If no files match the filters, return an empty list.
+    if (has_filename_filter || has_extension_filter || has_content_filter)
+        && matching_files.is_empty()
+    {
+        return Vec::new();
     }
 
-    let required_dirs: HashSet<PathBuf> = filtered
+    // From the matching files, determine all required ancestor directories.
+    let required_dirs: HashSet<PathBuf> = matching_files
         .par_iter()
         .flat_map(|item| {
             let mut parents = Vec::new();
@@ -193,24 +208,40 @@ fn apply_filters_on_data(
         })
         .collect();
 
-    let existing_paths_in_filtered: HashSet<PathBuf> =
-        filtered.par_iter().map(|item| item.path.clone()).collect();
+    // Combine matching files with all items from the full list that are required directories.
+    let full_file_map: HashMap<_, _> = full_file_list
+        .iter()
+        .map(|item| (item.path.clone(), item.clone()))
+        .collect();
 
     for dir_path in required_dirs {
-        if !existing_paths_in_filtered.contains(&dir_path) {
-            if let Some(dir_item) = full_file_list.iter().find(|i| i.path == dir_path) {
-                filtered.push(dir_item.clone());
-            }
+        if let Some(dir_item) = full_file_map.get(&dir_path) {
+            matching_files.push(dir_item.clone());
         }
     }
 
+    // If we're not filtering, we want to see all items.
+    let list_for_empty_dir_removal =
+        if !has_filename_filter && !has_extension_filter && !has_content_filter {
+            full_file_list.to_vec()
+        } else {
+            matching_files
+        };
+
+    // Remove duplicates that might have been added.
+    let mut unique_items = HashMap::new();
+    for item in list_for_empty_dir_removal {
+        unique_items.insert(item.path.clone(), item);
+    }
+    let unique_list: Vec<FileItem> = unique_items.values().cloned().collect();
+
     if config.remove_empty_directories {
-        // We now pass the unloaded_dirs to the core function.
+        // We now pass the combined set of preserved dirs to the core function.
         let (filtered_without_empty, _) =
-            SearchEngine::remove_empty_directories(filtered, unloaded_dirs);
+            SearchEngine::remove_empty_directories(unique_list, dirs_to_preserve);
         filtered_without_empty
     } else {
-        filtered
+        unique_list
     }
 }
 
@@ -221,7 +252,14 @@ pub fn auto_expand_for_matches(state: &mut AppState) {
         .filtered_file_list
         .iter()
         .filter(|item| {
+            // Skip directories
+            if item.is_directory {
+                return false;
+            }
+
             let file_name = item.path.file_name().unwrap_or_default().to_string_lossy();
+
+            // Check for filename match
             let name_match = if !state.search_query.is_empty() {
                 if state.config.case_sensitive_search {
                     file_name.contains(&state.search_query)
@@ -233,8 +271,20 @@ pub fn auto_expand_for_matches(state: &mut AppState) {
             } else {
                 false
             };
+
+            // --- FIX ---
+            // Check for extension match
+            let extension_match = if !state.extension_filter.is_empty() {
+                matches_extension(&item.path, &state.extension_filter)
+            } else {
+                false
+            };
+
+            // Check for content match
             let content_match = state.content_search_results.contains(&item.path);
-            (name_match || content_match) && !item.is_directory
+
+            // Item is a match if any of the conditions are true
+            name_match || extension_match || content_match
         })
         .map(|item| item.path.clone())
         .collect();

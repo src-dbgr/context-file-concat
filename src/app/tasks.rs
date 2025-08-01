@@ -17,7 +17,7 @@ use super::view_model::{
     apply_filters, auto_expand_for_matches, generate_ui_state, get_selected_files_in_tree_order,
 };
 
-use crate::core::{CoreError, DirectoryScanner, FileHandler, FileItem, ScanProgress};
+use crate::core::{CoreError, DirectoryScanner, FileHandler};
 
 /// Initiates a proactive, two-phase directory scan.
 ///

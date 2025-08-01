@@ -14,11 +14,27 @@ import { setupResizerListeners } from "./modules/resizer.js";
 //  API for the Rust backend (global window.* functions)
 // ==================================================================
 window.render = (newState) => {
+  // --- ANFANG DER ÄNDERUNG ---
+  // 1. Speichere die aktuelle Scroll-Position, bevor die UI neu gerendert wird.
+  const scrollContainer = document.querySelector(".virtual-scroll-container");
+  const scrollPosition = scrollContainer ? scrollContainer.scrollTop : 0;
+  // --- ENDE DER ÄNDERUNG ---
+
   const wasScanning = state.get().is_scanning;
   const previousPath = state.get().current_path;
 
   state.set(newState);
-  renderUI();
+  renderUI(); // Hier wird der Baum neu gezeichnet
+
+  // --- ANFANG DER ÄNDERUNG ---
+  // 2. Finde den *neuen* Scroll-Container und setze die gespeicherte Position.
+  const newScrollContainer = document.querySelector(
+    ".virtual-scroll-container"
+  );
+  if (newScrollContainer) {
+    newScrollContainer.scrollTop = scrollPosition;
+  }
+  // --- ENDE DER ÄNDERUNG ---
 
   // Update search inputs state when directory selection changes
   if (

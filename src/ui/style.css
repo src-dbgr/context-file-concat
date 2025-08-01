@@ -522,9 +522,10 @@ body.vertical-resizing {
 }
 
 .files-title-section {
+  padding-left: 10px;
   display: flex;
   align-items: center;
-  gap: 15px;
+  gap: 5px;
 }
 
 .files-title-section h3 {
@@ -1013,7 +1014,7 @@ button:disabled:hover {
 .tree .tree-item-container {
   display: flex;
   align-items: center;
-  gap: 6px;
+  /* gap: 6px; */
   padding: 3px 6px;
   border-radius: 4px;
   min-width: max-content;
@@ -1047,11 +1048,11 @@ button:disabled:hover {
   content: "";
   display: inline-block;
   width: 0.4em;
-  margin-right: 6px;
   flex-shrink: 0;
 }
 .tree input[type="checkbox"] {
   margin: 0;
+  margin-right: 6px;
   flex-shrink: 0;
   accent-color: var(--accent-color);
 }
@@ -1468,14 +1469,15 @@ button:disabled:hover {
   /* Höhe und top werden per JS gesetzt */
 }
 
-/* src/ui/style.css - BITTE AM ENDE DER DATEI HINZUFÜGEN */
+/* src/ui/style.css - BITTE AM ENDE DER DATEI HINZUFÜGEN (alten Fix entfernen) */
 
-/* --- STYLING FIX FOR VIRTUALIZED TREE --- */
+/* --- STYLING FIX FOR IGNORE BUTTON AND VIRTUALIZED TREE --- */
 
 /* 1. Make the flex container robust against overflow */
 .tree .tree-item-container {
   width: 100%;
   overflow: hidden;
+  /* This remains the main flex container */
 }
 
 /* 2. Define a fixed width for arrows and their spacers to ensure alignment */
@@ -1489,7 +1491,7 @@ button:disabled:hover {
   justify-content: center;
 }
 
-/* 3. Recreate the arrow graphic for the new span element */
+/* 3. Style for the arrow symbol */
 .arrow::before {
   content: "▶";
   font-size: 0.8em;
@@ -1501,8 +1503,165 @@ button:disabled:hover {
   transform: rotate(90deg);
 }
 
-/* 4. Make the file-name element flexible to prevent layout breaking */
-.tree .file-name {
-  flex: 1; /* Allows the name to grow and shrink */
+/* 4. NEW: Style the container for the name and button */
+.name-and-button {
+  flex: 1; /* This group now takes up the available space */
   min-width: 0; /* Crucial for allowing flex shrinking */
+  display: flex;
+  align-items: center;
+  overflow: hidden; /* Hide overflow within the group */
+}
+
+/* 5. Make the file-name itself flexible within its new group */
+.tree .file-name {
+  flex-grow: 0; /* It should not grow on its own */
+  flex-shrink: 1; /* It can shrink if needed */
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* 6. Position the ignore button correctly */
+.tree .tree-item-container .ignore-btn {
+  margin-left: 8px; /* A bit of space between name and button */
+  flex-shrink: 0; /* Prevent the button from shrinking */
+  /* Remove any 'margin-left: auto' from here */
+}
+
+/* 7. Position the file-size at the far right */
+.file-size {
+  margin-left: auto; /* This pushes the file size to the end */
+  padding-left: 10px;
+  flex-shrink: 0;
+}
+
+/* =================================================================== */
+/* == CSS FIXES - Bitte diesen gesamten Block am Ende der Datei einfügen == */
+/* =================================================================== */
+
+/* --- FIX 1: Styling für den "Generate/Concat/Cancel"-Button --- */
+
+/* Basis-Button eine Mindestbreite geben für Konsistenz */
+button#generate-btn {
+  min-width: 120px;
+  transition: all 0.2s ease-in-out;
+}
+
+/* Feste Breite entfernen und stattdessen padding für Flexibilität nutzen */
+#generate-btn.is-generating {
+  width: auto; /* Feste Breite entfernen */
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+/* Hover-Zustand explizit als Flex-Container für saubere Zentrierung definieren */
+#generate-btn.is-generating:hover .cancel-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+/* --- FIX 2: Checkboxen bleiben bei Inaktivität blau --- */
+
+/* Native Checkbox ausblenden */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  background-color: var(--bg-color-dark);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  position: relative;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+/* Hover-Effekt für die Box */
+input[type="checkbox"]:hover {
+  border-color: var(--accent-color);
+}
+
+/* Styling für die aktivierte Checkbox */
+input[type="checkbox"]:checked {
+  background-color: #3a7fd5; /* Explizites Blau, das nicht von accent-color abhängt */
+  border-color: #3a7fd5;
+}
+
+/* Das Häkchen als SVG-Hintergrundbild einfügen (immer sichtbar, wenn :checked) */
+input[type="checkbox"]:checked::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100%;
+  height: 100%;
+  transform: translate(-50%, -50%);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'%3E%3C/polyline%3E%3C/svg%3E");
+  background-size: 75%;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+/* Styling für den 'indeterminate' (teils ausgewählten) Zustand */
+input[type="checkbox"][data-indeterminate="true"] {
+  background-color: #3a7fd5;
+  border-color: #3a7fd5;
+}
+
+/* Der Strich für den 'indeterminate' Zustand */
+input[type="checkbox"][data-indeterminate="true"]::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 60%;
+  height: 2px;
+  transform: translate(-50%, -50%);
+  background-color: white;
+  border-radius: 1px;
+}
+
+/* --- FIX 3: Leerraum links vom File Tree reduzieren --- */
+
+.file-list-panel {
+  /* top, right, bottom, left */
+  padding: 10px 10px 10px 5px;
+}
+
+/* =================================================================== */
+/* == UI-Korrekturen (Aktualisierte Version)                        == */
+/* =================================================================== */
+
+/* --- KORREKTUR 1: "Concat/Cancel"-Button-Darstellung (unverändert) --- */
+
+button#generate-btn {
+  min-width: 120px;
+}
+
+#generate-btn.is-generating {
+  width: auto;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+#generate-btn.is-generating:hover .cancel-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+/* --- KORREKTUR 2 (NEU): Leerraum im File-Tree reduzieren --- */
+
+/* Du hattest recht, das Problem war nicht das Padding des Panels.
+   Der Abstand entsteht durch den Innenabstand jedes einzelnen Eintrags
+   im Baum. Wir passen diese Regel an, um den Leerraum zu reduzieren. */
+.tree summary,
+.tree .tree-item-container {
+  /* Horizontalen Innenabstand (links/rechts) von 6px auf 2px reduziert. */
+  padding: 3px 2px;
 }

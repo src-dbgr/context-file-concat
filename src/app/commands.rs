@@ -13,9 +13,7 @@ use super::events::UserEvent;
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
 use super::state::AppState;
-use super::tasks::{
-    self, generation_task, search_in_files, start_lazy_load_scan, start_scan_on_path,
-};
+use super::tasks::{generation_task, search_in_files, start_lazy_load_scan, start_scan_on_path};
 use super::view_model::{
     apply_filters, auto_expand_for_matches, generate_ui_state, get_language_from_path,
 };
@@ -162,7 +160,9 @@ pub async fn update_filters<P: EventProxy>(
         } else {
             with_state_and_notify(&state, &proxy, |s| {
                 apply_filters(s);
-                if !s.search_query.is_empty() {
+                // --- FIX ---
+                // Expand not only for search query but also for extension filter
+                if !s.search_query.is_empty() || !s.extension_filter.is_empty() {
                     auto_expand_for_matches(s);
                 }
             });
