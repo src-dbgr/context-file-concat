@@ -231,7 +231,7 @@ pub fn load_directory_level<P: EventProxy>(
     }
 }
 
-/// Adds a new ignore pattern from a specific file path and triggers a rescan.
+/// Adds a new ignore pattern from a specific file path by performing an in-memory update.
 pub fn add_ignore_path<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
@@ -249,30 +249,27 @@ pub fn add_ignore_path<P: EventProxy>(
             if let Ok(relative_path) = path_to_ignore.strip_prefix(&root_path) {
                 let mut pattern_to_add = relative_path.to_string_lossy().to_string();
 
-                // Ensure directory patterns end with a slash for correctness
                 if path_to_ignore.is_dir() && !pattern_to_add.ends_with('/') {
                     pattern_to_add.push('/');
                 }
 
                 // Add pattern to config and save it
-                if s.config.ignore_patterns.insert(pattern_to_add) {
+                if s.config.ignore_patterns.insert(pattern_to_add.clone()) {
+                    // KORREKTUR: Das neue Pattern auch zur "aktiven" Liste hinzufügen.
+                    s.active_ignore_patterns.insert(pattern_to_add);
+
                     if let Err(e) = config::settings::save_config(&s.config) {
                         tracing::warn!("Failed to save config after adding ignore path: {}", e);
                     }
                 }
 
-                // --- In-memory state update instead of a full rescan ---
-
-                // 1. Remove the newly ignored path (and any children) from the selection.
+                // --- In-memory state update ---
                 s.selected_files.retain(|p| !p.starts_with(&path_to_ignore));
                 s.expanded_dirs.remove(&path_to_ignore);
-
-                // 2. Remove the ignored items from the main file list.
                 s.full_file_list
                     .retain(|item| !item.path.starts_with(&path_to_ignore));
 
-                // 3. Re-apply filters to update the visible tree.
-                // This will also handle removing potentially empty parent directories.
+                // Re-apply filters to update the visible tree.
                 apply_filters(s);
             }
         });
