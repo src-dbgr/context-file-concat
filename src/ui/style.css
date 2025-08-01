@@ -1467,3 +1467,42 @@ button:disabled:hover {
   width: 100%;
   /* Höhe und top werden per JS gesetzt */
 }
+
+/* src/ui/style.css - BITTE AM ENDE DER DATEI HINZUFÜGEN */
+
+/* --- STYLING FIX FOR VIRTUALIZED TREE --- */
+
+/* 1. Make the flex container robust against overflow */
+.tree .tree-item-container {
+  width: 100%;
+  overflow: hidden;
+}
+
+/* 2. Define a fixed width for arrows and their spacers to ensure alignment */
+.arrow,
+.spacer {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 3. Recreate the arrow graphic for the new span element */
+.arrow::before {
+  content: "▶";
+  font-size: 0.8em;
+  color: var(--text-color-muted);
+  transition: transform 0.1s linear;
+}
+
+.arrow.expanded::before {
+  transform: rotate(90deg);
+}
+
+/* 4. Make the file-name element flexible to prevent layout breaking */
+.tree .file-name {
+  flex: 1; /* Allows the name to grow and shrink */
+  min-width: 0; /* Crucial for allowing flex shrinking */
+}
