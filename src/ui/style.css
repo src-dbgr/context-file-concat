@@ -322,6 +322,33 @@ body.vertical-resizing {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex-grow: 1;
+  text-align: left;
+}
+
+/* Stil für den Container des Indikators */
+.indexing-status {
+  display: flex; /* Sichtbarkeit wird per JS gesteuert */
+  align-items: center;
+  gap: 8px;
+  color: var(--text-color-muted);
+  flex-shrink: 0; /* Verhindert, dass das Element schrumpft */
+}
+
+/* Stil für den animierten Spinner */
+.indexing-status .spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent-color);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+/* Fügt der Statusleiste eine subtile Puls-Animation hinzu, wenn die Indexierung läuft */
+#status-bar.indexing {
+  border-top-color: var(--accent-color);
+  animation: statusPulse 2s ease-in-out infinite;
 }
 
 /* NEUE OUTPUT SETTINGS IN STATUS BAR */

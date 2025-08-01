@@ -238,10 +238,7 @@ pub fn add_ignore_path<P: EventProxy>(
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload) {
-        let root_path_string = {
-            let mut s = state
-                .lock()
-                .expect("Mutex was poisoned. This should not happen.");
+        with_state_and_notify(&state, &proxy, |s| {
             if s.current_path.is_empty() {
                 return;
             }
@@ -251,22 +248,34 @@ pub fn add_ignore_path<P: EventProxy>(
 
             if let Ok(relative_path) = path_to_ignore.strip_prefix(&root_path) {
                 let mut pattern_to_add = relative_path.to_string_lossy().to_string();
-                if path_to_ignore.is_dir() {
+
+                // Ensure directory patterns end with a slash for correctness
+                if path_to_ignore.is_dir() && !pattern_to_add.ends_with('/') {
                     pattern_to_add.push('/');
                 }
-                s.selected_files.retain(|p| !p.starts_with(&path_to_ignore));
 
-                s.config.ignore_patterns.insert(pattern_to_add);
-
-                if let Err(e) = config::settings::save_config(&s.config) {
-                    tracing::warn!("Failed to save config after adding ignore path: {}", e);
+                // Add pattern to config and save it
+                if s.config.ignore_patterns.insert(pattern_to_add) {
+                    if let Err(e) = config::settings::save_config(&s.config) {
+                        tracing::warn!("Failed to save config after adding ignore path: {}", e);
+                    }
                 }
-            }
-            s.current_path.clone()
-        };
 
-        // Triggering a rescan is necessary for the new ignore pattern to be applied correctly.
-        start_scan_on_path(PathBuf::from(root_path_string), proxy, state);
+                // --- In-memory state update instead of a full rescan ---
+
+                // 1. Remove the newly ignored path (and any children) from the selection.
+                s.selected_files.retain(|p| !p.starts_with(&path_to_ignore));
+                s.expanded_dirs.remove(&path_to_ignore);
+
+                // 2. Remove the ignored items from the main file list.
+                s.full_file_list
+                    .retain(|item| !item.path.starts_with(&path_to_ignore));
+
+                // 3. Re-apply filters to update the visible tree.
+                // This will also handle removing potentially empty parent directories.
+                apply_filters(s);
+            }
+        });
     }
 }
 
@@ -383,53 +392,44 @@ pub fn deselect_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     });
 }
 
-/// Starts a full, recursive scan of the entire project to expand all directories.
+/// Expands all directories after a full scan has completed.
 pub fn expand_all_fully<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
-    let is_scanned = {
-        let state_guard = state.lock().unwrap();
-        state_guard.is_fully_scanned && !state_guard.is_scanning
-    };
+    // This action should only be possible after the background indexing is complete.
+    // The UI should enforce this by disabling the button while is_fully_scanned is false.
+    with_state_and_notify(&state, &proxy, |s| {
+        if !s.is_fully_scanned {
+            tracing::warn!("expand_all_fully called before full scan completed. Ignoring.");
+            return;
+        }
 
-    if is_scanned {
-        // Optimization: If already fully scanned, just expand without a new scan.
-        with_state_and_notify(&state, &proxy, |s| {
-            apply_filters(s); // Ensure filters are current
-            s.expanded_dirs = s
-                .filtered_file_list
-                .iter()
-                .filter(|i| i.is_directory)
-                .map(|i| i.path.clone())
-                .collect();
-        });
-    } else {
-        // Trigger a full scan, which will then expand all directories upon completion.
-        tasks::start_full_scan(proxy, state, tasks::FullScanAction::ExpandAll);
-    }
+        // Expand all directories present in the *filtered* list.
+        s.expanded_dirs = s
+            .filtered_file_list
+            .iter()
+            .filter(|i| i.is_directory)
+            .map(|i| i.path.clone())
+            .collect();
+    });
 }
 
-/// Starts a full scan (if needed) and selects all filter-conformant files.
+/// Selects all filter-conformant files after a full scan has completed.
 pub fn select_all_fully<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
-    let is_scanned = {
-        let state_guard = state.lock().unwrap();
-        state_guard.is_fully_scanned && !state_guard.is_scanning
-    };
+    // This action should only be possible after the background indexing is complete.
+    with_state_and_notify(&state, &proxy, |s| {
+        if !s.is_fully_scanned {
+            tracing::warn!("select_all_fully called before full scan completed. Ignoring.");
+            return;
+        }
 
-    if is_scanned {
-        // Optimization: If already fully scanned, just apply filters and select.
-        with_state_and_notify(&state, &proxy, |s| {
-            apply_filters(s); // Re-apply filters to be safe
-            let paths_to_select: Vec<PathBuf> = s
-                .filtered_file_list
-                .iter()
-                .filter(|item| !item.is_directory)
-                .map(|item| item.path.clone())
-                .collect();
-            s.selected_files.extend(paths_to_select);
-        });
-    } else {
-        // Trigger a full scan, which will then select all files upon completion.
-        tasks::start_full_scan(proxy, state, tasks::FullScanAction::SelectAll);
-    }
+        // Select all files (not directories) from the already-filtered list.
+        let paths_to_select: Vec<PathBuf> = s
+            .filtered_file_list
+            .iter()
+            .filter(|item| !item.is_directory)
+            .map(|item| item.path.clone())
+            .collect();
+        s.selected_files.extend(paths_to_select);
+    });
 }
 
 /// Generates the final concatenated output from selected files by spawning a cancellable task.

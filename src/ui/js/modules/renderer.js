@@ -315,7 +315,8 @@ function setupCommonPatterns() {
 let generatingIntervalId = null;
 export function renderUI() {
   const appState = state.get();
-  const { config, is_scanning, is_generating } = appState;
+  const { config, is_scanning, is_generating, tree, is_fully_scanned } =
+    appState;
 
   elements.currentPath.textContent =
     appState.current_path || "No directory selected.";
@@ -341,10 +342,14 @@ export function renderUI() {
   elements.selectDirBtn.disabled = is_scanning;
   elements.rescanBtn.disabled = is_scanning;
   elements.importConfigBtn.disabled = is_scanning;
-  elements.expandAllBtn.disabled = is_scanning;
-  elements.collapseAllBtn.disabled = is_scanning;
-  elements.selectAllBtn.disabled = is_scanning;
-  elements.deselectAllBtn.disabled = is_scanning;
+
+  // Disable global actions until fully scanned
+  const globalActionsEnabled = is_fully_scanned && !is_scanning;
+  elements.expandAllBtn.disabled = !globalActionsEnabled;
+  elements.selectAllBtn.disabled = !globalActionsEnabled;
+
+  elements.collapseAllBtn.disabled = is_scanning || tree.length === 0;
+  elements.deselectAllBtn.disabled = is_scanning || !hasSelection;
 
   const iconFolder = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>`;
   const iconScan = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>`;
@@ -355,56 +360,43 @@ export function renderUI() {
   if (is_scanning) {
     elements.selectDirBtn.innerHTML = `${iconScanning} Scanning...`;
     elements.rescanBtn.innerHTML = `${iconScanning} Scanning...`;
-    elements.expandAllBtn.textContent = "Scanning...";
-    elements.selectAllBtn.textContent = "Scanning...";
   } else {
     elements.selectDirBtn.innerHTML = `${iconFolder} Select Directory`;
     elements.rescanBtn.innerHTML = `${iconScan} Re-Scan`;
-    elements.expandAllBtn.textContent = "Expand All";
-    elements.selectAllBtn.textContent = "Select All";
   }
 
   const wasGenerating =
     elements.generateBtn.classList.contains("is-generating");
 
   if (is_generating) {
-    // State is generating.
     if (!wasGenerating) {
-      // This is the first render in the generating state. Set up the interval.
-      clearInterval(generatingIntervalId); // Clear any old timers just in case.
-
+      clearInterval(generatingIntervalId);
       elements.generateBtn.classList.remove("button-cta");
       elements.generateBtn.classList.add("is-generating");
-
       elements.generateBtn.innerHTML = `
-          <span class="generating-content">
-              ${iconGenerate}
-              <span class="generating-text">Concat</span>
-          </span>
-          <span class="cancel-content">${iconCancel} Cancel</span>
+        <span class="generating-content">
+          ${iconGenerate}
+          <span class="generating-text">Concat</span>
+        </span>
+        <span class="cancel-content">${iconCancel} Cancel</span>
       `;
-
       const textElement =
         elements.generateBtn.querySelector(".generating-text");
       let dotCount = 0;
       generatingIntervalId = setInterval(() => {
-        dotCount = (dotCount + 1) % 4; // Cycle 0, 1, 2, 3
-
+        dotCount = (dotCount + 1) % 4;
         const dots = ".".repeat(dotCount);
-        const spaces = "\u00A0".repeat(3 - dotCount); // \u00A0 -> whitespace
+        const spaces = "\u00A0".repeat(3 - dotCount);
         if (textElement) {
           textElement.textContent = `Concat${dots}${spaces}`;
         }
       }, 500);
     }
-    elements.generateBtn.disabled = false; // Enable button for cancellation click
+    elements.generateBtn.disabled = false;
   } else {
-    // State is NOT generating.
     if (wasGenerating) {
-      // This is the first render after generating has stopped. Clean up.
       clearInterval(generatingIntervalId);
       generatingIntervalId = null;
-
       elements.generateBtn.classList.remove("is-generating");
       elements.generateBtn.classList.add("button-cta");
       elements.generateBtn.innerHTML = `${iconGenerate} Generate`;
@@ -412,11 +404,9 @@ export function renderUI() {
     elements.generateBtn.disabled = !hasSelection || is_scanning;
   }
 
-  // Clear the file tree container
   elements.fileTreeContainer.innerHTML = "";
 
-  if (is_scanning) {
-    // Show scanning progress
+  if (is_scanning && tree.length === 0) {
     elements.fileTreeContainer.appendChild(createScanProgressUI());
     const cancelBtn = document.getElementById("cancel-scan-btn");
     if (cancelBtn) {
@@ -426,31 +416,23 @@ export function renderUI() {
         cancelBtn.innerHTML = `${iconScanning} Cancelling...`;
       });
     }
-    const progressFill = document.getElementById("scan-progress-fill");
-    if (progressFill) progressFill.style.width = "0%";
   } else if (!appState.current_path) {
-    // No directory selected - show directory selection placeholder with drag & drop
     elements.fileTreeContainer.appendChild(
       createDirectorySelectionPlaceholder()
     );
-  } else if (appState.tree.length > 0) {
-    // Directory selected and files found - show the tree
+  } else if (tree.length > 0) {
     const treeRoot = document.createElement("div");
     treeRoot.className = "tree";
-    treeRoot.appendChild(createTreeLevel(appState.tree));
+    treeRoot.appendChild(createTreeLevel(tree));
     elements.fileTreeContainer.appendChild(treeRoot);
   } else {
-    // Directory selected but no files found
     const hasFilters = hasActiveFilters(appState);
-
     if (hasFilters) {
-      // Filters are active but no results - show filter message without drag & drop
       const noResultsIcon = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>`;
       elements.fileTreeContainer.appendChild(
         createMessageDisplay("No files found matching filters.", noResultsIcon)
       );
     } else {
-      // No filters but still no files - might be empty directory or all ignored
       const emptyIcon = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><path d="M12 10v6"/><path d="M9 13h6"/></svg>`;
       elements.fileTreeContainer.appendChild(
         createMessageDisplay("No files found in this directory.", emptyIcon)
@@ -461,22 +443,24 @@ export function renderUI() {
   document.querySelector(
     ".status-text"
   ).textContent = `Status: ${appState.status_message}`;
-  const { totalFiles, totalFolders } = countTreeItems(appState.tree);
+  const { totalFiles, totalFolders } = countTreeItems(tree);
   elements.fileStats.textContent = `Files: ${appState.selected_files_count} selected of ${totalFiles} • Folders: ${totalFolders}`;
 
-  let statusMessage = appState.status_message;
-  if (statusMessage.startsWith("Scan complete.")) {
-    const totalItemsInTree = totalFiles + totalFolders;
-    statusMessage = `Scan complete. Found ${totalItemsInTree} visible items.`;
+  // LOGIK FÜR INDEXIERUNGS-INDIKATOR
+  const isIndexingInProgress =
+    is_scanning && !is_fully_scanned && tree.length > 0;
+  if (elements.indexingStatus) {
+    elements.indexingStatus.style.display = isIndexingInProgress
+      ? "flex"
+      : "none";
   }
-  document.querySelector(
-    ".status-text"
-  ).textContent = `Status: ${statusMessage}`;
+  if (elements.statusBar) {
+    elements.statusBar.classList.toggle("indexing", isIndexingInProgress);
+  }
 
   setupCommonPatterns();
   renderIgnorePatterns();
 
-  // Update search inputs state if the function exists (from eventListeners.js)
   if (window.updateSearchInputsState) {
     window.updateSearchInputsState();
   }
