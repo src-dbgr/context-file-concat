@@ -1,9 +1,8 @@
 //! Generates an ASCII representation of a directory tree.
 
+use super::FileItem;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-
-use super::{build_globset_from_patterns, FileItem};
 
 /// A utility struct for generating an ASCII directory tree.
 ///
@@ -19,13 +18,20 @@ impl TreeGenerator {
         root_path: &Path,
         ignore_patterns: &HashSet<String>,
     ) -> String {
-        // 1. Build a GlobSet from the tree-specific ignore patterns.
-        let (ignore_set, _) = build_globset_from_patterns(ignore_patterns);
+        // 1. Build a Matcher from the tree-specific ignore patterns.
+        let mut ignore_builder = ignore::gitignore::GitignoreBuilder::new(root_path);
+        for pattern in ignore_patterns {
+            ignore_builder.add_line(None, pattern).ok();
+        }
+        let matcher = match ignore_builder.build() {
+            Ok(m) => m,
+            Err(_) => return String::from("Error building tree ignore patterns."),
+        };
 
         // 2. Filter the provided files before building the tree.
         let filtered_files: Vec<&FileItem> = files
             .iter()
-            .filter(|file| !ignore_set.is_match(&file.path))
+            .filter(|file| !matcher.matched(&file.path, file.is_directory).is_ignore())
             .collect();
 
         let mut tree_map = HashMap::new();

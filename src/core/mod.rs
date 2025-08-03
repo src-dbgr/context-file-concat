@@ -6,7 +6,6 @@
 
 pub mod error;
 pub mod file_handler;
-pub mod ignore;
 pub mod scanner;
 pub mod search;
 pub mod tree_generator;
@@ -43,15 +42,12 @@ pub struct SearchFilter {
     pub extension: String,
     /// `true` if the filename query should be case-sensitive.
     pub case_sensitive: bool,
-    /// A set of `.gitignore`-style patterns to exclude files and directories.
-    pub ignore_patterns: std::collections::HashSet<String>,
 }
 
 // Re-export der ScanProgress aus scanner
 pub use scanner::ScanProgress;
 
 pub use file_handler::FileHandler;
-pub use ignore::build_globset_from_patterns;
 pub use scanner::DirectoryScanner;
 pub use search::SearchEngine;
 pub use tree_generator::TreeGenerator;

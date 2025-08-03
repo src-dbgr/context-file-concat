@@ -39,9 +39,9 @@ impl FileHandler {
             let tree =
                 TreeGenerator::generate_tree(&items_for_tree, root_path, &tree_ignore_patterns);
             content.push_str("# DIRECTORY TREE\n");
-            content.push_str("====================================================\n");
+            content.push_str("=====================\n");
             content.push_str(&tree);
-            content.push_str("====================================================\n\n");
+            content.push_str("=====================\n\n");
         }
 
         for file_path in selected_files {
@@ -63,7 +63,7 @@ impl FileHandler {
             };
 
             content.push_str(&format!("{display_path}\n"));
-            content.push_str("=====================FILE-START==================\n");
+            content.push_str("===FILE-START===\n");
 
             match Self::read_file_content(file_path) {
                 Ok(file_content) => {
@@ -77,7 +77,7 @@ impl FileHandler {
                     content.push_str("[BINARY OR UNREADABLE FILE - CONTENT SKIPPED]\n");
                 }
             }
-            content.push_str("----------------------FILE-END-------------------\n\n");
+            content.push_str("---FILE-END-----\n\n");
         }
         Ok(content)
     }

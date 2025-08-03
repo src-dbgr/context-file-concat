@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod events;
+pub mod filtering;
 mod helpers;
 pub mod proxy;
 pub mod state;
@@ -27,7 +28,6 @@ pub fn handle_ipc_message<P: EventProxy>(message: String, proxy: P, state: Arc<M
         // Clone the proxy for use in the async task
         let proxy = proxy.clone();
         tokio::spawn(async move {
-            // Now, clone the proxy *again* for each command call
             match msg.command.as_str() {
                 "selectDirectory" => commands::select_directory(proxy.clone(), state),
                 "clearDirectory" => commands::clear_directory(proxy.clone(), state),
@@ -39,6 +39,9 @@ pub fn handle_ipc_message<P: EventProxy>(message: String, proxy: P, state: Arc<M
                     commands::update_filters(msg.payload, proxy.clone(), state).await
                 }
                 "loadFilePreview" => commands::load_file_preview(msg.payload, proxy.clone(), state),
+                "loadDirectoryLevel" => {
+                    commands::load_directory_level(msg.payload, proxy.clone(), state)
+                }
                 "addIgnorePath" => commands::add_ignore_path(msg.payload, proxy.clone(), state),
                 "toggleSelection" => commands::toggle_selection(msg.payload, proxy.clone(), state),
                 "toggleDirectorySelection" => {
@@ -57,6 +60,8 @@ pub fn handle_ipc_message<P: EventProxy>(message: String, proxy: P, state: Arc<M
                 "pickOutputDirectory" => commands::pick_output_directory(proxy.clone(), state),
                 "importConfig" => commands::import_config(proxy.clone(), state),
                 "exportConfig" => commands::export_config(proxy.clone(), state),
+                "expand_all_fully" => commands::expand_all_fully(proxy.clone(), state),
+                "select_all_fully" => commands::select_all_fully(proxy.clone(), state),
                 _ => tracing::warn!("Unknown IPC command: {}", msg.command),
             }
         });

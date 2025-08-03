@@ -39,6 +39,7 @@ export const elements = {
   browseOutputDirBtn: document.getElementById("browse-output-dir"),
   outputFilename: document.getElementById("output-filename"), // Other
   statusBar: document.getElementById("status-bar"),
+  indexingStatus: document.getElementById("indexing-status"),
   resizer: document.getElementById("resizer"),
   fileListPanel: document.getElementById("file-list-panel"),
   previewPanel: document.getElementById("preview-panel"),

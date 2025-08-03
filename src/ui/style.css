@@ -1,23 +1,23 @@
 :root {
-  /* --- NEUE FARBPALETTE --- */
-  /* Neutrale Hintergründe für einen ruhigeren Look */
-  --bg-color-dark: #1e1f22; /* Dunkelster Hintergrund, fast schwarz */
-  --bg-color-medium: #2c2e33; /* Mittlerer Hintergrund für Panels etc. */
-  --bg-color-light: #3a3d44; /* Hellerer Hintergrund für UI-Elemente */
-  --border-color: #4a4d55; /* Dezente Trennlinien */
+  /* --- NEW COLOR PALETTE --- */
+  /* Neutral backgrounds for a calmer look */
+  --bg-color-dark: #1e1f22; /* Darkest background, almost black */
+  --bg-color-medium: #2c2e33; /* Medium background for panels etc. */
+  --bg-color-light: #3a3d44; /* Lighter background for UI elements */
+  --border-color: #4a4d55; /* Subtle dividing lines */
 
-  /* Textfarben für bessere Lesbarkeit */
-  --text-color: #d4d4d4; /* Heller, aber nicht reinweiß für weniger Anstrengung */
-  --text-color-muted: #9a9a9a; /* Gedämpftes Grau für sekundäre Informationen */
+  /* Text colors for better readability */
+  --text-color: #d4d4d4; /* Lighter, but not pure white for less strain */
+  --text-color-muted: #9a9a9a; /* Muted gray for secondary information */
 
-  /* Konsistente Akzentfarben */
-  --accent-color: #3a7fd5; /* Ein klares, professionelles Blau */
-  --green-accent: #4caf50; /* Standard "Erfolg"-Grün */
-  --yellow-accent: #ffc107; /* Standard "Warnung"-Gelb/Amber */
-  --orange-accent: #fd7e14; /* Standard "Info/Scan"-Orange */
-  --red-accent: #e54b4b; /* Klares, aber nicht zu aggressives Rot */
+  /* Consistent accent colors */
+  --accent-color: #3a7fd5; /* A clear, professional blue */
+  --green-accent: #4caf50; /* Standard "success" green */
+  --yellow-accent: #ffc107; /* Standard "warning" yellow/amber */
+  --orange-accent: #fd7e14; /* Standard "info/scan" orange */
+  --red-accent: #e54b4b; /* Clear, but not too aggressive red */
 
-  /* Button-Farben */
+  /* Button colors */
   --button-bg: #3a3d44;
   --button-hover-bg: #4a4d55;
   --icon-size: 16px;
@@ -42,6 +42,16 @@ html {
   width: 100vw;
   overflow: hidden;
   font-size: 14px;
+}
+
+body.sidebar-resizing {
+  cursor: ew-resize !important;
+  user-select: none;
+}
+
+body.vertical-resizing {
+  cursor: ns-resize !important;
+  user-select: none;
 }
 
 .container {
@@ -104,11 +114,6 @@ html {
   transition: border-right-color 0.2s ease;
 }
 
-body.sidebar-resizing {
-  cursor: ew-resize !important;
-  user-select: none;
-}
-
 .main-content {
   flex-grow: 1;
   display: flex;
@@ -164,11 +169,12 @@ body.sidebar-resizing {
   overflow: hidden;
 }
 
+/* Corrected Padding for File List Panel */
 .file-list-panel {
   height: 60%;
   display: flex;
   flex-direction: column;
-  padding: 10px;
+  padding: 10px 10px 10px 5px; /* top, right, bottom, left */
   min-height: 100px;
 }
 
@@ -180,7 +186,286 @@ body.sidebar-resizing {
   min-height: 100px;
 }
 
-.preview-panel .panel-header #preview-title {
+.resizer {
+  height: 1px;
+  background-color: var(--border-color);
+  cursor: ns-resize;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.resizer.resizing {
+  background-color: var(--accent-color);
+}
+
+.resizer::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  left: 0;
+  right: 0;
+  height: 18px;
+  cursor: ns-resize;
+  z-index: 1;
+}
+
+.bottom-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-color);
+  background-color: var(--bg-color-medium);
+  flex-shrink: 0;
+}
+
+.main-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 5px;
+}
+
+#status-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  background-color: var(--bg-color-dark);
+  border-top: 1px solid var(--border-color);
+  padding: 4px 10px;
+  font-size: 0.8em;
+  color: var(--text-color-muted);
+  height: 30px;
+  transition: all 0.3s ease;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+#status-bar.indexing {
+  border-top-color: var(--accent-color);
+  animation: statusPulse 2s ease-in-out infinite;
+}
+
+#status-bar.scanning {
+  background: linear-gradient(
+    90deg,
+    var(--bg-color-dark),
+    var(--bg-color-medium)
+  );
+  border-top-color: var(--accent-color);
+  animation: statusPulse 2s ease-in-out infinite;
+}
+
+.status-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-grow: 1;
+  text-align: left;
+}
+
+.indexing-status {
+  display: flex; /* Visibility controlled by JS */
+  align-items: center;
+  gap: 8px;
+  color: var(--text-color-muted);
+  flex-shrink: 0; /* Prevents the element from shrinking */
+}
+
+.indexing-status .spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent-color);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.status-output-settings {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.status-output-settings summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.9em;
+  color: var(--text-color-muted);
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+.status-output-settings summary:hover {
+  background-color: var(--bg-color-medium);
+  border-color: var(--border-color);
+  color: var(--text-color);
+}
+
+.status-output-settings .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.status-output-settings .settings-content {
+  position: fixed;
+  bottom: 35px;
+  left: 10px;
+  width: 450px; /* ENLARGED: Wider pop-up for more space */
+  background-color: var(--bg-color-medium);
+  border: 1px solid var(--border-color);
+  border-radius: 8px; /* Slightly larger radius for a softer look */
+  padding: 20px; /* ENLARGED: More internal padding */
+  display: flex;
+  flex-direction: column;
+  gap: 16px; /* ENLARGED: More space between rows */
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); /* Stronger shadow for better separation */
+  z-index: 99999 !important;
+}
+
+.status-output-settings[open]::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: transparent;
+  z-index: 99998;
+  pointer-events: none;
+}
+
+.status-output-settings .icon-closed {
+  display: inline-block;
+}
+
+.status-output-settings .icon-opened {
+  display: none;
+}
+
+.status-output-settings[open] .icon-closed {
+  display: none;
+}
+
+.status-output-settings[open] .icon-opened {
+  display: inline-block;
+}
+
+.status-output-settings[open] summary {
+  background-color: var(--bg-color-medium);
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.status-output-settings .setting-row {
+  display: flex;
+  align-items: center;
+  gap: 12px; /* Adjusted spacing within a row */
+}
+
+.status-output-settings .setting-row label {
+  white-space: nowrap;
+  font-weight: 500;
+  font-size: 1em; /* LARGER: Standard font size for good readability */
+  color: var(--text-color);
+}
+
+.status-output-settings .setting-row label[for] {
+  flex-shrink: 0;
+}
+
+.status-output-settings .setting-row label:not([for]) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.status-output-settings .setting-row input[type="text"] {
+  flex-grow: 1;
+  margin-bottom: 0;
+  padding: 10px 12px; /* More padding for a larger click area */
+  font-size: 0.9em; /* Larger font in the field */
+}
+
+.status-output-settings .setting-row button {
+  padding: 10px 16px;
+  font-size: 0.9em;
+}
+
+.panel {
+  background-color: var(--bg-color-light);
+  border-radius: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+}
+
+.ignore-patterns-panel {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  gap: 10px;
+  min-height: 40px;
+  overflow: hidden;
+}
+
+.panel-header h3 {
+  margin: 0;
+  font-size: 1em;
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.files-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  gap: 15px;
+}
+
+.files-title-section {
+  padding-left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.files-title-section h3 {
+  margin: 0;
+  font-size: 1em;
+  white-space: nowrap;
+}
+
+.stats {
+  font-size: 0.8em;
+  color: var(--text-color-muted);
+  white-space: nowrap;
+  text-align: right;
+}
+
+#preview-title {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -189,6 +474,17 @@ body.sidebar-resizing {
   overflow: hidden;
   margin: 0;
   width: 100%;
+}
+.preview-main-title {
+  font-size: 1em;
+  font-weight: normal;
+}
+
+.preview-stats {
+  font-size: 0.8em;
+  color: var(--text-color-muted);
+  font-weight: normal;
+  white-space: nowrap;
 }
 
 .preview-path-container {
@@ -240,296 +536,6 @@ body.sidebar-resizing {
   min-height: 32px;
 }
 
-.preview-panel .preview-stats {
-  font-size: 0.8em;
-  color: var(--text-color-muted);
-  font-weight: normal;
-  white-space: nowrap;
-}
-
-.resizer {
-  height: 1px;
-  background-color: var(--border-color);
-  cursor: ns-resize;
-  flex-shrink: 0;
-  transition: all 0.2s ease;
-  position: relative;
-}
-
-.resizer.resizing {
-  background-color: var(--accent-color);
-  transition: all 0.2s ease;
-}
-
-.resizer::before {
-  content: "";
-  position: absolute;
-  top: -8px;
-  left: 0;
-  right: 0;
-  height: 18px;
-  cursor: ns-resize;
-  z-index: 1;
-}
-
-body.vertical-resizing {
-  cursor: ns-resize !important;
-  user-select: none;
-}
-
-.bottom-panel {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 20px;
-  padding: 8px 12px;
-  border-top: 1px solid var(--border-color);
-  background-color: var(--bg-color-medium);
-  flex-shrink: 0;
-}
-
-.main-actions {
-  display: flex;
-  flex-direction: row;
-  gap: 5px;
-}
-
-/* ========================================================== */
-/* == START: DIESEN GESAMTEN BLOCK KOPIEREN UND ERSETZEN == */
-/* ========================================================== */
-
-/* NEUE/GEÄNDERTE STATUS BAR STYLES */
-#status-bar {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  width: 100%;
-  background-color: var(--bg-color-dark);
-  border-top: 1px solid var(--border-color);
-  padding: 4px 10px;
-  font-size: 0.8em;
-  color: var(--text-color-muted);
-  height: 30px;
-  transition: all 0.3s ease;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-}
-
-.status-text {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* NEUE OUTPUT SETTINGS IN STATUS BAR */
-.status-output-settings {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-}
-
-.status-output-settings summary {
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 0.9em;
-  color: var(--text-color-muted);
-  padding: 2px 6px;
-  border-radius: 4px;
-  transition: all 0.2s ease;
-  border: 1px solid transparent;
-  background: transparent;
-}
-
-.status-output-settings summary:hover {
-  background-color: var(--bg-color-medium);
-  border-color: var(--border-color);
-  color: var(--text-color);
-}
-
-.status-output-settings .icon {
-  width: 14px;
-  height: 14px;
-}
-
-.status-output-settings .settings-content {
-  position: fixed;
-  bottom: 35px;
-  left: 10px;
-  width: 450px; /* VERGRÖSSERT: Breiteres Pop-up für mehr Platz */
-  background-color: var(--bg-color-medium);
-  border: 1px solid var(--border-color);
-  border-radius: 8px; /* Etwas grösserer Radius für ein weicheres Aussehen */
-  padding: 20px; /* VERGRÖSSERT: Mehr Innenabstand */
-  display: flex;
-  flex-direction: column;
-  gap: 16px; /* VERGRÖSSERT: Mehr Abstand zwischen den Zeilen */
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); /* Stärkerer Schatten für bessere Abhebung */
-  z-index: 99999 !important;
-}
-
-/* Optional: Backdrop für bessere Sichtbarkeit */
-.status-output-settings[open]::before {
-  content: "";
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: transparent;
-  z-index: 99998;
-  pointer-events: none;
-}
-
-/* Dynamic Output Settings Icon in Status Bar */
-.status-output-settings .icon-closed {
-  display: inline-block;
-}
-
-.status-output-settings .icon-opened {
-  display: none;
-}
-
-.status-output-settings[open] .icon-closed {
-  display: none;
-}
-
-.status-output-settings[open] .icon-opened {
-  display: inline-block;
-}
-
-.status-output-settings[open] summary {
-  background-color: var(--bg-color-medium);
-  border-color: var(--accent-color);
-  color: var(--accent-color);
-}
-
-.status-output-settings .setting-row {
-  display: flex;
-  align-items: center;
-  gap: 12px; /* Angepasster Abstand innerhalb einer Zeile */
-}
-
-/* VERBESSERT: Labels sind jetzt grösser und fetter */
-.status-output-settings .setting-row label {
-  white-space: nowrap;
-  font-weight: 500;
-  font-size: 1em; /* GRÖSSER: Standard-Schriftgrösse für gute Lesbarkeit */
-  color: var(--text-color);
-}
-
-/* VERBESSERT: Checkbox-Labels sind besser ausgerichtet */
-.status-output-settings .setting-row label[for] {
-  flex-shrink: 0;
-}
-
-.status-output-settings .setting-row label:not([for]) {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-}
-
-/* VERBESSERT: Textfelder sind höher und haben eine grössere Schrift */
-.status-output-settings .setting-row input[type="text"] {
-  flex-grow: 1;
-  margin-bottom: 0;
-  padding: 10px 12px; /* Mehr Innenabstand für eine grössere Klickfläche */
-  font-size: 0.9em; /* Grössere Schrift im Feld */
-}
-
-/* VERBESSERT: Der "Browse"-Button ist ebenfalls grösser */
-.status-output-settings .setting-row button {
-  padding: 10px 16px;
-  font-size: 0.9em;
-}
-
-/* ======================================================== */
-/* == ENDE: DIESEN GESAMTEN BLOCK KOPIEREN UND ERSETZEN == */
-/* ======================================================== */
-
-.panel {
-  background-color: var(--bg-color-light);
-  border-radius: 8px;
-  padding: 12px;
-  border: 1px solid var(--border-color);
-}
-
-.ignore-patterns-panel {
-  flex-grow: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.panel-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
-  gap: 10px;
-  min-height: 40px;
-  overflow: hidden;
-}
-
-.panel-header h3 {
-  margin: 0;
-  font-size: 1em;
-  white-space: nowrap;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.files-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
-  gap: 15px;
-}
-
-.files-title-section {
-  display: flex;
-  align-items: center;
-  gap: 15px;
-}
-
-.files-title-section h3 {
-  margin: 0;
-  font-size: 1em;
-  white-space: nowrap;
-}
-
-.stats {
-  font-size: 0.8em;
-  color: var(--text-color-muted);
-  white-space: nowrap;
-  text-align: right;
-}
-
-#preview-title {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.preview-main-title {
-  font-size: 1em;
-  font-weight: normal;
-}
-
-.preview-stats {
-  font-size: 0.8em;
-  color: var(--text-color-muted);
-  font-weight: normal;
-  white-space: nowrap;
-}
-
 input[type="text"] {
   width: 100%;
   padding: 8px 12px;
@@ -548,6 +554,19 @@ input[type="text"]:focus {
   box-shadow: 0 0 0 2px rgba(58, 127, 213, 0.25);
 }
 
+input[type="text"]:disabled {
+  background-color: var(--bg-color-dark);
+  color: var(--text-color-muted);
+  border-color: var(--border-color);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+input[type="text"]:disabled::placeholder {
+  color: var(--text-color-muted);
+  opacity: 0.8;
+}
+
 .input-group {
   display: flex;
   gap: 8px;
@@ -558,7 +577,6 @@ input[type="text"]:focus {
   flex-grow: 1;
 }
 
-/* Message Display Component - for non-interactive messages */
 .message-display {
   display: flex;
   flex-direction: column;
@@ -593,27 +611,6 @@ input[type="text"]:focus {
   line-height: 1.4;
 }
 
-/* Enhanced file tree container to properly center message displays */
-.file-tree-container:has(.message-display),
-.file-tree-container:has(.scan-progress-container) {
-  justify-content: center;
-  align-items: center;
-}
-
-/* Disabled state styles for search inputs */
-input[type="text"]:disabled {
-  background-color: var(--bg-color-dark);
-  color: var(--text-color-muted);
-  border-color: var(--border-color);
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-input[type="text"]:disabled::placeholder {
-  color: var(--text-color-muted);
-  opacity: 0.8;
-}
-
 button {
   background-color: var(--button-bg);
   color: var(--text-color);
@@ -644,6 +641,11 @@ button:disabled {
   pointer-events: none;
 }
 
+button:disabled:hover {
+  transform: none;
+  background-color: var(--button-bg);
+}
+
 .button-scanning {
   background-color: var(--orange-accent) !important;
   color: var(--bg-color-dark) !important;
@@ -651,33 +653,9 @@ button:disabled {
   animation: scanPulse 2s ease-in-out infinite;
 }
 
-button:disabled:hover {
-  transform: none;
-  background-color: var(--button-bg);
-}
-
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-::-webkit-scrollbar-track {
-  background: var(--bg-color-dark);
-  border-radius: 4px;
-}
-::-webkit-scrollbar-thumb {
-  background: var(--border-color);
-  border-radius: 4px;
-  border: 1px solid var(--bg-color-dark);
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--button-bg);
-}
-::-webkit-scrollbar-corner {
-  background: var(--bg-color-dark);
-}
-
-#copy-btn {
-  min-width: 50px;
+#copy-btn,
+#clear-preview-btn {
+  width: 80px;
   text-align: center;
   font-weight: 500;
 }
@@ -689,7 +667,7 @@ button:disabled:hover {
 .button-cta {
   background-color: var(--green-accent);
   border-color: var(--green-accent);
-  color: #ffffff; /* Weißer Text für besseren Kontrast auf Grün */
+  color: #ffffff; /* White text for better contrast on green */
   font-weight: 600;
 }
 
@@ -698,19 +676,6 @@ button:disabled:hover {
   border-color: #45a049;
 }
 
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.7;
-    transform: scale(1.15);
-  }
-}
-
-/* Class for the red cancel button style */
 .button-cancel-action {
   background-color: var(--red-accent);
   border-color: var(--red-accent);
@@ -721,19 +686,33 @@ button:disabled:hover {
   border-color: #d43f3f;
 }
 
-.is-generating .icon-lightning-light {
-  stroke: none;
+.button-secondary {
+  background-color: transparent;
+  border-color: var(--button-bg);
 }
 
-.is-generating .icon-lightning-light path {
-  fill: var(--yellow-accent);
+.button-group {
+  display: flex;
+  gap: 6px;
+}
+.button-group button {
+  font-size: 0.85em;
+  padding: 6px 12px;
+  min-height: 32px;
+}
+
+/* --- Corrected Styling for "Generate/Concat/Cancel" Button --- */
+button#generate-btn {
+  min-width: 120px;
+  transition: all 0.2s ease-in-out;
 }
 
 #generate-btn.is-generating {
   background-color: var(--button-bg);
   border-color: var(--border-color);
-  width: 120px;
-  transition: background-color 0.2s ease-in-out, border-color 0.2s ease-in-out;
+  width: auto; /* Use auto width for flexibility */
+  padding-left: 16px;
+  padding-right: 16px;
 }
 
 #generate-btn.is-generating .generating-content {
@@ -764,22 +743,18 @@ button:disabled:hover {
 }
 
 #generate-btn.is-generating:hover .cancel-content {
-  display: flex;
-}
-
-.button-secondary {
-  background-color: transparent;
-  border-color: var(--button-bg);
-}
-
-.button-group {
-  display: flex;
+  display: flex; /* Explicitly define flex for proper alignment */
+  align-items: center;
+  justify-content: center;
   gap: 6px;
 }
-.button-group button {
-  font-size: 0.85em;
-  padding: 6px 12px;
-  min-height: 32px;
+
+.is-generating .icon-lightning-light {
+  stroke: none;
+}
+
+.is-generating .icon-lightning-light path {
+  fill: var(--yellow-accent);
 }
 
 .current-patterns {
@@ -824,12 +799,12 @@ button:disabled:hover {
 
 .remove-pattern-btn:hover {
   color: var(--red-accent);
-  background-color: rgba(229, 75, 75, 0.15); /* Angepasst an neues Rot */
+  background-color: rgba(229, 75, 75, 0.15);
 }
 
 .current-pattern-chip.active-pattern {
   border-color: var(--green-accent);
-  background-color: rgba(76, 175, 80, 0.15); /* Angepasst an neues Grün */
+  background-color: rgba(76, 175, 80, 0.15);
   font-weight: 500;
   color: var(--green-accent);
 }
@@ -900,13 +875,13 @@ button:disabled:hover {
   padding: 6px 12px;
   background-color: var(--red-accent);
   border-color: var(--red-accent);
-  color: #ffffff; /* Weißer Text für Kontrast auf Rot */
+  color: #ffffff; /* White text for contrast on red */
   min-height: 32px;
   font-weight: 500;
 }
 
 #delete-all-patterns-btn:hover:not(:disabled) {
-  background-color: #d43f3f; /* Dunkleres Rot für Hover */
+  background-color: #d43f3f; /* Darker red on hover */
   border-color: #d43f3f;
 }
 
@@ -926,7 +901,9 @@ button:disabled:hover {
   flex-direction: column;
 }
 
-/* Nur zentrieren wenn AUSSCHLIESSLICH der Placeholder vorhanden ist */
+/* Center content only when it's the sole child */
+.file-tree-container:has(.message-display),
+.file-tree-container:has(.scan-progress-container),
 .file-tree-container:has(.placeholder:only-child) {
   justify-content: center;
   align-items: center;
@@ -953,20 +930,64 @@ button:disabled:hover {
   font-weight: 600;
 }
 
-.tree .file-name {
-  white-space: nowrap;
-  min-width: 0;
+/* --- Corrected Custom Checkbox Styling --- */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  background-color: var(--bg-color-dark);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  position: relative;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+  margin-right: 6px;
 }
 
-.tree .file-name.is-match {
-  color: var(--yellow-accent);
-  font-weight: bold;
+input[type="checkbox"]:hover {
+  border-color: var(--accent-color);
 }
 
+input[type="checkbox"]:checked {
+  background-color: var(--accent-color);
+  border-color: var(--button-bg);
+}
+
+input[type="checkbox"]:checked::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100%;
+  height: 100%;
+  transform: translate(-50%, -50%);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'%3E%3C/polyline%3E%3C/svg%3E");
+  background-size: 75%;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+input[type="checkbox"][data-indeterminate="true"] {
+  background-color: #3a7fd5;
+  border-color: #3a7fd5;
+}
+
+input[type="checkbox"][data-indeterminate="true"]::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 60%;
+  height: 2px;
+  transform: translate(-50%, -50%);
+  background-color: white;
+  border-radius: 1px;
+}
+
+/* --- START: Virtualized Tree Styling & Fixes --- */
 .tree {
   min-width: max-content;
 }
@@ -982,20 +1003,22 @@ button:disabled:hover {
   padding-left: 21px;
 }
 
+.tree summary {
+  list-style: none; /* remove disclosure triangle */
+  cursor: pointer;
+}
+
+/* Corrected padding to reduce left-side whitespace */
 .tree summary,
 .tree .tree-item-container {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 6px;
+  padding: 3px 2px; /* reduced horizontal padding */
   border-radius: 4px;
   min-width: max-content;
   transition: background-color 0.2s ease;
-}
-
-.tree summary {
-  list-style: none;
-  cursor: pointer;
+  width: 100%;
+  overflow: hidden; /* Robust container for flex items */
 }
 
 .tree summary:hover,
@@ -1003,39 +1026,59 @@ button:disabled:hover {
   background-color: var(--bg-color-light);
 }
 
-.tree summary::before {
-  content: "▶";
-  display: inline-block;
-  margin-right: 5px;
-  font-size: 0.7em;
-  transition: transform 0.1s linear;
-  flex-shrink: 0;
-  width: 0.6em;
-  color: var(--text-color-muted);
+.tree .tree-item-container.previewed,
+.tree .tree-item-container.previewed:hover {
+  background-color: rgba(58, 127, 213, 0.2);
+  border: 1px solid var(--accent-color);
+  border-radius: 4px;
 }
-.tree details[open] > summary::before {
+
+/* Fixed width for arrows and spacers for alignment */
+.arrow,
+.spacer {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Arrow symbol styling */
+.arrow::before {
+  content: "▶";
+  font-size: 0.8em;
+  color: var(--text-color-muted);
+  transition: transform 0.1s linear;
+}
+
+.arrow.expanded::before {
   transform: rotate(90deg);
 }
-.tree .tree-item-container::before {
-  content: "";
-  display: inline-block;
-  width: 0.4em;
-  margin-right: 6px;
-  flex-shrink: 0;
+
+/* Container for file name and ignore button */
+.name-and-button {
+  flex: 1; /* Takes up available space */
+  min-width: 0; /* Crucial for allowing flex shrinking */
+  display: flex;
+  align-items: center;
+  overflow: hidden; /* Hide overflow within this group */
 }
-.tree input[type="checkbox"] {
-  margin: 0;
-  flex-shrink: 0;
-  accent-color: var(--accent-color);
-}
-.file-name {
+
+/* Flexible file name that can shrink and show ellipsis */
+.tree .file-name {
+  flex-grow: 0;
+  flex-shrink: 1;
+  text-overflow: ellipsis;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
-.file-name.is-match {
+
+.tree .file-name.is-match {
   color: var(--yellow-accent);
   font-weight: bold;
 }
@@ -1043,15 +1086,14 @@ button:disabled:hover {
 .file-size {
   font-size: 0.8em;
   color: var(--text-color-muted);
-  margin-left: auto;
   padding-left: 10px;
   flex-shrink: 0;
+  margin-left: auto; /* Pushes file size to the end */
 }
 
 .ignore-btn {
   all: unset;
   cursor: pointer;
-  margin-left: 6px;
   padding: 2px 6px;
   border-radius: 4px;
   flex-shrink: 0;
@@ -1063,6 +1105,7 @@ button:disabled:hover {
   display: flex;
   align-items: center;
   justify-content: center;
+  margin-left: 8px; /* Space between name and button */
 }
 
 .ignore-btn .ignore-icon {
@@ -1074,6 +1117,27 @@ button:disabled:hover {
   color: var(--text-color);
 }
 
+.virtual-scroll-container {
+  position: relative;
+  overflow-y: auto;
+  height: 100%;
+  width: 100%;
+}
+
+.virtual-scroll-sizer {
+  position: relative;
+  width: 100%;
+  height: 0; /* Set by JS */
+}
+
+.virtual-scroll-item {
+  position: absolute;
+  width: 100%;
+  /* height and top set by JS */
+}
+
+/* --- END: Virtualized Tree Styling & Fixes --- */
+
 #editor-container {
   flex-grow: 1;
   width: 100%;
@@ -1081,12 +1145,7 @@ button:disabled:hover {
 }
 
 .search-highlight {
-  background-color: rgba(
-    255,
-    193,
-    7,
-    0.3
-  ) !important; /* Angepasst an neues Gelb */
+  background-color: rgba(255, 193, 7, 0.3) !important;
   border: 1px solid rgba(255, 193, 7, 0.7) !important;
   border-radius: 2px !important;
   box-shadow: 0 0 3px rgba(255, 193, 7, 0.5) !important;
@@ -1244,20 +1303,10 @@ button:disabled:hover {
 }
 
 #scan-skipped-count {
-  /* NEU: Kein grelles Gelb mehr. Die Farbe ist jetzt gedämpft und zur Differenzierung kursiv. */
+  /* No bright yellow. Color is now muted and italic for differentiation. */
   color: var(--text-color-muted);
   font-weight: 500;
   font-style: italic;
-}
-
-#status-bar.scanning {
-  background: linear-gradient(
-    90deg,
-    var(--bg-color-dark),
-    var(--bg-color-medium)
-  );
-  border-top-color: var(--accent-color);
-  animation: statusPulse 2s ease-in-out infinite;
 }
 
 .placeholder {
@@ -1339,7 +1388,19 @@ button:disabled:hover {
   }
 }
 
-/* NEU: Dezenterer Puls-Effekt */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.15);
+  }
+}
+
+/* More subtle pulse effect */
 @keyframes scanPulseSubtle {
   0%,
   100% {
@@ -1392,6 +1453,26 @@ button:disabled:hover {
   }
 }
 
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-color-dark);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+  border: 1px solid var(--bg-color-dark);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--button-bg);
+}
+::-webkit-scrollbar-corner {
+  background: var(--bg-color-dark);
+}
+
 @media (max-width: 768px) {
   .scan-progress-header {
     flex-direction: column;
@@ -1413,11 +1494,4 @@ button:disabled:hover {
   #scan-current-path {
     width: 100%;
   }
-}
-
-.tree .tree-item-container.previewed,
-.tree .tree-item-container.previewed:hover {
-  background-color: rgba(58, 127, 213, 0.2); /* Angepasst an neues Blau */
-  border: 1px solid var(--accent-color);
-  border-radius: 4px;
 }

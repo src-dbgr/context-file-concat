@@ -51,7 +51,7 @@ mod helpers {
             let config = Self::create_clean_test_config(root_path.clone());
             let mut state = AppState::default();
             state.config = config;
-            state.current_path = root_path.to_string_lossy().to_string();
+            // current_path is set by start_scan_on_path, so we leave it empty here.
 
             Self {
                 state: Arc::new(Mutex::new(state)),
@@ -63,13 +63,10 @@ mod helpers {
         }
 
         /// Creates a clean test configuration without production ignore patterns.
-        ///
-        /// This ensures that test files are not filtered out by default patterns
-        /// and allows tests to verify specific filtering behavior in isolation.
         fn create_clean_test_config(root_path: PathBuf) -> AppConfig {
             AppConfig {
                 last_directory: Some(root_path),
-                ignore_patterns: HashSet::new(), // Start with empty patterns for clean tests
+                ignore_patterns: HashSet::new(), // Start with empty patterns
                 case_sensitive_search: false,
                 remove_empty_directories: true,
                 ..Default::default()
@@ -94,17 +91,34 @@ mod helpers {
             self.create_file("docs/guide.txt", "User guide content");
         }
 
-        /// Waits for the background scan to complete by listening for the final event.
-        pub async fn wait_for_scan_completion(&mut self) {
+        /// Waits for the shallow scan phase to complete.
+        pub async fn wait_for_shallow_scan_completion(&mut self) {
             loop {
                 match tokio::time::timeout(Duration::from_secs(5), self.event_rx.recv()).await {
                     Ok(Some(UserEvent::StateUpdate(ui_state))) => {
-                        if !ui_state.is_scanning {
-                            return; // Scan is complete
+                        // The shallow scan is done when we get a state update
+                        // where scanning is still true, but the file list is not empty.
+                        if ui_state.is_scanning && !ui_state.tree.is_empty() {
+                            return;
                         }
                     }
                     Ok(Some(_)) => { /* Ignore other events like ScanProgress */ }
-                    _ => panic!("Scan did not complete within timeout or channel closed"),
+                    _ => panic!("Shallow scan did not complete within timeout or channel closed"),
+                }
+            }
+        }
+
+        /// Waits for the entire background scan to complete.
+        pub async fn wait_for_full_scan_completion(&mut self) {
+            loop {
+                match tokio::time::timeout(Duration::from_secs(10), self.event_rx.recv()).await {
+                    Ok(Some(UserEvent::StateUpdate(ui_state))) => {
+                        if !ui_state.is_scanning {
+                            return; // Full scan is complete
+                        }
+                    }
+                    Ok(Some(_)) => { /* Ignore other events */ }
+                    _ => panic!("Full scan did not complete within timeout or channel closed"),
                 }
             }
         }
@@ -112,108 +126,140 @@ mod helpers {
 }
 
 #[tokio::test]
-async fn test_scan_and_initial_state() {
+async fn test_proactive_scan_loads_shallow_then_deep() {
     // --- ARRANGE ---
     let mut harness = helpers::TestHarness::new();
-    harness.setup_basic_project();
+    harness.setup_basic_project(); // Creates src/main.rs, docs/guide.txt, etc.
 
     // --- ACT ---
+    // 1. Start the proactive scan
     app::tasks::start_scan_on_path(
         harness.root_path.clone(),
         harness.proxy.clone(),
         harness.state.clone(),
+        false,
     );
-    harness.wait_for_scan_completion().await;
 
-    // --- ASSERT ---
-    let state = harness.state.lock().unwrap();
-    assert!(!state.is_scanning, "Scan should be finished");
+    // 2. Wait for the shallow scan to finish and update the UI
+    harness.wait_for_shallow_scan_completion().await;
 
-    let visible_paths: HashSet<_> = state
-        .filtered_file_list
-        .iter()
-        .map(|item| {
-            item.path
-                .strip_prefix(&harness.root_path)
-                .unwrap()
-                .to_path_buf()
-        })
-        .collect();
+    // --- ASSERT (Phase 1: Shallow Scan) ---
+    {
+        let state = harness.state.lock().unwrap();
+        assert!(
+            state.is_scanning,
+            "Scanning should still be active in the background"
+        );
+        assert!(
+            !state.is_fully_scanned,
+            "is_fully_scanned should be false after shallow scan"
+        );
 
-    // Verify expected files are present (no ignore patterns active)
-    assert!(visible_paths.contains(&PathBuf::from("src/main.rs")));
-    assert!(visible_paths.contains(&PathBuf::from("src/lib.rs")));
-    assert!(visible_paths.contains(&PathBuf::from("README.md")));
-    assert!(visible_paths.contains(&PathBuf::from("Cargo.toml")));
-    assert!(visible_paths.contains(&PathBuf::from("docs/guide.txt")));
+        let visible_paths: HashSet<_> = state
+            .full_file_list
+            .iter()
+            .map(|item| {
+                item.path
+                    .strip_prefix(&harness.root_path)
+                    .unwrap()
+                    .to_path_buf()
+            })
+            .collect();
+
+        // Only top-level items should be present
+        assert!(visible_paths.contains(&PathBuf::from("src")));
+        assert!(visible_paths.contains(&PathBuf::from("docs")));
+        assert!(visible_paths.contains(&PathBuf::from("README.md")));
+        assert!(visible_paths.contains(&PathBuf::from("Cargo.toml")));
+
+        // Nested items should NOT be present yet
+        assert!(!visible_paths.contains(&PathBuf::from("src/main.rs")));
+        assert!(!visible_paths.contains(&PathBuf::from("docs/guide.txt")));
+
+        assert_eq!(
+            visible_paths.len(),
+            4,
+            "Should only have 4 top-level items after shallow scan"
+        );
+    }
+
+    // 3. Wait for the deep "indexing" scan to finish
+    harness.wait_for_full_scan_completion().await;
+
+    // --- ASSERT (Phase 2: Deep Scan) ---
+    {
+        let state = harness.state.lock().unwrap();
+        assert!(!state.is_scanning, "Scanning should be finished");
+        assert!(
+            state.is_fully_scanned,
+            "is_fully_scanned should be true after deep scan"
+        );
+
+        let all_paths: HashSet<_> = state
+            .full_file_list
+            .iter()
+            .map(|item| {
+                item.path
+                    .strip_prefix(&harness.root_path)
+                    .unwrap()
+                    .to_path_buf()
+            })
+            .collect();
+
+        // All items, including nested ones, should now be present
+        assert!(all_paths.contains(&PathBuf::from("src/main.rs")));
+        assert!(all_paths.contains(&PathBuf::from("src/lib.rs")));
+        assert!(all_paths.contains(&PathBuf::from("docs/guide.txt")));
+
+        // Total items: src, docs, README.md, Cargo.toml, src/main.rs, src/lib.rs, docs/guide.txt
+        assert_eq!(
+            all_paths.len(),
+            7,
+            "Should have all 7 project items after deep scan"
+        );
+    }
 }
 
 #[tokio::test]
-async fn test_ignore_patterns_are_applied_on_scan() {
+async fn test_expand_all_fully_after_scan() {
     // --- ARRANGE ---
     let mut harness = helpers::TestHarness::new();
     harness.setup_basic_project();
 
-    // Add specific ignore patterns to test
-    {
-        let mut state = harness.state.lock().unwrap();
-        state.config.ignore_patterns.insert("src/".to_string());
-        state.config.ignore_patterns.insert("*.md".to_string());
-    }
-
-    // --- ACT ---
+    // Run the full proactive scan and wait for it to complete
     app::tasks::start_scan_on_path(
         harness.root_path.clone(),
         harness.proxy.clone(),
         harness.state.clone(),
+        false,
     );
-    harness.wait_for_scan_completion().await;
+    harness.wait_for_full_scan_completion().await;
+
+    // --- ACT ---
+    // Now that the scan is complete, call the simplified command
+    app::commands::expand_all_fully(harness.proxy.clone(), harness.state.clone());
+
+    // The command is synchronous, so we can check the state immediately.
 
     // --- ASSERT ---
     let state = harness.state.lock().unwrap();
+    assert!(state.is_fully_scanned);
 
-    let visible_paths: HashSet<_> = state
-        .filtered_file_list
-        .iter()
-        .map(|item| {
-            item.path
-                .strip_prefix(&harness.root_path)
-                .unwrap()
-                .to_path_buf()
-        })
-        .collect();
+    // All directories ("src" and "docs") should be in the expanded set
+    let src_path = harness.root_path.join("src");
+    let docs_path = harness.root_path.join("docs");
 
-    // Verify that ignored patterns are not present
     assert!(
-        !visible_paths.contains(&PathBuf::from("src/main.rs")),
-        "src/main.rs should be filtered out by src/ pattern"
+        state.expanded_dirs.contains(&src_path),
+        "src directory should be expanded"
     );
     assert!(
-        !visible_paths.contains(&PathBuf::from("src/lib.rs")),
-        "src/lib.rs should be filtered out by src/ pattern"
+        state.expanded_dirs.contains(&docs_path),
+        "docs directory should be expanded"
     );
-    assert!(
-        !visible_paths.contains(&PathBuf::from("README.md")),
-        "README.md should be filtered out by *.md pattern"
-    );
-
-    // Verify that non-ignored files are still present
-    assert!(
-        visible_paths.contains(&PathBuf::from("Cargo.toml")),
-        "Cargo.toml should not be filtered out"
-    );
-    assert!(
-        visible_paths.contains(&PathBuf::from("docs/guide.txt")),
-        "docs/guide.txt should not be filtered out"
-    );
-
-    // Verify that ignore patterns were activated
-    assert!(
-        state.active_ignore_patterns.contains("src/"),
-        "src/ ignore pattern should be active"
-    );
-    assert!(
-        state.active_ignore_patterns.contains("*.md"),
-        "*.md ignore pattern should be active"
+    assert_eq!(
+        state.expanded_dirs.len(),
+        2,
+        "There should be exactly 2 expanded directories"
     );
 }

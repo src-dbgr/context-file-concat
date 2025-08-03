@@ -18,10 +18,6 @@ pub enum CoreError {
     #[error("Task join error: {0}")]
     Join(#[from] tokio::task::JoinError),
 
-    /// Represents an error during the parsing or building of a glob pattern.
-    #[error("Invalid glob pattern: {0}")]
-    GlobPattern(#[from] globset::Error),
-
     /// Represents a path that was expected to be a directory but was not.
     #[allow(dead_code)]
     #[error("Path is not a valid directory: {0}")]
