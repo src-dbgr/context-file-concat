@@ -1,6 +1,6 @@
 [package]
 name = "context-file-concat"
-version = "0.1.1"  # Start with 0.1.0 as requested
+version = "0.2.0"  # Start with 0.1.0 as requested
 edition = "2021"
 description = "Context File Concatenator - Intelligently select, filter, and combine project files for LLM context"
 authors = ["src dbgr"]
@@ -48,7 +48,7 @@ strip = true  # Remove debug symbols for smaller binaries
 [package.metadata.bundle]
 name = "Context File Concatenator"
 identifier = "io.devsam.contextfileconcat"
-version = "0.1.1"
+version = "0.2.0"
 short_description = "Context File Concatenator for LLMs"
 long_description = "A desktop application to intelligently select, filter, and combine project files into a single text file optimized for Large Language Models."
 icon = ["assets/icons/icon.icns"]  # macOS
