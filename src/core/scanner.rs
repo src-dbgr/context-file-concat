@@ -43,6 +43,7 @@ impl DirectoryScanner {
     pub async fn scan_directory_with_progress<F>(
         &self,
         root_path: &Path,
+        max_depth: Option<usize>,
         cancel_flag: Arc<AtomicBool>,
         progress_callback: F,
     ) -> Result<(Vec<FileItem>, HashSet<String>), CoreError>
@@ -76,6 +77,9 @@ impl DirectoryScanner {
                     .collect();
 
             let mut walker_builder = WalkBuilder::new(&root_path_buf);
+            if let Some(depth) = max_depth {
+                walker_builder.max_depth(Some(depth));
+            }
             walker_builder
                 .hidden(false)
                 .parents(false)

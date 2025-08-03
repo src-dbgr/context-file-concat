@@ -4,6 +4,7 @@ import { state } from "../state.js";
 import { post } from "../services/backend.js";
 import { generateStatsString, splitPathForDisplay } from "../utils.js";
 import { MONACO_VS_PATH } from "../config.js";
+import { renderUI } from "./renderer.js";
 
 export function initEditor(onFinished) {
   require.config({ paths: { vs: MONACO_VS_PATH } });
@@ -25,7 +26,24 @@ export function showPreviewContent(content, language, searchTerm, path) {
   const editor = state.getEditor();
   if (!editor) return;
 
+  const oldPreviewedPath = state.getPreviewedPath();
+
   state.setPreviewedPath(path);
+
+  if (oldPreviewedPath) {
+    const oldElement = document.querySelector(
+      `.file-item[data-path="${oldPreviewedPath}"]`
+    );
+    if (oldElement) {
+      oldElement.classList.remove("previewed");
+    }
+  }
+
+  const newElement = document.querySelector(`.file-item[data-path="${path}"]`);
+  if (newElement) {
+    newElement.classList.add("previewed");
+  }
+
   editor.setValue(content);
   const model = editor.getModel();
 

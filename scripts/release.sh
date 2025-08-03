@@ -68,10 +68,6 @@ if [ "$DRY_RUN" = false ]; then
     print_status "Updating Cargo.toml version to $VERSION"
     sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
     rm Cargo.toml.bak
-    
-    # Update version in bundle metadata as well
-    sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
-    rm Cargo.toml.bak 2>/dev/null || true
 fi
 
 # Run tests to ensure everything works

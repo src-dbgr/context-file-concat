@@ -4,6 +4,7 @@ import {
   initEditor,
   showPreviewContent,
   showGeneratedContent,
+  clearPreview,
 } from "./modules/editor.js";
 import { renderUI } from "./modules/renderer.js";
 import { setupEventListeners } from "./modules/eventListeners.js";
@@ -14,15 +15,33 @@ import { setupResizerListeners } from "./modules/resizer.js";
 //  API for the Rust backend (global window.* functions)
 // ==================================================================
 window.render = (newState) => {
+  const previousState = state.get(); // Get the state *before* it's updated
+
+  const scrollContainer = document.querySelector(".virtual-scroll-container");
+  const scrollPosition = scrollContainer ? scrollContainer.scrollTop : 0;
+
   const wasScanning = state.get().is_scanning;
-  const previousPath = state.get().current_path;
 
   state.set(newState);
-  renderUI();
+  renderUI(); // Render the declarative parts of the UI
+
+  const newScrollContainer = document.querySelector(
+    ".virtual-scroll-container"
+  );
+  if (newScrollContainer) {
+    requestAnimationFrame(() => {
+      newScrollContainer.scrollTop = scrollPosition;
+    });
+  }
+
+  // Detect a hard reset (e.g., after config import or "Clear Directory").
+  if (previousState.current_path && !newState.current_path) {
+    clearPreview();
+  }
 
   // Update search inputs state when directory selection changes
   if (
-    previousPath !== newState.current_path &&
+    previousState.current_path !== newState.current_path &&
     window.updateSearchInputsState
   ) {
     window.updateSearchInputsState();

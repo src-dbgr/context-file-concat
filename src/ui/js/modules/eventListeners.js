@@ -2,8 +2,9 @@ import { elements } from "../dom.js";
 import { post } from "../services/backend.js";
 import { state } from "../state.js";
 import { clearPreview } from "./editor.js";
-import { copyToClipboard } from "./clipboard.js";
+import { handleCopy } from "./clipboard.js";
 import { renderUI } from "./renderer.js";
+import { getUndoManagerForElement } from "./undo.js";
 
 let filterDebounceTimeout;
 
@@ -22,6 +23,29 @@ function onFilterChange() {
       contentSearchQuery: elements.contentSearchQuery.value,
     });
   }, 300);
+}
+
+function shouldEnableSearch() {
+  const appState = state.get();
+  return !!(appState.current_path && !appState.is_scanning);
+}
+
+function updateSearchInputsState() {
+  const searchEnabled = shouldEnableSearch();
+
+  elements.searchQuery.disabled = !searchEnabled;
+  elements.extensionFilter.disabled = !searchEnabled;
+  elements.contentSearchQuery.disabled = !searchEnabled;
+
+  if (!searchEnabled) {
+    elements.searchQuery.placeholder = "Select a directory first...";
+    elements.extensionFilter.placeholder = "Select a directory first...";
+    elements.contentSearchQuery.placeholder = "Select a directory first...";
+  } else {
+    elements.searchQuery.placeholder = "Search filenames...";
+    elements.extensionFilter.placeholder = "Filter by extension (e.g., rs, py)";
+    elements.contentSearchQuery.placeholder = "Search text inside files...";
+  }
 }
 
 function onConfigChange() {
@@ -53,36 +77,6 @@ function addIgnorePattern() {
   }
 }
 
-/**
- * Validates if search operations should be enabled based on current state
- * @returns {boolean} True if search should be enabled
- */
-function shouldEnableSearch() {
-  const appState = state.get();
-  return !!(appState.current_path && !appState.is_scanning);
-}
-
-/**
- * Updates the UI state of search inputs based on whether search should be enabled
- */
-function updateSearchInputsState() {
-  const searchEnabled = shouldEnableSearch();
-
-  elements.searchQuery.disabled = !searchEnabled;
-  elements.extensionFilter.disabled = !searchEnabled;
-  elements.contentSearchQuery.disabled = !searchEnabled;
-
-  if (!searchEnabled) {
-    elements.searchQuery.placeholder = "Select a directory first...";
-    elements.extensionFilter.placeholder = "Select a directory first...";
-    elements.contentSearchQuery.placeholder = "Select a directory first...";
-  } else {
-    elements.searchQuery.placeholder = "Search filenames...";
-    elements.extensionFilter.placeholder = "Filter by extension (e.g., rs, py)";
-    elements.contentSearchQuery.placeholder = "Search text inside files...";
-  }
-}
-
 export function setupEventListeners() {
   elements.selectDirBtn.addEventListener("click", () =>
     post("selectDirectory")
@@ -95,11 +89,13 @@ export function setupEventListeners() {
   elements.exportConfigBtn.addEventListener("click", () =>
     post("exportConfig")
   );
+
   elements.selectAllBtn.addEventListener("click", () => post("selectAll"));
-  elements.deselectAllBtn.addEventListener("click", () => post("deselectAll"));
   elements.expandAllBtn.addEventListener("click", () =>
     post("expandCollapseAll", true)
   );
+
+  elements.deselectAllBtn.addEventListener("click", () => post("deselectAll"));
   elements.collapseAllBtn.addEventListener("click", () =>
     post("expandCollapseAll", false)
   );
@@ -118,9 +114,11 @@ export function setupEventListeners() {
     post("pickOutputDirectory")
   );
   elements.clearPreviewBtn.addEventListener("click", clearPreview);
-  elements.copyBtn.addEventListener("click", copyToClipboard);
 
-  // --- Change/Input Listeners ---
+  elements.copyBtn.addEventListener("click", () => {
+    handleCopy({ isEditorFocused: true });
+  });
+
   ["change", "input"].forEach((evt) => {
     elements.includeTree.addEventListener(evt, onConfigChange);
     elements.relativePaths.addEventListener(evt, onConfigChange);
@@ -130,26 +128,13 @@ export function setupEventListeners() {
     elements.outputDir.addEventListener(evt, onConfigChange);
   });
 
-  // Enhanced filter event listeners with validation
   ["input"].forEach((evt) => {
-    elements.searchQuery.addEventListener(evt, (e) => {
-      if (shouldEnableSearch()) {
-        onFilterChange();
-      }
-    });
-    elements.extensionFilter.addEventListener(evt, (e) => {
-      if (shouldEnableSearch()) {
-        onFilterChange();
-      }
-    });
-    elements.contentSearchQuery.addEventListener(evt, (e) => {
-      if (shouldEnableSearch()) {
-        onFilterChange();
-      }
-    });
+    elements.searchQuery.addEventListener(evt, onFilterChange);
+    elements.extensionFilter.addEventListener(evt, onFilterChange);
+    elements.contentSearchQuery.addEventListener(evt, onFilterChange);
     elements.filterPatterns.addEventListener(evt, (e) => {
       state.setPatternFilter(e.target.value.toLowerCase());
-      renderUI(); // Re-render to apply filter
+      renderUI();
     });
   });
 
@@ -162,9 +147,22 @@ export function setupEventListeners() {
     post("updateConfig", { ...state.get().config, ignore_patterns: [] });
   });
 
-  // Initialize search inputs state
-  updateSearchInputsState();
+  // Using event delegation on the body to catch events for all current and future inputs.
+  document.body.addEventListener("focusin", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") {
+      // This ensures an UndoManager is created as soon as an input is focused.
+      getUndoManagerForElement(e.target);
+    }
+  });
 
-  // Update search inputs state when app state changes (called from main.js render function)
+  document.body.addEventListener("input", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") {
+      // Record state on typing, with coalescing.
+      getUndoManagerForElement(e.target).recordState();
+    }
+  });
+
+  // Initializing the state of the search inputs and making the update function globally available.
+  updateSearchInputsState();
   window.updateSearchInputsState = updateSearchInputsState;
 }

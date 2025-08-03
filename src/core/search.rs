@@ -16,8 +16,6 @@ impl SearchEngine {
     /// This is the main entry point for applying dynamic UI filters (name, extension).
     /// Ignore patterns are handled during the initial scan by the `scanner` module.
     pub fn filter_files(files: &[FileItem], filter: &SearchFilter) -> Vec<FileItem> {
-        // Die `ignore_glob_set`-Logik wurde entfernt. Das Filtern nach Ignore-Mustern
-        // wurde bereits vom `scanner` mit der `ignore`-Crate durchgeführt.
         files
             .par_iter()
             .filter(|file| Self::matches_filter(file, filter))
@@ -26,10 +24,7 @@ impl SearchEngine {
     }
 
     /// Checks if a single `FileItem` matches the given filter criteria.
-    fn matches_filter(file: &FileItem, filter: &SearchFilter) -> bool {
-        // Die Prüfung auf ignore-Muster und .git wurde entfernt.
-        // Diese Funktion kümmert sich nur noch um dynamische UI-Filter.
-
+    pub fn matches_filter(file: &FileItem, filter: &SearchFilter) -> bool {
         if !filter.query.is_empty()
             && !Self::matches_search_query(&file.path, &filter.query, filter.case_sensitive)
         {
@@ -66,53 +61,57 @@ impl SearchEngine {
                 .unwrap_or(extension_filter);
             ext.eq_ignore_ascii_case(filter)
         } else {
-            // Diese Logik behandelt Dateien ohne Extension korrekt
             extension_filter.is_empty() || extension_filter.eq_ignore_ascii_case("no extension")
         }
     }
 
     /// Recursively removes directories from a list that do not contain any files.
     ///
-    /// This implementation is optimized to run in near-linear time O(N) by using HashSets
-    /// to avoid nested loops, which would result in O(N^2) complexity.
-    pub fn remove_empty_directories(files: Vec<FileItem>) -> (Vec<FileItem>, HashSet<PathBuf>) {
-        if files.is_empty() {
-            return (files, HashSet::new());
+    /// This implementation is optimized to run in near-linear time O(N).
+    /// It now takes a reference to `all_project_files` to correctly determine
+    /// which directories are genuinely empty, regardless of any active filters.
+    pub fn remove_empty_directories(
+        files_to_filter: Vec<FileItem>,
+        all_project_files: &[FileItem],
+        dirs_to_preserve: &HashSet<PathBuf>,
+    ) -> (Vec<FileItem>, HashSet<PathBuf>) {
+        if files_to_filter.is_empty() {
+            return (files_to_filter, HashSet::new());
         }
 
-        // 1. Collect all directories and files into separate sets for efficient lookup.
-        let mut directories = HashSet::new();
-        let mut file_paths = HashSet::new();
-        for item in &files {
-            if item.is_directory {
-                directories.insert(item.path.clone());
-            } else {
-                file_paths.insert(item.path.clone());
-            }
-        }
+        // 1. Build a set of all non-directory paths from the complete file list.
+        // This is the crucial reference to determine which directories are essential.
+        let all_file_paths: HashSet<_> = all_project_files
+            .iter()
+            .filter(|item| !item.is_directory)
+            .map(|item| item.path.clone())
+            .collect();
 
         // 2. Build a set of all directories that are ancestors of at least one file.
         let mut essential_dirs = HashSet::new();
-        for file_path in &file_paths {
+        for file_path in &all_file_paths {
             let mut current = file_path.parent();
             while let Some(parent) = current {
-                if directories.contains(parent) {
-                    essential_dirs.insert(parent.to_path_buf());
+                // No need to check if parent is in a directory list; any parent of a file is essential.
+                if essential_dirs.insert(parent.to_path_buf()) {
                     current = parent.parent();
                 } else {
-                    // Stop if we go above the known directory structure
+                    // Stop if we've already processed this parent path.
                     break;
                 }
             }
         }
 
-        // 3. Filter the original list: keep all files and all essential directories.
+        // 3. Filter the original list: keep all files and all essential/preserved directories.
         let mut removed_dirs_set = HashSet::new();
-        let final_list: Vec<FileItem> = files
+        let final_list: Vec<FileItem> = files_to_filter
             .into_iter()
             .filter(|item| {
                 if item.is_directory {
-                    if essential_dirs.contains(&item.path) {
+                    // Keep if it's essential (contains files somewhere in its subtree) OR
+                    // if it's explicitly preserved (e.g., it's not fully loaded yet).
+                    if essential_dirs.contains(&item.path) || dirs_to_preserve.contains(&item.path)
+                    {
                         true // Keep this directory
                     } else {
                         removed_dirs_set.insert(item.path.clone());
@@ -233,9 +232,4 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].path.to_str(), Some("src/main.rs"));
     }
-
-    // `test_filter_with_ignore_patterns` wurde entfernt, da diese Funktionalität
-    // nicht mehr in der Verantwortung des `SearchEngine` liegt. Sie wird vom
-    // `DirectoryScanner` während des initialen Scans übernommen. Die Integrationstests
-    // decken das Verhalten des Scanners mit Ignore-Patterns bereits ab.
 }

@@ -40,7 +40,7 @@ cfc_output*.txt
 .env
 .env.*
 # Local application settings that should not be committed
-cfc-config.json
+*cfc-config*.json
 # Private docu
 README_*.md
 

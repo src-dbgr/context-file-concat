@@ -1,63 +1,97 @@
-import { elements } from '../dom.js';
+import { elements } from "../dom.js";
 
 export function setupResizerListeners() {
-    let verticalMouseDown = false;
-    elements.resizer.addEventListener("mousedown", () => {
-        verticalMouseDown = true;
-        document.body.classList.add("vertical-resizing");
-    });
+  // --- Vertical Resizer using Pointer Events API ---
+  elements.resizer.addEventListener("pointerdown", (e) => {
+    // Prevent default browser actions like text selection during drag.
+    e.preventDefault();
 
-    let sidebarMouseDown = false;
-    let startX = 0;
-    let startWidth = 0;
-    const sidebar = document.querySelector(".sidebar");
+    // Capture the pointer to ensure all subsequent pointer events are
+    // retargeted to this element until the pointer is released.
+    elements.resizer.setPointerCapture(e.pointerId);
 
-    document.addEventListener("mousedown", (e) => {
-        if (!sidebar) return;
-        const rect = sidebar.getBoundingClientRect();
-        if (e.clientX >= rect.right - 5 && e.clientX <= rect.right + 5) {
-            sidebarMouseDown = true;
-            startX = e.clientX;
-            startWidth = parseInt(getComputedStyle(sidebar).width, 10);
-            document.body.classList.add("sidebar-resizing");
-            e.preventDefault();
-        }
-    });
+    document.body.classList.add("vertical-resizing");
 
-    document.addEventListener("mouseup", () => {
-        verticalMouseDown = false;
-        sidebarMouseDown = false;
-        document.body.classList.remove("vertical-resizing", "sidebar-resizing");
+    const handlePointerMove = (moveEvent) => {
+      const totalHeight = elements.contentSplitter.offsetHeight;
+      // Ensure clientY is used for consistent coordinates regardless of scroll.
+      const newTopHeight = moveEvent.clientY - elements.fileListPanel.offsetTop;
+
+      // Set min/max boundaries for the resize operation.
+      const minHeight = 100; // px
+      const maxHeight = totalHeight - 100; // px
+
+      if (newTopHeight > minHeight && newTopHeight < maxHeight) {
+        const newTopPercent = (newTopHeight / totalHeight) * 100;
+        elements.fileListPanel.style.height = `${newTopPercent}%`;
+        elements.previewPanel.style.height = `${100 - newTopPercent}%`;
+      }
+    };
+
+    const handlePointerUp = () => {
+      // Crucial: Release the pointer capture to allow normal event flow.
+      elements.resizer.releasePointerCapture(e.pointerId);
+      document.body.classList.remove("vertical-resizing");
+
+      // Clean up global event listeners to prevent memory leaks.
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", handlePointerUp);
+    };
+
+    // Attach listeners to the document for the duration of the drag.
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("pointerup", handlePointerUp);
+  });
+
+  // --- Sidebar Resizer (Legacy Mouse Events) ---
+  // Note: This could also be migrated to Pointer Events for consistency.
+  let isSidebarDrag = false;
+  let startX = 0;
+  let startWidth = 0;
+  const sidebar = document.querySelector(".sidebar");
+
+  const handleSidebarDown = (e) => {
+    if (!sidebar) return;
+    const rect = sidebar.getBoundingClientRect();
+
+    // Activate resizer only when the mouse is within a small threshold of the edge.
+    if (e.clientX >= rect.right - 5 && e.clientX <= rect.right + 5) {
+      e.preventDefault();
+      isSidebarDrag = true;
+      startX = e.clientX;
+      startWidth = parseInt(getComputedStyle(sidebar).width, 10);
+      document.body.classList.add("sidebar-resizing");
+    }
+  };
+
+  const handleSidebarUp = () => {
+    if (isSidebarDrag) {
+      isSidebarDrag = false;
+      document.body.classList.remove("sidebar-resizing");
+      document.body.style.cursor = "default";
+    }
+  };
+
+  const handleSidebarMove = (e) => {
+    if (isSidebarDrag) {
+      // Calculate new width within defined constraints.
+      const newWidth = Math.max(
+        280,
+        Math.min(600, startWidth + e.clientX - startX)
+      );
+      sidebar.style.width = `${newWidth}px`;
+    } else if (sidebar) {
+      // Update cursor style on hover over the resize handle area.
+      const rect = sidebar.getBoundingClientRect();
+      if (e.clientX >= rect.right - 5 && e.clientX <= rect.right + 5) {
+        document.body.style.cursor = "ew-resize";
+      } else if (document.body.style.cursor === "ew-resize") {
         document.body.style.cursor = "default";
-    });
+      }
+    }
+  };
 
-    document.addEventListener("mousemove", (e) => {
-        if (sidebarMouseDown && sidebar) {
-            const newWidth = Math.max(280, Math.min(600, startWidth + e.clientX - startX));
-            sidebar.style.width = newWidth + "px";
-            e.preventDefault();
-            return;
-        }
-
-        if (verticalMouseDown) {
-            const totalHeight = elements.contentSplitter.offsetHeight;
-            const newTopHeight = e.clientY - elements.fileListPanel.offsetTop;
-            if (newTopHeight > 100 && newTopHeight < totalHeight - 100) {
-                const newTopPercent = (newTopHeight / totalHeight) * 100;
-                elements.fileListPanel.style.height = `${newTopPercent}%`;
-                elements.previewPanel.style.height = `${100 - newTopPercent}%`;
-            }
-            return;
-        }
-
-        // Set cursor for sidebar resize hover
-        if (sidebar && !sidebarMouseDown) {
-             const rect = sidebar.getBoundingClientRect();
-             if (e.clientX >= rect.right - 5 && e.clientX <= rect.right + 5) {
-                 document.body.style.cursor = "ew-resize";
-             } else if (document.body.style.cursor === "ew-resize") {
-                 document.body.style.cursor = "default";
-             }
-        }
-    });
+  document.addEventListener("mousedown", handleSidebarDown);
+  document.addEventListener("mouseup", handleSidebarUp);
+  document.addEventListener("mousemove", handleSidebarMove);
 }

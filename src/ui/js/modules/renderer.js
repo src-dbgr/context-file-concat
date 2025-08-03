@@ -4,6 +4,207 @@ import { post } from "../services/backend.js";
 import { COMMON_IGNORE_PATTERNS } from "../config.js";
 import { formatFileSize } from "../utils.js";
 
+// --- Virtualization Logic ---
+const ITEM_HEIGHT = 28; // Height of a single item in pixels
+let flatTree = [];
+let virtualScrollContainer = null;
+
+/**
+ * Flattens the hierarchical tree structure into a flat array of visible nodes.
+ * This is the core of the virtualization, as it determines which items
+ * should be part of the scrollable list.
+ * @param {Array<object>} nodes - The array of tree nodes to flatten.
+ * @param {number} [level=0] - The current depth level for indentation.
+ * @returns {Array<{node: object, level: number}>} A flat array of visible nodes with their depth.
+ */
+function flattenTree(nodes, level = 0) {
+  let result = [];
+  if (!nodes) return result;
+
+  for (const node of nodes) {
+    result.push({ node, level });
+    // Only recurse into children if the directory is expanded
+    if (
+      node.is_directory &&
+      node.is_expanded &&
+      node.children &&
+      node.children.length > 0
+    ) {
+      result = result.concat(flattenTree(node.children, level + 1));
+    }
+  }
+  return result;
+}
+
+/**
+ * Renders only the visible portion of the flattened tree into the DOM.
+ * This function is called on initial render and on every scroll event
+ * of the file tree container.
+ */
+function renderVirtualTree() {
+  if (!virtualScrollContainer) return;
+
+  const visibleItems = flatTree;
+  const totalHeight = visibleItems.length * ITEM_HEIGHT;
+  const sizer = virtualScrollContainer.querySelector(".virtual-scroll-sizer");
+  if (sizer) {
+    sizer.style.height = `${totalHeight}px`;
+  }
+
+  const scrollTop = virtualScrollContainer.scrollTop;
+  const viewportHeight = virtualScrollContainer.offsetHeight;
+
+  // Calculate the start and end indices of the items that should be visible
+  let startIndex = Math.floor(scrollTop / ITEM_HEIGHT);
+  let endIndex = Math.min(
+    visibleItems.length - 1,
+    Math.ceil((scrollTop + viewportHeight) / ITEM_HEIGHT)
+  );
+
+  // Add a buffer of items before and after the viewport to reduce flickering on fast scroll
+  startIndex = Math.max(0, startIndex - 5);
+  endIndex = Math.min(visibleItems.length - 1, endIndex + 5);
+
+  let html = "";
+  for (let i = startIndex; i <= endIndex; i++) {
+    const item = visibleItems[i];
+    if (item) {
+      // Each item is absolutely positioned within the sizer element
+      html += `<div class="virtual-scroll-item" style="top: ${
+        i * ITEM_HEIGHT
+      }px; height: ${ITEM_HEIGHT}px;">
+                         ${createNodeHtml(item.node, item.level)}
+                       </div>`;
+    }
+  }
+
+  let contentDiv = virtualScrollContainer.querySelector(
+    ".virtual-scroll-content"
+  );
+  if (!contentDiv) {
+    contentDiv = document.createElement("div");
+    contentDiv.className = "virtual-scroll-content";
+    if (sizer) {
+      sizer.appendChild(contentDiv);
+    }
+  }
+  contentDiv.innerHTML = html;
+
+  // The 'indeterminate' property of a checkbox can only be set via JavaScript,
+  // so we query and set it after rendering the HTML.
+  contentDiv.querySelectorAll('[data-indeterminate="true"]').forEach((el) => {
+    el.indeterminate = true;
+  });
+}
+
+/**
+ * Generates the HTML string for a single tree node.
+ * @param {object} node - The tree node data from the backend.
+ * @param {number} level - The indentation level of the node.
+ * @returns {string} The HTML string for the node.
+ */
+function createNodeHtml(node, level) {
+  // Indentation width based on the node's depth in the tree.
+  const indentWidth = level * 21;
+
+  if (node.is_directory) {
+    const arrowClass = node.is_expanded ? "expanded" : "";
+    const checkboxState = node.selection_state === "full" ? "checked" : "";
+    const indeterminateState =
+      node.selection_state === "partial" ? 'data-indeterminate="true"' : "";
+    const matchClass = node.is_match ? "is-match" : "";
+
+    return `
+            <div class="tree-item-container directory-item" data-path="${node.path}" data-type="directory">
+                <span style="width: ${indentWidth}px; flex-shrink: 0;"></span>
+                <span class="arrow ${arrowClass}" data-type="directory"></span>
+                <input type="checkbox" ${checkboxState} ${indeterminateState} data-path="${node.path}" data-type="dir-checkbox">
+                <div class="name-and-button">
+                    <span class="file-name ${matchClass}" data-path="${node.path}" data-type="label">
+                        <svg class="icon" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+                        ${node.name}
+                    </span>
+                    <button class="ignore-btn" title="Add this directory to ignore patterns" data-path="${node.path}" data-type="ignore">
+                        <svg class="icon ignore-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></svg>
+                    </button>
+                </div>
+            </div>`;
+  } else {
+    const checkboxState = node.selection_state === "full" ? "checked" : "";
+    const previewedClass = node.is_previewed ? "previewed" : "";
+    const matchClass = node.is_match ? "is-match" : "";
+    const iconHTML = node.is_binary
+      ? `<svg class="icon" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`
+      : `<svg class="icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10,9 9,9 8,9"/></svg>`;
+
+    return `
+            <div class="tree-item-container file-item ${previewedClass}" data-path="${
+      node.path
+    }">
+                <span style="width: ${indentWidth}px; flex-shrink: 0;"></span>
+                <span class="spacer"></span>
+                <input type="checkbox" ${checkboxState} data-path="${
+      node.path
+    }" data-type="file-checkbox">
+                <div class="name-and-button">
+                    <span class="file-name ${matchClass}" data-path="${
+      node.path
+    }" data-type="label">
+                        ${iconHTML}
+                        ${node.name}
+                    </span>
+                    <button class="ignore-btn" title="Add this file to ignore patterns" data-path="${
+                      node.path
+                    }" data-type="ignore">
+                        <svg class="icon ignore-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></svg>
+                    </button>
+                </div>
+                <span class="file-size">${formatFileSize(node.size)}</span>
+            </div>`;
+  }
+}
+
+/**
+ * Handles all click events within the virtualized tree using event delegation.
+ * This is efficient as it requires only one event listener for the entire tree.
+ * @param {MouseEvent} event - The click event.
+ */
+function handleTreeClick(event) {
+  const target = event.target;
+  const actionElement = target.closest("[data-type]");
+  if (!actionElement) return;
+  const itemContainer = target.closest(".tree-item-container");
+  if (!itemContainer) return;
+
+  const path = itemContainer.dataset.path;
+  const type = actionElement.dataset.type;
+
+  switch (type) {
+    case "directory":
+    case "label":
+      if (itemContainer.dataset.type === "directory") {
+        post("toggleExpansion", path);
+      } else {
+        post("loadFilePreview", path);
+      }
+      break;
+    case "dir-checkbox":
+      event.preventDefault();
+      post("toggleDirectorySelection", path);
+      break;
+    case "file-checkbox":
+      event.preventDefault();
+      post("toggleSelection", path);
+      break;
+    case "ignore":
+      event.stopPropagation();
+      post("addIgnorePath", path);
+      break;
+  }
+}
+
+// ... (Rest of the file remains unchanged)
+
 function countTreeItems(nodes) {
   let totalFiles = 0;
   let totalFolders = 0;
@@ -56,12 +257,6 @@ function createScanProgressUI() {
   return container;
 }
 
-/**
- * Creates a simple message display without drag & drop functionality
- * @param {string} message - The message to display
- * @param {string} iconSvg - Optional SVG icon to display
- * @returns {HTMLElement} The message element
- */
 function createMessageDisplay(message, iconSvg = null) {
   const messageContainer = document.createElement("div");
   messageContainer.className = "message-display";
@@ -81,10 +276,6 @@ function createMessageDisplay(message, iconSvg = null) {
   return messageContainer;
 }
 
-/**
- * Creates the directory selection placeholder with drag & drop functionality
- * @returns {HTMLElement} The placeholder element
- */
 function createDirectorySelectionPlaceholder() {
   const placeholder = document.createElement("p");
   placeholder.className = "placeholder";
@@ -94,11 +285,6 @@ function createDirectorySelectionPlaceholder() {
   return placeholder;
 }
 
-/**
- * Determines if any active filters are applied
- * @param {Object} appState - Current application state
- * @returns {boolean} True if filters are active
- */
 function hasActiveFilters(appState) {
   return !!(
     appState.search_query?.trim() ||
@@ -107,122 +293,12 @@ function hasActiveFilters(appState) {
   );
 }
 
-function createTreeLevel(nodes) {
-  const ul = document.createElement("ul");
-  if (!nodes) return ul;
-
-  nodes.forEach((node) => {
-    const li = document.createElement("li");
-
-    if (node.is_directory) {
-      const details = document.createElement("details");
-      details.open = node.is_expanded;
-      details.addEventListener("toggle", (e) => {
-        // This check prevents sending redundant events on programmatic open/close
-        if (e.target.open !== node.is_expanded) {
-          post("toggleExpansion", node.path);
-        }
-      });
-
-      const summary = document.createElement("summary");
-
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.checked = node.selection_state === "full";
-      checkbox.indeterminate = node.selection_state === "partial";
-      checkbox.addEventListener("click", (e) => {
-        e.preventDefault(); // Prevent default checkbox behavior
-        post("toggleDirectorySelection", node.path);
-      });
-
-      const nameSpan = document.createElement("span");
-      nameSpan.className = "file-name";
-      if (node.is_match) nameSpan.classList.add("is-match");
-
-      const icon = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "svg"
-      );
-      icon.setAttribute("class", "icon");
-      icon.setAttribute("viewBox", "0 0 24 24");
-      icon.innerHTML = `<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>`;
-      nameSpan.appendChild(icon);
-      nameSpan.appendChild(document.createTextNode(` ${node.name}`));
-
-      const ignoreBtn = document.createElement("button");
-      ignoreBtn.className = "ignore-btn";
-      ignoreBtn.title = "Add this directory to ignore patterns";
-      ignoreBtn.innerHTML = `<svg class="icon ignore-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></svg>`;
-      ignoreBtn.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        post("addIgnorePath", node.path);
-      });
-
-      summary.appendChild(checkbox);
-      summary.appendChild(nameSpan);
-      summary.appendChild(ignoreBtn);
-      details.appendChild(summary);
-
-      details.appendChild(createTreeLevel(node.children));
-      li.appendChild(details);
-    } else {
-      // It's a file
-      const container = document.createElement("div");
-      container.className = "tree-item-container";
-      if (node.is_previewed) container.classList.add("previewed");
-
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.checked = node.selection_state === "full";
-      checkbox.addEventListener("change", () =>
-        post("toggleSelection", node.path)
-      );
-
-      const nameSpan = document.createElement("span");
-      nameSpan.className = "file-name";
-      if (node.is_match) nameSpan.classList.add("is-match");
-      const iconHTML = node.is_binary
-        ? `<svg class="icon" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`
-        : `<svg class="icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10,9 9,9 8,9"/></svg>`;
-      nameSpan.innerHTML = `${iconHTML} `;
-      nameSpan.appendChild(document.createTextNode(node.name));
-      nameSpan.setAttribute("data-path", node.path);
-      nameSpan.addEventListener("click", () =>
-        post("loadFilePreview", node.path)
-      );
-
-      const ignoreBtn = document.createElement("button");
-      ignoreBtn.className = "ignore-btn";
-      ignoreBtn.title = "Add this file to ignore patterns";
-      ignoreBtn.innerHTML = `<svg class="icon ignore-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></svg>`;
-      ignoreBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        post("addIgnorePath", node.path);
-      });
-
-      const sizeSpan = document.createElement("span");
-      sizeSpan.className = "file-size";
-      sizeSpan.textContent = formatFileSize(node.size);
-
-      container.appendChild(checkbox);
-      container.appendChild(nameSpan);
-      container.appendChild(ignoreBtn);
-      container.appendChild(sizeSpan);
-      li.appendChild(container);
-    }
-    ul.appendChild(li);
-  });
-  return ul;
-}
-
 function renderIgnorePatterns() {
   elements.currentPatternsContainer.innerHTML = "";
   const appState = state.get();
   const allPatterns = Array.from(appState.config.ignore_patterns || []);
   const activePatterns = new Set(appState.active_ignore_patterns || []);
 
-  // Sort active patterns first, then inactive, both alphabetically
   const active = allPatterns.filter((p) => activePatterns.has(p)).sort();
   const inactive = allPatterns.filter((p) => !activePatterns.has(p)).sort();
   let patterns = [...active, ...inactive];
@@ -264,7 +340,6 @@ function renderIgnorePatterns() {
     elements.currentPatternsContainer.appendChild(chip);
   });
 }
-
 function setupCommonPatterns() {
   elements.commonPatternsContainer.innerHTML = "";
   const appState = state.get();
@@ -298,10 +373,10 @@ function setupCommonPatterns() {
 }
 
 let generatingIntervalId = null;
-
 export function renderUI() {
   const appState = state.get();
-  const { config, is_scanning, is_generating } = appState;
+  const { config, is_scanning, is_generating, tree, is_fully_scanned } =
+    appState;
 
   elements.currentPath.textContent =
     appState.current_path || "No directory selected.";
@@ -323,9 +398,16 @@ export function renderUI() {
   elements.contentSearchQuery.value = appState.content_search_query;
 
   const hasSelection = appState.selected_files_count > 0;
+  const hasVisibleItems = tree.length > 0;
+
   elements.selectDirBtn.disabled = is_scanning;
   elements.rescanBtn.disabled = is_scanning;
   elements.importConfigBtn.disabled = is_scanning;
+
+  elements.expandAllBtn.disabled = is_scanning || !hasVisibleItems;
+  elements.selectAllBtn.disabled = is_scanning || !hasVisibleItems;
+  elements.collapseAllBtn.disabled = is_scanning || !hasVisibleItems;
+  elements.deselectAllBtn.disabled = is_scanning || !hasSelection;
 
   const iconFolder = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>`;
   const iconScan = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>`;
@@ -345,43 +427,34 @@ export function renderUI() {
     elements.generateBtn.classList.contains("is-generating");
 
   if (is_generating) {
-    // State is generating.
     if (!wasGenerating) {
-      // This is the first render in the generating state. Set up the interval.
-      clearInterval(generatingIntervalId); // Clear any old timers just in case.
-
+      clearInterval(generatingIntervalId);
       elements.generateBtn.classList.remove("button-cta");
       elements.generateBtn.classList.add("is-generating");
-
       elements.generateBtn.innerHTML = `
-          <span class="generating-content">
-              ${iconGenerate}
-              <span class="generating-text">Concat</span>
-          </span>
-          <span class="cancel-content">${iconCancel} Cancel</span>
+        <span class="generating-content">
+          ${iconGenerate}
+          <span class="generating-text">Concat</span>
+        </span>
+        <span class="cancel-content">${iconCancel} Cancel</span>
       `;
-
       const textElement =
         elements.generateBtn.querySelector(".generating-text");
       let dotCount = 0;
       generatingIntervalId = setInterval(() => {
-        dotCount = (dotCount + 1) % 4; // Cycle 0, 1, 2, 3
-
+        dotCount = (dotCount + 1) % 4;
         const dots = ".".repeat(dotCount);
-        const spaces = "\u00A0".repeat(3 - dotCount); // \u00A0 -> whitespace
+        const spaces = "\u00A0".repeat(3 - dotCount);
         if (textElement) {
           textElement.textContent = `Concat${dots}${spaces}`;
         }
       }, 500);
     }
-    elements.generateBtn.disabled = false; // Enable button for cancellation click
+    elements.generateBtn.disabled = false;
   } else {
-    // State is NOT generating.
     if (wasGenerating) {
-      // This is the first render after generating has stopped. Clean up.
       clearInterval(generatingIntervalId);
       generatingIntervalId = null;
-
       elements.generateBtn.classList.remove("is-generating");
       elements.generateBtn.classList.add("button-cta");
       elements.generateBtn.innerHTML = `${iconGenerate} Generate`;
@@ -389,11 +462,9 @@ export function renderUI() {
     elements.generateBtn.disabled = !hasSelection || is_scanning;
   }
 
-  // Clear the file tree container
   elements.fileTreeContainer.innerHTML = "";
 
-  if (is_scanning) {
-    // Show scanning progress
+  if (is_scanning && tree.length === 0) {
     elements.fileTreeContainer.appendChild(createScanProgressUI());
     const cancelBtn = document.getElementById("cancel-scan-btn");
     if (cancelBtn) {
@@ -403,31 +474,31 @@ export function renderUI() {
         cancelBtn.innerHTML = `${iconScanning} Cancelling...`;
       });
     }
-    const progressFill = document.getElementById("scan-progress-fill");
-    if (progressFill) progressFill.style.width = "0%";
   } else if (!appState.current_path) {
-    // No directory selected - show directory selection placeholder with drag & drop
     elements.fileTreeContainer.appendChild(
       createDirectorySelectionPlaceholder()
     );
-  } else if (appState.tree.length > 0) {
-    // Directory selected and files found - show the tree
-    const treeRoot = document.createElement("div");
-    treeRoot.className = "tree";
-    treeRoot.appendChild(createTreeLevel(appState.tree));
-    elements.fileTreeContainer.appendChild(treeRoot);
-  } else {
-    // Directory selected but no files found
-    const hasFilters = hasActiveFilters(appState);
+  } else if (tree.length > 0) {
+    virtualScrollContainer = document.createElement("div");
+    virtualScrollContainer.className = "virtual-scroll-container tree";
+    virtualScrollContainer.innerHTML =
+      '<div class="virtual-scroll-sizer"><div class="virtual-scroll-content"></div></div>';
 
+    elements.fileTreeContainer.appendChild(virtualScrollContainer);
+
+    virtualScrollContainer.addEventListener("scroll", renderVirtualTree);
+    virtualScrollContainer.addEventListener("click", handleTreeClick);
+
+    flatTree = flattenTree(tree);
+    renderVirtualTree();
+  } else {
+    const hasFilters = hasActiveFilters(appState);
     if (hasFilters) {
-      // Filters are active but no results - show filter message without drag & drop
       const noResultsIcon = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>`;
       elements.fileTreeContainer.appendChild(
         createMessageDisplay("No files found matching filters.", noResultsIcon)
       );
     } else {
-      // No filters but still no files - might be empty directory or all ignored
       const emptyIcon = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><path d="M12 10v6"/><path d="M9 13h6"/></svg>`;
       elements.fileTreeContainer.appendChild(
         createMessageDisplay("No files found in this directory.", emptyIcon)
@@ -438,22 +509,23 @@ export function renderUI() {
   document.querySelector(
     ".status-text"
   ).textContent = `Status: ${appState.status_message}`;
-  const { totalFiles, totalFolders } = countTreeItems(appState.tree);
+  const { totalFiles, totalFolders } = countTreeItems(tree);
   elements.fileStats.textContent = `Files: ${appState.selected_files_count} selected of ${totalFiles} • Folders: ${totalFolders}`;
 
-  let statusMessage = appState.status_message;
-  if (statusMessage.startsWith("Scan complete.")) {
-    const totalItemsInTree = totalFiles + totalFolders;
-    statusMessage = `Scan complete. Found ${totalItemsInTree} visible items.`;
+  const isIndexingInProgress =
+    is_scanning && !is_fully_scanned && tree.length > 0;
+  if (elements.indexingStatus) {
+    elements.indexingStatus.style.display = isIndexingInProgress
+      ? "flex"
+      : "none";
   }
-  document.querySelector(
-    ".status-text"
-  ).textContent = `Status: ${statusMessage}`;
+  if (elements.statusBar) {
+    elements.statusBar.classList.toggle("indexing", isIndexingInProgress);
+  }
 
   setupCommonPatterns();
   renderIgnorePatterns();
 
-  // Update search inputs state if the function exists (from eventListeners.js)
   if (window.updateSearchInputsState) {
     window.updateSearchInputsState();
   }

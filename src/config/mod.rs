@@ -16,8 +16,8 @@ pub struct AppConfig {
     pub include_tree_by_default: bool,
     pub use_relative_paths: bool,
     pub remove_empty_directories: bool,
-    pub window_size: (f32, f32),
-    pub window_position: Option<(f32, f32)>,
+    pub window_size: (f64, f64),
+    pub window_position: (f64, f64),
     pub auto_load_last_directory: bool,
     pub max_file_size_mb: u64,
     pub scan_chunk_size: usize,
@@ -88,7 +88,7 @@ impl Default for AppConfig {
             use_relative_paths: true,
             remove_empty_directories: false,
             window_size: (1200.0, 800.0),
-            window_position: None,
+            window_position: (100.0, 100.0),
             auto_load_last_directory: false,
             max_file_size_mb: 20, // 20MB Standard-Limit
             scan_chunk_size: 100, // 100 Files per chunk

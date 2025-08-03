@@ -25,6 +25,8 @@ pub struct AppState {
     pub selected_files: HashSet<PathBuf>,
     /// The set of absolute paths to directories that are expanded in the UI tree.
     pub expanded_dirs: HashSet<PathBuf>,
+    /// The set of absolute paths to directories whose children have been loaded.
+    pub loaded_dirs: HashSet<PathBuf>,
     /// `true` if a directory scan is currently in progress.
     pub is_scanning: bool,
     /// `true` if the concatenation process is currently running.
@@ -53,6 +55,8 @@ pub struct AppState {
     pub generation_cancellation_flag: Arc<AtomicBool>,
     /// The set of ignore patterns that were actually matched during the last scan.
     pub active_ignore_patterns: HashSet<String>,
+    /// `true` if a full, non-lazy scan has been completed successfully.
+    pub is_fully_scanned: bool,
 }
 
 impl Default for AppState {
@@ -65,6 +69,7 @@ impl Default for AppState {
             filtered_file_list: Vec::new(),
             selected_files: HashSet::new(),
             expanded_dirs: HashSet::new(),
+            loaded_dirs: HashSet::new(),
             is_scanning: false,
             is_generating: false,
             search_query: String::new(),
@@ -83,6 +88,7 @@ impl Default for AppState {
             generation_task: None,
             generation_cancellation_flag: Arc::new(AtomicBool::new(false)),
             active_ignore_patterns: HashSet::new(),
+            is_fully_scanned: false,
         }
     }
 }
@@ -131,6 +137,7 @@ impl AppState {
         self.filtered_file_list.clear();
         self.selected_files.clear();
         self.expanded_dirs.clear();
+        self.loaded_dirs.clear();
         self.search_query.clear();
         self.extension_filter.clear();
         self.content_search_query.clear();
@@ -138,11 +145,40 @@ impl AppState {
         self.previewed_file_path = None;
         self.active_ignore_patterns.clear();
         self.is_generating = false;
+        self.is_fully_scanned = false; // Reset the flag here
 
         self.scan_progress = ScanProgress {
             files_scanned: 0,
             large_files_skipped: 0,
             current_scanning_path: "Ready.".to_string(),
         };
+    }
+
+    /// Applies ignore patterns consistently across all file lists
+    pub fn apply_ignore_patterns(&mut self, patterns_to_add: &HashSet<String>) {
+        if patterns_to_add.is_empty() {
+            return;
+        }
+
+        let root_path = PathBuf::from(&self.current_path);
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(&root_path);
+        for pattern in patterns_to_add {
+            builder.add_line(None, pattern).ok();
+        }
+
+        if let Ok(matcher) = builder.build() {
+            // Filter full_file_list
+            self.full_file_list
+                .retain(|item| !matcher.matched(&item.path, item.is_directory).is_ignore());
+
+            // Filter selected_files
+            self.selected_files.retain(|path| {
+                let is_dir = path.is_dir();
+                !matcher.matched(path, is_dir).is_ignore()
+            });
+
+            // Mark patterns as active
+            self.active_ignore_patterns.extend(patterns_to_add.clone());
+        }
     }
 }
