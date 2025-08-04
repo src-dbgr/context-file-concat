@@ -1,0 +1,8 @@
+---
+source: src/core/tree_generator.rs
+expression: tree_output
+---
+project/
+├── 📁 src
+│   └── 📄 main.rs
+└── 📄 README.md
