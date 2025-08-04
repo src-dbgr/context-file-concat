@@ -123,7 +123,7 @@ async fn proactive_scan_task<P: EventProxy>(
         })
         .await;
 
-    if cancel_flag.load(Ordering::Relaxed) {
+    if cancel_flag.load(Ordering::SeqCst) {
         tracing::info!("Scan cancelled after shallow scan phase.");
         return;
     }
@@ -144,7 +144,7 @@ async fn proactive_scan_task<P: EventProxy>(
         }
     }
 
-    if cancel_flag.load(Ordering::Relaxed) {
+    if cancel_flag.load(Ordering::SeqCst) {
         tracing::info!("Scan cancelled before deep scan phase.");
         return;
     }
@@ -158,7 +158,7 @@ async fn proactive_scan_task<P: EventProxy>(
         })
         .await;
 
-    if cancel_flag.load(Ordering::Relaxed) {
+    if cancel_flag.load(Ordering::SeqCst) {
         tracing::info!("Scan cancelled during deep scan phase.");
         return;
     }
@@ -167,7 +167,7 @@ async fn proactive_scan_task<P: EventProxy>(
     match scan_result_deep {
         Ok((files, patterns)) => {
             let mut s = state.lock().unwrap();
-            if cancel_flag.load(Ordering::Relaxed) {
+            if cancel_flag.load(Ordering::SeqCst) {
                 return;
             }
 
@@ -412,6 +412,8 @@ pub async fn generation_task<P: EventProxy>(
         config.tree_ignore_patterns,
         config.use_relative_paths,
         cancel_flag,
+        #[cfg(test)]
+        None,
     )
     .await;
 

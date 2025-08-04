@@ -103,7 +103,7 @@ impl AppState {
             tracing::info!("LOG: handle.abort() was called.");
 
             tracing::info!("LOG: Setting cancellation flag (AtomicBool) to true.");
-            self.scan_cancellation_flag.store(true, Ordering::Relaxed);
+            self.scan_cancellation_flag.store(true, Ordering::SeqCst);
 
             self.is_scanning = false;
             self.scan_progress = ScanProgress {
@@ -123,7 +123,7 @@ impl AppState {
             handle.abort();
         }
         self.generation_cancellation_flag
-            .store(true, Ordering::Relaxed);
+            .store(true, Ordering::SeqCst);
         self.is_generating = false;
     }
 

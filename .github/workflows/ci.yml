@@ -55,5 +55,7 @@ jobs:
       - name: Run Clippy
         run: cargo clippy -- -D warnings
 
-      - name: Run tests
-        run: cargo test
+      - name: Run tests with snapshot verification
+        env:
+          INSTA_UPDATE: "no"
+        run: cargo test --workspace

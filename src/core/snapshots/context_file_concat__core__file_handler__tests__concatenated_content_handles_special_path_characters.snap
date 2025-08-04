@@ -1,0 +1,18 @@
+---
+source: src/core/file_handler.rs
+expression: content
+---
+# CFC Output - Generated: [DATETIME]
+# Total files: 1
+
+# DIRECTORY TREE
+=====================
+[PROJECT_NAME]/
+└── 📁 Mein Ordner
+    └── 📄 Lösung.rs
+=====================
+
+[PROJECT_NAME]/Mein Ordner/Lösung.rs
+===FILE-START===
+pub const ANSWER: i32 = 42;
+---FILE-END-----

@@ -1,0 +1,27 @@
+---
+source: src/core/file_handler.rs
+expression: content
+---
+# CFC Output - Generated: [DATETIME]
+# Total files: 2
+
+# DIRECTORY TREE
+=====================
+[PROJECT_NAME]/
+├── 📁 src
+│   ├── 📄 lib.rs
+│   └── 📄 main.rs
+└── 📄 README.md
+=====================
+
+[PROJECT_NAME]/src/main.rs
+===FILE-START===
+fn main() {
+    println!("Hello, world!");
+}
+---FILE-END-----
+
+[PROJECT_NAME]/README.md
+===FILE-START===
+This is the main readme.
+---FILE-END-----

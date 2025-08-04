@@ -111,7 +111,7 @@ impl DirectoryScanner {
             let walker = walker_builder.build();
 
             for result in walker {
-                if cancel_flag.load(Ordering::Relaxed) {
+                if cancel_flag.load(Ordering::SeqCst) {
                     tracing::warn!("LOG: BLOCKING-TASK:: Cancellation detected, stopping walk.");
                     break;
                 }

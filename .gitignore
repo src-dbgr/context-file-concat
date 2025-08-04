@@ -79,3 +79,4 @@ $RECYCLE.BIN/
 *.tmp
 scripts/*-test.sh
 .github/workflows/test-*.yml
+tarpaulin-report.html

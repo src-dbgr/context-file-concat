@@ -1,0 +1,17 @@
+---
+source: src/core/file_handler.rs
+expression: content
+---
+# CFC Output - Generated: [DATETIME]
+# Total files: 2
+
+[PROJECT_NAME]/no_newline.txt
+===FILE-START===
+Line 1
+Line 2
+---FILE-END-----
+
+[PROJECT_NAME]/empty.txt
+===FILE-START===
+
+---FILE-END-----
