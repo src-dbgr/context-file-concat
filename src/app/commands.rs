@@ -644,3 +644,447 @@ pub fn export_config<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
         proxy.send_event(UserEvent::ConfigExported(result));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::AppState;
+    use crate::app::view_model::UiState;
+    use crate::core::FileItem;
+    use serde_json::json;
+    use std::fs as std_fs;
+    use tempfile::{tempdir, TempDir};
+    use tokio::sync::mpsc;
+
+    // A mock EventProxy for capturing events sent to the UI.
+    #[derive(Clone)]
+    struct TestEventProxy {
+        sender: mpsc::UnboundedSender<UserEvent>,
+    }
+
+    impl EventProxy for TestEventProxy {
+        fn send_event(&self, event: UserEvent) {
+            // Sending might fail if the receiver is dropped, which is a panic condition in tests.
+            self.sender.send(event).expect("Test receiver dropped");
+        }
+    }
+
+    // A harness to set up a consistent and isolated test environment.
+    struct TestHarness {
+        state: Arc<Mutex<AppState>>,
+        proxy: TestEventProxy,
+        event_rx: mpsc::UnboundedReceiver<UserEvent>,
+        _temp_dir: TempDir, // Kept for its Drop trait, which cleans up the temp directory.
+        root_path: PathBuf,
+    }
+
+    impl TestHarness {
+        // Creates a new harness with a default state.
+        fn new() -> Self {
+            let temp_dir = tempdir().expect("Failed to create temp dir");
+            let root_path = temp_dir.path().to_path_buf();
+            let (tx, rx) = mpsc::unbounded_channel();
+
+            let proxy = TestEventProxy { sender: tx };
+
+            // FIX: Explicitly create a clean state instead of using AppState::default().
+            // This ensures the test is hermetic and does not load any user-level config files
+            // from the file system, which was the cause of the original failure.
+            let mut state = AppState::default();
+            state.config = AppConfig::default(); // Overwrite with a pristine, in-memory default config.
+            state.current_path = root_path.to_string_lossy().to_string(); // Set path for the test context.
+
+            Self {
+                state: Arc::new(Mutex::new(state)),
+                proxy,
+                event_rx: rx,
+                _temp_dir: temp_dir,
+                root_path,
+            }
+        }
+
+        // Helper to create a file within the test's temporary directory.
+        fn create_file(&self, relative_path: &str) -> PathBuf {
+            let path = self.root_path.join(relative_path);
+            if let Some(parent) = path.parent() {
+                std_fs::create_dir_all(parent).unwrap();
+            }
+            std_fs::write(&path, format!("content of {}", relative_path)).unwrap();
+            path
+        }
+
+        // Helper to populate the AppState with a list of FileItems.
+        fn set_initial_files(&self, paths: &[&str]) {
+            let mut state = self.state.lock().unwrap();
+            let mut items = Vec::new();
+            for p_str in paths {
+                let path = self.root_path.join(p_str);
+                // Corrected: Clone path for the first argument to avoid move-then-borrow error.
+                items.push(file_item(path.clone(), path.is_dir()));
+            }
+            state.full_file_list = items.clone();
+            state.filtered_file_list = items;
+        }
+
+        // Helper to receive the last `StateUpdate` event from the channel, consuming any intermediate events.
+        async fn get_last_state_update(&mut self) -> Option<Box<UiState>> {
+            let mut last_update = None;
+            // Set a short timeout to prevent tests from hanging if no event is sent.
+            let timeout = tokio::time::sleep(std::time::Duration::from_millis(200));
+            tokio::pin!(timeout);
+
+            loop {
+                tokio::select! {
+                    event = self.event_rx.recv() => {
+                        if let Some(event) = event {
+                            if let UserEvent::StateUpdate(ui_state) = event {
+                                last_update = Some(ui_state);
+                            }
+                        } else {
+                            break; // Channel closed
+                        }
+                    },
+                    _ = &mut timeout => {
+                        break; // Timeout elapsed
+                    }
+                }
+            }
+            last_update
+        }
+
+        // Helper to get the next event, regardless of its type.
+        async fn get_next_event(&mut self) -> Option<UserEvent> {
+            tokio::time::timeout(std::time::Duration::from_secs(1), self.event_rx.recv())
+                .await
+                .ok()
+                .flatten()
+        }
+    }
+
+    // Helper to create a mock FileItem for testing.
+    fn file_item(path: PathBuf, is_dir: bool) -> FileItem {
+        FileItem {
+            path,
+            is_directory: is_dir,
+            is_binary: false,
+            size: if is_dir { 0 } else { 123 },
+            depth: 1,
+            parent: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_initialize_sends_initial_state() {
+        // Arrange
+        let mut harness = TestHarness::new();
+
+        // Act
+        initialize(harness.proxy.clone(), harness.state.clone());
+
+        // Assert
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state.current_path, harness.root_path.to_string_lossy());
+        assert!(ui_state.tree.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_clear_directory_resets_state() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let file_path = harness.create_file("file.txt");
+        harness.set_initial_files(&["file.txt"]);
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.selected_files.insert(file_path);
+            state.config.last_directory = Some(harness.root_path.clone());
+        }
+
+        // Act
+        clear_directory(harness.proxy.clone(), harness.state.clone());
+
+        // Assert (Corrected Structure)
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        assert!(ui_state.current_path.is_empty());
+        assert_eq!(ui_state.visible_files_count, 0);
+
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(state.current_path.is_empty());
+            assert!(state.full_file_list.is_empty());
+            assert!(state.filtered_file_list.is_empty());
+            assert!(state.selected_files.is_empty());
+            assert!(state.config.last_directory.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_toggle_selection_adds_and_removes_file() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let file_path = harness.create_file("test.rs");
+        harness.set_initial_files(&["test.rs"]);
+        let payload = json!(file_path);
+
+        // Act 1: Select the file
+        toggle_selection(
+            payload.clone(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        // Assert 1 (Corrected Structure)
+        let ui_state1 = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state1.selected_files_count, 1);
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(state.selected_files.contains(&file_path));
+        }
+
+        // Act 2: Deselect the file
+        toggle_selection(payload, harness.proxy.clone(), harness.state.clone());
+
+        // Assert 2 (Corrected Structure)
+        let ui_state2 = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state2.selected_files_count, 0);
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(!state.selected_files.contains(&file_path));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_toggle_directory_selection_selects_all_children() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        harness.create_file("src/main.rs");
+        harness.create_file("src/lib.rs");
+        let dir_path = harness.root_path.join("src");
+        harness.set_initial_files(&["src", "src/main.rs", "src/lib.rs"]);
+        let payload = json!(dir_path);
+
+        // Act
+        toggle_directory_selection(payload, harness.proxy.clone(), harness.state.clone());
+
+        // Assert (Corrected Structure)
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state.selected_files_count, 2);
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(state
+                .selected_files
+                .contains(&harness.root_path.join("src/main.rs")));
+            assert!(state
+                .selected_files
+                .contains(&harness.root_path.join("src/lib.rs")));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_all_and_deselect_all() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        harness.create_file("file1.txt");
+        harness.create_file("file2.txt");
+        harness.set_initial_files(&["file1.txt", "file2.txt"]);
+
+        // Act 1: Select all
+        select_all(harness.proxy.clone(), harness.state.clone());
+
+        // Assert 1
+        let ui_state1 = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state1.selected_files_count, 2);
+
+        // Act 2: Deselect all
+        deselect_all(harness.proxy.clone(), harness.state.clone());
+
+        // Assert 2
+        let ui_state2 = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state2.selected_files_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_expand_collapse_all() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        harness.create_file("src/main.rs");
+        harness.create_file("docs/guide.md");
+        harness.set_initial_files(&["src", "docs", "src/main.rs", "docs/guide.md"]);
+
+        // Act 1: Expand all
+        expand_collapse_all(json!(true), harness.proxy.clone(), harness.state.clone());
+
+        // Assert 1 (Corrected Structure)
+        let ui_state1 = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state1.tree.iter().filter(|n| n.is_expanded).count(), 2);
+        {
+            let state = harness.state.lock().unwrap();
+            assert_eq!(state.expanded_dirs.len(), 2);
+        }
+
+        // Act 2: Collapse all
+        expand_collapse_all(json!(false), harness.proxy.clone(), harness.state.clone());
+
+        // Assert 2 (Corrected Structure)
+        let ui_state2 = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state2.tree.iter().filter(|n| n.is_expanded).count(), 0);
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(state.expanded_dirs.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_file_preview_success_and_error() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let file_path = harness.create_file("preview.txt");
+        harness.set_initial_files(&["preview.txt"]); // Corrected: ensure file is in state for UI update
+        let bad_path = harness.root_path.join("nonexistent.txt");
+        let payload_good = json!(file_path);
+        let payload_bad = json!(bad_path);
+
+        // Act 1: Successful preview
+        load_file_preview(payload_good, harness.proxy.clone(), harness.state.clone());
+
+        // Assert 1
+        let mut saw_preview = false;
+        let mut saw_state_update = false;
+        for _ in 0..2 {
+            // Expect two events
+            if let Some(event) = harness.get_next_event().await {
+                match event {
+                    UserEvent::ShowFilePreview { content, path, .. } => {
+                        assert_eq!(content, "content of preview.txt\n");
+                        assert_eq!(path, file_path);
+                        saw_preview = true;
+                    }
+                    UserEvent::StateUpdate(ui_state) => {
+                        assert_eq!(ui_state.tree[0].path, file_path);
+                        assert!(ui_state.tree[0].is_previewed);
+                        saw_state_update = true;
+                    }
+                    _ => panic!("Unexpected event received"),
+                }
+            }
+        }
+        assert!(
+            saw_preview && saw_state_update,
+            "Did not receive both required events for preview"
+        );
+
+        // Act 2: Failed preview
+        load_file_preview(payload_bad, harness.proxy.clone(), harness.state.clone());
+
+        // Assert 2
+        if let Some(UserEvent::ShowError(msg)) = harness.get_next_event().await {
+            assert!(msg.contains("No such file or directory"));
+        } else {
+            panic!("Expected a ShowError event for non-existent file");
+        }
+    }
+
+    // In src/app/commands.rs, inside #[cfg(test)] mod tests { ... }
+
+    #[tokio::test]
+    async fn test_update_config_triggers_refilter() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        harness.create_file("src/main.rs");
+        harness.create_file("src/empty_dir/placeholder.txt");
+        // Manually remove the placeholder to make the directory genuinely empty.
+        std_fs::remove_file(harness.root_path.join("src/empty_dir/placeholder.txt")).unwrap();
+
+        let src_path = harness.root_path.join("src");
+        let empty_dir_path = harness.root_path.join("src/empty_dir");
+
+        harness.set_initial_files(&["src", "src/main.rs", "src/empty_dir"]);
+
+        {
+            let mut state = harness.state.lock().unwrap();
+            // FIX: Accurately simulate a full scan by setting is_fully_scanned AND
+            // marking all found directories as "loaded". This is crucial for the
+            // "remove empty" logic to correctly identify and prune `src/empty_dir`.
+            state.is_fully_scanned = true;
+            state.loaded_dirs.insert(src_path);
+            state.loaded_dirs.insert(empty_dir_path);
+        }
+
+        let mut new_config;
+        {
+            let state = harness.state.lock().unwrap();
+            new_config = state.config.clone();
+        }
+        new_config.remove_empty_directories = true; // Change the setting that triggers a refilter
+        let payload = serde_json::to_value(new_config).unwrap();
+
+        // Act
+        update_config(payload, harness.proxy.clone(), harness.state.clone());
+
+        // Assert
+        let ui_state = harness
+            .get_last_state_update()
+            .await
+            .expect("Test timed out waiting for StateUpdate event");
+
+        // The visible file count should now be 2: 'src' and 'src/main.rs'. 'src/empty_dir' is removed.
+        assert_eq!(
+            ui_state.visible_files_count, 2,
+            "Expected 'src/empty_dir' to be removed"
+        );
+
+        // Add a more robust assertion to check the tree structure directly.
+        let src_node = ui_state
+            .tree
+            .iter()
+            .find(|n| n.name == "src")
+            .expect("'src' node should be present in the tree");
+
+        assert!(
+            !src_node.children.iter().any(|n| n.name == "empty_dir"),
+            "The node for 'empty_dir' should have been filtered out and not be a child of 'src'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_ignore_path_retriggers_scan() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        harness.create_file("src/main.rs");
+        harness.create_file("docs/guide.md"); // This file will be ignored
+
+        // This simulates a state after an initial scan
+        harness.set_initial_files(&["src", "docs", "src/main.rs", "docs/guide.md"]);
+
+        let path_to_ignore = harness.root_path.join("docs");
+        let payload = json!(path_to_ignore);
+
+        // Act: Ignore the 'docs' directory
+        // This is async because it triggers `update_config` which triggers `start_scan_on_path`
+        add_ignore_path(payload, harness.proxy.clone(), harness.state.clone());
+
+        // Assert
+        // We expect a final state update after the rescan finishes.
+        let final_state = loop {
+            if let Some(event) = harness.get_next_event().await {
+                if let UserEvent::StateUpdate(ui_state) = event {
+                    if !ui_state.is_scanning {
+                        break Some(ui_state);
+                    }
+                }
+            } else {
+                break None;
+            }
+        }
+        .expect("Scan did not complete after ignoring path");
+
+        // The 'docs' directory and its contents should be gone.
+        assert_eq!(final_state.visible_files_count, 2); // 'src' and 'src/main.rs'
+        assert!(final_state.tree.iter().any(|n| n.name == "src"));
+        assert!(!final_state.tree.iter().any(|n| n.name == "docs"));
+
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(state.config.ignore_patterns.contains("docs/"));
+        }
+    }
+}
