@@ -27,6 +27,10 @@ pub enum CoreError {
     #[error("Failed to strip prefix from path: {0}")]
     PathStrip(#[from] StripPrefixError),
 
+    /// Represents an error related to ignore pattern processing.
+    #[error("Pattern error: {0}")]
+    Pattern(String),
+
     /// Represents a user-initiated cancellation of an operation.
     #[error("Operation was cancelled by the user")]
     Cancelled,
