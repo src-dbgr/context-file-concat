@@ -1087,4 +1087,112 @@ mod tests {
             assert!(state.config.ignore_patterns.contains("docs/"));
         }
     }
+
+    #[tokio::test]
+    async fn test_commands_with_invalid_payloads_do_not_panic() {
+        // This single test covers the error paths for multiple commands.
+
+        // Arrange
+        let mut harness = TestHarness::new();
+        let initial_state_snapshot = harness.state.lock().unwrap().config.clone();
+
+        // Act & Assert for toggle_selection (expects a string, gets a number)
+        toggle_selection(json!(123), harness.proxy.clone(), harness.state.clone());
+        assert!(
+            harness.event_rx.try_recv().is_err(),
+            "Should not send event on bad payload"
+        );
+
+        // Act & Assert for update_filters (expects an object, gets a string)
+        update_filters(
+            json!("bad data"),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+        assert!(
+            harness.event_rx.try_recv().is_err(),
+            "Should not send event on bad payload"
+        );
+
+        // Act & Assert for update_config (expects AppConfig, gets a boolean)
+        update_config(json!(false), harness.proxy.clone(), harness.state.clone());
+        assert!(
+            harness.event_rx.try_recv().is_err(),
+            "Should not send event on bad payload"
+        );
+
+        // Final check: Ensure state was not mutated by any of the invalid calls
+        let final_state_snapshot = harness.state.lock().unwrap().config.clone();
+        assert_eq!(
+            initial_state_snapshot.output_filename, final_state_snapshot.output_filename,
+            "State should not change on bad payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_generation_resets_generating_state() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        harness.create_file("file.txt");
+        harness.set_initial_files(&["file.txt"]);
+
+        // Start generation first
+        generate_preview(harness.proxy.clone(), harness.state.clone());
+        // Wait for the initial "generating" state update to be processed
+        let _ = harness.get_last_state_update().await;
+
+        // Act: Now cancel it
+        cancel_generation(harness.proxy.clone(), harness.state.clone());
+
+        // Assert
+        let ui_state = harness
+            .get_last_state_update()
+            .await
+            .expect("Did not receive state update after cancelling generation");
+
+        assert!(
+            !ui_state.is_generating,
+            "UI State should not be 'generating'"
+        );
+
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(!state.is_generating, "App State should not be 'generating'");
+            assert!(
+                state.generation_task.is_none(),
+                "Task handle should be cleared after cancellation"
+            );
+        }
+    }
+
+    // #[tokio::test]
+    // async fn test_generate_preview_sets_generating_state_and_spawns_task() {
+    //     // Arrange
+    //     let mut harness = TestHarness::new();
+    //     harness.create_file("file.txt");
+    //     harness.set_initial_files(&["file.txt"]);
+
+    //     // Act
+    //     generate_preview(harness.proxy.clone(), harness.state.clone());
+
+    //     // Assert: Check the immediate effects of calling the command
+    //     let ui_state = harness
+    //         .get_last_state_update()
+    //         .await
+    //         .expect("Did not receive state update after starting generation");
+
+    //     // 1. UI state immediately reflects that generation is in progress.
+    //     assert!(ui_state.is_generating);
+
+    //     // 2. The internal app state is correctly configured.
+    //     {
+    //         let state = harness.state.lock().unwrap();
+    //         assert!(state.is_generating);
+    //         assert!(
+    //             state.generation_task.is_some(),
+    //             "Generation task handle should be stored in state"
+    //         );
+    //     }
+    // }
 }
