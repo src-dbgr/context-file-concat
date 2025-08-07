@@ -465,6 +465,11 @@ body.vertical-resizing {
   text-align: right;
 }
 
+.preview-title {
+  color: var(--text-color-muted);
+  padding-right: 4px;
+}
+
 #preview-title {
   display: flex;
   flex-direction: column;
@@ -498,11 +503,14 @@ body.vertical-resizing {
   font-size: 1em;
   font-weight: normal;
   cursor: help;
-  gap: 4px;
+}
+
+.generated-preview-title {
+  color: var(--text-color);
 }
 
 .preview-path-part {
-  color: var(--text-color);
+  color: var(--text-color-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

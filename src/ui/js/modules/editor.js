@@ -4,7 +4,6 @@ import { state } from "../state.js";
 import { post } from "../services/backend.js";
 import { generateStatsString, splitPathForDisplay } from "../utils.js";
 import { MONACO_VS_PATH } from "../config.js";
-import { renderUI } from "./renderer.js";
 
 export function initEditor(onFinished) {
   require.config({ paths: { vs: MONACO_VS_PATH } });
@@ -16,6 +15,17 @@ export function initEditor(onFinished) {
       readOnly: true,
       automaticLayout: true,
       wordWrap: "on",
+      stickyScroll: {
+        enabled: true,
+      },
+      minimap: { enabled: true },
+      renderLineHighlight: "line",
+      padding: { top: 10 },
+
+      // 2. Bearbeitungskomfort
+      bracketPairColorization: { enabled: true },
+      formatOnPaste: true,
+      smoothScrolling: true,
     });
     state.setEditor(editor);
     if (onFinished) onFinished();
@@ -25,6 +35,12 @@ export function initEditor(onFinished) {
 export function showPreviewContent(content, language, searchTerm, path) {
   const editor = state.getEditor();
   if (!editor) return;
+
+  const oldListener = state.getChangeListener();
+  if (oldListener) {
+    oldListener.dispose();
+    state.setChangeListener(null);
+  }
 
   const oldPreviewedPath = state.getPreviewedPath();
 
@@ -84,9 +100,9 @@ export function showPreviewContent(content, language, searchTerm, path) {
     path,
     state.get().current_path
   );
-  const statsString = generateStatsString(content, "Read-only");
-
+  const statsString = generateStatsString(content, "Read-only", undefined);
   const previewTitle = document.querySelector(".preview-panel #preview-title");
+
   if (previewTitle) {
     previewTitle.innerHTML = `
       <div class="preview-path-container" title="${path}">
@@ -99,9 +115,15 @@ export function showPreviewContent(content, language, searchTerm, path) {
   elements.clearPreviewBtn.style.display = "inline-block";
 }
 
-export function showGeneratedContent(content) {
+export function showGeneratedContent(content, tokenCount) {
   const editor = state.getEditor();
   if (!editor) return;
+
+  const oldListener = state.getChangeListener();
+  if (oldListener) {
+    oldListener.dispose();
+    state.setChangeListener(null);
+  }
 
   state.setPreviewedPath(null);
   editor.setValue(content);
@@ -111,7 +133,11 @@ export function showGeneratedContent(content) {
 
   const updateStats = () => {
     const currentContent = editor.getValue();
-    const statsString = generateStatsString(currentContent, "Editable");
+    const statsString = generateStatsString(
+      currentContent,
+      "Editable",
+      tokenCount
+    );
     const previewTitle = document.querySelector(
       ".preview-panel #preview-title"
     );
@@ -120,7 +146,7 @@ export function showGeneratedContent(content) {
               <div class="preview-path-container">
                 <span class="preview-filename">
                   <svg class="icon icon-lightning" viewBox="0 0 24 24"><path d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"></path></svg>
-                  Generated Preview
+                  <h3 class="generated-preview-title">Generated Preview</h3>
                 </span>
               </div>
               <span class="preview-stats">${statsString}</span>`;
@@ -130,7 +156,8 @@ export function showGeneratedContent(content) {
   updateStats();
   const model = editor.getModel();
   if (model) {
-    model.onDidChangeContent(updateStats);
+    const newListener = model.onDidChangeContent(updateStats);
+    state.setChangeListener(newListener);
   }
 
   elements.saveBtn.disabled = false;
@@ -153,9 +180,7 @@ export function clearPreview() {
   const previewTitle = document.querySelector(".preview-panel #preview-title");
   if (previewTitle) {
     previewTitle.innerHTML = `
-      <div class="preview-path-container">
-        <span class="preview-filename">Preview</span>
-      </div>
+      <div class="preview-title-left"></div>
       <span class="preview-stats">Select a file to preview</span>`;
   }
 

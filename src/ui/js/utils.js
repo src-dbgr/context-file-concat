@@ -18,22 +18,29 @@ function countCharacters(text) {
 }
 
 function formatNumber(num) {
+  if (num === undefined || num === null) return "...";
   if (num >= 1000000) return (num / 1000000).toFixed(1) + "M";
   if (num >= 1000) return (num / 1000).toFixed(1) + "K";
   return num.toString();
 }
 
-export function generateStatsString(content, additionalInfo = "") {
+export function generateStatsString(content, additionalInfo = "", tokenCount) {
   const lines = content.split("\n").length;
   const words = countWords(content);
   const characters = countCharacters(content);
-  const sizeBytes = new Blob([content], { type: "text/plain" }).size;
-  const sizeFormatted = formatFileSize(sizeBytes);
-  const formattedWords = formatNumber(words);
-  const formattedChars = formatNumber(characters);
-  let statsString = `${lines} lines • ${formattedWords} words • ${formattedChars} chars • ${sizeFormatted}`;
-  if (additionalInfo) statsString += ` • ${additionalInfo}`;
-  return statsString;
+  const statsParts = [
+    `${lines} lines`,
+    `${formatNumber(words)} words`,
+    `${formatNumber(characters)} chars`,
+  ];
+  if (typeof tokenCount === "number") {
+    statsParts.push(`${formatNumber(tokenCount)} tokens`);
+  }
+  statsParts.push(formatFileSize(new Blob([content]).size));
+  if (additionalInfo) {
+    statsParts.push(additionalInfo);
+  }
+  return statsParts.join(" • ");
 }
 
 export function splitPathForDisplay(fullPath, currentDir) {

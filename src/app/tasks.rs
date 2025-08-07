@@ -19,6 +19,7 @@ use super::view_model::{
 };
 
 use crate::core::{CoreError, DirectoryScanner, FileHandler, SearchEngine};
+use tiktoken_rs::cl100k_base;
 
 /// Initiates a proactive, two-phase directory scan.
 ///
@@ -428,7 +429,14 @@ pub async fn generation_task<P: EventProxy>(
     // Check if the operation was cancelled. If so, we don't show an error.
     match result {
         Ok(content) => {
-            proxy.send_event(UserEvent::ShowGeneratedContent(content));
+            // Token-Zählung hier einfügen
+            let bpe = cl100k_base().unwrap();
+            let token_count = bpe.encode_with_special_tokens(&content).len();
+
+            proxy.send_event(UserEvent::ShowGeneratedContent {
+                content,
+                token_count,
+            });
         }
         Err(CoreError::Cancelled) => {
             state_guard.scan_progress.current_scanning_path = "Generation cancelled.".to_string();

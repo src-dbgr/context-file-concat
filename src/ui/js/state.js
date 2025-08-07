@@ -18,6 +18,7 @@ export const state = (() => {
   };
 
   let _editor = null;
+  let _changeListener = null;
   let _currentDecorations = [];
   let _currentPreviewedPath = null;
   let _currentPatternFilter = "";
@@ -32,6 +33,10 @@ export const state = (() => {
     getEditor: () => _editor,
     setEditor: (e) => {
       _editor = e;
+    },
+    getChangeListener: () => _changeListener,
+    setChangeListener: (listener) => {
+      _changeListener = listener;
     },
     getDecorations: () => _currentDecorations,
     setDecorations: (decs) => {

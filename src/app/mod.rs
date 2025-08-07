@@ -91,11 +91,15 @@ pub fn handle_user_event(event: UserEvent, webview: &WebView) {
             serde_json::to_string(&content).unwrap_or_default(),
             serde_json::to_string(&language).unwrap_or_default(),
             serde_json::to_string(&search_term).unwrap_or_default(),
-            serde_json::to_string(&path).unwrap_or_default()
+            serde_json::to_string(&path).unwrap_or_default(),
         ),
-        UserEvent::ShowGeneratedContent(content) => format!(
-            "window.showGeneratedContent({});",
-            serde_json::to_string(&content).unwrap_or_default()
+        UserEvent::ShowGeneratedContent {
+            content,
+            token_count,
+        } => format!(
+            "window.showGeneratedContent({}, {});",
+            serde_json::to_string(&content).unwrap_or_default(),
+            token_count
         ),
         UserEvent::ShowError(msg) => {
             format!(
