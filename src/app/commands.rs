@@ -10,7 +10,10 @@ use super::filtering; // SRP: Use the new filtering module
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
 use super::state::AppState;
-use super::tasks::{generation_task, search_in_files, start_lazy_load_scan, start_scan_on_path};
+// VET: Import tasks and their new service structs/traits
+use super::tasks::{
+    self, generation_task, search_in_files, start_lazy_load_scan, start_scan_on_path,
+};
 use super::view_model::{auto_expand_for_matches, generate_ui_state, get_language_from_path};
 use crate::app::file_dialog::DialogService;
 use crate::config::{self, AppConfig}; // Import AppConfig for explicit deserialization
@@ -134,7 +137,7 @@ pub async fn update_config<P: EventProxy>(
             let event = UserEvent::StateUpdate(Box::new(ui_state));
             proxy.send_event(event);
         }
-        // If only other settings changed (like output filename), no re-scan or re-filter is needed.
+    // If only other settings changed (like output filename), no re-scan or re-filter is needed.
     } else {
         tracing::warn!(
             "Failed to deserialize AppConfig from payload: {:?}",
@@ -185,7 +188,8 @@ pub async fn update_filters<P: EventProxy>(
         };
 
         if should_search_content {
-            search_in_files(proxy, state).await;
+            let searcher = tasks::RealFileSearcher;
+            search_in_files(proxy, state, searcher).await;
         } else {
             with_state_and_notify(&state, &proxy, |s| {
                 filtering::apply_filters(s);
@@ -506,12 +510,21 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
         &state_guard,
     ))));
 
+    // --- DEPENDENCY INJECTION ---
+    // Create concrete implementations of our service traits.
+    let real_generator = tasks::RealContentGenerator {
+        cancel_flag: new_cancel_flag,
+    };
+    let real_tokenizer = tasks::RealTokenizer;
+    // --- END INJECTION ---
+
     let proxy_clone = proxy.clone();
     let state_clone = state.clone();
 
     // Spawn the actual generation logic as a separate, managed task.
     let handle = tokio::spawn(async move {
-        generation_task(proxy_clone, state_clone, new_cancel_flag).await;
+        // Pass the injected services to the task.
+        generation_task(proxy_clone, state_clone, real_generator, real_tokenizer).await;
     });
     state_guard.generation_task = Some(handle);
 }

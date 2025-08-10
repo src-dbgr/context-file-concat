@@ -101,7 +101,8 @@ impl FileHandler {
     /// Reads the content of a file, with safeguards for large or binary files.
     fn read_file_content(file_path: &Path) -> Result<String, CoreError> {
         let metadata =
-            fs::metadata(file_path).map_err(|e| CoreError::Io(e, file_path.to_path_buf()))?;
+            // VET: Convert error to string
+            fs::metadata(file_path).map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
 
         // Skip files that exceed the size limit to prevent excessive memory usage.
         if metadata.len() > 20 * 1024 * 1024 {
@@ -117,7 +118,8 @@ impl FileHandler {
             // If reading as a string fails, it's likely binary or has an incompatible encoding.
             Err(_) => {
                 let bytes =
-                    fs::read(file_path).map_err(|e| CoreError::Io(e, file_path.to_path_buf()))?;
+                    // VET: Convert error to string
+                    fs::read(file_path).map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
 
                 // Use a lossy conversion to create a string preview. If the conversion
                 // introduces Unicode replacement characters, we classify it as binary.
@@ -142,13 +144,15 @@ impl FileHandler {
 
         // Use a utility to quickly check if the file is likely text-based.
         if !is_text_file(file_path)
-            .map_err(|e| CoreError::Io(std::io::Error::other(e), file_path.to_path_buf()))?
+            // VET: Convert error to string
+            .map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?
         {
             return Ok("[BINARY FILE]".to_string());
         }
 
         let file =
-            fs::File::open(file_path).map_err(|e| CoreError::Io(e, file_path.to_path_buf()))?;
+            // VET: Convert error to string
+            fs::File::open(file_path).map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
         let reader = BufReader::new(file);
         let mut preview = String::new();
 

@@ -200,7 +200,8 @@ impl DirectoryScanner {
         match blocking_task_handle.await {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(core_error)) => Err(core_error),
-            Err(join_error) => Err(CoreError::Join(join_error)),
+            // VET: Use .into() to correctly convert the JoinError via our From impl.
+            Err(join_error) => Err(join_error.into()),
         }
     }
 }

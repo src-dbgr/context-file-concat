@@ -7,16 +7,15 @@ use thiserror::Error;
 ///
 /// This enum encapsulates all possible errors that can occur during
 /// core operations like file scanning, content generation, and pattern matching.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum CoreError {
     /// Represents an I/O error, typically from file system operations.
     #[error("I/O error for path {1}: {0}")]
-    Io(#[source] std::io::Error, PathBuf),
+    Io(String, PathBuf),
 
     /// Represents an error that occurred when a Tokio task was joined.
-    /// This is often due to a task panicking or being cancelled.
     #[error("Task join error: {0}")]
-    Join(#[from] tokio::task::JoinError),
+    Join(String),
 
     /// Represents a path that was expected to be a directory but was not.
     #[allow(dead_code)]
@@ -25,7 +24,7 @@ pub enum CoreError {
 
     /// Represents a failure to strip a path prefix.
     #[error("Failed to strip prefix from path: {0}")]
-    PathStrip(#[from] StripPrefixError),
+    PathStrip(String),
 
     /// Represents an error related to ignore pattern processing.
     #[error("Pattern error: {0}")]
@@ -34,4 +33,17 @@ pub enum CoreError {
     /// Represents a user-initiated cancellation of an operation.
     #[error("Operation was cancelled by the user")]
     Cancelled,
+}
+
+// Manual From implementations because the source errors are not Clone
+impl From<tokio::task::JoinError> for CoreError {
+    fn from(e: tokio::task::JoinError) -> Self {
+        CoreError::Join(e.to_string())
+    }
+}
+
+impl From<StripPrefixError> for CoreError {
+    fn from(e: StripPrefixError) -> Self {
+        CoreError::PathStrip(e.to_string())
+    }
 }
