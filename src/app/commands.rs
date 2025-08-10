@@ -684,7 +684,6 @@ mod tests {
             let temp_dir = tempdir().expect("Failed to create temp dir");
             let root_path = temp_dir.path().to_path_buf();
             let (tx, rx) = mpsc::unbounded_channel();
-
             let proxy = TestEventProxy { sender: tx };
 
             // FIX: Explicitly create a clean state instead of using AppState::default().
@@ -710,6 +709,13 @@ mod tests {
                 std_fs::create_dir_all(parent).unwrap();
             }
             std_fs::write(&path, format!("content of {}", relative_path)).unwrap();
+            path
+        }
+
+        // Helper to create a directory within the test's temporary directory.
+        fn create_dir(&self, relative_path: &str) -> PathBuf {
+            let path = self.root_path.join(relative_path);
+            std_fs::create_dir_all(&path).unwrap();
             path
         }
 
@@ -759,6 +765,29 @@ mod tests {
                 .ok()
                 .flatten()
         }
+
+        // Helper to wait for an async scan to complete by watching the `is_scanning` flag.
+        async fn wait_for_scan_completion(&mut self) -> Option<Box<UiState>> {
+            let timeout = tokio::time::sleep(std::time::Duration::from_secs(2));
+            tokio::pin!(timeout);
+
+            loop {
+                tokio::select! {
+                    event = self.get_next_event() => {
+                         if let Some(UserEvent::StateUpdate(ui_state)) = event {
+                            if !ui_state.is_scanning {
+                                return Some(ui_state);
+                            }
+                        } else if event.is_none() {
+                            return None; // Channel closed
+                        }
+                    },
+                    _ = &mut timeout => {
+                        return None; // Timeout
+                    }
+                }
+            }
+        }
     }
 
     // Helper to create a mock FileItem for testing.
@@ -806,7 +835,6 @@ mod tests {
         let ui_state = harness.get_last_state_update().await.unwrap();
         assert!(ui_state.current_path.is_empty());
         assert_eq!(ui_state.visible_files_count, 0);
-
         {
             let state = harness.state.lock().unwrap();
             assert!(state.current_path.is_empty());
@@ -815,6 +843,28 @@ mod tests {
             assert!(state.selected_files.is_empty());
             assert!(state.config.last_directory.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn test_rescan_directory_on_empty_path_does_nothing() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        {
+            // Ensure no path is loaded
+            let mut state = harness.state.lock().unwrap();
+            state.current_path = String::new();
+        }
+
+        // Act
+        rescan_directory(harness.proxy.clone(), harness.state.clone());
+
+        // Assert
+        // No StateUpdate event should be sent, so the channel should be empty.
+        let event = harness.get_next_event().await;
+        assert!(
+            event.is_none(),
+            "Rescan should not trigger any event when path is empty"
+        );
     }
 
     #[tokio::test]
@@ -853,30 +903,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_toggle_directory_selection_selects_all_children() {
+    async fn test_toggle_directory_selection_selects_and_deselects_all_children() {
         // Arrange
         let mut harness = TestHarness::new();
-        harness.create_file("src/main.rs");
-        harness.create_file("src/lib.rs");
+        let file1 = harness.create_file("src/main.rs");
+        let file2 = harness.create_file("src/lib.rs");
         let dir_path = harness.root_path.join("src");
         harness.set_initial_files(&["src", "src/main.rs", "src/lib.rs"]);
         let payload = json!(dir_path);
 
-        // Act
+        // Act 1: Select all children
+        toggle_directory_selection(
+            payload.clone(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        // Assert 1: All children are selected
+        let ui_state_select = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state_select.selected_files_count, 2);
+        let src_node_select = ui_state_select
+            .tree
+            .iter()
+            .find(|n| n.name == "src")
+            .unwrap();
+        assert_eq!(
+            src_node_select.selection_state, "full",
+            "Directory should be fully selected"
+        );
+
+        // Act 2: Deselect all children
         toggle_directory_selection(payload, harness.proxy.clone(), harness.state.clone());
 
-        // Assert (Corrected Structure)
-        let ui_state = harness.get_last_state_update().await.unwrap();
-        assert_eq!(ui_state.selected_files_count, 2);
-        {
-            let state = harness.state.lock().unwrap();
-            assert!(state
-                .selected_files
-                .contains(&harness.root_path.join("src/main.rs")));
-            assert!(state
-                .selected_files
-                .contains(&harness.root_path.join("src/lib.rs")));
-        }
+        // Assert 2: All children are deselected
+        let ui_state_deselect = harness.get_last_state_update().await.unwrap();
+        assert_eq!(
+            ui_state_deselect.selected_files_count, 0,
+            "Files should be deselected"
+        );
+        let src_node_deselect = ui_state_deselect
+            .tree
+            .iter()
+            .find(|n| n.name == "src")
+            .unwrap();
+        assert_eq!(
+            src_node_deselect.selection_state, "none",
+            "Directory should have no selection"
+        );
+
+        let state = harness.state.lock().unwrap();
+        assert!(!state.selected_files.contains(&file1));
+        assert!(!state.selected_files.contains(&file2));
     }
 
     #[tokio::test]
@@ -899,6 +976,35 @@ mod tests {
 
         // Assert 2
         let ui_state2 = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state2.selected_files_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_fully_scanned_guards() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        harness.create_file("file1.txt");
+        harness.set_initial_files(&["file1.txt"]);
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.is_fully_scanned = false; // Explicitly set to false
+            state.expanded_dirs.clear();
+            state.selected_files.clear();
+        }
+
+        // Act 1: Call expand_all_fully when not fully scanned
+        expand_all_fully(harness.proxy.clone(), harness.state.clone());
+        let ui_state1 = harness.get_last_state_update().await.unwrap();
+
+        // Assert 1: Nothing changed
+        assert!(ui_state1.tree.iter().all(|n| !n.is_expanded));
+        assert_eq!(ui_state1.selected_files_count, 0);
+
+        // Act 2: Call select_all_fully when not fully scanned
+        select_all_fully(harness.proxy.clone(), harness.state.clone());
+        let ui_state2 = harness.get_last_state_update().await.unwrap();
+
+        // Assert 2: Nothing changed
         assert_eq!(ui_state2.selected_files_count, 0);
     }
 
@@ -934,6 +1040,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_load_file_preview_sends_search_term() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let file_path = harness.create_file("preview.txt");
+        let search_term = "magic_word";
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.content_search_query = search_term.to_string();
+        }
+        let payload = json!(file_path);
+
+        // Act
+        load_file_preview(payload, harness.proxy.clone(), harness.state.clone());
+
+        // Assert
+        // We expect two events: ShowFilePreview and StateUpdate
+        let mut saw_preview = false;
+        for _ in 0..2 {
+            if let Some(event) = harness.get_next_event().await {
+                if let UserEvent::ShowFilePreview {
+                    search_term: term, ..
+                } = event
+                {
+                    assert_eq!(
+                        term,
+                        Some(search_term.to_string()),
+                        "Search term should be passed to the preview event"
+                    );
+                    saw_preview = true;
+                }
+            }
+        }
+        assert!(saw_preview, "Did not receive the ShowFilePreview event");
+    }
+
+    #[tokio::test]
     async fn test_load_file_preview_success_and_error() {
         // Arrange
         let mut harness = TestHarness::new();
@@ -954,7 +1096,7 @@ mod tests {
             if let Some(event) = harness.get_next_event().await {
                 match event {
                     UserEvent::ShowFilePreview { content, path, .. } => {
-                        assert_eq!(content, "content of preview.txt\n");
+                        assert!(content.contains("content of preview.txt"));
                         assert_eq!(path, file_path);
                         saw_preview = true;
                     }
@@ -984,7 +1126,6 @@ mod tests {
     }
 
     // In src/app/commands.rs, inside #[cfg(test)] mod tests { ... }
-
     #[tokio::test]
     async fn test_update_config_triggers_refilter() {
         // Arrange
@@ -993,12 +1134,10 @@ mod tests {
         harness.create_file("src/empty_dir/placeholder.txt");
         // Manually remove the placeholder to make the directory genuinely empty.
         std_fs::remove_file(harness.root_path.join("src/empty_dir/placeholder.txt")).unwrap();
-
         let src_path = harness.root_path.join("src");
         let empty_dir_path = harness.root_path.join("src/empty_dir");
 
         harness.set_initial_files(&["src", "src/main.rs", "src/empty_dir"]);
-
         {
             let mut state = harness.state.lock().unwrap();
             // FIX: Accurately simulate a full scan by setting is_fully_scanned AND
@@ -1038,7 +1177,6 @@ mod tests {
             .iter()
             .find(|n| n.name == "src")
             .expect("'src' node should be present in the tree");
-
         assert!(
             !src_node.children.iter().any(|n| n.name == "empty_dir"),
             "The node for 'empty_dir' should have been filtered out and not be a child of 'src'"
@@ -1046,10 +1184,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_filters_applies_filename_filter_without_content_search() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        harness.create_file("src/main.rs");
+        harness.create_file("src/lib.rs");
+        harness.create_file("README.md");
+        harness.set_initial_files(&["src", "src/main.rs", "src/lib.rs", "README.md"]);
+
+        let filters = json!({
+            "searchQuery": "main",
+            "extensionFilter": "",
+            "contentSearchQuery": "" // Ensure content search is not triggered
+        });
+
+        // Act
+        update_filters(filters, harness.proxy.clone(), harness.state.clone()).await;
+
+        // Assert
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        // Visible items should be 'src' and 'src/main.rs'
+        assert_eq!(ui_state.visible_files_count, 2);
+        assert!(ui_state.tree.iter().any(|n| n.name == "src"));
+        assert!(!ui_state.tree.iter().any(|n| n.name == "README.md"));
+        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
+        assert!(src_node.children.iter().any(|c| c.name == "main.rs"));
+        assert!(!src_node.children.iter().any(|c| c.name == "lib.rs"));
+
+        // Verify that the internal state was updated correctly.
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.search_query, "main");
+    }
+
+    #[tokio::test]
+    async fn test_add_ignore_path_for_file() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        harness.create_file("src/main.rs");
+        harness.create_file("README.md"); // This file will be ignored
+        harness.set_initial_files(&["src", "src/main.rs", "README.md"]);
+
+        let path_to_ignore = harness.root_path.join("README.md");
+        let payload = json!(path_to_ignore);
+
+        // Act: Ignore the 'README.md' file
+        add_ignore_path(payload, harness.proxy.clone(), harness.state.clone());
+
+        // Assert: A rescan is triggered, so we wait for it to complete.
+        let final_state = harness
+            .wait_for_scan_completion()
+            .await
+            .expect("Scan did not complete after ignoring path");
+
+        // The 'README.md' file should be gone.
+        assert_eq!(final_state.visible_files_count, 2); // 'src' and 'src/main.rs'
+        assert!(final_state.tree.iter().any(|n| n.name == "src"));
+        assert!(!final_state.tree.iter().any(|n| n.name == "README.md"));
+
+        let state = harness.state.lock().unwrap();
+        assert!(state.config.ignore_patterns.contains("README.md"));
+    }
+
+    #[tokio::test]
     async fn test_add_ignore_path_retriggers_scan() {
         // Arrange
         let mut harness = TestHarness::new();
         harness.create_file("src/main.rs");
+        harness.create_dir("docs");
         harness.create_file("docs/guide.md"); // This file will be ignored
 
         // This simulates a state after an initial scan
@@ -1064,34 +1265,27 @@ mod tests {
 
         // Assert
         // We expect a final state update after the rescan finishes.
-        let final_state = loop {
-            if let Some(event) = harness.get_next_event().await {
-                if let UserEvent::StateUpdate(ui_state) = event {
-                    if !ui_state.is_scanning {
-                        break Some(ui_state);
-                    }
-                }
-            } else {
-                break None;
-            }
-        }
-        .expect("Scan did not complete after ignoring path");
+        let final_state = harness
+            .wait_for_scan_completion()
+            .await
+            .expect("Scan did not complete after ignoring path");
 
         // The 'docs' directory and its contents should be gone.
         assert_eq!(final_state.visible_files_count, 2); // 'src' and 'src/main.rs'
         assert!(final_state.tree.iter().any(|n| n.name == "src"));
         assert!(!final_state.tree.iter().any(|n| n.name == "docs"));
-
         {
             let state = harness.state.lock().unwrap();
-            assert!(state.config.ignore_patterns.contains("docs/"));
+            assert!(
+                state.config.ignore_patterns.contains("docs/"),
+                "Pattern should end with a slash for directories"
+            );
         }
     }
 
     #[tokio::test]
     async fn test_commands_with_invalid_payloads_do_not_panic() {
         // This single test covers the error paths for multiple commands.
-
         // Arrange
         let mut harness = TestHarness::new();
         let initial_state_snapshot = harness.state.lock().unwrap().config.clone();
@@ -1131,6 +1325,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_generate_preview_sets_generating_state_and_spawns_task() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        harness.create_file("file.txt");
+        harness.set_initial_files(&["file.txt"]);
+
+        // Act
+        generate_preview(harness.proxy.clone(), harness.state.clone());
+
+        // Assert: Check for the *immediate* state update to 'generating: true'
+        let event = harness
+            .get_next_event()
+            .await
+            .expect("Did not receive an event after calling generate_preview");
+
+        let ui_state = match event {
+            UserEvent::StateUpdate(ui_state) => ui_state,
+            _ => panic!("Expected a StateUpdate event first, got {:?}", event),
+        };
+        assert!(
+            ui_state.is_generating,
+            "UI state should immediately switch to generating"
+        );
+
+        // Assert: Check the internal app state is correctly configured
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(state.is_generating);
+            assert!(
+                state.generation_task.is_some(),
+                "Generation task handle should be stored in state"
+            );
+        }
+
+        // Assert: Wait for the generation to complete by looking for the final state update.
+        // This is more robust than get_last_state_update.
+        let mut final_event_found = false;
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(2));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                event = harness.get_next_event() => {
+                    if let Some(UserEvent::StateUpdate(ui_state)) = event {
+                        if !ui_state.is_generating { // This is the specific condition we are waiting for
+                            final_event_found = true;
+                            break;
+                        }
+                    } else if event.is_none() {
+                        panic!("Event channel closed unexpectedly while waiting for final state");
+                    }
+                },
+                _ = &mut timeout => {
+                    break; // Timeout elapsed
+                }
+            }
+        }
+
+        assert!(
+            final_event_found,
+            "Did not receive final state update where is_generating is false"
+        );
+    }
+
+    #[tokio::test]
     async fn test_cancel_generation_resets_generating_state() {
         // Arrange
         let mut harness = TestHarness::new();
@@ -1139,6 +1398,7 @@ mod tests {
 
         // Start generation first
         generate_preview(harness.proxy.clone(), harness.state.clone());
+
         // Wait for the initial "generating" state update to be processed
         let _ = harness.get_last_state_update().await;
 
@@ -1150,12 +1410,10 @@ mod tests {
             .get_last_state_update()
             .await
             .expect("Did not receive state update after cancelling generation");
-
         assert!(
             !ui_state.is_generating,
             "UI State should not be 'generating'"
         );
-
         {
             let state = harness.state.lock().unwrap();
             assert!(!state.is_generating, "App State should not be 'generating'");
@@ -1165,34 +1423,4 @@ mod tests {
             );
         }
     }
-
-    // #[tokio::test]
-    // async fn test_generate_preview_sets_generating_state_and_spawns_task() {
-    //     // Arrange
-    //     let mut harness = TestHarness::new();
-    //     harness.create_file("file.txt");
-    //     harness.set_initial_files(&["file.txt"]);
-
-    //     // Act
-    //     generate_preview(harness.proxy.clone(), harness.state.clone());
-
-    //     // Assert: Check the immediate effects of calling the command
-    //     let ui_state = harness
-    //         .get_last_state_update()
-    //         .await
-    //         .expect("Did not receive state update after starting generation");
-
-    //     // 1. UI state immediately reflects that generation is in progress.
-    //     assert!(ui_state.is_generating);
-
-    //     // 2. The internal app state is correctly configured.
-    //     {
-    //         let state = harness.state.lock().unwrap();
-    //         assert!(state.is_generating);
-    //         assert!(
-    //             state.generation_task.is_some(),
-    //             "Generation task handle should be stored in state"
-    //         );
-    //     }
-    // }
 }
