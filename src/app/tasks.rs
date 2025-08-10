@@ -387,11 +387,11 @@ pub async fn generation_task<P: EventProxy>(
             get_selected_files_in_tree_order(&state_guard),
             PathBuf::from(&state_guard.current_path),
             state_guard.config.clone(),
-            state_guard.full_file_list.clone(), // ← KORREKT
+            state_guard.full_file_list.clone(),
             state_guard.is_fully_scanned,
         )
     };
-    // Wichtig: Auch die übergebene Variable umbenennen für Klarheit
+
     let items_for_tree = if config.remove_empty_directories && is_fully_scanned {
         tracing::info!("🌳 Pruning empty directories from the generated tree.");
         SearchEngine::remove_empty_directories(
@@ -418,37 +418,46 @@ pub async fn generation_task<P: EventProxy>(
     )
     .await;
 
-    // Lock the state again to update it after the task is done.
-    let mut state_guard = state
-        .lock()
-        .expect("Mutex was poisoned. This should not happen.");
-
-    // The task is finished, so we can clear the handle.
-    state_guard.generation_task = None;
-
-    // Check if the operation was cancelled. If so, we don't show an error.
+    // Process the result
     match result {
         Ok(content) => {
-            // Token-Zählung hier einfügen
-            let bpe = cl100k_base().unwrap();
-            let token_count = bpe.encode_with_special_tokens(&content).len();
+            // Offload the CPU-intensive token counting to a blocking thread
+            let proxy_clone = proxy.clone();
+            let state_clone = state.clone();
+            tokio::task::spawn_blocking(move || {
+                let bpe = cl100k_base().unwrap();
+                let token_count = bpe.encode_with_special_tokens(&content).len();
 
-            proxy.send_event(UserEvent::ShowGeneratedContent {
-                content,
-                token_count,
+                proxy_clone.send_event(UserEvent::ShowGeneratedContent {
+                    content,
+                    token_count,
+                });
+
+                // Update the final state after the event has been sent
+                let mut state_guard = state_clone
+                    .lock()
+                    .expect("Mutex was poisoned. This should not happen.");
+                state_guard.is_generating = false;
+                proxy_clone.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                    &state_guard,
+                ))));
             });
         }
         Err(CoreError::Cancelled) => {
+            let mut state_guard = state.lock().expect("Mutex was poisoned");
             state_guard.scan_progress.current_scanning_path = "Generation cancelled.".to_string();
+            state_guard.is_generating = false;
+            proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_guard,
+            ))));
         }
         Err(e) => {
             proxy.send_event(UserEvent::ShowError(e.to_string()));
+            let mut state_guard = state.lock().expect("Mutex was poisoned");
+            state_guard.is_generating = false;
+            proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_guard,
+            ))));
         }
     }
-
-    // This is now the single point of truth for resetting the generating state.
-    state_guard.is_generating = false;
-    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-        &state_guard,
-    ))));
 }
