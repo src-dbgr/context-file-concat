@@ -1,4 +1,5 @@
 use context_file_concat::app;
+use context_file_concat::app::file_dialog::NativeDialogService;
 use context_file_concat::config;
 use std::sync::{Arc, Mutex};
 use tao::{
@@ -33,6 +34,7 @@ async fn main() {
     // Create the shared application state and the event loop proxy
     let proxy = event_loop.create_proxy();
     let state = Arc::new(Mutex::new(app::state::AppState::default()));
+    let dialog_service = Arc::new(NativeDialogService {});
 
     let html_content = include_str!("ui/index.html")
         .replace("/*INJECT_CSS*/", include_str!("ui/style.css"))
@@ -40,13 +42,19 @@ async fn main() {
 
     let proxy_for_ipc = proxy.clone();
     let state_for_ipc = state.clone();
+    let dialog_for_ipc = dialog_service.clone();
     let proxy_for_drop = proxy.clone();
     let state_for_drop = state.clone();
 
     let webview = WebViewBuilder::new(&*window)
         .with_html(html_content)
         .with_ipc_handler(move |message: String| {
-            app::handle_ipc_message(message, proxy_for_ipc.clone(), state_for_ipc.clone());
+            app::handle_ipc_message(
+                message,
+                dialog_for_ipc.clone(),
+                proxy_for_ipc.clone(),
+                state_for_ipc.clone(),
+            );
         })
         .with_file_drop_handler(move |event| {
             use wry::FileDropEvent;

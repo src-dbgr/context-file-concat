@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod events;
+pub mod file_dialog;
 pub mod filtering;
 mod helpers;
 pub mod proxy;
@@ -12,6 +13,7 @@ pub mod state;
 pub mod tasks;
 pub mod view_model;
 
+use crate::app::file_dialog::DialogService;
 use std::sync::{Arc, Mutex};
 use wry::WebView;
 
@@ -23,13 +25,21 @@ use state::AppState;
 ///
 /// It parses the message and delegates to the appropriate command handler function
 /// in the `commands` module. Each command is spawned as a separate Tokio task.
-pub fn handle_ipc_message<P: EventProxy>(message: String, proxy: P, state: Arc<Mutex<AppState>>) {
+pub fn handle_ipc_message<P: EventProxy>(
+    message: String,
+    dialog_service: Arc<impl DialogService + 'static>,
+    proxy: P,
+    state: Arc<Mutex<AppState>>,
+) {
     if let Ok(msg) = serde_json::from_str::<IpcMessage>(&message) {
         // Clone the proxy for use in the async task
         let proxy = proxy.clone();
+        let dialog = dialog_service.clone();
         tokio::spawn(async move {
             match msg.command.as_str() {
-                "selectDirectory" => commands::select_directory(proxy.clone(), state),
+                "selectDirectory" => {
+                    commands::select_directory(dialog.as_ref(), proxy.clone(), state)
+                }
                 "clearDirectory" => commands::clear_directory(proxy.clone(), state),
                 "rescanDirectory" => commands::rescan_directory(proxy.clone(), state),
                 "cancelScan" => commands::cancel_scan(proxy.clone(), state),
@@ -56,10 +66,14 @@ pub fn handle_ipc_message<P: EventProxy>(message: String, proxy: P, state: Arc<M
                 "generatePreview" => commands::generate_preview(proxy.clone(), state),
                 "cancelGeneration" => commands::cancel_generation(proxy.clone(), state),
                 "clearPreviewState" => commands::clear_preview_state(proxy.clone(), state),
-                "saveFile" => commands::save_file(msg.payload, proxy.clone(), state),
-                "pickOutputDirectory" => commands::pick_output_directory(proxy.clone(), state),
-                "importConfig" => commands::import_config(proxy.clone(), state),
-                "exportConfig" => commands::export_config(proxy.clone(), state),
+                "saveFile" => {
+                    commands::save_file(dialog.as_ref(), msg.payload, proxy.clone(), state)
+                }
+                "pickOutputDirectory" => {
+                    commands::pick_output_directory(dialog.as_ref(), proxy.clone(), state)
+                }
+                "importConfig" => commands::import_config(dialog.as_ref(), proxy.clone(), state),
+                "exportConfig" => commands::export_config(dialog.as_ref(), proxy.clone(), state),
                 "expand_all_fully" => commands::expand_all_fully(proxy.clone(), state),
                 "select_all_fully" => commands::select_all_fully(proxy.clone(), state),
                 _ => tracing::warn!("Unknown IPC command: {}", msg.command),
