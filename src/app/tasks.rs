@@ -413,7 +413,7 @@ pub fn start_scan_on_path<P: EventProxy>(
             }
             state_guard.current_path = directory_path.to_string_lossy().to_string();
             state_guard.config.last_directory = Some(directory_path.clone());
-            crate::config::settings::save_config(&state_guard.config).ok();
+            crate::config::settings::save_config(&state_guard.config, None).ok();
             state_guard.is_scanning = true;
             state_guard.is_fully_scanned = false;
             let flag = Arc::new(AtomicBool::new(false));

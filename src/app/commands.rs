@@ -11,9 +11,7 @@ use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
 use super::state::AppState;
 // VET: Import tasks and their new service structs/traits
-use super::tasks::{
-    self, generation_task, search_in_files, start_lazy_load_scan, start_scan_on_path,
-};
+use super::tasks::{self, search_in_files, start_lazy_load_scan, start_scan_on_path};
 use super::view_model::{auto_expand_for_matches, generate_ui_state, get_language_from_path};
 use crate::app::file_dialog::DialogService;
 use crate::config::{self, AppConfig}; // Import AppConfig for explicit deserialization
@@ -52,7 +50,7 @@ pub fn clear_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     with_state_and_notify(&state, &proxy, |s| {
         s.reset_directory_state();
         s.config.last_directory = None;
-        if let Err(e) = config::settings::save_config(&s.config) {
+        if let Err(e) = config::settings::save_config(&s.config, None) {
             tracing::warn!("Failed to save config after clearing directory: {}", e);
         }
     });
@@ -112,7 +110,7 @@ pub async fn update_config<P: EventProxy>(
 
         // Always update the config in the state first.
         state_guard.config = new_config;
-        if let Err(e) = config::settings::save_config(&state_guard.config) {
+        if let Err(e) = config::settings::save_config(&state_guard.config, None) {
             tracing::warn!("Failed to save config on update: {}", e);
         }
 
@@ -502,6 +500,19 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     state_guard.cancel_current_generation();
     state_guard.is_generating = true;
     state_guard.previewed_file_path = None;
+
+    // VET: CORRECTED LOGIC
+    // Only generate a new timestamped filename if the current one appears to be a default.
+    // This preserves any filename explicitly set by the user.
+    let current_filename = &state_guard.config.output_filename;
+    if current_filename.starts_with("cfc_output_") && current_filename.ends_with(".txt") {
+        let new_filename = format!(
+            "cfc_output_{}.txt",
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        );
+        state_guard.config.output_filename = new_filename;
+    }
+
     let new_cancel_flag = Arc::new(AtomicBool::new(false));
     state_guard.generation_cancellation_flag = new_cancel_flag.clone();
 
@@ -510,21 +521,17 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
         &state_guard,
     ))));
 
-    // --- DEPENDENCY INJECTION ---
-    // Create concrete implementations of our service traits.
     let real_generator = tasks::RealContentGenerator {
         cancel_flag: new_cancel_flag,
     };
     let real_tokenizer = tasks::RealTokenizer;
-    // --- END INJECTION ---
 
     let proxy_clone = proxy.clone();
     let state_clone = state.clone();
 
     // Spawn the actual generation logic as a separate, managed task.
     let handle = tokio::spawn(async move {
-        // Pass the injected services to the task.
-        generation_task(proxy_clone, state_clone, real_generator, real_tokenizer).await;
+        tasks::generation_task(proxy_clone, state_clone, real_generator, real_tokenizer).await;
     });
     state_guard.generation_task = Some(handle);
 }
@@ -624,7 +631,7 @@ pub async fn import_config<P: EventProxy, D: DialogService + ?Sized>(
                 // 2. Apply the new configuration.
                 state_guard.config = new_config;
                 state_guard.current_config_filename = filename;
-                if let Err(e) = config::settings::save_config(&state_guard.config) {
+                if let Err(e) = config::settings::save_config(&state_guard.config, None) {
                     tracing::warn!("Failed to save imported config: {}", e);
                 }
 
@@ -1634,5 +1641,27 @@ mod tests {
             }
             _ => panic!("Expected SaveComplete(false, ...) event"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_generate_preview_preserves_custom_filename() {
+        let mut harness = TestHarness::new();
+        let custom_filename = "my_special_context.md".to_string();
+
+        // 1. Set a custom filename in the state.
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.config.output_filename = custom_filename.clone();
+        }
+
+        // 2. Run the generate_preview command.
+        generate_preview(harness.proxy.clone(), harness.state.clone());
+
+        // 3. Verify the filename in the state has NOT been changed.
+        let final_filename = harness.state.lock().unwrap().config.output_filename.clone();
+        assert_eq!(final_filename, custom_filename);
+
+        // Consume events to avoid panics on drop
+        let _ = harness.get_next_event().await;
     }
 }

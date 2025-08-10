@@ -107,7 +107,7 @@ async fn main() {
                     state_guard.config.window_size = (size.width.into(), size.height.into());
                     state_guard.config.window_position = (position.x.into(), position.y.into());
 
-                    if let Err(e) = config::settings::save_config(&state_guard.config) {
+                    if let Err(e) = config::settings::save_config(&state_guard.config, None) {
                         tracing::error!("Failed to save config on exit: {}", e);
                     }
                     *control_flow = ControlFlow::Exit;
