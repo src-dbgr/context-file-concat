@@ -1314,4 +1314,369 @@ mod tests {
             _ => panic!("Expected ConfigExported event"),
         }
     }
+
+    #[tokio::test]
+    async fn test_update_config_does_nothing_when_no_directory_is_loaded() {
+        let mut harness = TestHarness::new();
+        // Ensure no directory is loaded
+        let new_config = {
+            let mut state = harness.state.lock().unwrap();
+            state.current_path = String::new();
+            let mut config = state.config.clone();
+            config.remove_empty_directories = !config.remove_empty_directories; // Change a setting
+            config
+        };
+
+        let payload = serde_json::to_value(new_config.clone()).unwrap();
+
+        update_config(payload, harness.proxy.clone(), harness.state.clone());
+
+        // Assert that the config *was* updated in the state
+        // We use a new scope to ensure the lock is released before calling get_next_event
+        {
+            let final_config = &harness.state.lock().unwrap().config;
+            assert_eq!(
+                final_config.remove_empty_directories,
+                new_config.remove_empty_directories
+            );
+        } // The MutexGuard is dropped here
+
+        // Assert that no events (like a rescan) were triggered because there's no path to scan
+        let event = harness.get_next_event().await;
+        assert!(
+            event.is_none(),
+            "No events should be sent when no directory is loaded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_ignore_path_does_nothing_when_no_directory_is_loaded() {
+        let mut harness = TestHarness::new();
+        let initial_patterns_count;
+        // Ensure no directory is loaded
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.current_path = String::new();
+            initial_patterns_count = state.config.ignore_patterns.len();
+        }
+
+        let payload = json!("/some/path/to/ignore.txt");
+        add_ignore_path(payload, harness.proxy.clone(), harness.state.clone());
+
+        // Assert that config has not changed
+        // Use a new scope here as well for consistency and safety
+        {
+            let final_patterns_count = harness.state.lock().unwrap().config.ignore_patterns.len();
+            assert_eq!(
+                initial_patterns_count, final_patterns_count,
+                "Ignore patterns should not change"
+            );
+        }
+
+        // Assert that no events were triggered
+        let event = harness.get_next_event().await;
+        assert!(
+            event.is_none(),
+            "No events should be sent when no directory is loaded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_import_config_sends_error_on_corrupt_file() {
+        let mut harness = TestHarness::new();
+        let corrupt_config_path = harness.create_file("corrupt_config.json", "{ not_valid_json, }");
+        harness.dialog.set_pick_file(Some(corrupt_config_path));
+
+        import_config(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        match harness.get_next_event().await.unwrap() {
+            UserEvent::ShowError(msg) => {
+                assert!(
+                    msg.contains("Failed to import config"),
+                    "Expected an import error message, but got: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected ShowError event, but got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_export_config_sends_no_event_on_cancel() {
+        let mut harness = TestHarness::new();
+        // Simulate user cancelling the dialog
+        harness.dialog.set_save_file(None);
+
+        export_config(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        let event = harness.get_next_event().await;
+        assert!(
+            event.is_none(),
+            "No event should be sent when export is cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_file_handles_invalid_payload() {
+        let mut harness = TestHarness::new();
+        let save_path = harness.root_path.join("output.txt");
+        harness.dialog.set_save_file(Some(save_path.clone()));
+
+        // Payload is a number, not a string
+        let invalid_payload = json!(12345);
+
+        save_file(
+            harness.dialog.as_ref(),
+            invalid_payload,
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        // Check that no file was written
+        assert!(
+            !save_path.exists(),
+            "No file should have been written with an invalid payload"
+        );
+
+        // Check that no event was sent
+        let event = harness.get_next_event().await;
+        assert!(
+            event.is_none(),
+            "No event should be sent for an invalid payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_directory_level_handles_invalid_payload() {
+        let mut harness = TestHarness::new();
+
+        // Payload is an object, not a string
+        let invalid_payload = json!({ "path": "/not/a/string/path" });
+
+        load_directory_level(
+            invalid_payload,
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        // No event should be sent as the payload parsing will fail silently (with a log)
+        let event = harness.get_next_event().await;
+        assert!(
+            event.is_none(),
+            "No event should be sent for an invalid payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_config_handles_invalid_payload() {
+        let mut harness = TestHarness::new();
+        // This payload does not match the AppConfig struct.
+        let invalid_payload = json!({ "some_random_key": "some_value" });
+        let initial_config = harness.state.lock().unwrap().config.clone();
+
+        update_config(
+            invalid_payload,
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        // The config should not have changed.
+        let final_config = harness.state.lock().unwrap().config.clone();
+        assert_eq!(initial_config.output_filename, final_config.output_filename);
+
+        // No event should have been sent.
+        let event = harness.get_next_event().await;
+        assert!(event.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_config_triggers_rescan_on_pattern_change() {
+        let mut harness = TestHarness::new();
+        harness.set_initial_files(&["src/main.rs"]);
+
+        let mut new_config = harness.state.lock().unwrap().config.clone();
+        new_config.ignore_patterns.insert("*.rs".to_string());
+        let payload = serde_json::to_value(new_config).unwrap();
+
+        // This should trigger a full rescan, not just a refilter.
+        update_config(payload, harness.proxy.clone(), harness.state.clone());
+
+        // We expect a scan to complete, which results in a final state update where `is_scanning` is false.
+        let final_state = harness.wait_for_scan_completion().await.unwrap();
+        // After ignoring *.rs, no files should be visible.
+        assert_eq!(
+            final_state.visible_files_count, 0,
+            "Scan should have removed the .rs file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_file_preview_sends_error_for_nonexistent_file() {
+        let mut harness = TestHarness::new();
+        let nonexistent_path = harness.root_path.join("nonexistent.txt");
+        let payload = json!(nonexistent_path);
+
+        load_file_preview(payload, harness.proxy.clone(), harness.state.clone());
+
+        // We expect a ShowError event, and a StateUpdate for the selection.
+        let mut error_event_found = false;
+        while let Some(event) = harness.get_next_event().await {
+            if let UserEvent::ShowError(msg) = event {
+                assert!(
+                    msg.contains("I/O error"),
+                    "Expected an I/O error message, got: {}",
+                    msg
+                );
+                error_event_found = true;
+                break;
+            }
+        }
+        assert!(
+            error_event_found,
+            "Did not receive ShowError event for nonexistent file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_filters_triggers_content_search() {
+        let mut harness = TestHarness::new();
+        harness.set_initial_files(&["file1.txt"]);
+        harness.create_file("file1.txt", "hello world");
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.content_search_query = "initial".to_string();
+        }
+
+        let filters = json!({
+            "contentSearchQuery": "world" // New search term
+        });
+
+        update_filters(filters, harness.proxy.clone(), harness.state.clone()).await;
+
+        // The search task runs and updates the state. Wait for the final state.
+        let final_state = harness.get_last_state_update().await.unwrap();
+        assert_eq!(final_state.content_search_query, "world");
+        assert_eq!(
+            final_state.visible_files_count, 1,
+            "The matching file should be visible"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_ignore_path_handles_path_outside_root() {
+        let mut harness = TestHarness::new();
+        harness.set_initial_files(&["src/main.rs"]);
+        let initial_patterns_count = harness.state.lock().unwrap().config.ignore_patterns.len();
+
+        // A path that is not inside the project root cannot be made relative.
+        let outside_path = json!("/etc/hosts");
+
+        add_ignore_path(outside_path, harness.proxy.clone(), harness.state.clone());
+
+        // No event should be sent and config should not change.
+        let event = harness.get_next_event().await;
+        assert!(event.is_none());
+        let final_patterns_count = harness.state.lock().unwrap().config.ignore_patterns.len();
+        assert_eq!(initial_patterns_count, final_patterns_count);
+    }
+
+    #[tokio::test]
+    async fn test_add_ignore_path_handles_duplicate_pattern() {
+        let mut harness = TestHarness::new();
+        harness.set_initial_files(&["docs/guide.md"]);
+
+        // First, add the pattern
+        let path_to_ignore = harness.root_path.join("docs");
+        let payload = json!(path_to_ignore);
+        add_ignore_path(
+            payload.clone(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        let _ = harness.wait_for_scan_completion().await; // Wait for the first scan to finish
+
+        // Now, add the same pattern again.
+        add_ignore_path(payload, harness.proxy.clone(), harness.state.clone());
+
+        // No second scan should be triggered, so no new events should arrive.
+        let event = harness.get_next_event().await;
+        assert!(
+            event.is_none(),
+            "No rescan should be triggered for a duplicate ignore pattern"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_file_sends_error_on_io_failure() {
+        let mut harness = TestHarness::new();
+        // On Unix, /dev/null is a classic way to create a path that can't be written to as a file.
+        // For Windows, a path with invalid characters would be an alternative.
+        let invalid_save_path = PathBuf::from("/dev/null/output.txt");
+        harness.dialog.set_save_file(Some(invalid_save_path));
+
+        save_file(
+            harness.dialog.as_ref(),
+            json!("some content"),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        let event = harness.get_next_event().await.unwrap();
+        match event {
+            UserEvent::SaveComplete(success, msg) => {
+                assert!(!success);
+                // Check for a plausible I/O error message
+                assert!(
+                    msg.contains("Is a directory")
+                        || msg.contains("Not a directory")
+                        || msg.contains("No such file or directory")
+                );
+            }
+            _ => panic!("Expected SaveComplete(false, ...) event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_import_config_handles_nonexistent_scan_directory() {
+        let mut harness = TestHarness::new();
+        let new_config_path = harness.root_path.join("new_config.json");
+        let nonexistent_project_dir = harness.root_path.join("nonexistent_dir");
+
+        let new_config = AppConfig {
+            last_directory: Some(nonexistent_project_dir),
+            ..Default::default()
+        };
+        std_fs::write(
+            &new_config_path,
+            serde_json::to_string(&new_config).unwrap(),
+        )
+        .unwrap();
+        harness.dialog.set_pick_file(Some(new_config_path));
+
+        import_config(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        // We expect a state update from the reset, but no scan should be triggered.
+        // Therefore, we should not receive any further events after a short delay.
+        let event = harness.get_next_event().await;
+        assert!(matches!(event, Some(UserEvent::StateUpdate(_))));
+
+        // And no further events should follow.
+        let second_event = harness.get_next_event().await;
+        assert!(
+            second_event.is_none(),
+            "No scan should start for a nonexistent directory"
+        );
+    }
 }
