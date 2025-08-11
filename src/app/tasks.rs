@@ -1592,21 +1592,15 @@ mod tests {
         assert!(matches!(events[1], UserEvent::StateUpdate(_)));
     }
 
-    /// Tests the happy path for lazy loading a directory level.
+    /// Test for the lazy load happy path, using the proper entry point.
     #[tokio::test]
     async fn start_lazy_load_scan_happy_path_adds_files() {
         // Arrange
         let mut harness = TestHarness::new();
-        let scanner = MockScanner::new();
         let dir_to_load = harness.root_path.join("src");
-        let new_file = dir_to_load.join("main.rs");
-
-        // Mock scanner will return one new file for the lazy-loaded directory
-        let new_items = vec![FileItem {
-            path: new_file.clone(),
-            ..Default::default()
-        }];
-        *scanner.shallow_result.lock().unwrap() = Ok((new_items, HashSet::new()));
+        std::fs::create_dir_all(&dir_to_load).unwrap();
+        let new_file_path = dir_to_load.join("main.rs");
+        std::fs::write(&new_file_path, "fn main() {}").unwrap();
 
         {
             let mut state = harness.state.lock().unwrap();
@@ -1616,19 +1610,22 @@ mod tests {
                 is_directory: true,
                 ..Default::default()
             });
+            state.filtered_file_list = state.full_file_list.clone();
         }
 
         // Act - Use the real entry point for lazy loading
-        lazy_load_task(
+        start_lazy_load_scan(
             dir_to_load.clone(),
             harness.proxy.clone(),
             harness.state.clone(),
-            scanner,
-        )
-        .await;
+        );
 
         // Assert
-        let final_state_update = harness.get_last_state_update().await.unwrap();
+        // The task will run in the background, so we need to await its resulting state update.
+        let final_state_update = harness
+            .get_last_state_update()
+            .await
+            .expect("Should receive a state update after lazy load");
         assert_eq!(
             final_state_update.visible_files_count, 2,
             "Should show parent dir and new file"
@@ -1647,7 +1644,7 @@ mod tests {
             state
                 .full_file_list
                 .iter()
-                .any(|item| item.path == new_file),
+                .any(|item| item.path == new_file_path),
             "New file should be in the full list"
         );
     }
@@ -1674,6 +1671,128 @@ mod tests {
         assert!(
             events.is_empty(),
             "No events should be sent when lazy load is ignored"
+        );
+    }
+
+    /// Tests that the RealFileSearcher gracefully handles files that cannot be read
+    /// from the filesystem (e.g., due to permissions).
+    #[tokio::test]
+    #[cfg(unix)] // This test relies on Unix-style permissions.
+    async fn search_in_files_with_real_searcher_handles_read_error() {
+        // Arrange
+        use std::os::unix::fs::PermissionsExt;
+
+        let harness = TestHarness::new();
+        let searcher = RealFileSearcher;
+
+        let unreadable_file_path = harness.root_path.join("unreadable.txt");
+        std::fs::write(&unreadable_file_path, "you can't read me").unwrap();
+
+        // Set file permissions to write-only (0o200) to cause a read error.
+        let mut perms = std::fs::metadata(&unreadable_file_path)
+            .unwrap()
+            .permissions();
+        perms.set_mode(0o200);
+        std::fs::set_permissions(&unreadable_file_path, perms).unwrap();
+
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.full_file_list = vec![FileItem {
+                path: unreadable_file_path.clone(),
+                ..Default::default()
+            }];
+            state.content_search_query = "read".to_string();
+        }
+
+        // Act
+        search_in_files(harness.proxy.clone(), harness.state.clone(), searcher).await;
+
+        // Assert
+        // The main assertion is that the task completes without panicking.
+        // We also assert that the unreadable file is not included in the results.
+        let final_state = harness.state.lock().unwrap();
+        assert!(
+            final_state.content_search_results.is_empty(),
+            "Unreadable file should not be a search result."
+        );
+    }
+
+    /// Tests the actual cancellation mechanism of the generation_task using the RealContentGenerator.
+    #[tokio::test]
+    async fn generation_task_with_real_generator_cancels_gracefully() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        // Use the REAL generator, not a mock.
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let generator = RealContentGenerator {
+            cancel_flag: cancel_flag.clone(),
+        };
+        let tokenizer = MockTokenizer { token_count: 0 };
+
+        // Set up state with a file to be processed.
+        {
+            let mut state = harness.state.lock().unwrap();
+            let file_path = harness.root_path.join("file1.txt");
+            std::fs::write(&file_path, "content").unwrap();
+            state.selected_files.insert(file_path.clone());
+            state.full_file_list.push(FileItem {
+                path: file_path,
+                ..Default::default()
+            });
+        }
+
+        // Act
+        let task_handle = tokio::spawn(generation_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            generator,
+            tokenizer,
+        ));
+
+        // Immediately signal cancellation. The task should pick this up.
+        cancel_flag.store(true, Ordering::SeqCst);
+        task_handle.await.unwrap();
+
+        // Assert
+        let events = harness.get_n_events(2).await;
+        // We expect ONLY a StateUpdate event that resets the is_generating flag.
+        // We should NOT receive a ShowGeneratedContent or ShowError event.
+        assert_eq!(
+            events.len(),
+            1,
+            "Only one final StateUpdate event should be sent on cancellation."
+        );
+
+        let final_state = match &events[0] {
+            UserEvent::StateUpdate(s) => s,
+            other => panic!("Expected a StateUpdate, but got {:?}", other),
+        };
+
+        assert!(!final_state.is_generating, "is_generating should be reset.");
+        assert!(
+            final_state.status_message.contains("Generation cancelled"),
+            "Status message should indicate cancellation."
+        );
+    }
+
+    /// Tests the edge case where handle_scan_error is called when no scan is active.
+    #[tokio::test]
+    async fn handle_scan_error_does_nothing_if_not_scanning() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        // Ensure is_scanning is false.
+        harness.state.lock().unwrap().is_scanning = false;
+        let dummy_error = CoreError::Cancelled;
+
+        // Act
+        handle_scan_error(dummy_error, &harness.state, &harness.proxy);
+
+        // Assert
+        // The function should return early without sending any events.
+        let events = harness.get_n_events(1).await;
+        assert!(
+            events.is_empty(),
+            "No events should be sent if not scanning."
         );
     }
 }
