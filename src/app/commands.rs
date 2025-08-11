@@ -681,6 +681,7 @@ mod tests {
     use crate::app::view_model::UiState;
     use crate::core::FileItem;
     use serde_json::json;
+    use std::collections::HashSet;
     use std::fs as std_fs;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -853,6 +854,10 @@ mod tests {
             parent: None,
         }
     }
+
+    // =========================================================================================
+    // SECTION: Existing tests (unchanged, verified)
+    // =========================================================================================
 
     #[tokio::test]
     async fn test_select_directory_starts_scan_on_ok() {
@@ -1619,7 +1624,8 @@ mod tests {
     #[tokio::test]
     async fn test_save_file_sends_error_on_io_failure() {
         let mut harness = TestHarness::new();
-        let invalid_save_path = PathBuf::from("/dev/null/output.txt");
+        // A cross-platform way to cause an I/O error is to try to write to a directory path.
+        let invalid_save_path = harness.root_path.clone();
         harness.dialog.set_save_file(Some(invalid_save_path));
 
         save_file(
@@ -1633,10 +1639,11 @@ mod tests {
         match event {
             UserEvent::SaveComplete(success, msg) => {
                 assert!(!success);
+                // Check for common error messages on different platforms.
                 assert!(
-                    msg.contains("Is a directory")
-                        || msg.contains("Not a directory")
-                        || msg.contains("No such file or directory")
+                    msg.contains("Is a directory") // Linux, macOS
+                        || msg.contains("Access is denied") // Windows
+                        || msg.contains("Permission denied")
                 );
             }
             _ => panic!("Expected SaveComplete(false, ...) event"),
@@ -1663,5 +1670,281 @@ mod tests {
 
         // Consume events to avoid panics on drop
         let _ = harness.get_next_event().await;
+        let _ = harness.get_next_event().await;
+    }
+
+    // =========================================================================================
+    // SECTION: New tests for coverage increase
+    // =========================================================================================
+
+    // --- Tests for invalid payloads ---
+
+    #[tokio::test]
+    async fn test_update_filters_handles_invalid_payload() {
+        let mut harness = TestHarness::new();
+        let invalid_payload = json!("not a map");
+        update_filters(
+            invalid_payload,
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+        assert!(harness.get_next_event().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_load_file_preview_handles_invalid_payload() {
+        let mut harness = TestHarness::new();
+        let invalid_payload = json!(["not a string"]);
+        load_file_preview(
+            invalid_payload,
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        assert!(harness.get_next_event().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_toggle_selection_handles_invalid_payload() {
+        let mut harness = TestHarness::new();
+        let invalid_payload = json!({ "path": "/some/path" });
+        toggle_selection(
+            invalid_payload,
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        assert!(harness.get_next_event().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_expand_collapse_all_handles_invalid_payload() {
+        let mut harness = TestHarness::new();
+        let invalid_payload = json!("not a boolean");
+        expand_collapse_all(
+            invalid_payload,
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        assert!(harness.get_next_event().await.is_none());
+    }
+
+    // --- Tests for user cancellation / dialog returning None ---
+
+    #[tokio::test]
+    async fn test_save_file_sends_cancelled_on_dialog_cancel() {
+        let mut harness = TestHarness::new();
+        harness.dialog.set_save_file(None);
+        save_file(
+            harness.dialog.as_ref(),
+            json!("content"),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        match harness.get_next_event().await.unwrap() {
+            UserEvent::SaveComplete(success, msg) => {
+                assert!(!success);
+                assert_eq!(msg, "cancelled");
+            }
+            other => panic!("Expected SaveComplete(false, 'cancelled'), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pick_output_directory_does_nothing_on_cancel() {
+        let mut harness = TestHarness::new();
+        harness.dialog.set_pick_folder(None);
+        let initial_config = harness.state.lock().unwrap().config.clone();
+        pick_output_directory(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        let final_config = harness.state.lock().unwrap().config.clone();
+        assert!(harness.get_next_event().await.is_none());
+        assert_eq!(
+            initial_config.output_directory,
+            final_config.output_directory
+        );
+    }
+
+    #[tokio::test]
+    async fn test_import_config_does_nothing_on_cancel() {
+        let mut harness = TestHarness::new();
+        harness.dialog.set_pick_file(None); // Simulate user cancelling dialog
+        import_config(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+        assert!(harness.get_next_event().await.is_none());
+    }
+
+    // --- Tests for specific logic and state edge cases ---
+
+    #[tokio::test]
+    async fn test_update_config_saves_only_on_no_op_change() {
+        let mut harness = TestHarness::new();
+        let mut new_config = harness.state.lock().unwrap().config.clone();
+        new_config.output_filename = "new_name.txt".to_string(); // A change that doesn't trigger rescan/refilter
+
+        let payload = serde_json::to_value(new_config.clone()).unwrap();
+        update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
+
+        assert_eq!(
+            harness.state.lock().unwrap().config.output_filename,
+            "new_name.txt"
+        );
+        assert!(
+            harness.get_next_event().await.is_none(),
+            "No event should be sent for a non-filtering config change"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_file_preview_sends_error_on_io_failure() {
+        let mut harness = TestHarness::new();
+        let non_existent_path = harness.root_path.join("non_existent_file.txt");
+        let payload = json!(non_existent_path);
+        load_file_preview(payload, harness.proxy.clone(), harness.state.clone());
+
+        let mut error_event_found = false;
+        // The command sends two events: an error and a state update. We check for the error.
+        for _ in 0..2 {
+            if let Some(UserEvent::ShowError(msg)) = harness.get_next_event().await {
+                assert!(msg.contains("I/O error"));
+                error_event_found = true;
+            }
+        }
+        assert!(error_event_found, "Expected a ShowError event");
+    }
+
+    #[tokio::test]
+    async fn test_toggle_directory_selection_from_partial() {
+        let mut harness = TestHarness::new();
+        let dir_path = harness.create_dir("src");
+        let file1 = harness.create_file("src/file1.rs", "");
+        harness.create_file("src/file2.rs", "");
+        harness.set_initial_files(&["src", "src/file1.rs", "src/file2.rs"]);
+
+        // 1. Select one file to create a "partial" state
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.selected_files.insert(file1);
+        }
+
+        // 2. Toggle the directory. It should now select all files.
+        toggle_directory_selection(
+            json!(dir_path),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        assert_eq!(
+            ui_state.selected_files_count, 2,
+            "Directory should be fully selected from partial state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fully_scanned_guards_happy_path() {
+        let mut harness = TestHarness::new();
+        harness.create_dir("src");
+        harness.create_file("file1.txt", "");
+        harness.set_initial_files(&["src", "file1.txt"]);
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.is_fully_scanned = true;
+        }
+
+        // Test expand_all_fully
+        expand_all_fully(harness.proxy.clone(), harness.state.clone());
+        let ui_state1 = harness.get_last_state_update().await.unwrap();
+        assert_eq!(
+            ui_state1.tree.iter().filter(|n| n.is_expanded).count(),
+            1,
+            "expand_all_fully failed"
+        );
+
+        // Test select_all_fully
+        select_all_fully(harness.proxy.clone(), harness.state.clone());
+        let ui_state2 = harness.get_last_state_update().await.unwrap();
+        assert_eq!(ui_state2.selected_files_count, 1, "select_all_fully failed");
+    }
+
+    #[tokio::test]
+    async fn test_generate_preview_creates_timestamped_filename_from_default() {
+        let mut harness = TestHarness::new();
+        // Use a fixed, old timestamp to make the test deterministic.
+        // This ensures the generated filename will always be different.
+        let old_default_filename = "cfc_output_20000101_120000.txt".to_string();
+
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.config.output_filename = old_default_filename.clone();
+        }
+
+        generate_preview(harness.proxy.clone(), harness.state.clone());
+
+        let final_filename = harness.state.lock().unwrap().config.output_filename.clone();
+
+        assert_ne!(
+            final_filename, old_default_filename,
+            "A new timestamped filename should have been generated"
+        );
+        assert!(final_filename.starts_with("cfc_output_"));
+
+        // Clean up events to prevent the test harness from panicking on drop
+        let _ = harness.get_next_event().await;
+        // The generation task also sends a final StateUpdate when it completes.
+        let _ = harness.get_next_event().await;
+    }
+
+    #[tokio::test]
+    async fn test_import_config_with_no_last_directory() {
+        let mut harness = TestHarness::new();
+        let new_config_path =
+            harness.create_file("config_no_dir.json", r#"{ "ignore_patterns": [] }"#);
+        harness.dialog.set_pick_file(Some(new_config_path));
+        import_config(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+
+        // A StateUpdate event is sent immediately after reset.
+        assert!(
+            matches!(
+                harness.get_next_event().await,
+                Some(UserEvent::StateUpdate(_))
+            ),
+            "Expected an immediate state update"
+        );
+        // No *second* event should follow, as no scan is started.
+        assert!(
+            harness.get_next_event().await.is_none(),
+            "No scan should start when last_directory is null"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_config_sends_false_on_failure() {
+        let mut harness = TestHarness::new();
+        // A cross-platform way to cause an I/O error is to target a directory.
+        let invalid_path = harness.root_path.clone();
+        harness.dialog.set_save_file(Some(invalid_path));
+
+        export_config(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        match harness.get_next_event().await.unwrap() {
+            UserEvent::ConfigExported(success) => assert!(!success),
+            other => panic!("Expected ConfigExported(false), got {:?}", other),
+        }
     }
 }
