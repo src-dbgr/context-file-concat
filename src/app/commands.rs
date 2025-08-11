@@ -681,7 +681,6 @@ mod tests {
     use crate::app::view_model::UiState;
     use crate::core::FileItem;
     use serde_json::json;
-    use std::collections::HashSet;
     use std::fs as std_fs;
     use std::path::PathBuf;
     use std::sync::Mutex;

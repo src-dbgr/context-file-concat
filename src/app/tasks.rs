@@ -73,7 +73,7 @@ pub trait FileSearcher: Send + Sync {
 }
 
 //================================================================================================//
-//|                                  REAL IMPLEMENTATIONS                                        |//
+//|                                   REAL IMPLEMENTATIONS                                       |//
 //================================================================================================//
 
 pub struct RealContentGenerator {
@@ -391,19 +391,23 @@ pub fn start_scan_on_path<P: EventProxy>(
     let proxy_clone = proxy.clone();
     let state_clone = state.clone();
     tokio::spawn(async move {
+        // 1. First, check if the path exists at all.
+        if !path.exists() {
+            proxy.send_event(UserEvent::ShowError(format!(
+                "Path does not exist: {}",
+                path.display()
+            )));
+            return;
+        }
+
+        // 2. If it exists, determine the correct directory to scan.
         let directory_path = if path.is_dir() {
             path
         } else {
-            path.parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| path.clone())
+            // It's a file, so we take its parent. This is safe now because we know the path exists.
+            path.parent().map(|p| p.to_path_buf()).unwrap_or(path) // Fallback just in case of root paths like "/"
         };
-        if !directory_path.is_dir() {
-            proxy.send_event(UserEvent::ShowError(
-                "Dropped item is not a valid directory.".to_string(),
-            ));
-            return;
-        }
+
         let new_cancel_flag = {
             let mut state_guard = state.lock().expect("Mutex was poisoned");
             if !preserve_state {
@@ -569,7 +573,7 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
 
     //============================================================================================//
-    //|                                     TEST HARNESS                                         |//
+    //|                                       TEST HARNESS                                       |//
     //============================================================================================//
     #[derive(Clone)]
     struct TestEventProxy {
@@ -628,7 +632,7 @@ mod tests {
     }
 
     //============================================================================================//
-    //|                                     MOCK SERVICES                                        |//
+    //|                                        MOCK SERVICES                                     |//
     //============================================================================================//
 
     #[derive(Clone)]
@@ -763,7 +767,7 @@ mod tests {
     }
 
     //============================================================================================//
-    //|                                       TEST CASES                                         |//
+    //|                                        TEST CASES                                        |//
     //============================================================================================//
 
     #[tokio::test]
@@ -1047,5 +1051,397 @@ mod tests {
             harness.get_last_state_update().await.is_some(),
             "Should have received a state update"
         );
+    }
+
+    #[tokio::test]
+    async fn proactive_scan_task_handles_shallow_scan_error() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let scanner = MockScanner::new();
+        let scan_error = CoreError::Io("Permission denied".to_string(), harness.root_path.clone());
+
+        // Configure the mock scanner to fail the shallow scan
+        *scanner.shallow_result.lock().unwrap() = Err(scan_error.clone());
+
+        harness.state.lock().unwrap().is_scanning = true;
+
+        // Act
+        proactive_scan_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            harness.root_path.clone(),
+            scanner,
+        )
+        .await;
+
+        // Assert
+        // The RAII guard will send a final StateUpdate on drop because of the error.
+        let events = harness.get_n_events(1).await;
+        assert_eq!(events.len(), 1, "Expected one final StateUpdate event");
+
+        let final_state = match &events[0] {
+            UserEvent::StateUpdate(s) => s,
+            _ => panic!("Expected a StateUpdate event."),
+        };
+
+        assert!(
+            !final_state.is_scanning,
+            "Scanning should be stopped on error."
+        );
+        assert!(
+            final_state
+                .status_message
+                .contains("Scan failed: I/O error"),
+            "Status message should reflect the scan failure."
+        );
+    }
+
+    #[tokio::test]
+    async fn proactive_scan_task_handles_deep_scan_error() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let scanner = MockScanner::new();
+        let scan_error = CoreError::Io("Disk full".to_string(), harness.root_path.clone());
+
+        // Shallow scan succeeds, deep scan fails
+        let shallow_files = vec![FileItem {
+            path: harness.root_path.join("file.txt"),
+            ..Default::default()
+        }];
+        *scanner.shallow_result.lock().unwrap() = Ok((shallow_files.clone(), HashSet::new()));
+        *scanner.deep_result.lock().unwrap() = Err(scan_error.clone());
+
+        harness.state.lock().unwrap().is_scanning = true;
+
+        // Act
+        proactive_scan_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            harness.root_path.clone(),
+            scanner,
+        )
+        .await;
+
+        // Assert
+        // Expect two StateUpdates: one after the successful shallow scan, one for the final error state.
+        let events = harness.get_n_events(2).await;
+        assert_eq!(events.len(), 2, "Expected two StateUpdate events");
+
+        // Check state after shallow scan
+        let state1 = match &events[0] {
+            UserEvent::StateUpdate(s) => s,
+            _ => panic!("Expected StateUpdate for shallow scan"),
+        };
+        assert!(
+            state1.is_scanning,
+            "Should still be scanning after shallow scan."
+        );
+        assert_eq!(
+            state1.visible_files_count, 1,
+            "Shallow scan results should be visible."
+        );
+
+        // Check final state after deep scan error
+        let state2 = match &events[1] {
+            UserEvent::StateUpdate(s) => s,
+            _ => panic!("Expected StateUpdate for deep scan failure"),
+        };
+        assert!(
+            !state2.is_scanning,
+            "Scanning should be stopped after error."
+        );
+        assert!(
+            state2.status_message.contains("Scan failed: I/O error"),
+            "Status message should reflect the deep scan failure."
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_task_handles_generator_error() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let generator = MockContentGenerator::new();
+        let gen_error = CoreError::Io("Failed to read file".to_string(), PathBuf::from("test.txt"));
+        generator.set_result(Err(gen_error.clone()));
+        let tokenizer = MockTokenizer { token_count: 0 };
+        harness.state.lock().unwrap().is_generating = true;
+
+        // Act
+        generation_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            generator,
+            tokenizer,
+        )
+        .await;
+
+        // Assert
+        // Expect a ShowError event, followed by a StateUpdate.
+        let events = harness.get_n_events(2).await;
+        assert_eq!(events.len(), 2, "Expected ShowError and StateUpdate events");
+
+        // Check the ShowError event
+        match &events[0] {
+            UserEvent::ShowError(msg) => {
+                assert!(
+                    msg.contains("Failed to read file"),
+                    "Error message content is incorrect."
+                );
+            }
+            _ => panic!("Expected a ShowError event first."),
+        }
+
+        // Check the final StateUpdate
+        match &events[1] {
+            UserEvent::StateUpdate(s) => {
+                assert!(!s.is_generating, "is_generating flag should be reset.");
+            }
+            _ => panic!("Expected a StateUpdate event second."),
+        }
+
+        // Double-check the final state directly
+        assert!(
+            !harness.state.lock().unwrap().is_generating,
+            "is_generating should be false in final AppState."
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_load_task_handles_scan_error() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let scanner = MockScanner::new();
+        let path_to_load = harness.root_path.join("lazy");
+
+        // Configure scanner to fail for the shallow scan, which is what lazy_load uses
+        let scan_error = CoreError::NotADirectory(path_to_load.clone());
+        *scanner.shallow_result.lock().unwrap() = Err(scan_error.clone());
+
+        // Act
+        lazy_load_task(
+            path_to_load.clone(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            scanner,
+        )
+        .await;
+
+        // Assert
+        // Expect a ShowError event.
+        let events = harness.get_n_events(1).await;
+        assert_eq!(events.len(), 1, "Expected one ShowError event");
+
+        match &events[0] {
+            UserEvent::ShowError(msg) => {
+                assert!(
+                    msg.contains("Failed to load directory"),
+                    "Error message is incorrect"
+                );
+                assert!(
+                    msg.contains("lazy"),
+                    "Error message should contain the path"
+                );
+                assert!(
+                    msg.contains("not a valid directory"),
+                    "Error message should contain the error detail"
+                );
+            }
+            _ => panic!("Expected a ShowError event."),
+        }
+
+        // Assert that state was not left inconsistent
+        let state = harness.state.lock().unwrap();
+        assert!(
+            !state.loaded_dirs.contains(&path_to_load),
+            "Failed path should not be marked as loaded."
+        );
+    }
+
+    #[tokio::test]
+    async fn proactive_scan_task_cancels_between_phases() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let mut scanner = MockScanner::new();
+
+        // Use the cancellation helper to pause the task between scan phases
+        let (shallow_scan_finished, allow_deep_scan_to_proceed) =
+            scanner.prepare_for_cancellation();
+
+        // Shallow scan succeeds.
+        let shallow_files = vec![FileItem {
+            path: harness.root_path.join("file.txt"),
+            ..Default::default()
+        }];
+        *scanner.shallow_result.lock().unwrap() = Ok((shallow_files.clone(), HashSet::new()));
+        *scanner.deep_result.lock().unwrap() = Ok((vec![], HashSet::new()));
+
+        harness.state.lock().unwrap().is_scanning = true;
+        let cancel_flag = harness.state.lock().unwrap().scan_cancellation_flag.clone();
+        let proxy_clone = harness.proxy.clone();
+        let state_clone = harness.state.clone();
+        let path_clone = harness.root_path.clone();
+
+        // Act
+        let task_handle = tokio::spawn(async move {
+            proactive_scan_task(proxy_clone, state_clone, path_clone, scanner).await
+        });
+
+        // 1. Wait for the signal from the mock that the shallow scan is complete.
+        shallow_scan_finished
+            .await
+            .expect("Mock scanner should signal that shallow scan finished");
+
+        // 2. Now that the task is paused, set the cancellation flag.
+        cancel_flag.store(true, Ordering::SeqCst);
+
+        // 3. Unblock the task, which will now immediately see the cancel flag and exit.
+        allow_deep_scan_to_proceed.send(()).unwrap();
+
+        // 4. Wait for the task to fully terminate.
+        task_handle.await.unwrap();
+
+        // Assert
+        // We need to drain the initial shallow update event first.
+        let _ = harness.get_n_events(1).await;
+        // Now, the ScanGuard will have fired a final state update on drop. Get that one.
+        let final_state_update = harness
+            .get_last_state_update()
+            .await
+            .expect("ScanGuard should send a final update on cancellation");
+
+        assert!(
+            !final_state_update.is_scanning,
+            "Scanning should be false in the final state."
+        );
+        assert!(
+            !final_state_update.is_fully_scanned,
+            "Scan should not be marked as full."
+        );
+
+        // The final AppState should be consistent
+        let final_app_state = harness.state.lock().unwrap();
+        assert!(!final_app_state.is_scanning);
+        assert!(final_app_state.scan_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_scan_on_path_handles_nonexistent_path() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let nonexistent_path = harness.root_path.join("nonexistent");
+
+        // Act
+        start_scan_on_path(
+            nonexistent_path,
+            harness.proxy.clone(),
+            harness.state.clone(),
+            false,
+        );
+
+        // Assert
+        // We must await the event, as it's sent from a spawned task.
+        let event = harness
+            .get_n_events(1)
+            .await
+            .pop()
+            .expect("Should have received one event");
+
+        match event {
+            UserEvent::ShowError(msg) => {
+                // Check for the more specific error message from our fix.
+                assert!(msg.contains("Path does not exist"));
+            }
+            _ => panic!("Expected a ShowError event."),
+        }
+
+        let state = harness.state.lock().unwrap();
+        assert!(!state.is_scanning, "is_scanning should remain false.");
+    }
+
+    #[tokio::test]
+    async fn start_scan_on_path_handles_path_is_file() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let file_path = harness.root_path.join("some_file.txt");
+        std::fs::write(&file_path, "content").unwrap();
+
+        // Act
+        // We expect this to run the scan on the parent directory.
+        start_scan_on_path(
+            file_path,
+            harness.proxy.clone(),
+            harness.state.clone(),
+            false,
+        );
+
+        // Assert
+        // It should NOT send an error. It should start scanning the parent.
+        // It sends an initial state update setting is_scanning to true.
+        let events = harness.get_n_events(1).await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            UserEvent::StateUpdate(s) => {
+                assert!(s.is_scanning);
+                assert_eq!(s.current_path, harness.root_path.to_string_lossy());
+            }
+            _ => panic!("Expected a StateUpdate event."),
+        }
+
+        // Lock the state mutably to check and then cancel.
+        let mut state = harness.state.lock().unwrap();
+        assert!(state.is_scanning, "is_scanning should be true.");
+        assert_eq!(state.current_path, harness.root_path.to_string_lossy());
+
+        // Cancel the scan to clean up the task and prevent test runner warnings.
+        state.cancel_current_scan();
+    }
+
+    #[tokio::test]
+    async fn start_scan_on_path_preserves_state() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let dir_to_expand = harness.root_path.join("src");
+        let new_scan_path = harness.root_path.join("new_project");
+        std::fs::create_dir_all(&new_scan_path).unwrap();
+
+        // Set initial state
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.expanded_dirs.insert(dir_to_expand.clone());
+        }
+
+        // Act
+        // Call with preserve_state = true
+        start_scan_on_path(
+            new_scan_path.clone(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            true,
+        );
+
+        // Assert
+        // Wait for the initial StateUpdate event which confirms the task has started and set the initial state.
+        // This resolves the race condition.
+        let initial_update = harness
+            .get_n_events(1)
+            .await
+            .pop()
+            .expect("Task should send an initial StateUpdate");
+        assert!(matches!(initial_update, UserEvent::StateUpdate(_)));
+
+        // Now it's safe to check the state.
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(state.is_scanning, "Scanning should have started.");
+            assert_eq!(state.current_path, new_scan_path.to_string_lossy());
+            assert!(
+                state.expanded_dirs.contains(&dir_to_expand),
+                "expanded_dirs should have been preserved."
+            );
+        }
+
+        // We need to wait for the scan to finish to avoid panics on drop.
+        // Let's get all events to clear the channel.
+        while harness.get_n_events(1).await.len() > 0 {}
     }
 }
