@@ -232,4 +232,31 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].path.to_str(), Some("src/main.rs"));
     }
+
+    #[test]
+    fn test_filter_by_no_extension() {
+        let files = vec![
+            file("src/main.rs"),
+            file("Makefile"),
+            file(".config"),
+            file("archive.tar.gz"),
+        ];
+        let filter = SearchFilter {
+            query: String::new(),
+            extension: "no extension".to_string(),
+            case_sensitive: false,
+        };
+
+        let result = SearchEngine::filter_files(&files, &filter);
+        let result_paths: std::collections::HashSet<_> =
+            result.iter().map(|f| f.path.to_str().unwrap()).collect();
+
+        assert_eq!(
+            result.len(),
+            2,
+            "Should find the two files without the file ending"
+        );
+        assert!(result_paths.contains("Makefile"));
+        assert!(result_paths.contains(".config"));
+    }
 }
