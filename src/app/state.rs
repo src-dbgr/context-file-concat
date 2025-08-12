@@ -57,6 +57,10 @@ pub struct AppState {
     pub active_ignore_patterns: HashSet<String>,
     /// `true` if a full, non-lazy scan has been completed successfully.
     pub is_fully_scanned: bool,
+    /// Indicates whether patterns were removed and a re-scan is recommended.
+    /// This flag is set when ignore patterns are removed, as the current file list
+    /// might be missing files that were previously filtered out.
+    pub patterns_need_rescan: bool,
 }
 
 impl Default for AppState {
@@ -89,6 +93,7 @@ impl Default for AppState {
             generation_cancellation_flag: Arc::new(AtomicBool::new(false)),
             active_ignore_patterns: HashSet::new(),
             is_fully_scanned: false,
+            patterns_need_rescan: false,
         }
     }
 }
@@ -145,8 +150,8 @@ impl AppState {
         self.previewed_file_path = None;
         self.active_ignore_patterns.clear();
         self.is_generating = false;
-        self.is_fully_scanned = false; // Reset the flag here
-
+        self.is_fully_scanned = false;
+        self.patterns_need_rescan = false;
         self.scan_progress = ScanProgress {
             files_scanned: 0,
             large_files_skipped: 0,
@@ -154,45 +159,46 @@ impl AppState {
         };
     }
 
-    /// Applies ignore patterns consistently across all file lists
-    pub fn apply_ignore_patterns(&mut self, patterns_to_add: &HashSet<String>) {
-        if patterns_to_add.is_empty() {
+    /// Applies the complete set of current ignore patterns to the in-memory file lists.
+    /// This function re-builds the matcher from `self.config.ignore_patterns`
+    /// and filters `full_file_list` and `selected_files` accordingly.
+    pub fn apply_ignore_patterns(&mut self) {
+        // CHANGED: Use the complete, current set of patterns from the config.
+        let patterns = &self.config.ignore_patterns;
+        if patterns.is_empty() {
             return;
         }
 
         let root_path = PathBuf::from(&self.current_path);
         let mut builder = ignore::gitignore::GitignoreBuilder::new(&root_path);
-        for pattern in patterns_to_add {
+
+        // CHANGED: Iterate over all configured patterns.
+        for pattern in patterns {
             builder.add_line(None, pattern).ok();
         }
 
         if let Ok(matcher) = builder.build() {
-            // Create a lookup map from the original list to get `is_directory`
-            // information without hitting the filesystem. This fixes a latent bug.
             let path_info: std::collections::HashMap<_, _> = self
                 .full_file_list
                 .iter()
                 .map(|item| (item.path.clone(), item.is_directory))
                 .collect();
 
-            // Filter full_file_list using the correct matching method.
             self.full_file_list.retain(|item| {
                 !matcher
                     .matched_path_or_any_parents(&item.path, item.is_directory)
                     .is_ignore()
             });
 
-            // Filter selected_files using the same robust logic.
             self.selected_files.retain(|path| {
-                // Get `is_dir` from our map, defaulting to `false` (file).
                 let is_dir = path_info.get(path).copied().unwrap_or(false);
                 !matcher
                     .matched_path_or_any_parents(path, is_dir)
                     .is_ignore()
             });
 
-            // Mark patterns as active
-            self.active_ignore_patterns.extend(patterns_to_add.clone());
+            // Note: active_ignore_patterns are typically recalculated during a full scan
+            // or could be updated here if needed, but for local filtering this is sufficient.
         }
     }
 }
@@ -320,6 +326,7 @@ mod tests {
         state.generation_task = Some(create_dummy_task());
         state.is_scanning = true;
         state.is_generating = true;
+        state.patterns_need_rescan = true;
 
         // Act
         state.reset_directory_state();
@@ -340,12 +347,15 @@ mod tests {
         // Assert that the tasks were cancelled and removed
         assert!(state.scan_task.is_none());
         assert!(state.generation_task.is_none());
+        assert!(!state.patterns_need_rescan);
     }
 
     #[tokio::test]
     async fn test_apply_ignore_patterns_removes_files_and_selections() {
         // Arrange
         let mut state = AppState::default();
+        // NOTE: Ensure a clean state, independent of any config file on disk.
+        state.config.ignore_patterns.clear();
         state.current_path = "/project".to_string();
 
         let file_to_keep = create_test_file_item("/project/src/main.rs", false);
@@ -360,12 +370,13 @@ mod tests {
         state.selected_files =
             HashSet::from([file_to_keep.path.clone(), file_to_ignore.path.clone()]);
 
-        let patterns = HashSet::from(["node_modules/".to_string()]);
+        // Set the patterns for this specific test case.
+        state.config.ignore_patterns = HashSet::from(["node_modules/".to_string()]);
 
         // Act
-        state.apply_ignore_patterns(&patterns);
+        state.apply_ignore_patterns();
 
-        // Assert - Check full file list
+        // Assert
         assert_eq!(
             state.full_file_list.len(),
             1,
@@ -375,8 +386,6 @@ mod tests {
             state.full_file_list[0].path, file_to_keep.path,
             "The remaining file should be main.rs"
         );
-
-        // Assert - Check selected files
         assert_eq!(
             state.selected_files.len(),
             1,
@@ -386,27 +395,23 @@ mod tests {
             state.selected_files.contains(&file_to_keep.path),
             "main.rs should still be selected"
         );
-        assert!(
-            !state.selected_files.contains(&file_to_ignore.path),
-            "The ignored file should be deselected"
-        );
-
-        // Assert - Check active patterns
-        assert!(state.active_ignore_patterns.contains("node_modules/"));
     }
 
     #[tokio::test]
     async fn test_apply_ignore_patterns_with_empty_set_does_nothing() {
         // Arrange
         let mut state = AppState::default();
+        // NOTE: Ensure a clean state, independent of any config file on disk.
+        state.config.ignore_patterns.clear();
+
         let initial_file_list = vec![create_test_file_item("/project/file.txt", false)];
         state.full_file_list = initial_file_list.clone();
-        let patterns = HashSet::new();
 
         // Act
-        state.apply_ignore_patterns(&patterns);
+        state.apply_ignore_patterns();
 
         // Assert
         assert_eq!(state.full_file_list.len(), initial_file_list.len());
+        assert_eq!(state.full_file_list[0].path, initial_file_list[0].path);
     }
 }

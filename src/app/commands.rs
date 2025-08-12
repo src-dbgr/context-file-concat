@@ -16,7 +16,7 @@ use super::view_model::{auto_expand_for_matches, generate_ui_state, get_language
 use crate::app::file_dialog::DialogService;
 use crate::config::{self, AppConfig}; // Import AppConfig for explicit deserialization
 use crate::core::FileHandler;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -62,14 +62,16 @@ pub fn clear_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 /// the file list from the filesystem.
 pub fn rescan_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     let current_path_str = {
-        state
+        let mut state_guard = state
             .lock()
-            .expect("Mutex was poisoned. This should not happen.")
-            .current_path
-            .clone()
+            .expect("Mutex was poisoned. This should not happen.");
+
+        // Clear the rescan flag when actually rescanning
+        state_guard.patterns_need_rescan = false;
+        state_guard.current_path.clone()
     };
+
     if !current_path_str.is_empty() {
-        // A manual rescan should preserve the current UI state (expansions, selections).
         start_scan_on_path(PathBuf::from(current_path_str), proxy, state, true);
     }
 }
@@ -82,16 +84,21 @@ pub fn cancel_scan<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     });
 }
 
+// In file: src/app/commands.rs
+
 /// Updates the application configuration and persists it.
 ///
-/// This function handles different types of configuration changes intelligently:
-/// - If `ignore_patterns` are changed in any way (added or removed), a full re-scan of
-///   the directory is triggered while preserving the UI state (selections, expansions).
-///   This is the most robust way to ensure the file list is perfectly synchronized
-///   with the current ignore rules, fixing potential inconsistencies.
-/// - If only filter-related settings change (e.g., `remove_empty_directories`),
-///   the existing file list is re-filtered in-place for a fast UI update.
-/// - Other changes (e.g., output settings) are just saved without triggering any UI update.
+/// This function handles configuration changes intelligently based on their type:
+/// - **Pattern Removal**: If ignore patterns are removed, the function sets a
+///   `patterns_need_rescan` flag. It does NOT trigger a re-scan automatically,
+///   prompting the user to do it manually. This is necessary because previously
+///   ignored files are not in memory.
+/// - **Pattern Addition**: If patterns are only added, the existing in-memory file
+///   list is filtered immediately. This is a fast, local operation that provides
+///   immediate UI feedback.
+/// - **Filter Changes**: If settings like `remove_empty_directories` change, a
+///   fast, in-memory re-filtering is applied.
+/// - **Other Changes**: Settings like output paths are saved without any file list changes.
 pub async fn update_config<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
@@ -102,13 +109,23 @@ pub async fn update_config<P: EventProxy>(
             .lock()
             .expect("Mutex was poisoned. This should not happen.");
 
-        // Check what kind of change we have.
-        let patterns_changed = state_guard.config.ignore_patterns != new_config.ignore_patterns;
+        let patterns_added: HashSet<String> = new_config
+            .ignore_patterns
+            .difference(&state_guard.config.ignore_patterns)
+            .cloned()
+            .collect();
+
+        let patterns_removed: HashSet<String> = state_guard
+            .config
+            .ignore_patterns
+            .difference(&new_config.ignore_patterns)
+            .cloned()
+            .collect();
+
         let needs_refilter = state_guard.config.remove_empty_directories
             != new_config.remove_empty_directories
             || state_guard.config.case_sensitive_search != new_config.case_sensitive_search;
 
-        // Always update the config in the state first.
         state_guard.config = new_config;
         if let Err(e) = config::settings::save_config(&state_guard.config, None) {
             tracing::warn!("Failed to save config on update: {}", e);
@@ -116,26 +133,38 @@ pub async fn update_config<P: EventProxy>(
 
         let current_path = state_guard.current_path.clone();
         if current_path.is_empty() {
-            // No directory loaded, nothing more to do.
             drop(state_guard);
             return;
         }
 
-        if patterns_changed {
-            tracing::info!("🔄 Ignore patterns changed. Restarting scan (preserving UI state).");
-            // Important: Release the lock *before* calling the async task spawner
-            // to prevent potential deadlocks.
-            drop(state_guard);
-            start_scan_on_path(PathBuf::from(current_path), proxy, state, true);
+        if !patterns_removed.is_empty() {
+            tracing::info!(
+                "⚠️ Ignore patterns removed: {:?}. Re-scan recommended.",
+                patterns_removed
+            );
+            state_guard.patterns_need_rescan = true;
+            let ui_state = generate_ui_state(&state_guard);
+            proxy.send_event(UserEvent::StateUpdate(Box::new(ui_state)));
+        } else if !patterns_added.is_empty() {
+            tracing::info!(
+                "✓ Applying new ignore patterns locally: {:?}",
+                patterns_added
+            );
+
+            // Mark the newly added patterns as "active" for potential UI feedback.
+            state_guard.active_ignore_patterns.extend(patterns_added);
+
+            state_guard.apply_ignore_patterns();
+            filtering::apply_filters(&mut state_guard);
+
+            let ui_state = generate_ui_state(&state_guard);
+            proxy.send_event(UserEvent::StateUpdate(Box::new(ui_state)));
         } else if needs_refilter {
             tracing::info!("🚀 Re-applying filters due to config change.");
-            // This is a synchronous operation, so we can complete it and notify from within the lock.
             filtering::apply_filters(&mut state_guard);
             let ui_state = generate_ui_state(&state_guard);
-            let event = UserEvent::StateUpdate(Box::new(ui_state));
-            proxy.send_event(event);
+            proxy.send_event(UserEvent::StateUpdate(Box::new(ui_state)));
         }
-    // If only other settings changed (like output filename), no re-scan or re-filter is needed.
     } else {
         tracing::warn!(
             "Failed to deserialize AppConfig from payload: {:?}",
@@ -1945,5 +1974,121 @@ mod tests {
             UserEvent::ConfigExported(success) => assert!(!success),
             other => panic!("Expected ConfigExported(false), got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_update_config_applies_locally_on_pattern_addition() {
+        let mut harness = TestHarness::new();
+
+        // Ensure a clean state for the test run.
+        {
+            harness.state.lock().unwrap().config.ignore_patterns.clear();
+        }
+
+        // The `current_path` is the root for the ignore matcher. All file paths
+        // in the state MUST be children of this root path.
+        let root = "/test/project";
+        harness.state.lock().unwrap().current_path = root.to_string();
+
+        // Create abstract files on the "filesystem".
+        harness.create_file("src/main.rs", "fn main() {}");
+        harness.create_file("debug.log", "log content");
+
+        // Set up the initial file list using full paths that are consistent
+        // with the root path. This resolves the `ignore` crate panic.
+        harness.set_initial_files(&[
+            &format!("{}/src", root),
+            &format!("{}/src/main.rs", root),
+            &format!("{}/debug.log", root),
+        ]);
+
+        // Add a pattern to the config.
+        let mut new_config = harness.state.lock().unwrap().config.clone();
+        new_config.ignore_patterns.insert("*.log".to_string());
+        let payload = serde_json::to_value(new_config).unwrap();
+
+        // Execute the function under test.
+        update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
+
+        // Assert the outcome.
+        let ui_state = harness.get_last_state_update().await.unwrap();
+
+        assert!(
+            !ui_state.patterns_need_rescan,
+            "Flag should NOT be set when only adding patterns"
+        );
+
+        // After filtering "*.log", two items remain: "/test/project/src" and "/test/project/src/main.rs".
+        assert_eq!(
+            ui_state.visible_files_count, 2,
+            "Should have src dir and main.rs, log file should be filtered out"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_config_sets_rescan_flag_on_pattern_removal() {
+        let mut harness = TestHarness::new();
+
+        // Create actual files
+        harness.create_file("src/main.rs", "fn main() {}");
+        harness.create_file("debug.log", "log content");
+        harness.create_dir("node_modules");
+        harness.create_file("node_modules/package.json", "{}");
+
+        // Set initial files
+        harness.set_initial_files(&[
+            "src",
+            "src/main.rs",
+            "debug.log",
+            "node_modules",
+            "node_modules/package.json",
+        ]);
+
+        // Set initial patterns
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.config.ignore_patterns.insert("*.log".to_string());
+            state
+                .config
+                .ignore_patterns
+                .insert("node_modules/".to_string());
+        }
+
+        // Remove one pattern
+        let mut new_config = harness.state.lock().unwrap().config.clone();
+        new_config.ignore_patterns.remove("node_modules/");
+        let payload = serde_json::to_value(new_config).unwrap();
+
+        update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
+
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        assert!(
+            ui_state.patterns_need_rescan,
+            "Flag should be set when patterns are removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rescan_clears_patterns_need_rescan_flag() {
+        let mut harness = TestHarness::new();
+
+        // Create a test directory with a file
+        harness.create_file("test.txt", "content");
+
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.patterns_need_rescan = true;
+            // Ensure we have a valid current_path for the rescan
+            // (TestHarness::new() already sets this)
+        }
+
+        rescan_directory(harness.proxy.clone(), harness.state.clone());
+
+        // Wait for scan to complete
+        let final_state = harness.wait_for_scan_completion().await.unwrap();
+        assert!(
+            !final_state.patterns_need_rescan,
+            "Flag should be cleared after rescan"
+        );
     }
 }

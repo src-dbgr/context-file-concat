@@ -1503,3 +1503,37 @@ input[type="checkbox"][data-indeterminate="true"]::before {
     width: 100%;
   }
 }
+
+.needs-rescan {
+  background-color: #ff9800 !important;
+  color: #1e1e1e !important;
+  animation: subtle-pulse 2s ease-in-out infinite;
+}
+
+.needs-rescan:hover {
+  background-color: #f57c00 !important;
+}
+
+@keyframes subtle-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+.needs-rescan .icon.pulse {
+  animation: rotate-pulse 3s ease-in-out infinite;
+}
+
+@keyframes rotate-pulse {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(15deg);
+  }
+}

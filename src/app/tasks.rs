@@ -492,7 +492,9 @@ async fn lazy_load_task<P: EventProxy, S: Scanner>(
     state: Arc<Mutex<AppState>>,
     scanner: S,
 ) {
+    // The scan call remains the same.
     let scan_result = scanner.scan(&path_to_load, Some(1), Box::new(|_| {})).await;
+
     match scan_result {
         Ok((new_items, new_active_patterns)) => {
             tracing::info!(
@@ -500,24 +502,40 @@ async fn lazy_load_task<P: EventProxy, S: Scanner>(
                 new_items.len(),
                 path_to_load
             );
-            super::helpers::with_state_and_notify(&state, &proxy, |s| {
-                s.loaded_dirs.insert(path_to_load.clone());
-                s.expanded_dirs.insert(path_to_load);
-                s.active_ignore_patterns.extend(new_active_patterns);
-                let existing_paths: HashSet<PathBuf> = s
-                    .full_file_list
-                    .iter()
-                    .map(|item| item.path.clone())
-                    .collect();
-                for item in new_items {
-                    if !existing_paths.contains(&item.path) {
-                        s.full_file_list.push(item);
-                    }
+
+            // Instead of using the `with_state_and_notify` helper, we now manually
+            // lock the state and explicitly send the notification event.
+            // This aligns with the pattern used in other modern tasks in this file.
+            let mut state_guard = state.lock().expect("Mutex was poisoned");
+
+            state_guard.loaded_dirs.insert(path_to_load.clone());
+            state_guard.expanded_dirs.insert(path_to_load);
+            state_guard
+                .active_ignore_patterns
+                .extend(new_active_patterns);
+
+            let existing_paths: HashSet<PathBuf> = state_guard
+                .full_file_list
+                .iter()
+                .map(|item| item.path.clone())
+                .collect();
+
+            for item in new_items {
+                if !existing_paths.contains(&item.path) {
+                    state_guard.full_file_list.push(item);
                 }
-                filtering::apply_filters(s);
-            });
+            }
+
+            // Apply other filters to the now-updated list.
+            filtering::apply_filters(&mut state_guard);
+
+            // Explicitly send the state update event. This fixes the test panic.
+            proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+                &state_guard,
+            ))));
         }
         Err(e) => {
+            // Error handling remains the same.
             tracing::error!("LOG: TASK:: Lazy load failed for {:?}: {}", path_to_load, e);
             proxy.send_event(UserEvent::ShowError(format!(
                 "Failed to load directory {}: {}",

@@ -414,13 +414,31 @@ export function renderUI() {
   const iconScanning = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>`;
   const iconGenerate = `<svg class="icon icon-lightning-light" viewBox="0 0 24 24"><path d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"></path></svg>`;
   const iconCancel = `<svg class="icon" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
-
   if (is_scanning) {
     elements.selectDirBtn.innerHTML = `${iconScanning} Scanning...`;
     elements.rescanBtn.innerHTML = `${iconScanning} Scanning...`;
   } else {
     elements.selectDirBtn.innerHTML = `${iconFolder} Select Directory`;
     elements.rescanBtn.innerHTML = `${iconScan} Re-Scan`;
+    // Visual indication for Re-Scan button when patterns need rescan
+    if (appState.patterns_need_rescan) {
+      elements.rescanBtn.classList.add("needs-rescan");
+      elements.rescanBtn.title =
+        "Ignore patterns were removed - Re-scan recommended to find previously hidden files";
+
+      // Override the button text with pulsing icon
+      const iconPulse = `<svg class="icon pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+        <path d="M21 3v5h-5"/>
+        <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+        <path d="M3 21v-5h5"/>
+      </svg>`;
+      elements.rescanBtn.innerHTML = `${iconPulse} Re-Scan`;
+    } else {
+      elements.rescanBtn.classList.remove("needs-rescan");
+      elements.rescanBtn.title = "Re-scan with current ignore patterns";
+      // Normal state is already set above, no need to set innerHTML again
+    }
   }
 
   const wasGenerating =
