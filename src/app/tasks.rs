@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
 
 use super::events::UserEvent;
 use super::filtering;
@@ -456,7 +457,12 @@ fn handle_scan_error<P: EventProxy>(error: CoreError, state: &Arc<Mutex<AppState
 }
 
 /// Initiates a scan for a specific subdirectory level (lazy loading).
-pub fn start_lazy_load_scan<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<Mutex<AppState>>) {
+pub fn start_lazy_load_scan<P: EventProxy>(
+    path: PathBuf,
+    proxy: P,
+    state: Arc<Mutex<AppState>>,
+    completion_signal: Option<oneshot::Sender<()>>,
+) {
     tokio::spawn(async move {
         let (ignore_patterns, is_scanning) = {
             let state_guard = state
@@ -480,7 +486,7 @@ pub fn start_lazy_load_scan<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<M
         let state_clone = state.clone();
         tracing::info!("LOG: Spawning new lazy_load_task for path: {:?}", path);
         tokio::spawn(async move {
-            lazy_load_task(path, proxy_clone, state_clone, scanner).await;
+            lazy_load_task(path, proxy_clone, state_clone, scanner, completion_signal).await;
         });
     });
 }
@@ -491,6 +497,7 @@ async fn lazy_load_task<P: EventProxy, S: Scanner>(
     proxy: P,
     state: Arc<Mutex<AppState>>,
     scanner: S,
+    completion_signal: Option<oneshot::Sender<()>>,
 ) {
     // The scan call remains the same.
     let scan_result = scanner.scan(&path_to_load, Some(1), Box::new(|_| {})).await;
@@ -543,6 +550,11 @@ async fn lazy_load_task<P: EventProxy, S: Scanner>(
                 e
             )));
         }
+    }
+
+    // After all work is done, send the completion signal if one was provided.
+    if let Some(signal) = completion_signal {
+        let _ = signal.send(());
     }
 }
 
@@ -1242,6 +1254,7 @@ mod tests {
             harness.proxy.clone(),
             harness.state.clone(),
             scanner,
+            None,
         )
         .await;
 
@@ -1622,7 +1635,6 @@ mod tests {
 
         {
             let mut state = harness.state.lock().unwrap();
-            // Initial state only contains the directory, not its contents
             state.full_file_list.push(FileItem {
                 path: dir_to_load.clone(),
                 is_directory: true,
@@ -1631,40 +1643,42 @@ mod tests {
             state.filtered_file_list = state.full_file_list.clone();
         }
 
-        // Act - Use the real entry point for lazy loading
+        // Create a signaling channel for synchronization
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        // Act - Pass the sender part of the channel to the function.
         start_lazy_load_scan(
             dir_to_load.clone(),
             harness.proxy.clone(),
             harness.state.clone(),
+            Some(tx), // Provide the signal sender.
         );
 
-        // Assert
-        // The task will run in the background, so we need to await its resulting state update.
+        // --- Assert ---
+        // 1. Wait deterministically for the background task to complete.
+        //    This replaces the flaky timeout.
+        rx.await
+            .expect("The lazy_load_task should send a completion signal.");
+
+        // 2. Now that we KNOW the task is done, retrieve the event from the channel.
+        //    This call will now find the event immediately without needing a long wait.
         let final_state_update = harness
             .get_last_state_update()
             .await
             .expect("Should receive a state update after lazy load");
+
+        // 3. Perform the final state checks.
         assert_eq!(
             final_state_update.visible_files_count, 2,
             "Should show parent dir and new file"
         );
-
         let state = harness.state.lock().unwrap();
-        assert!(
-            state.loaded_dirs.contains(&dir_to_load),
-            "Directory should be marked as loaded"
-        );
-        assert!(
-            state.expanded_dirs.contains(&dir_to_load),
-            "Directory should be expanded"
-        );
-        assert!(
-            state
-                .full_file_list
-                .iter()
-                .any(|item| item.path == new_file_path),
-            "New file should be in the full list"
-        );
+        assert!(state.loaded_dirs.contains(&dir_to_load));
+        assert!(state.expanded_dirs.contains(&dir_to_load));
+        assert!(state
+            .full_file_list
+            .iter()
+            .any(|item| item.path == new_file_path));
     }
 
     /// Tests that a lazy load scan is ignored if a main scan is already in progress.
@@ -1680,7 +1694,12 @@ mod tests {
         }
 
         // Act
-        start_lazy_load_scan(dir_to_load, harness.proxy.clone(), harness.state.clone());
+        start_lazy_load_scan(
+            dir_to_load,
+            harness.proxy.clone(),
+            harness.state.clone(),
+            None,
+        );
 
         // Assert that no events are sent and no new tasks are spawned.
         // We wait a short moment to ensure the spawned task would have had time to run.

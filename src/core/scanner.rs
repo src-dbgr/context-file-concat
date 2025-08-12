@@ -237,24 +237,13 @@ impl DirectoryScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_helpers::setup_test_logging;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::panic;
     use std::path::PathBuf;
-    use std::sync::{atomic::AtomicBool, Mutex, Once};
+    use std::sync::{atomic::AtomicBool, Mutex};
     use tempfile::TempDir;
-
-    static LOGGING_INIT: Once = Once::new();
-
-    /// Initializes tracing for tests. Safe to call multiple times.
-    fn setup_logging() {
-        LOGGING_INIT.call_once(|| {
-            tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-                .with_test_writer()
-                .init();
-        });
-    }
 
     /// Creates a temporary, realistic file system structure for robust testing.
     fn setup_test_filesystem() -> (TempDir, PathBuf) {
@@ -278,7 +267,7 @@ mod tests {
     /// Verifies the main success path: respecting .gitignore, custom ignores, and large file skips.
     #[tokio::test]
     async fn test_scan_respects_all_ignore_mechanisms() {
-        setup_logging();
+        setup_test_logging();
         let (_temp_dir, root) = setup_test_filesystem();
         let mut custom_ignores = HashSet::new();
         custom_ignores.insert("src/core/".to_string()); // Custom rule
@@ -306,7 +295,7 @@ mod tests {
     /// Verifies that the `max_depth` parameter is correctly honored.
     #[tokio::test]
     async fn test_max_depth_is_honored() {
-        setup_logging();
+        setup_test_logging();
         let (_temp_dir, root) = setup_test_filesystem();
         let scanner = DirectoryScanner::new(HashSet::new());
 
@@ -340,7 +329,7 @@ mod tests {
     /// Verifies that the scan stops promptly upon cancellation.
     #[tokio::test]
     async fn test_cancellation_stops_scan() {
-        setup_logging();
+        setup_test_logging();
         let (_temp_dir, root) = setup_test_filesystem();
         for i in 0..200 {
             fs::write(root.join(format!("file_{i}.txt")), "data").unwrap();
@@ -393,7 +382,7 @@ mod tests {
     /// Verifies that the progress callback is invoked deterministically.
     #[tokio::test]
     async fn test_progress_callback_is_invoked_deterministically() {
-        setup_logging();
+        setup_test_logging();
         // Create an isolated, clean environment for this test.
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
@@ -436,7 +425,7 @@ mod tests {
     /// Verifies that custom ignore patterns that are used are reported back.
     #[tokio::test]
     async fn test_active_ignore_patterns_are_reported() {
-        setup_logging();
+        setup_test_logging();
         let (_temp_dir, root) = setup_test_filesystem();
         let mut custom_ignores = HashSet::new();
         // Use a pattern that is NOT in the .gitignore to isolate the test's purpose.
@@ -470,7 +459,7 @@ mod tests {
     /// Verifies that paths with special characters are handled correctly.
     #[tokio::test]
     async fn test_scan_with_special_characters_in_paths() {
-        setup_logging();
+        setup_test_logging();
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
         let special_dir = root.join("ein Ordner mit Leerzeichen");
@@ -492,7 +481,7 @@ mod tests {
     /// Verifies that the scanner runs correctly when no custom ignores are provided.
     #[tokio::test]
     async fn test_scan_handles_empty_custom_ignores() {
-        setup_logging();
+        setup_test_logging();
         let (_temp_dir, root) = setup_test_filesystem();
         let scanner = DirectoryScanner::new(HashSet::new());
 
@@ -509,7 +498,7 @@ mod tests {
     /// Verifies that an invalid ignore pattern does not crash the scanner.
     #[tokio::test]
     async fn test_scan_with_invalid_ignore_pattern() {
-        setup_logging();
+        setup_test_logging();
         let (_temp_dir, root) = setup_test_filesystem();
         let mut custom_ignores = HashSet::new();
         custom_ignores.insert("[".to_string());
@@ -535,7 +524,7 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)] // Relies on Unix-style permissions.
     async fn test_scan_unreadable_directory() {
-        setup_logging();
+        setup_test_logging();
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
         let unreadable_dir = root.join("unreadable");
@@ -565,7 +554,7 @@ mod tests {
     /// This is simulated by deleting a file *during* the scan, a realistic race condition.
     #[tokio::test]
     async fn test_scanner_skips_entry_on_metadata_error() {
-        setup_logging();
+        setup_test_logging();
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
         let file_ok = root.join("file_ok.txt");
@@ -608,7 +597,7 @@ mod tests {
     /// terminates promptly after the flag is set.
     #[tokio::test]
     async fn test_cancellation_is_near_immediate() {
-        setup_logging();
+        setup_test_logging();
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
         for i in 0..100 {
@@ -655,7 +644,7 @@ mod tests {
     /// This test is now deterministic by overriding the progress throttle.
     #[tokio::test]
     async fn test_scan_returns_join_error_on_panic() {
-        setup_logging();
+        setup_test_logging();
         let (_temp_dir, root) = setup_test_filesystem();
         // Create a scanner with a zero-duration throttle to guarantee the callback is called.
         let scanner = DirectoryScanner::new_with_throttle(HashSet::new(), Duration::ZERO);
@@ -691,7 +680,7 @@ mod tests {
     /// item as a directory at the time of processing.
     #[tokio::test]
     async fn test_scanner_handles_file_being_replaced_by_directory() {
-        setup_logging();
+        setup_test_logging();
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
         let path_to_replace = root.join("race_condition.data");
