@@ -1,12 +1,14 @@
 {
   "name": "context-file-concat-ui",
   "version": "0.1.0",
-  "description": "Frontend UI for Context File Concatenator - Web-based interface built with modern JavaScript",
-  "main": "js/main.js",
+  "description": "Frontend UI for Context File Concatenator - Built with Svelte 5 and Vite",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "build": "esbuild js/main.js --bundle --outfile=dist/bundle.js --minify",
-    "watch": "esbuild js/main.js --bundle --outfile=dist/bundle.js --watch",
-    "dev": "concurrently \"npm:watch\" \"cargo run --manifest-path=../../Cargo.toml\""
+    "dev": "concurrently \"vite\" \"cargo run --manifest-path=../../Cargo.toml\"",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "keywords": [
     "llm",
@@ -14,18 +16,27 @@
     "files",
     "ui",
     "frontend",
-    "webview"
+    "webview",
+    "svelte"
   ],
   "author": "src-dbgr",
   "license": "MIT",
-  "type": "commonjs",
   "repository": {
     "type": "git",
     "url": "https://github.com/src-dbgr/context-file-concat",
     "directory": "src/ui"
   },
   "devDependencies": {
-    "concurrently": "^9.2.0",
-    "esbuild": "^0.25.8"
+    "@sveltejs/vite-plugin-svelte": "^4.0.1",
+    "@tsconfig/svelte": "^5.0.4",
+    "concurrently": "^8.2.2",
+    "eslint": "^9.8.0",
+    "prettier": "^3.3.3",
+    "prettier-plugin-svelte": "^3.2.6",
+    "svelte": "^5.0.0-next.188",
+    "svelte-check": "^3.8.4",
+    "tslib": "^2.6.3",
+    "typescript": "^5.5.4",
+    "vite": "^5.3.3"
   }
 }

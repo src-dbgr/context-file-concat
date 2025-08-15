@@ -36,55 +36,72 @@ async fn main() {
     let state = Arc::new(Mutex::new(app::state::AppState::default()));
     let dialog_service = Arc::new(NativeDialogService {});
 
-    let html_content = include_str!("ui/index.html")
-        .replace("/*INJECT_CSS*/", include_str!("ui/style.css"))
-        .replace("/*INJECT_JS*/", include_str!("ui/dist/bundle.js"));
+    // To avoid code duplication, we define the handlers first.
+    let ipc_handler_state = state.clone();
+    let ipc_handler_proxy = proxy.clone();
+    let ipc_handler_dialog = dialog_service.clone();
+    let ipc_handler = move |message: String| {
+        app::handle_ipc_message(
+            message,
+            ipc_handler_dialog.clone(),
+            ipc_handler_proxy.clone(),
+            ipc_handler_state.clone(),
+        );
+    };
 
-    let proxy_for_ipc = proxy.clone();
-    let state_for_ipc = state.clone();
-    let dialog_for_ipc = dialog_service.clone();
-    let proxy_for_drop = proxy.clone();
-    let state_for_drop = state.clone();
-
-    let webview = WebViewBuilder::new(&*window)
-        .with_html(html_content)
-        .with_ipc_handler(move |message: String| {
-            app::handle_ipc_message(
-                message,
-                dialog_for_ipc.clone(),
-                proxy_for_ipc.clone(),
-                state_for_ipc.clone(),
-            );
-        })
-        .with_file_drop_handler(move |event| {
-            use wry::FileDropEvent;
-            match event {
-                FileDropEvent::Hovered { .. } => {
-                    let _ =
-                        proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(true));
-                }
-                FileDropEvent::Dropped { paths, .. } => {
-                    let _ =
-                        proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(false));
-                    if let Some(path) = paths.first() {
-                        // Dropping a new path should always reset the state.
-                        app::tasks::start_scan_on_path(
-                            path.clone(),
-                            proxy_for_drop.clone(),
-                            state_for_drop.clone(),
-                            false,
-                        );
-                    }
-                }
-                FileDropEvent::Cancelled => {
-                    let _ =
-                        proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(false));
-                }
-                _ => (),
+    let drop_handler_state = state.clone();
+    let drop_handler_proxy = proxy.clone();
+    let file_drop_handler = move |event| {
+        use wry::FileDropEvent;
+        match event {
+            FileDropEvent::Hovered { .. } => {
+                let _ =
+                    drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(true));
             }
-            true
-        })
-        .with_devtools(true)
+            FileDropEvent::Dropped { paths, .. } => {
+                let _ =
+                    drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
+                if let Some(path) = paths.first() {
+                    app::tasks::start_scan_on_path(
+                        path.clone(),
+                        drop_handler_proxy.clone(),
+                        drop_handler_state.clone(),
+                        false,
+                    );
+                }
+            }
+            FileDropEvent::Cancelled => {
+                let _ =
+                    drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
+            }
+            _ => (),
+        }
+        true
+    };
+
+    // Now, build the WebView differently for debug and release builds.
+    #[cfg(debug_assertions)]
+    let webview_builder = {
+        // In debug builds, load from the Vite dev server.
+        tracing::info!("Running in DEBUG mode, loading from Vite dev server.");
+        WebViewBuilder::new(&*window)
+            .with_url("http://localhost:1420")
+            .with_devtools(true)
+    };
+
+    #[cfg(not(debug_assertions))]
+    let webview_builder = {
+        // In release builds, load the static HTML file produced by `npm run build`.
+        tracing::info!("Running in RELEASE mode, loading from bundled assets.");
+        let html_content = include_str!("ui/dist/index.html");
+        WebViewBuilder::new(&*window)
+            .with_html(html_content)
+            .with_devtools(false) // Devtools are disabled in release
+    };
+
+    let webview = webview_builder
+        .with_ipc_handler(ipc_handler)
+        .with_file_drop_handler(file_drop_handler)
         .build()
         .expect("Failed to build WebView");
 

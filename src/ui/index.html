@@ -1,12 +1,9 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CFC - Context File Concatenator</title>
-    <style>
-      /*INJECT_CSS*/
-    </style>
     <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
   </head>
   <body>
@@ -47,7 +44,6 @@
             ><input type="checkbox" id="case-sensitive" /> Case Sensitive</label
           >
         </div>
-
         <div class="panel ignore-patterns-panel">
           <div class="panel-header">
             <h3>
@@ -119,7 +115,6 @@
           <div id="current-patterns-container" class="current-patterns"></div>
         </div>
       </aside>
-
       <main class="main-content">
         <div class="top-bar">
           <div class="path-selection">
@@ -194,7 +189,6 @@
             </button>
           </div>
         </div>
-
         <div class="content-splitter">
           <div id="file-list-panel" class="file-list-panel">
             <div class="panel-header files-header">
@@ -211,9 +205,7 @@
             </div>
             <div id="file-tree-container" class="file-tree-container"></div>
           </div>
-
           <div id="resizer" class="resizer"></div>
-
           <div id="preview-panel" class="preview-panel">
             <div class="panel-header">
               <h3 id="preview-title">Preview</h3>
@@ -251,7 +243,6 @@
             <div id="editor-container"></div>
           </div>
         </div>
-
         <footer class="bottom-panel">
           <div class="main-actions">
             <button id="generate-btn" class="button-cta" disabled>
@@ -282,6 +273,7 @@
         </footer>
       </main>
     </div>
+
     <div id="status-bar">
       <details class="status-output-settings">
         <summary>
@@ -347,9 +339,9 @@
         <span>Indexing...</span>
       </div>
     </div>
-    </div>
-    <script>
-      /*INJECT_JS*/
-    </script>
+
+    <div id="svelte-root"></div>
+
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
