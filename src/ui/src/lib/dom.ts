@@ -73,19 +73,8 @@ export const elements = {
   // Bottom Panel
   generateBtn: document.getElementById("generate-btn") as HTMLButtonElement,
   saveBtn: document.getElementById("save-btn") as HTMLButtonElement,
-  includeTree: document.getElementById("include-tree") as HTMLInputElement,
-  relativePaths: document.getElementById("relative-paths") as HTMLInputElement,
-  outputDir: document.getElementById("output-dir") as HTMLInputElement,
-  browseOutputDirBtn: document.getElementById(
-    "browse-output-dir"
-  ) as HTMLButtonElement,
-  outputFilename: document.getElementById(
-    "output-filename"
-  ) as HTMLInputElement,
 
   // Other
-  statusBar: document.getElementById("status-bar") as HTMLDivElement,
-  indexingStatus: document.getElementById("indexing-status") as HTMLDivElement,
   resizer: document.getElementById("resizer") as HTMLDivElement,
   fileListPanel: document.getElementById("file-list-panel") as HTMLDivElement,
   previewPanel: document.getElementById("preview-panel") as HTMLDivElement,

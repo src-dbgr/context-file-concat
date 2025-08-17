@@ -1,19 +1,19 @@
 import "../style.css";
 
 import { mount } from "svelte";
-import { post } from "./lib/services/backend";
-import { appState, getState } from "./lib/stores/app";
+import { post } from "$lib/services/backend";
+import { appState, getState } from "$lib/stores/app";
 import {
   showPreviewContent,
   showGeneratedContent,
   clearPreview,
-} from "./lib/modules/editor";
-import { setupEventListeners } from "./lib/modules/eventListeners";
-import { setupGlobalKeyboardListeners } from "./lib/modules/keyboard";
-import { setupResizerListeners } from "./lib/modules/resizer";
+} from "$lib/modules/editor";
+import { setupEventListeners } from "$lib/modules/eventListeners";
+import { setupGlobalKeyboardListeners } from "$lib/modules/keyboard";
+import { setupResizerListeners } from "$lib/modules/resizer";
 import App from "./App.svelte";
-import type { AppState } from "./lib/types";
-import { initEditor } from "./lib/modules/editor";
+import type { AppState } from "$lib/types";
+import { initEditor } from "$lib/modules/editor";
 
 mount(App, {
   target: document.getElementById("svelte-root")!,
@@ -44,6 +44,9 @@ declare global {
  */
 window.render = (newState: AppState) => {
   const previousPath = getState().current_path;
+
+  // Ensure the status message always has a prefix for consistent display
+  newState.status_message = `Status: ${newState.status_message}`;
 
   appState.set(newState);
 
@@ -96,25 +99,30 @@ window.showPreviewContent = showPreviewContent;
 window.showGeneratedContent = showGeneratedContent;
 
 window.showError = (msg: string) => {
-  const statusEl = document.querySelector(".status-text");
-  if (statusEl) statusEl.textContent = `Error: ${msg}`;
+  appState.update((s: AppState) => {
+    s.status_message = `Error: ${msg}`;
+    return s;
+  });
 };
 
 window.showStatus = (msg: string) => {
-  const statusEl = document.querySelector(".status-text");
-  if (statusEl) statusEl.textContent = `Status: ${msg}`;
+  appState.update((s: AppState) => {
+    s.status_message = `Status: ${msg}`;
+    return s;
+  });
 };
 
 window.fileSaveStatus = (success: boolean, path: string) => {
-  const status = document.querySelector(".status-text");
-  if (!status) return;
+  let msg = "";
   if (path === "cancelled") {
-    status.textContent = "Status: Save cancelled.";
+    msg = "Status: Save cancelled.";
   } else {
-    status.textContent = success
-      ? `Status: Saved to ${path}`
-      : `Error: Failed to save file.`;
+    msg = success ? `Status: Saved to ${path}` : `Error: Failed to save file.`;
   }
+  appState.update((s: AppState) => {
+    s.status_message = msg;
+    return s;
+  });
 };
 
 window.setDragState = (isDragging: boolean) => {

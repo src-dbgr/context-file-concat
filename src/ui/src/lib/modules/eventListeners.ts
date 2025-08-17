@@ -29,11 +29,7 @@ function onConfigChange() {
   const newConfig = {
     ...currentConfig,
     case_sensitive_search: elements.caseSensitive.checked,
-    include_tree_by_default: elements.includeTree.checked,
-    use_relative_paths: elements.relativePaths.checked,
     remove_empty_directories: elements.removeEmptyDirs.checked,
-    output_filename: elements.outputFilename.value,
-    output_directory: elements.outputDir.value,
   };
   post("updateConfig", newConfig);
 }
@@ -90,9 +86,6 @@ export function setupEventListeners() {
       post("saveFile", editor.getValue());
     }
   });
-  elements.browseOutputDirBtn.addEventListener("click", () =>
-    post("pickOutputDirectory")
-  );
   elements.clearPreviewBtn.addEventListener("click", clearPreview);
   elements.copyBtn.addEventListener("click", () =>
     handleCopy({
@@ -103,11 +96,7 @@ export function setupEventListeners() {
   );
 
   ["change", "input"].forEach((evt) => {
-    elements.includeTree.addEventListener(evt, onConfigChange);
-    elements.relativePaths.addEventListener(evt, onConfigChange);
-    elements.outputFilename.addEventListener(evt, onConfigChange);
     elements.removeEmptyDirs.addEventListener(evt, onConfigChange);
-    elements.outputDir.addEventListener(evt, onConfigChange);
     elements.caseSensitive.addEventListener(evt, onConfigAndFilterChange);
   });
 

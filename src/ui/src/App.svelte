@@ -7,14 +7,15 @@
 		editorDecorations,
 		previewedPath,
 		getState
-	} from './lib/stores/app';
+	} from '$lib/stores/app';
 	import { get } from 'svelte/store';
-	import type { AppState, TreeNode } from './lib/types';
+	import type { AppState, TreeNode } from '$lib/types';
 	import type * as monaco from 'monaco-editor';
-	import { elements } from './lib/dom';
-	import { post } from './lib/services/backend';
-	import { COMMON_IGNORE_PATTERNS } from './lib/config';
-	import { formatFileSize } from './lib/utils';
+	import { elements } from '$lib/dom';
+	import { post } from '$lib/services/backend';
+	import { COMMON_IGNORE_PATTERNS } from '$lib/config';
+	import { formatFileSize } from '$lib/utils';
+	import StatusBar from '$lib/components/StatusBar.svelte';
 
 	// --- STATE & LIFECYCLE MANAGEMENT ---
 
@@ -145,8 +146,8 @@
 				html += `<div class="virtual-scroll-item" style="top: ${
 					i * ITEM_HEIGHT
 				}px; height: ${ITEM_HEIGHT}px;">
-                                  ${createNodeHtml(item.node, item.level)}
-                                </div>`;
+							${createNodeHtml(item.node, item.level)}
+						</div>`;
 			}
 		}
 
@@ -173,28 +174,28 @@
 			const matchClass = node.is_match ? 'is-match' : '';
 
 			return `
-                <div class="tree-item-container directory-item" data-path="${
-									node.path
-								}" data-type="directory">
-                    <span style="width: ${indentWidth}px; flex-shrink: 0;"></span>
-                    <span class="arrow ${arrowClass}" data-type="directory"></span>
-                    <input type="checkbox" ${checkboxState} ${indeterminateState} data-path="${
+				<div class="tree-item-container directory-item" data-path="${
+					node.path
+				}" data-type="directory">
+					<span style="width: ${indentWidth}px; flex-shrink: 0;"></span>
+					<span class="arrow ${arrowClass}" data-type="directory"></span>
+					<input type="checkbox" ${checkboxState} ${indeterminateState} data-path="${
 				node.path
 			}" data-type="dir-checkbox">
-                    <div class="name-and-button">
-                        <span class="file-name ${matchClass}" data-path="${
+					<div class="name-and-button">
+						<span class="file-name ${matchClass}" data-path="${
 				node.path
 			}" data-type="label">
-                            <svg class="icon" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-                            ${node.name}
-                        </span>
-                        <button class="ignore-btn" title="Add this directory to ignore patterns" data-path="${
-													node.path
-												}" data-type="ignore">
-                            <svg class="icon ignore-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></svg>
-                        </button>
-                    </div>
-                </div>`;
+							<svg class="icon" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+							${node.name}
+						</span>
+						<button class="ignore-btn" title="Add this directory to ignore patterns" data-path="${
+							node.path
+						}" data-type="ignore">
+							<svg class="icon ignore-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></svg>
+						</button>
+					</div>
+				</div>`;
 		} else {
 			const checkboxState = node.selection_state === 'full' ? 'checked' : '';
 			const previewedClass = node.is_previewed ? 'previewed' : '';
@@ -204,23 +205,23 @@
 				: `<svg class="icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10,9 9,9 8,9"/></svg>`;
 
 			return `
-                <div class="tree-item-container file-item ${previewedClass}" data-path="${node.path}">
-                    <span style="width: ${indentWidth}px; flex-shrink: 0;"></span>
-                    <span class="spacer"></span>
-                    <input type="checkbox" ${checkboxState} data-path="${node.path}" data-type="file-checkbox">
-                    <div class="name-and-button">
-                        <span class="file-name ${matchClass}" data-path="${node.path}" data-type="label">
-                            ${iconHTML}
-                            ${node.name}
-                        </span>
-                        <button class="ignore-btn" title="Add this file to ignore patterns" data-path="${
-													node.path
-												}" data-type="ignore">
-                            <svg class="icon ignore-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></svg>
-                        </button>
-                    </div>
-                    <span class="file-size">${formatFileSize(node.size)}</span>
-                </div>`;
+				<div class="tree-item-container file-item ${previewedClass}" data-path="${node.path}">
+					<span style="width: ${indentWidth}px; flex-shrink: 0;"></span>
+					<span class="spacer"></span>
+					<input type="checkbox" ${checkboxState} data-path="${node.path}" data-type="file-checkbox">
+					<div class="name-and-button">
+						<span class="file-name ${matchClass}" data-path="${node.path}" data-type="label">
+							${iconHTML}
+							${node.name}
+						</span>
+						<button class="ignore-btn" title="Add this file to ignore patterns" data-path="${
+							node.path
+						}" data-type="ignore">
+							<svg class="icon ignore-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></svg>
+						</button>
+					</div>
+					<span class="file-size">${formatFileSize(node.size)}</span>
+				</div>`;
 		}
 	}
 
@@ -284,23 +285,23 @@
 		const container = document.createElement('div');
 		container.className = 'scan-progress-container';
 		container.innerHTML = `
-        <div class="scan-progress-header">
-            <div class="scan-status">
-                <div class="scan-spinner"></div>
-                <span class="scan-text">Scanning directory...</span>
-            </div>
-            <button id="cancel-scan-btn" class="cancel-scan-btn" title="Cancel current scan">
-                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Cancel
-            </button>
-        </div>
-        <div class="scan-progress-bar">
-            <div class="scan-progress-fill" id="scan-progress-fill"></div>
-        </div>
-        <div class="scan-details">
-            <span id="scan-files-count">0 files processed</span>
-            <span id="scan-current-path">Starting scan...</span>
-            <span id="scan-skipped-count"></span>
-        </div>`;
+		<div class="scan-progress-header">
+			<div class="scan-status">
+				<div class="scan-spinner"></div>
+				<span class="scan-text">Scanning directory...</span>
+			</div>
+			<button id="cancel-scan-btn" class="cancel-scan-btn" title="Cancel current scan">
+				<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Cancel
+			</button>
+		</div>
+		<div class="scan-progress-bar">
+			<div class="scan-progress-fill" id="scan-progress-fill"></div>
+		</div>
+		<div class="scan-details">
+			<span id="scan-files-count">0 files processed</span>
+			<span id="scan-current-path">Starting scan...</span>
+			<span id="scan-skipped-count"></span>
+		</div>`;
 		return container;
 	}
 
@@ -424,7 +425,7 @@
 
 	function renderUI() {
 		const appState = getState();
-		const { config, is_scanning, is_generating, tree, is_fully_scanned } = appState;
+		const { config, is_scanning, is_generating, tree } = appState;
 
 		elements.currentPath.textContent = appState.current_path || 'No directory selected.';
 		elements.currentPath.title = appState.current_path ?? '';
@@ -432,11 +433,7 @@
 		elements.currentConfigFilename.textContent = appState.current_config_filename || '';
 
 		elements.caseSensitive.checked = config.case_sensitive_search;
-		elements.includeTree.checked = config.include_tree_by_default;
-		elements.relativePaths.checked = config.use_relative_paths;
 		elements.removeEmptyDirs.checked = config.remove_empty_directories || false;
-		elements.outputDir.value = config.output_directory?.toString() || '';
-		elements.outputFilename.value = config.output_filename;
 		elements.searchQuery.value = appState.search_query;
 		elements.extensionFilter.value = appState.extension_filter;
 		elements.contentSearchQuery.value = appState.content_search_query;
@@ -471,11 +468,11 @@
 				elements.rescanBtn.title =
 					'Ignore patterns were removed - Re-scan recommended to find previously hidden files';
 				const iconPulse = `<svg class="icon pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
-        <path d="M21 3v5h-5"/>
-        <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
-        <path d="M3 21v-5h5"/>
-      </svg>`;
+		<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+		<path d="M21 3v5h-5"/>
+		<path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+		<path d="M3 21v-5h5"/>
+	</svg>`;
 				elements.rescanBtn.innerHTML = `${iconPulse} Re-Scan`;
 			} else {
 				elements.rescanBtn.classList.remove('needs-rescan');
@@ -491,12 +488,12 @@
 				elements.generateBtn.classList.remove('button-cta');
 				elements.generateBtn.classList.add('is-generating');
 				elements.generateBtn.innerHTML = `
-        <span class="generating-content">
-          ${iconGenerate}
-          <span class="generating-text">Concat</span>
-        </span>
-        <span class="cancel-content">${iconCancel} Cancel</span>
-      `;
+				<span class="generating-content">
+					${iconGenerate}
+					<span class="generating-text">Concat</span>
+				</span>
+				<span class="cancel-content">${iconCancel} Cancel</span>
+			`;
 				const textElement =
 					elements.generateBtn.querySelector<HTMLSpanElement>('.generating-text');
 				let dotCount = 0;
@@ -563,20 +560,8 @@
 			}
 		}
 
-		const statusTextEl = document.querySelector('.status-text');
-		if (statusTextEl) {
-			statusTextEl.textContent = `Status: ${appState.status_message}`;
-		}
 		const { totalFiles, totalFolders } = countTreeItems(tree);
 		elements.fileStats.textContent = `Files: ${appState.selected_files_count} selected of ${totalFiles} • Folders: ${totalFolders}`;
-
-		const isIndexingInProgress = is_scanning && !is_fully_scanned && tree.length > 0;
-		if (elements.indexingStatus) {
-			elements.indexingStatus.style.display = isIndexingInProgress ? 'flex' : 'none';
-		}
-		if (elements.statusBar) {
-			elements.statusBar.classList.toggle('indexing', isIndexingInProgress);
-		}
 
 		setupCommonPatterns();
 		renderIgnorePatterns();
@@ -630,3 +615,5 @@
 		editorDecorations.set(newDecorationIds);
 	}
 </script>
+
+<StatusBar />

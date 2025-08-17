@@ -12,6 +12,12 @@
     /* Bundler mode */
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    /* Path Alias Configuration */
+    "baseUrl": ".",
+    "paths": {
+      "$lib": ["src/lib"],
+      "$lib/*": ["src/lib/*"]
+    },
     /* Linting */
     "strict": true,
     "noUnusedLocals": true,
