@@ -1,22 +1,22 @@
 import { elements } from "../dom.js";
 import { post } from "../services/backend.js";
-import { state } from "../state.js";
+import { getState, patternFilter, editorInstance } from "../stores/app.js";
 import { clearPreview } from "./editor.js";
 import { handleCopy } from "./clipboard.js";
 import { renderUI } from "./renderer.js";
 import { getUndoManagerForElement } from "./undo.js";
+import { get } from "svelte/store";
 
-let filterDebounceTimeout;
+let filterDebounceTimeout: number | undefined;
 
 function onFilterChange() {
-  // Only apply filters if a directory is selected
-  const appState = state.get();
-  if (!appState.current_path) {
+  const currentAppState = getState();
+  if (!currentAppState.current_path) {
     return;
   }
 
   clearTimeout(filterDebounceTimeout);
-  filterDebounceTimeout = setTimeout(() => {
+  filterDebounceTimeout = window.setTimeout(() => {
     post("updateFilters", {
       searchQuery: elements.searchQuery.value,
       extensionFilter: elements.extensionFilter.value,
@@ -25,9 +25,9 @@ function onFilterChange() {
   }, 300);
 }
 
-function shouldEnableSearch() {
-  const appState = state.get();
-  return !!(appState.current_path && !appState.is_scanning);
+function shouldEnableSearch(): boolean {
+  const currentAppState = getState();
+  return !!(currentAppState.current_path && !currentAppState.is_scanning);
 }
 
 function updateSearchInputsState() {
@@ -49,9 +49,9 @@ function updateSearchInputsState() {
 }
 
 function onConfigChange() {
-  const appState = state.get();
+  const currentConfig = getState().config;
   const newConfig = {
-    ...appState.config,
+    ...currentConfig,
     case_sensitive_search: elements.caseSensitive.checked,
     include_tree_by_default: elements.includeTree.checked,
     use_relative_paths: elements.relativePaths.checked,
@@ -62,16 +62,18 @@ function onConfigChange() {
   post("updateConfig", newConfig);
 }
 
+function onConfigAndFilterChange() {
+  onConfigChange();
+  onFilterChange();
+}
+
 function addIgnorePattern() {
   const pattern = elements.newIgnorePattern.value.trim();
   if (pattern) {
-    const appState = state.get();
-    if (!appState.config.ignore_patterns.includes(pattern)) {
-      const newConfig = {
-        ...appState.config,
-        ignore_patterns: [...appState.config.ignore_patterns, pattern],
-      };
-      post("updateConfig", newConfig);
+    const currentConfig = getState().config;
+    if (!currentConfig.ignore_patterns.includes(pattern)) {
+      const newPatterns = [...currentConfig.ignore_patterns, pattern];
+      post("updateConfig", { ...currentConfig, ignore_patterns: newPatterns });
     }
     elements.newIgnorePattern.value = "";
   }
@@ -94,75 +96,87 @@ export function setupEventListeners() {
   elements.expandAllBtn.addEventListener("click", () =>
     post("expandCollapseAll", true)
   );
-
   elements.deselectAllBtn.addEventListener("click", () => post("deselectAll"));
   elements.collapseAllBtn.addEventListener("click", () =>
     post("expandCollapseAll", false)
   );
+
   elements.generateBtn.addEventListener("click", () => {
-    const appState = state.get();
-    if (appState.is_generating) {
+    if (getState().is_generating) {
       post("cancelGeneration");
     } else {
       post("generatePreview");
     }
   });
-  elements.saveBtn.addEventListener("click", () =>
-    post("saveFile", state.getEditor().getValue())
-  );
+  elements.saveBtn.addEventListener("click", () => {
+    const editor = get(editorInstance);
+    if (editor) {
+      post("saveFile", editor.getValue());
+    }
+  });
   elements.browseOutputDirBtn.addEventListener("click", () =>
     post("pickOutputDirectory")
   );
   elements.clearPreviewBtn.addEventListener("click", clearPreview);
-
-  elements.copyBtn.addEventListener("click", () => {
-    handleCopy({ isEditorFocused: true });
-  });
+  elements.copyBtn.addEventListener("click", () =>
+    handleCopy({
+      isEditorFocused: true,
+      activeEl: document.activeElement as HTMLElement,
+      isInNormalInputField: false,
+    })
+  );
 
   ["change", "input"].forEach((evt) => {
     elements.includeTree.addEventListener(evt, onConfigChange);
     elements.relativePaths.addEventListener(evt, onConfigChange);
     elements.outputFilename.addEventListener(evt, onConfigChange);
-    elements.caseSensitive.addEventListener(evt, onConfigChange);
     elements.removeEmptyDirs.addEventListener(evt, onConfigChange);
     elements.outputDir.addEventListener(evt, onConfigChange);
+    elements.caseSensitive.addEventListener(evt, onConfigAndFilterChange);
   });
 
   ["input"].forEach((evt) => {
     elements.searchQuery.addEventListener(evt, onFilterChange);
     elements.extensionFilter.addEventListener(evt, onFilterChange);
     elements.contentSearchQuery.addEventListener(evt, onFilterChange);
-    elements.filterPatterns.addEventListener(evt, (e) => {
-      state.setPatternFilter(e.target.value.toLowerCase());
+
+    elements.filterPatterns.addEventListener(evt, (e: Event) => {
+      const target = e.target as HTMLInputElement;
+      patternFilter.set(target.value.toLowerCase());
       renderUI();
     });
   });
 
   elements.addPatternBtn.addEventListener("click", addIgnorePattern);
-  elements.newIgnorePattern.addEventListener("keydown", (e) => {
+  elements.newIgnorePattern.addEventListener("keydown", (e: KeyboardEvent) => {
     if (e.key === "Enter") addIgnorePattern();
   });
 
   elements.deleteAllPatternsBtn.addEventListener("click", () => {
-    post("updateConfig", { ...state.get().config, ignore_patterns: [] });
+    const currentConfig = getState().config;
+    post("updateConfig", { ...currentConfig, ignore_patterns: [] });
   });
 
-  // Using event delegation on the body to catch events for all current and future inputs.
-  document.body.addEventListener("focusin", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") {
-      // This ensures an UndoManager is created as soon as an input is focused.
-      getUndoManagerForElement(e.target);
+  document.body.addEventListener("focusin", (e: Event) => {
+    const target = e.target as HTMLElement;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement
+    ) {
+      getUndoManagerForElement(target);
     }
   });
 
-  document.body.addEventListener("input", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") {
-      // Record state on typing, with coalescing.
-      getUndoManagerForElement(e.target).recordState();
+  document.body.addEventListener("input", (e: Event) => {
+    const target = e.target as HTMLElement;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement
+    ) {
+      getUndoManagerForElement(target).recordState();
     }
   });
 
-  // Initializing the state of the search inputs and making the update function globally available.
   updateSearchInputsState();
   window.updateSearchInputsState = updateSearchInputsState;
 }

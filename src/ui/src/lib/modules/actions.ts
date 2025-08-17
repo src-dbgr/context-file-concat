@@ -1,16 +1,12 @@
-import { state } from "../state.js"; // Import state for Monaco access
+import { editorInstance } from "../stores/app.js";
+import type { FocusContext } from "../types.js";
+import { get } from "svelte/store";
 
-const WORD_BREAK_LEFT = /[\s.,;()\[\]{}<>"']|$/;
-const WORD_BREAK_RIGHT = /^[\s.,;()\[\]{}<>"']/;
-
-/**
- * Finds the boundary of the next/previous word from a given position.
- * @param {string} value - The text content.
- * @param {number} position - The starting cursor position.
- * @param {'forward' | 'backward'} direction - The direction to search.
- * @returns {number} The new cursor position.
- */
-function findWordBoundary(value, position, direction) {
+function findWordBoundary(
+  value: string,
+  position: number,
+  direction: "forward" | "backward"
+): number {
   let i = position;
 
   if (direction === "forward") {
@@ -32,50 +28,44 @@ function findWordBoundary(value, position, direction) {
   }
 }
 
-/**
- * Moves the cursor word by word.
- * @param {HTMLInputElement|HTMLTextAreaElement} element
- * @param {'forward' | 'backward'} direction
- */
-export function moveWord(element, direction) {
+export function moveWord(
+  element: HTMLInputElement | HTMLTextAreaElement,
+  direction: "forward" | "backward"
+) {
   const newPos = findWordBoundary(
     element.value,
-    element.selectionStart,
+    element.selectionStart ?? 0,
     direction
   );
   element.setSelectionRange(newPos, newPos);
 }
 
-/**
- * Selects text word by word.
- * @param {HTMLInputElement|HTMLTextAreaElement} element
- * @param {'forward' | 'backward'} direction
- */
-export function selectWord(element, direction) {
+export function selectWord(
+  element: HTMLInputElement | HTMLTextAreaElement,
+  direction: "forward" | "backward"
+) {
   if (direction === "forward") {
     const newPos = findWordBoundary(
       element.value,
-      element.selectionEnd,
+      element.selectionEnd ?? 0,
       "forward"
     );
     element.setSelectionRange(element.selectionStart, newPos);
   } else {
     const newPos = findWordBoundary(
       element.value,
-      element.selectionStart,
+      element.selectionStart ?? 0,
       "backward"
     );
     element.setSelectionRange(newPos, element.selectionEnd);
   }
 }
 
-/**
- * Deletes the word behind the cursor.
- * @param {HTMLInputElement|HTMLTextAreaElement} element
- */
-export function deleteWordBackward(element) {
-  const start = element.selectionStart;
-  const end = element.selectionEnd;
+export function deleteWordBackward(
+  element: HTMLInputElement | HTMLTextAreaElement
+) {
+  const start = element.selectionStart ?? 0;
+  const end = element.selectionEnd ?? 0;
 
   if (start !== end) {
     element.value = element.value.slice(0, start) + element.value.slice(end);
@@ -87,29 +77,29 @@ export function deleteWordBackward(element) {
   }
 }
 
-/**
- * Deletes from the cursor to the beginning of the line.
- * @param {HTMLInputElement|HTMLTextAreaElement} element
- */
-export function deleteLineBackward(element) {
-  const start = element.selectionStart;
-  const end = element.selectionEnd;
-  element.value = element.value.slice(0, 0) + element.value.slice(end);
+export function deleteLineBackward(
+  element: HTMLInputElement | HTMLTextAreaElement
+) {
+  const end = element.selectionEnd ?? 0;
+  element.value = element.value.slice(end);
   element.setSelectionRange(0, 0);
 }
 
-/**
- * Selects all text in the currently focused context (input field or editor).
- * @param {object} context
- */
-export function selectAll(context) {
+export function selectAll(context: FocusContext) {
   const { activeEl, isEditorFocused, isInNormalInputField } = context;
-  if (isInNormalInputField && activeEl.select) {
+
+  if (
+    isInNormalInputField &&
+    (activeEl instanceof HTMLInputElement ||
+      activeEl instanceof HTMLTextAreaElement)
+  ) {
     activeEl.select();
   } else if (isEditorFocused) {
-    const editor = state.getEditor();
+    const editor = get(editorInstance);
+    if (!editor) return;
     const model = editor.getModel();
-    if (editor && model) {
+    const monaco = (window as any).monaco;
+    if (model && monaco) {
       editor.setSelection(
         new monaco.Selection(
           1,

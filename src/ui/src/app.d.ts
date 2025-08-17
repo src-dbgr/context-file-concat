@@ -6,3 +6,10 @@ declare module "*.svelte" {
   const component: typeof SvelteComponent;
   export default component;
 }
+
+// Declare the ipc property that the WebView environment provides.
+declare interface Window {
+  ipc: {
+    postMessage(message: string): void;
+  };
+}

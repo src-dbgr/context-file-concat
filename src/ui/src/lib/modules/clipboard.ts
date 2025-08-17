@@ -1,8 +1,10 @@
-import { state } from "../state.js";
+import { editorInstance } from "../stores/app.js";
 import { getUndoManagerForElement } from "./undo.js";
 import { elements } from "../dom.js";
+import type { FocusContext } from "../types.js";
+import { get } from "svelte/store";
 
-async function readFromClipboardWithFallback() {
+async function readFromClipboardWithFallback(): Promise<string | null> {
   try {
     return await navigator.clipboard.readText();
   } catch (err) {
@@ -11,7 +13,7 @@ async function readFromClipboardWithFallback() {
   }
 }
 
-async function copyWithFallback(content) {
+async function copyWithFallback(content: string): Promise<boolean> {
   if (!content) return false;
   try {
     await navigator.clipboard.writeText(content);
@@ -35,21 +37,30 @@ async function copyWithFallback(content) {
   }
 }
 
-export async function handleCopy(context) {
+export async function handleCopy(context: FocusContext) {
   const { activeEl, isEditorFocused, isInNormalInputField } = context;
   let textToCopy = "";
   let statusMessage = "✗ Failed to copy.";
+  const statusEl = document.querySelector(".status-text");
 
-  if (isInNormalInputField) {
+  if (
+    isInNormalInputField &&
+    (activeEl instanceof HTMLInputElement ||
+      activeEl instanceof HTMLTextAreaElement)
+  ) {
     const selection = activeEl.value.substring(
-      activeEl.selectionStart,
-      activeEl.selectionEnd
+      activeEl.selectionStart ?? 0,
+      activeEl.selectionEnd ?? 0
     );
     textToCopy = selection || activeEl.value;
     if (textToCopy) statusMessage = `✓ Copied text from input field.`;
   } else if (isEditorFocused) {
-    const editor = state.getEditor();
+    const editor = get(editorInstance);
+    if (!editor) return;
+
     const model = editor.getModel();
+    if (!model) return;
+
     const selection = editor.getSelection();
     if (selection && !selection.isEmpty()) {
       textToCopy = model.getValueInRange(selection);
@@ -62,24 +73,22 @@ export async function handleCopy(context) {
 
   const success = await copyWithFallback(textToCopy);
 
-  // Update the main status bar at the bottom
-  document.querySelector(".status-text").textContent = success
-    ? statusMessage
-    : "✗ Failed to copy to clipboard.";
+  if (statusEl) {
+    statusEl.textContent = success
+      ? statusMessage
+      : "✗ Failed to copy to clipboard.";
+  }
 
-  // Provide visual feedback directly on the copy button itself.
-  // This logic is specific to the button click context (isEditorFocused).
   if (isEditorFocused && elements.copyBtn) {
     if (success) {
       elements.copyBtn.innerHTML = `... Copied!`;
-      elements.copyBtn.style.backgroundColor = "#4caf50"; // Success green
-      elements.copyBtn.style.color = "#2c2e33"; // Success green
+      elements.copyBtn.style.backgroundColor = "#4caf50";
+      elements.copyBtn.style.color = "#2c2e33";
     } else {
       elements.copyBtn.innerHTML = `... Failed`;
-      elements.copyBtn.style.backgroundColor = "#e54b4b"; // Error red
+      elements.copyBtn.style.backgroundColor = "#e54b4b";
     }
 
-    // Reset the button after 2 seconds
     setTimeout(() => {
       elements.copyBtn.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
       elements.copyBtn.style.backgroundColor = "";
@@ -88,58 +97,77 @@ export async function handleCopy(context) {
   }
 }
 
-export async function handlePaste(context) {
+export async function handlePaste(context: FocusContext) {
   const { activeEl, isEditorFocused, isInNormalInputField } = context;
-  if (isInNormalInputField)
-    getUndoManagerForElement(activeEl).recordState(true);
+  const statusEl = document.querySelector(".status-text");
+  if (!statusEl) return;
 
-  if (isInNormalInputField) {
+  if (
+    isInNormalInputField &&
+    (activeEl instanceof HTMLInputElement ||
+      activeEl instanceof HTMLTextAreaElement)
+  ) {
+    getUndoManagerForElement(activeEl).recordState(true);
     activeEl.focus();
-    const success = document.execCommand("paste");
-    if (success) {
-      document.querySelector(".status-text").textContent = `✓ Content pasted.`;
+
+    const text = await readFromClipboardWithFallback();
+    if (text) {
+      document.execCommand("insertText", false, text);
+      statusEl.textContent = `✓ Content pasted.`;
       activeEl.dispatchEvent(new Event("input", { bubbles: true }));
     } else {
-      const text = await readFromClipboardWithFallback();
-      if (text) activeEl.value += text;
+      statusEl.textContent = `✗ Paste failed or clipboard empty.`;
     }
   } else if (isEditorFocused) {
     const clipboardText = await readFromClipboardWithFallback();
 
     if (clipboardText === null) {
-      document.querySelector(".status-text").textContent =
-        "Status: Paste cancelled.";
+      statusEl.textContent = "Status: Paste cancelled.";
       return;
     }
     if (!clipboardText) {
-      document.querySelector(".status-text").textContent =
-        "Status: Clipboard is empty.";
+      statusEl.textContent = "Status: Clipboard is empty.";
       return;
     }
 
-    const editor = state.getEditor();
+    const editor = get(editorInstance);
+    if (!editor) return;
     const selection = editor.getSelection();
-    editor.executeEdits("paste", [{ range: selection, text: clipboardText }]);
-    document.querySelector(".status-text").textContent = `✓ Content pasted.`;
+    if (selection) {
+      editor.executeEdits("paste", [{ range: selection, text: clipboardText }]);
+      statusEl.textContent = `✓ Content pasted.`;
+    }
   } else {
-    document.querySelector(".status-text").textContent =
-      "✗ Paste not supported here.";
+    statusEl.textContent = "✗ Paste not supported here.";
   }
 }
 
-export async function handleCut(context) {
+export async function handleCut(context: FocusContext) {
   const { activeEl, isEditorFocused, isInNormalInputField } = context;
-  if (isInNormalInputField)
-    getUndoManagerForElement(activeEl).recordState(true);
-
   let success = false;
+  const statusEl = document.querySelector(".status-text");
+  if (!statusEl) return;
 
-  if (isInNormalInputField) {
-    activeEl.focus();
-    success = document.execCommand("cut");
+  if (
+    isInNormalInputField &&
+    (activeEl instanceof HTMLInputElement ||
+      activeEl instanceof HTMLTextAreaElement)
+  ) {
+    getUndoManagerForElement(activeEl).recordState(true);
+    const textToCopy = activeEl.value.substring(
+      activeEl.selectionStart ?? 0,
+      activeEl.selectionEnd ?? 0
+    );
+    const copied = await copyWithFallback(textToCopy);
+    if (copied) {
+      document.execCommand("delete");
+      success = true;
+    }
   } else if (isEditorFocused) {
-    const editor = state.getEditor();
+    const editor = get(editorInstance);
+    if (!editor) return;
     const model = editor.getModel();
+    if (!model) return;
     const selection = editor.getSelection();
 
     if (selection && !selection.isEmpty()) {
@@ -152,7 +180,5 @@ export async function handleCut(context) {
     }
   }
 
-  document.querySelector(".status-text").textContent = success
-    ? `✓ Text cut to clipboard.`
-    : `✗ Cut failed.`;
+  statusEl.textContent = success ? `✓ Text cut to clipboard.` : `✗ Cut failed.`;
 }

@@ -66,7 +66,6 @@ pub fn rescan_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
             .lock()
             .expect("Mutex was poisoned. This should not happen.");
 
-        // Clear the rescan flag when actually rescanning
         state_guard.patterns_need_rescan = false;
         state_guard.current_path.clone()
     };
@@ -85,18 +84,6 @@ pub fn cancel_scan<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 }
 
 /// Updates the application configuration and persists it.
-///
-/// This function handles configuration changes intelligently based on their type:
-/// - **Pattern Removal**: If ignore patterns are removed, the function sets a
-///   `patterns_need_rescan` flag. It does NOT trigger a re-scan automatically,
-///   prompting the user to do it manually. This is necessary because previously
-///   ignored files are not in memory.
-/// - **Pattern Addition**: If patterns are only added, the existing in-memory file
-///   list is filtered immediately. This is a fast, local operation that provides
-///   immediate UI feedback.
-/// - **Filter Changes**: If settings like `remove_empty_directories` change, a
-///   fast, in-memory re-filtering is applied.
-/// - **Other Changes**: Settings like output paths are saved without any file list changes.
 pub async fn update_config<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
@@ -129,11 +116,12 @@ pub async fn update_config<P: EventProxy>(
             tracing::warn!("Failed to save config on update: {}", e);
         }
 
-        let current_path = state_guard.current_path.clone();
-        if current_path.is_empty() {
-            drop(state_guard);
+        // KORREKTUR: Wenn kein Verzeichnis geladen ist, wird nur gespeichert. Kein Event.
+        if state_guard.current_path.is_empty() {
             return;
         }
+
+        let mut should_send_update = false;
 
         if !patterns_removed.is_empty() {
             tracing::info!(
@@ -141,25 +129,41 @@ pub async fn update_config<P: EventProxy>(
                 patterns_removed
             );
             state_guard.patterns_need_rescan = true;
-            let ui_state = generate_ui_state(&state_guard);
-            proxy.send_event(UserEvent::StateUpdate(Box::new(ui_state)));
+            should_send_update = true;
         } else if !patterns_added.is_empty() {
             tracing::info!(
                 "✓ Applying new ignore patterns locally: {:?}",
                 patterns_added
             );
 
-            // Mark the newly added patterns as "active" for potential UI feedback.
-            state_guard.active_ignore_patterns.extend(patterns_added);
+            let root_path = PathBuf::from(&state_guard.current_path);
+            for pattern in &patterns_added {
+                let mut builder = ignore::gitignore::GitignoreBuilder::new(&root_path);
+                if builder.add_line(None, pattern).is_ok() {
+                    if let Ok(matcher) = builder.build() {
+                        let has_match = state_guard.full_file_list.iter().any(|item| {
+                            matcher
+                                .matched_path_or_any_parents(&item.path, item.is_directory)
+                                .is_ignore()
+                        });
+
+                        if has_match {
+                            state_guard.active_ignore_patterns.insert(pattern.clone());
+                        }
+                    }
+                }
+            }
 
             state_guard.apply_ignore_patterns();
             filtering::apply_filters(&mut state_guard);
-
-            let ui_state = generate_ui_state(&state_guard);
-            proxy.send_event(UserEvent::StateUpdate(Box::new(ui_state)));
+            should_send_update = true;
         } else if needs_refilter {
             tracing::info!("🚀 Re-applying filters due to config change.");
             filtering::apply_filters(&mut state_guard);
+            should_send_update = true;
+        }
+
+        if should_send_update {
             let ui_state = generate_ui_state(&state_guard);
             proxy.send_event(UserEvent::StateUpdate(Box::new(ui_state)));
         }
@@ -308,35 +312,29 @@ pub async fn add_ignore_path<P: EventProxy>(
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload) {
-        // --- Lock Scope: Read data and release lock immediately ---
         let (current_path_str, mut new_config) = {
             let state_guard = state
                 .lock()
                 .expect("Mutex was poisoned. This should not happen.");
             if state_guard.current_path.is_empty() {
-                return; // Early exit if no directory is loaded.
+                return;
             }
-            // Clone the data we need...
             (state_guard.current_path.clone(), state_guard.config.clone())
-        }; // <-- MutexGuard is dropped here, releasing the lock.
+        };
 
-        // --- Logic without holding the lock ---
         let path_to_ignore = PathBuf::from(path_str);
         let root_path = PathBuf::from(&current_path_str);
 
         if let Ok(relative_path) = path_to_ignore.strip_prefix(&root_path) {
             let mut pattern_to_add = relative_path.to_string_lossy().to_string();
 
-            // Ensure directory patterns end with a slash for correctness.
             if path_to_ignore.is_dir() && !pattern_to_add.ends_with('/') {
                 pattern_to_add.push('/');
             }
 
-            // If the pattern is new, proceed to update the config.
             if new_config.ignore_patterns.insert(pattern_to_add) {
                 match serde_json::to_value(new_config) {
                     Ok(config_payload) => {
-                        // Call the next async function, now that we are not holding any locks.
                         update_config(config_payload, proxy, state).await;
                     }
                     Err(e) => {

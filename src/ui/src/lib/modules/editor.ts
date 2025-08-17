@@ -1,73 +1,71 @@
-/* global require, monaco */
 import { elements } from "../dom.js";
-import { state } from "../state.js";
+import {
+  editorInstance,
+  editorDecorations,
+  previewedPath,
+  getState,
+} from "../stores/app.js";
 import { post } from "../services/backend.js";
 import { generateStatsString, splitPathForDisplay } from "../utils.js";
 import { MONACO_VS_PATH } from "../config.js";
+import { get } from "svelte/store";
+import type * as monaco from "monaco-editor";
 
-export function initEditor(onFinished) {
-  require.config({ paths: { vs: MONACO_VS_PATH } });
-  require(["vs/editor/editor.main"], () => {
-    const editor = monaco.editor.create(elements.editorContainer, {
-      value: "// Select a directory to begin.",
-      language: "plaintext",
-      theme: "vs-dark",
-      readOnly: true,
-      automaticLayout: true,
-      wordWrap: "on",
-      stickyScroll: {
-        enabled: true,
-      },
-      minimap: { enabled: true },
-      renderLineHighlight: "line",
-      padding: { top: 10 },
+let contentChangeListener: monaco.IDisposable | null = null;
 
-      // 2. Bearbeitungskomfort
-      bracketPairColorization: { enabled: true },
-      formatOnPaste: true,
-      smoothScrolling: true,
-    });
-    state.setEditor(editor);
-    if (onFinished) onFinished();
-  });
+export function initEditor(onFinished?: () => void) {
+  if ((window as any).require) {
+    (window as any).require.config({ paths: { vs: MONACO_VS_PATH } });
+    (window as any).require(
+      ["vs/editor/editor.main"],
+      (monacoInstance: typeof monaco) => {
+        const editor = monacoInstance.editor.create(elements.editorContainer, {
+          value: "// Select a directory to begin.",
+          language: "plaintext",
+          theme: "vs-dark",
+          readOnly: true,
+          automaticLayout: true,
+          wordWrap: "on",
+          stickyScroll: { enabled: true },
+          minimap: { enabled: true },
+          renderLineHighlight: "line",
+          padding: { top: 10 },
+          bracketPairColorization: { enabled: true },
+          formatOnPaste: true,
+          smoothScrolling: true,
+        });
+        editorInstance.set(editor);
+        if (onFinished) onFinished();
+      }
+    );
+  }
 }
 
-export function showPreviewContent(content, language, searchTerm, path) {
-  const editor = state.getEditor();
+export function showPreviewContent(
+  content: string,
+  language: string,
+  searchTerm: string,
+  path: string
+) {
+  const editor = get(editorInstance);
   if (!editor) return;
 
-  const oldListener = state.getChangeListener();
-  if (oldListener) {
-    oldListener.dispose();
-    state.setChangeListener(null);
+  if (contentChangeListener) {
+    contentChangeListener.dispose();
+    contentChangeListener = null;
   }
 
-  const oldPreviewedPath = state.getPreviewedPath();
-
-  state.setPreviewedPath(path);
-
-  if (oldPreviewedPath) {
-    const oldElement = document.querySelector(
-      `.file-item[data-path="${oldPreviewedPath}"]`
-    );
-    if (oldElement) {
-      oldElement.classList.remove("previewed");
-    }
-  }
-
-  const newElement = document.querySelector(`.file-item[data-path="${path}"]`);
-  if (newElement) {
-    newElement.classList.add("previewed");
-  }
+  previewedPath.set(path);
 
   editor.setValue(content);
   const model = editor.getModel();
 
   if (model) {
+    const monaco = (window as any).monaco;
     monaco.editor.setModelLanguage(model, language);
-    let newDecorations = [];
+    let newDecorations: monaco.editor.IModelDeltaDecoration[] = [];
     if (searchTerm && searchTerm.trim() !== "") {
-      const matchCase = state.get().config.case_sensitive_search;
+      const matchCase = getState().config.case_sensitive_search;
       const matches = model.findMatches(
         searchTerm,
         true,
@@ -76,7 +74,7 @@ export function showPreviewContent(content, language, searchTerm, path) {
         null,
         true
       );
-      newDecorations = matches.map((match) => ({
+      newDecorations = matches.map((match: monaco.editor.FindMatch) => ({
         range: match.range,
         options: {
           inlineClassName: "search-highlight",
@@ -84,12 +82,12 @@ export function showPreviewContent(content, language, searchTerm, path) {
         },
       }));
     }
-    const currentDecorations = state.getDecorations();
+    const currentDecorations = get(editorDecorations);
     const newCurrentDecorations = editor.deltaDecorations(
       currentDecorations,
       newDecorations
     );
-    state.setDecorations(newCurrentDecorations);
+    editorDecorations.set(newCurrentDecorations);
   }
 
   editor.updateOptions({ readOnly: true });
@@ -98,7 +96,7 @@ export function showPreviewContent(content, language, searchTerm, path) {
 
   const { pathPart, filename } = splitPathForDisplay(
     path,
-    state.get().current_path
+    getState().current_path
   );
   const statsString = generateStatsString(content, "Read-only", undefined);
   const previewTitle = document.querySelector(".preview-panel #preview-title");
@@ -115,20 +113,23 @@ export function showPreviewContent(content, language, searchTerm, path) {
   elements.clearPreviewBtn.style.display = "inline-block";
 }
 
-export function showGeneratedContent(content, tokenCount) {
-  const editor = state.getEditor();
+export function showGeneratedContent(content: string, tokenCount: number) {
+  const editor = get(editorInstance);
   if (!editor) return;
 
-  const oldListener = state.getChangeListener();
-  if (oldListener) {
-    oldListener.dispose();
-    state.setChangeListener(null);
+  if (contentChangeListener) {
+    contentChangeListener.dispose();
+    contentChangeListener = null;
   }
 
-  state.setPreviewedPath(null);
+  previewedPath.set(null);
   editor.setValue(content);
-  state.setDecorations(editor.deltaDecorations(state.getDecorations(), []));
-  monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
+  editorDecorations.set(editor.deltaDecorations(get(editorDecorations), []));
+  const model = editor.getModel();
+  if (model) {
+    const monaco = (window as any).monaco;
+    monaco.editor.setModelLanguage(model, "plaintext");
+  }
   editor.updateOptions({ readOnly: false });
 
   const updateStats = () => {
@@ -143,21 +144,19 @@ export function showGeneratedContent(content, tokenCount) {
     );
     if (previewTitle) {
       previewTitle.innerHTML = `
-              <div class="preview-path-container">
-                <span class="preview-filename">
-                  <svg class="icon icon-lightning" viewBox="0 0 24 24"><path d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"></path></svg>
-                  <h3 class="generated-preview-title">Generated Preview</h3>
-                </span>
-              </div>
-              <span class="preview-stats">${statsString}</span>`;
+        <div class="preview-path-container">
+          <span class="preview-filename">
+            <svg class="icon icon-lightning" viewBox="0 0 24 24"><path d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"></path></svg>
+            <h3 class="generated-preview-title">Generated Preview</h3>
+          </span>
+        </div>
+        <span class="preview-stats">${statsString}</span>`;
     }
   };
 
   updateStats();
-  const model = editor.getModel();
   if (model) {
-    const newListener = model.onDidChangeContent(updateStats);
-    state.setChangeListener(newListener);
+    contentChangeListener = model.onDidChangeContent(updateStats);
   }
 
   elements.saveBtn.disabled = false;
@@ -167,20 +166,26 @@ export function showGeneratedContent(content, tokenCount) {
 
 export function clearPreview() {
   post("clearPreviewState");
-  state.setPreviewedPath(null);
+  previewedPath.set(null);
 
-  const editor = state.getEditor();
+  const editor = get(editorInstance);
   if (!editor) return;
 
   editor.setValue("// Preview cleared.");
-  state.setDecorations(editor.deltaDecorations(state.getDecorations(), []));
+  editorDecorations.set(editor.deltaDecorations(get(editorDecorations), []));
   editor.updateOptions({ readOnly: true });
-  monaco.editor.setModelLanguage(editor.getModel(), "plaintext");
+  const model = editor.getModel();
+  if (model) {
+    const monaco = (window as any).monaco;
+    monaco.editor.setModelLanguage(model, "plaintext");
+  }
 
   const previewTitle = document.querySelector(".preview-panel #preview-title");
   if (previewTitle) {
     previewTitle.innerHTML = `
-      <div class="preview-title-left"></div>
+      <div class="preview-path-container">
+          <span class="preview-filename">Preview</span>
+      </div>
       <span class="preview-stats">Select a file to preview</span>`;
   }
 
