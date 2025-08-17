@@ -6,8 +6,8 @@ import {
   getState,
 } from "../stores/app.js";
 import { post } from "../services/backend.js";
-import { generateStatsString, splitPathForDisplay } from "../utils.js";
 import { get } from "svelte/store";
+import { previewMode, generatedTokenCount } from "../stores/preview.js";
 
 // --- START: Direct Monaco Integration (Plugin-Free) ---
 import * as monaco from "monaco-editor";
@@ -40,6 +40,25 @@ self.MonacoEnvironment = {
 
 let contentChangeListener: monaco.IDisposable | null = null;
 
+/** Schedule a safe layout pass for Monaco (next frame, plus micro delay). */
+export function layoutEditorSoon() {
+  const editor = get(editorInstance);
+  if (!editor) return;
+
+  // Manche Flex/Resize-Kaskaden liefern im gleichen Frame noch falsche Größen.
+  // Darum: zweimal schedulen.
+  requestAnimationFrame(() => {
+    try {
+      editor.layout();
+    } catch {}
+    setTimeout(() => {
+      try {
+        editor.layout();
+      } catch {}
+    }, 0);
+  });
+}
+
 export function initEditor(onFinished?: () => void) {
   const editor = monaco.editor.create(elements.editorContainer, {
     value: "// Select a directory to begin.",
@@ -57,6 +76,10 @@ export function initEditor(onFinished?: () => void) {
     smoothScrolling: true,
   });
   editorInstance.set(editor);
+
+  // Erstlayout nach Erzeugung
+  layoutEditorSoon();
+
   if (onFinished) onFinished();
 }
 
@@ -112,23 +135,11 @@ export function showPreviewContent(
   editor.setPosition({ lineNumber: 1, column: 1 });
   editor.revealLine(1);
 
-  const { pathPart, filename } = splitPathForDisplay(
-    path,
-    getState().current_path
-  );
-  const statsString = generateStatsString(content, "Read-only", undefined);
-  const previewTitle = document.querySelector(".preview-panel #preview-title");
+  previewMode.set("file");
+  generatedTokenCount.set(null);
 
-  if (previewTitle) {
-    previewTitle.innerHTML = `
-      <div class="preview-path-container" title="${path}">
-        <span class="preview-path-part">${pathPart}</span><span class="preview-filename">${filename}</span>
-      </div>
-      <span class="preview-stats">${statsString}</span>`;
-  }
-
-  elements.copyBtn.style.display = "inline-block";
-  elements.clearPreviewBtn.style.display = "inline-block";
+  // Kritisch: Layout nach Content/Mode-Wechsel erzwingen
+  layoutEditorSoon();
 }
 
 export function showGeneratedContent(content: string, tokenCount: number) {
@@ -149,36 +160,15 @@ export function showGeneratedContent(content: string, tokenCount: number) {
   }
   editor.updateOptions({ readOnly: false });
 
-  const updateStats = () => {
-    const currentContent = editor.getValue();
-    const statsString = generateStatsString(
-      currentContent,
-      "Editable",
-      tokenCount
-    );
-    const previewTitle = document.querySelector(
-      ".preview-panel #preview-title"
-    );
-    if (previewTitle) {
-      previewTitle.innerHTML = `
-        <div class="preview-path-container">
-          <span class="preview-filename">
-            <svg class="icon icon-lightning" viewBox="0 0 24 24"><path d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"></path></svg>
-            <h3 class="generated-preview-title">Generated Preview</h3>
-          </span>
-        </div>
-        <span class="preview-stats">${statsString}</span>`;
-    }
-  };
-
-  updateStats();
-  if (model) {
-    contentChangeListener = model.onDidChangeContent(updateStats);
-  }
-
+  // Keep Save button behavior outside of the component (belongs to footer)
   elements.saveBtn.disabled = false;
-  elements.copyBtn.style.display = "inline-block";
-  elements.clearPreviewBtn.style.display = "inline-block";
+
+  // -- New: component-driven UI --
+  previewMode.set("generated");
+  generatedTokenCount.set(tokenCount);
+
+  // Kritisch: Layout nach Content/Mode-Wechsel erzwingen
+  layoutEditorSoon();
 }
 
 export function clearPreview() {
@@ -196,16 +186,12 @@ export function clearPreview() {
     monaco.editor.setModelLanguage(model, "plaintext");
   }
 
-  const previewTitle = document.querySelector(".preview-panel #preview-title");
-  if (previewTitle) {
-    previewTitle.innerHTML = `
-      <div class="preview-path-container">
-          <span class="preview-filename">Preview</span>
-      </div>
-      <span class="preview-stats">Select a file to preview</span>`;
-  }
-
+  // Footer save button state remains controlled here
   elements.saveBtn.disabled = true;
-  elements.clearPreviewBtn.style.display = "none";
-  elements.copyBtn.style.display = "none";
+
+  previewMode.set("idle");
+  generatedTokenCount.set(null);
+
+  // Layout nach Header-Umschaltung
+  layoutEditorSoon();
 }

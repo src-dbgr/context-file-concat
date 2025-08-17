@@ -28,44 +28,13 @@
             </div>
             <div id="file-tree-container" class="file-tree-container"></div>
           </div>
+
           <div id="resizer" class="resizer"></div>
-          <div id="preview-panel" class="preview-panel">
-            <div class="panel-header">
-              <h3 id="preview-title">Preview</h3>
-              <div class="preview-header-buttons">
-                <button id="copy-btn" style="display: none">
-                  <svg
-                    class="icon"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                  >
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                    <path
-                      d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
-                    />
-                  </svg>
-                  Copy
-                </button>
-                <button id="clear-preview-btn" style="display: none">
-                  <svg
-                    class="icon"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                  >
-                    <line x1="18" y1="6" x2="6" y2="18" />
-                    <line x1="6" y1="6" x2="18" y2="18" />
-                  </svg>
-                  Clear
-                </button>
-              </div>
-            </div>
-            <div id="editor-container"></div>
-          </div>
+
+          <!-- RESTORED: the preview panel must be a direct flex child -->
+          <div id="preview-panel" class="preview-panel"></div>
         </div>
+
         <footer class="bottom-panel">
           <div class="main-actions">
             <button id="generate-btn" class="button-cta" disabled>

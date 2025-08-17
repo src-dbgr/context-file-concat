@@ -1,9 +1,6 @@
 import { elements } from "../dom.js";
 import { post } from "../services/backend.js";
 import { getState, editorInstance } from "../stores/app.js";
-import { clearPreview } from "./editor.js";
-import { handleCopy } from "./clipboard.js";
-import { getUndoManagerForElement } from "./undo.js";
 import { get } from "svelte/store";
 
 export function setupEventListeners() {
@@ -34,16 +31,6 @@ export function setupEventListeners() {
     }
   });
 
-  // Preview helpers
-  elements.clearPreviewBtn.addEventListener("click", clearPreview);
-  elements.copyBtn.addEventListener("click", () =>
-    handleCopy({
-      isEditorFocused: true,
-      activeEl: document.activeElement as HTMLElement,
-      isInNormalInputField: false,
-    })
-  );
-
   // Input undo/redo support for remaining plain inputs (e.g., file-list header if any)
   document.body.addEventListener("focusin", (e: Event) => {
     const target = e.target as HTMLElement;
@@ -51,7 +38,10 @@ export function setupEventListeners() {
       target instanceof HTMLInputElement ||
       target instanceof HTMLTextAreaElement
     ) {
-      getUndoManagerForElement(target);
+      // Lazy init per element
+      import("./undo.js").then(({ getUndoManagerForElement }) =>
+        getUndoManagerForElement(target)
+      );
     }
   });
 
@@ -61,7 +51,9 @@ export function setupEventListeners() {
       target instanceof HTMLInputElement ||
       target instanceof HTMLTextAreaElement
     ) {
-      getUndoManagerForElement(target).recordState();
+      import("./undo.js").then(({ getUndoManagerForElement }) =>
+        getUndoManagerForElement(target).recordState()
+      );
     }
   });
 }

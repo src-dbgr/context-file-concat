@@ -15,6 +15,7 @@ import { setupResizerListeners } from "$lib/modules/resizer";
 import App from "./App.svelte";
 import Header from "$lib/components/Header.svelte";
 import Sidebar from "$lib/components/Sidebar.svelte";
+import PreviewPanel from "$lib/components/PreviewPanel.svelte";
 import type { AppState } from "$lib/types";
 
 // Mount the main App component (bridge + StatusBar)
@@ -30,6 +31,12 @@ mount(Header, {
 // Mount Sidebar
 mount(Sidebar, {
   target: document.getElementById("sidebar-root")!,
+});
+
+// Mount Preview Panel INTO the existing #preview-panel element,
+// preserving flex layout & the resizer's height handling.
+mount(PreviewPanel, {
+  target: document.getElementById("preview-panel")!,
 });
 
 declare global {
@@ -145,6 +152,7 @@ function initialize() {
   console.log("App initializing with Svelte 5 & TypeScript...");
   setupEventListeners();
   setupResizerListeners();
+  // Create Monaco AFTER the PreviewPanel exists in the DOM
   initEditor(() => {
     console.log("Monaco Editor is ready.");
     setupGlobalKeyboardListeners();
