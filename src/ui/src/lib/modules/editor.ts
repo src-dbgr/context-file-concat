@@ -7,38 +7,57 @@ import {
 } from "../stores/app.js";
 import { post } from "../services/backend.js";
 import { generateStatsString, splitPathForDisplay } from "../utils.js";
-import { MONACO_VS_PATH } from "../config.js";
 import { get } from "svelte/store";
-import type * as monaco from "monaco-editor";
+
+// --- START: Direct Monaco Integration (Plugin-Free) ---
+import * as monaco from "monaco-editor";
+import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
+import cssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
+import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
+import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
+
+// Configure the Monaco environment to use the imported workers
+// This must be done before the editor is created.
+self.MonacoEnvironment = {
+  getWorker(_, label) {
+    if (label === "json") {
+      return new jsonWorker();
+    }
+    if (label === "css" || label === "scss" || label === "less") {
+      return new cssWorker();
+    }
+    if (label === "html" || label === "handlebars" || label === "razor") {
+      return new htmlWorker();
+    }
+    if (label === "typescript" || label === "javascript") {
+      return new tsWorker();
+    }
+    return new editorWorker();
+  },
+};
+// --- END: Direct Monaco Integration ---
 
 let contentChangeListener: monaco.IDisposable | null = null;
 
 export function initEditor(onFinished?: () => void) {
-  if ((window as any).require) {
-    (window as any).require.config({ paths: { vs: MONACO_VS_PATH } });
-    (window as any).require(
-      ["vs/editor/editor.main"],
-      (monacoInstance: typeof monaco) => {
-        const editor = monacoInstance.editor.create(elements.editorContainer, {
-          value: "// Select a directory to begin.",
-          language: "plaintext",
-          theme: "vs-dark",
-          readOnly: true,
-          automaticLayout: true,
-          wordWrap: "on",
-          stickyScroll: { enabled: true },
-          minimap: { enabled: true },
-          renderLineHighlight: "line",
-          padding: { top: 10 },
-          bracketPairColorization: { enabled: true },
-          formatOnPaste: true,
-          smoothScrolling: true,
-        });
-        editorInstance.set(editor);
-        if (onFinished) onFinished();
-      }
-    );
-  }
+  const editor = monaco.editor.create(elements.editorContainer, {
+    value: "// Select a directory to begin.",
+    language: "plaintext",
+    theme: "vs-dark",
+    readOnly: true,
+    automaticLayout: true,
+    wordWrap: "on",
+    stickyScroll: { enabled: true },
+    minimap: { enabled: true },
+    renderLineHighlight: "line",
+    padding: { top: 10 },
+    bracketPairColorization: { enabled: true },
+    formatOnPaste: true,
+    smoothScrolling: true,
+  });
+  editorInstance.set(editor);
+  if (onFinished) onFinished();
 }
 
 export function showPreviewContent(
@@ -61,7 +80,6 @@ export function showPreviewContent(
   const model = editor.getModel();
 
   if (model) {
-    const monaco = (window as any).monaco;
     monaco.editor.setModelLanguage(model, language);
     let newDecorations: monaco.editor.IModelDeltaDecoration[] = [];
     if (searchTerm && searchTerm.trim() !== "") {
@@ -127,7 +145,6 @@ export function showGeneratedContent(content: string, tokenCount: number) {
   editorDecorations.set(editor.deltaDecorations(get(editorDecorations), []));
   const model = editor.getModel();
   if (model) {
-    const monaco = (window as any).monaco;
     monaco.editor.setModelLanguage(model, "plaintext");
   }
   editor.updateOptions({ readOnly: false });
@@ -176,7 +193,6 @@ export function clearPreview() {
   editor.updateOptions({ readOnly: true });
   const model = editor.getModel();
   if (model) {
-    const monaco = (window as any).monaco;
     monaco.editor.setModelLanguage(model, "plaintext");
   }
 

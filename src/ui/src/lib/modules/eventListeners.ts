@@ -52,17 +52,7 @@ function addIgnorePattern() {
 }
 
 export function setupEventListeners() {
-  elements.selectDirBtn.addEventListener("click", () =>
-    post("selectDirectory")
-  );
-  elements.clearDirBtn.addEventListener("click", () => post("clearDirectory"));
   elements.rescanBtn.addEventListener("click", () => post("rescanDirectory"));
-  elements.importConfigBtn.addEventListener("click", () =>
-    post("importConfig")
-  );
-  elements.exportConfigBtn.addEventListener("click", () =>
-    post("exportConfig")
-  );
 
   elements.selectAllBtn.addEventListener("click", () => post("selectAll"));
   elements.expandAllBtn.addEventListener("click", () =>

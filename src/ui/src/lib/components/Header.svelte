@@ -1,0 +1,74 @@
+<script lang="ts">
+	import { appState } from '$lib/stores/app';
+	import { post } from '$lib/services/backend';
+
+	// Reactive Destructuring:
+	// Automatically updates when properties in $appState change.
+	$: ({ current_path, current_config_filename, is_scanning } = $appState);
+</script>
+
+<div class="top-bar">
+	<div class="path-selection">
+		<button
+			id="select-dir-btn"
+			on:click={() => post('selectDirectory')}
+			disabled={is_scanning}
+		>
+			{#if is_scanning}
+				<svg class="icon" viewBox="0 0 24 24">
+					<circle cx="12" cy="12" r="10" />
+					<polyline points="12,6 12,12 16,14" />
+				</svg>
+				Scanning...
+			{:else}
+				<svg class="icon" viewBox="0 0 24 24">
+					<path
+						d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"
+					/>
+				</svg>
+				Select Directory
+			{/if}
+		</button>
+		<button
+			id="clear-dir-btn"
+			title="Clear current directory"
+			style:display={current_path ? 'inline-flex' : 'none'}
+			on:click={() => post('clearDirectory')}
+			disabled={is_scanning}
+		>
+			<svg class="icon" viewBox="0 0 24 24">
+				<line x1="18" y1="6" x2="6" y2="18" />
+				<line x1="6" y1="6" x2="18" y2="18" />
+			</svg>
+			Clear
+		</button>
+		<span id="current-path" title={current_path ?? ''}
+			>{current_path || 'No directory selected.'}</span
+		>
+	</div>
+	<div class="config-buttons">
+		<span id="current-config-filename" class="config-filename">{current_config_filename || ''}</span>
+		<button id="import-config-btn" on:click={() => post('importConfig')} disabled={is_scanning}>
+			<svg class="icon" viewBox="0 0 24 24">
+				<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+				<polyline points="14,2 14,8 20,8" />
+				<line x1="16" y1="13" x2="8" y2="13" />
+				<line x1="16" y1="17" x2="8" y2="17" />
+				<polyline points="10,9 9,9 8,9" />
+			</svg>
+			Import Config
+		</button>
+		<button
+			id="export-config-btn"
+			on:click={() => post('exportConfig')}
+			disabled={is_scanning || !current_path}
+		>
+			<svg class="icon" viewBox="0 0 24 24">
+				<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+				<polyline points="17,21 17,13 7,13 7,21" />
+				<polyline points="7,3 7,8 15,8" />
+			</svg>
+			Export Config
+		</button>
+	</div>
+</div>

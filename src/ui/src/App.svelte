@@ -10,7 +10,8 @@
 	} from '$lib/stores/app';
 	import { get } from 'svelte/store';
 	import type { AppState, TreeNode } from '$lib/types';
-	import type * as monaco from 'monaco-editor';
+	import type * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
+
 	import { elements } from '$lib/dom';
 	import { post } from '$lib/services/backend';
 	import { COMMON_IGNORE_PATTERNS } from '$lib/config';
@@ -22,11 +23,6 @@
 	onMount(() => {
 		let previousState: AppState | null = null;
 
-		/**
-		 * Wraps a render function with logic to preserve the scroll position of the file tree.
-		 * This is a robust solution for the current imperative rendering bridge.
-		 * @param renderFn The function that performs the DOM update.
-		 */
 		function preserveScroll(renderFn: () => void) {
 			const container = document.querySelector<HTMLDivElement>('.virtual-scroll-container');
 			const scroll = container ? container.scrollTop : 0;
@@ -41,17 +37,14 @@
 			}
 		}
 
-		// Subscribe to the main state store to drive all UI updates
 		const unsubscribeAppState = appState.subscribe((newState) => {
 			if (!previousState) {
-				// Initial render on mount, no scroll preservation needed
 				renderUI();
 				updateSearchInputsState();
 				previousState = newState;
 				return;
 			}
 
-			// Subsequent renders triggered by state changes
 			preserveScroll(() => {
 				renderUI();
 				updateSearchInputsState();
@@ -65,21 +58,18 @@
 					progressFill.style.width = '100%';
 					progressFill.classList.add('scan-complete');
 				}
-				setTimeout(() => preserveScroll(renderUI), 500); // Allow animation to finish
+				setTimeout(() => preserveScroll(renderUI), 500);
 			}
 
 			previousState = newState;
 		});
 
-		// Subscribe to the pattern filter store for live filtering of ignore patterns
 		const unsubscribePatternFilter = patternFilter.subscribe(() => {
 			if (previousState) {
-				// Only re-render if the component is already mounted and has state
 				preserveScroll(renderUI);
 			}
 		});
 
-		// Return a cleanup function to prevent memory leaks
 		return () => {
 			unsubscribeAppState();
 			unsubscribePatternFilter();
@@ -87,8 +77,6 @@
 	});
 
 	// --- IMPERATIVE RENDER LOGIC (BRIDGE TO LEGACY CODE) ---
-	// This entire section is the legacy render code, now controlled by Svelte's reactivity.
-	// It will be replaced by Svelte components in the next migration stage.
 
 	interface TreeNodeWithLevel {
 		node: TreeNode;
@@ -427,11 +415,6 @@
 		const appState = getState();
 		const { config, is_scanning, is_generating, tree } = appState;
 
-		elements.currentPath.textContent = appState.current_path || 'No directory selected.';
-		elements.currentPath.title = appState.current_path ?? '';
-		elements.clearDirBtn.style.display = appState.current_path ? 'inline-block' : 'none';
-		elements.currentConfigFilename.textContent = appState.current_config_filename || '';
-
 		elements.caseSensitive.checked = config.case_sensitive_search;
 		elements.removeEmptyDirs.checked = config.remove_empty_directories || false;
 		elements.searchQuery.value = appState.search_query;
@@ -441,27 +424,21 @@
 		const hasSelection = appState.selected_files_count > 0;
 		const hasVisibleItems = tree.length > 0;
 
-		elements.selectDirBtn.disabled = is_scanning;
 		elements.rescanBtn.disabled = is_scanning || !appState.current_path;
-		elements.importConfigBtn.disabled = is_scanning;
-		elements.exportConfigBtn.disabled = is_scanning || !appState.current_path;
 
 		elements.expandAllBtn.disabled = is_scanning || !hasVisibleItems;
 		elements.selectAllBtn.disabled = is_scanning || !hasVisibleItems;
 		elements.collapseAllBtn.disabled = is_scanning || !hasVisibleItems;
 		elements.deselectAllBtn.disabled = is_scanning || !hasSelection;
 
-		const iconFolder = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>`;
 		const iconScan = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>`;
 		const iconScanning = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>`;
 		const iconGenerate = `<svg class="icon icon-lightning-light" viewBox="0 0 24 24"><path d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"></path></svg>`;
 		const iconCancel = `<svg class="icon" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
 
 		if (is_scanning) {
-			elements.selectDirBtn.innerHTML = `${iconScanning} Scanning...`;
 			elements.rescanBtn.innerHTML = `${iconScanning} Scanning...`;
 		} else {
-			elements.selectDirBtn.innerHTML = `${iconFolder} Select Directory`;
 			elements.rescanBtn.innerHTML = `${iconScan} Re-Scan`;
 			if (appState.patterns_need_rescan) {
 				elements.rescanBtn.classList.add('needs-rescan');

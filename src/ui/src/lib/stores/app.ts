@@ -1,6 +1,6 @@
 import { writable, derived, get } from "svelte/store";
 import type { AppState, Config } from "../types";
-import type * as monaco from "monaco-editor";
+import type * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 
 /**
  * Creates the central app state store with a custom method for updating config.

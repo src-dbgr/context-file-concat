@@ -1,84 +1,127 @@
-// Collects all DOM-Element-References at one place with proper types
+/**
+ * A helper function to safely get an element by its ID.
+ * The query is executed when the function is called, not on module load.
+ */
+const getEl = (id: string) => document.getElementById(id);
+
+/**
+ * An object that provides access to DOM elements using getters.
+ * This ensures that `document.getElementById` is only called when an element
+ * is actually accessed, preventing errors where the script executes before
+ * the DOM is fully parsed.
+ */
 export const elements = {
-  // Top bar
-  selectDirBtn: document.getElementById("select-dir-btn") as HTMLButtonElement,
-  clearDirBtn: document.getElementById("clear-dir-btn") as HTMLButtonElement,
-  currentPath: document.getElementById("current-path") as HTMLSpanElement,
-  currentConfigFilename: document.getElementById(
-    "current-config-filename"
-  ) as HTMLSpanElement,
-  importConfigBtn: document.getElementById(
-    "import-config-btn"
-  ) as HTMLButtonElement,
-  exportConfigBtn: document.getElementById(
-    "export-config-btn"
-  ) as HTMLButtonElement,
+  // Top bar (partially managed by Header.svelte, but IDs still exist)
+  get selectDirBtn() {
+    return getEl("select-dir-btn") as HTMLButtonElement;
+  },
+  get clearDirBtn() {
+    return getEl("clear-dir-btn") as HTMLButtonElement;
+  },
+  get currentPath() {
+    return getEl("current-path") as HTMLSpanElement;
+  },
+  get currentConfigFilename() {
+    return getEl("current-config-filename") as HTMLSpanElement;
+  },
+  get importConfigBtn() {
+    return getEl("import-config-btn") as HTMLButtonElement;
+  },
+  get exportConfigBtn() {
+    return getEl("export-config-btn") as HTMLButtonElement;
+  },
 
   // Sidebar
-  searchQuery: document.getElementById("search-query") as HTMLInputElement,
-  extensionFilter: document.getElementById(
-    "extension-filter"
-  ) as HTMLInputElement,
-  contentSearchQuery: document.getElementById(
-    "content-search-query"
-  ) as HTMLInputElement,
-  caseSensitive: document.getElementById("case-sensitive") as HTMLInputElement,
-  rescanBtn: document.getElementById("rescan-btn") as HTMLButtonElement,
-  newIgnorePattern: document.getElementById(
-    "new-ignore-pattern"
-  ) as HTMLInputElement,
-  addPatternBtn: document.getElementById(
-    "add-pattern-btn"
-  ) as HTMLButtonElement,
-  commonPatternsContainer: document.getElementById(
-    "common-patterns-container"
-  ) as HTMLDivElement,
-  deleteAllPatternsBtn: document.getElementById(
-    "delete-all-patterns-btn"
-  ) as HTMLButtonElement,
-  removeEmptyDirs: document.getElementById(
-    "remove-empty-dirs"
-  ) as HTMLInputElement,
-  filterPatterns: document.getElementById(
-    "filter-patterns"
-  ) as HTMLInputElement,
-  currentPatternsContainer: document.getElementById(
-    "current-patterns-container"
-  ) as HTMLDivElement,
+  get searchQuery() {
+    return getEl("search-query") as HTMLInputElement;
+  },
+  get extensionFilter() {
+    return getEl("extension-filter") as HTMLInputElement;
+  },
+  get contentSearchQuery() {
+    return getEl("content-search-query") as HTMLInputElement;
+  },
+  get caseSensitive() {
+    return getEl("case-sensitive") as HTMLInputElement;
+  },
+  get rescanBtn() {
+    return getEl("rescan-btn") as HTMLButtonElement;
+  },
+  get newIgnorePattern() {
+    return getEl("new-ignore-pattern") as HTMLInputElement;
+  },
+  get addPatternBtn() {
+    return getEl("add-pattern-btn") as HTMLButtonElement;
+  },
+  get commonPatternsContainer() {
+    return getEl("common-patterns-container") as HTMLDivElement;
+  },
+  get deleteAllPatternsBtn() {
+    return getEl("delete-all-patterns-btn") as HTMLButtonElement;
+  },
+  get removeEmptyDirs() {
+    return getEl("remove-empty-dirs") as HTMLInputElement;
+  },
+  get filterPatterns() {
+    return getEl("filter-patterns") as HTMLInputElement;
+  },
+  get currentPatternsContainer() {
+    return getEl("current-patterns-container") as HTMLDivElement;
+  },
 
   // File List
-  fileStats: document.getElementById("file-stats") as HTMLDivElement,
-  selectAllBtn: document.getElementById("select-all-btn") as HTMLButtonElement,
-  deselectAllBtn: document.getElementById(
-    "deselect-all-btn"
-  ) as HTMLButtonElement,
-  expandAllBtn: document.getElementById("expand-all-btn") as HTMLButtonElement,
-  collapseAllBtn: document.getElementById(
-    "collapse-all-btn"
-  ) as HTMLButtonElement,
-  fileTreeContainer: document.getElementById(
-    "file-tree-container"
-  ) as HTMLDivElement,
+  get fileStats() {
+    return getEl("file-stats") as HTMLDivElement;
+  },
+  get selectAllBtn() {
+    return getEl("select-all-btn") as HTMLButtonElement;
+  },
+  get deselectAllBtn() {
+    return getEl("deselect-all-btn") as HTMLButtonElement;
+  },
+  get expandAllBtn() {
+    return getEl("expand-all-btn") as HTMLButtonElement;
+  },
+  get collapseAllBtn() {
+    return getEl("collapse-all-btn") as HTMLButtonElement;
+  },
+  get fileTreeContainer() {
+    return getEl("file-tree-container") as HTMLDivElement;
+  },
 
   // Preview/Editor
-  previewTitle: document.getElementById("preview-title") as HTMLHeadingElement,
-  copyBtn: document.getElementById("copy-btn") as HTMLButtonElement,
-  clearPreviewBtn: document.getElementById(
-    "clear-preview-btn"
-  ) as HTMLButtonElement,
-  editorContainer: document.getElementById(
-    "editor-container"
-  ) as HTMLDivElement,
+  get previewTitle() {
+    return getEl("preview-title") as HTMLHeadingElement;
+  },
+  get copyBtn() {
+    return getEl("copy-btn") as HTMLButtonElement;
+  },
+  get clearPreviewBtn() {
+    return getEl("clear-preview-btn") as HTMLButtonElement;
+  },
+  get editorContainer() {
+    return getEl("editor-container") as HTMLDivElement;
+  },
 
   // Bottom Panel
-  generateBtn: document.getElementById("generate-btn") as HTMLButtonElement,
-  saveBtn: document.getElementById("save-btn") as HTMLButtonElement,
+  get generateBtn() {
+    return getEl("generate-btn") as HTMLButtonElement;
+  },
+  get saveBtn() {
+    return getEl("save-btn") as HTMLButtonElement;
+  },
 
   // Other
-  resizer: document.getElementById("resizer") as HTMLDivElement,
-  fileListPanel: document.getElementById("file-list-panel") as HTMLDivElement,
-  previewPanel: document.getElementById("preview-panel") as HTMLDivElement,
-  contentSplitter: document.querySelector(
-    ".content-splitter"
-  ) as HTMLDivElement,
+  get resizer() {
+    return getEl("resizer") as HTMLDivElement;
+  },
+  get fileListPanel() {
+    return getEl("file-list-panel") as HTMLDivElement;
+  },
+  get previewPanel() {
+    return getEl("preview-panel") as HTMLDivElement;
+  },
+  get contentSplitter() {
+    return document.querySelector(".content-splitter") as HTMLDivElement;
+  },
 };

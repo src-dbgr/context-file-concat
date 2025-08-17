@@ -7,16 +7,23 @@ import {
   showPreviewContent,
   showGeneratedContent,
   clearPreview,
+  initEditor,
 } from "$lib/modules/editor";
 import { setupEventListeners } from "$lib/modules/eventListeners";
 import { setupGlobalKeyboardListeners } from "$lib/modules/keyboard";
 import { setupResizerListeners } from "$lib/modules/resizer";
 import App from "./App.svelte";
+import Header from "$lib/components/Header.svelte";
 import type { AppState } from "$lib/types";
-import { initEditor } from "$lib/modules/editor";
 
+// Mount the main App component (which is now just the logic bridge + StatusBar)
 mount(App, {
   target: document.getElementById("svelte-root")!,
+});
+
+// Mount the new Header component into its specific placeholder
+mount(Header, {
+  target: document.getElementById("header-root")!,
 });
 
 declare global {
@@ -88,10 +95,8 @@ window.updateScanProgress = (progress: {
 
   const fillEl = document.getElementById("scan-progress-fill");
   if (fillEl && files_scanned > 0) {
-    (fillEl as HTMLElement).style.width = `${Math.min(
-      90,
-      (files_scanned / 1000) * 100
-    )}%`;
+    (fillEl as HTMLElement).style.width =
+      `${Math.min(90, (files_scanned / 1000) * 100)}%`;
   }
 };
 
