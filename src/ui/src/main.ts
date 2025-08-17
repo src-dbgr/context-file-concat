@@ -14,16 +14,22 @@ import { setupGlobalKeyboardListeners } from "$lib/modules/keyboard";
 import { setupResizerListeners } from "$lib/modules/resizer";
 import App from "./App.svelte";
 import Header from "$lib/components/Header.svelte";
+import Sidebar from "$lib/components/Sidebar.svelte";
 import type { AppState } from "$lib/types";
 
-// Mount the main App component (which is now just the logic bridge + StatusBar)
+// Mount the main App component (bridge + StatusBar)
 mount(App, {
   target: document.getElementById("svelte-root")!,
 });
 
-// Mount the new Header component into its specific placeholder
+// Mount Header
 mount(Header, {
   target: document.getElementById("header-root")!,
+});
+
+// Mount Sidebar
+mount(Sidebar, {
+  target: document.getElementById("sidebar-root")!,
 });
 
 declare global {
@@ -45,19 +51,17 @@ declare global {
 }
 
 /**
- * The main entry point for updates from the Rust backend.
- * This function now has a single responsibility: updating the central Svelte store.
- * All rendering and side effects are handled reactively within the App.svelte component.
+ * Main entry point for backend updates — updates central Svelte store.
  */
 window.render = (newState: AppState) => {
   const previousPath = getState().current_path;
 
-  // Ensure the status message always has a prefix for consistent display
+  // Uniform status prefix
   newState.status_message = `Status: ${newState.status_message}`;
 
   appState.set(newState);
 
-  // If the directory was cleared, explicitly clear the editor preview.
+  // If directory was cleared, clear editor preview
   if (previousPath && !newState.current_path) {
     clearPreview();
   }
@@ -73,7 +77,8 @@ window.updateScanProgress = (progress: {
     progress;
 
   const scanTextEl = document.querySelector(".scan-text");
-  if (scanTextEl) scanTextEl.textContent = "Scanning directory...";
+  if (scanTextEl)
+    (scanTextEl as HTMLElement).textContent = "Scanning directory...";
 
   const filesCountEl = document.getElementById("scan-files-count");
   if (filesCountEl)

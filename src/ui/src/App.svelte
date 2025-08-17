@@ -2,7 +2,6 @@
 	import { onMount } from 'svelte';
 	import {
 		appState,
-		patternFilter,
 		editorInstance,
 		editorDecorations,
 		previewedPath,
@@ -14,7 +13,6 @@
 
 	import { elements } from '$lib/dom';
 	import { post } from '$lib/services/backend';
-	import { COMMON_IGNORE_PATTERNS } from '$lib/config';
 	import { formatFileSize } from '$lib/utils';
 	import StatusBar from '$lib/components/StatusBar.svelte';
 
@@ -40,14 +38,12 @@
 		const unsubscribeAppState = appState.subscribe((newState) => {
 			if (!previousState) {
 				renderUI();
-				updateSearchInputsState();
 				previousState = newState;
 				return;
 			}
 
 			preserveScroll(() => {
 				renderUI();
-				updateSearchInputsState();
 				updateEditorDecorations();
 			});
 
@@ -64,19 +60,12 @@
 			previousState = newState;
 		});
 
-		const unsubscribePatternFilter = patternFilter.subscribe(() => {
-			if (previousState) {
-				preserveScroll(renderUI);
-			}
-		});
-
 		return () => {
 			unsubscribeAppState();
-			unsubscribePatternFilter();
 		};
 	});
 
-	// --- IMPERATIVE RENDER LOGIC (BRIDGE TO LEGACY CODE) ---
+	// --- IMPERATIVE RENDER LOGIC (bridge for legacy tree/preview only) ---
 
 	interface TreeNodeWithLevel {
 		node: TreeNode;
@@ -249,10 +238,7 @@
 		}
 	}
 
-	function countTreeItems(nodes: TreeNode[]): {
-		totalFiles: number;
-		totalFolders: number;
-	} {
+	function countTreeItems(nodes: TreeNode[]): { totalFiles: number; totalFolders: number } {
 		let totalFiles = 0;
 		let totalFolders = 0;
 		function traverse(items: TreeNode[]) {
@@ -293,10 +279,7 @@
 		return container;
 	}
 
-	function createMessageDisplay(
-		message: string,
-		iconSvg: string | null = null
-	): HTMLDivElement {
+	function createMessageDisplay(message: string, iconSvg: string | null = null): HTMLDivElement {
 		const messageContainer = document.createElement('div');
 		messageContainer.className = 'message-display';
 
@@ -324,138 +307,26 @@
 		return placeholder;
 	}
 
-	function hasActiveFilters(appState: AppState): boolean {
-		return !!(
-			appState.search_query?.trim() ||
-			appState.extension_filter?.trim() ||
-			appState.content_search_query?.trim()
-		);
-	}
-
-	function renderIgnorePatterns() {
-		elements.currentPatternsContainer.innerHTML = '';
-		const appState = getState();
-		const allPatterns = Array.from(new Set(appState.config.ignore_patterns || []));
-		const activePatterns = new Set(appState.active_ignore_patterns || []);
-
-		const active = allPatterns.filter((p) => activePatterns.has(p)).sort();
-		const inactive = allPatterns.filter((p) => !activePatterns.has(p)).sort();
-		let patternsToRender = [...active, ...inactive];
-
-		const currentPatternFilter = get(patternFilter);
-		if (currentPatternFilter) {
-			patternsToRender = patternsToRender.filter((pattern) =>
-				pattern.toLowerCase().includes(currentPatternFilter)
-			);
-		}
-
-		patternsToRender.forEach((p) => {
-			const chip = document.createElement('div');
-			chip.className = 'current-pattern-chip';
-			if (activePatterns.has(p)) {
-				chip.classList.add('active-pattern');
-				chip.title = `This pattern was active and matched one or more files/directories.`;
-			}
-
-			const nameSpan = document.createElement('span');
-			nameSpan.textContent = p;
-
-			const removeBtn = document.createElement('button');
-			removeBtn.className = 'remove-pattern-btn';
-			removeBtn.dataset.pattern = p;
-			removeBtn.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
-
-			removeBtn.addEventListener('click', () => {
-				const patternToRemove = removeBtn.dataset.pattern;
-				const currentConfig = getState().config;
-				const newPatterns = currentConfig.ignore_patterns.filter(
-					(pat) => pat !== patternToRemove
-				);
-				post('updateConfig', { ...currentConfig, ignore_patterns: newPatterns });
-			});
-
-			chip.appendChild(nameSpan);
-			chip.appendChild(removeBtn);
-			elements.currentPatternsContainer.appendChild(chip);
-		});
-	}
-	function setupCommonPatterns() {
-		elements.commonPatternsContainer.innerHTML = '';
-		const appState = getState();
-		const availablePatterns = COMMON_IGNORE_PATTERNS.filter(
-			(pattern) => !appState.config.ignore_patterns.includes(pattern)
-		);
-
-		const commonPatternsLabel =
-			document.querySelector<HTMLLabelElement>('.common-patterns-label');
-		if (commonPatternsLabel) {
-			commonPatternsLabel.style.display = availablePatterns.length > 0 ? 'block' : 'none';
-		}
-
-		availablePatterns.forEach((pattern) => {
-			const chip = document.createElement('button');
-			chip.className = 'common-pattern-chip';
-			chip.textContent = pattern;
-			chip.title = `Click to add "${pattern}" to ignore patterns`;
-			chip.addEventListener('click', (e) => {
-				e.preventDefault();
-				const currentConfig = getState().config;
-				if (!currentConfig.ignore_patterns.includes(pattern)) {
-					post('updateConfig', {
-						...currentConfig,
-						ignore_patterns: [...currentConfig.ignore_patterns, pattern]
-					});
-				}
-			});
-			elements.commonPatternsContainer.appendChild(chip);
-		});
+	function hasActiveFilters(s: AppState): boolean {
+		return !!(s.search_query?.trim() || s.extension_filter?.trim() || s.content_search_query?.trim());
 	}
 
 	function renderUI() {
-		const appState = getState();
-		const { config, is_scanning, is_generating, tree } = appState;
+		const s = getState();
+		const { is_scanning, is_generating, tree } = s;
 
-		elements.caseSensitive.checked = config.case_sensitive_search;
-		elements.removeEmptyDirs.checked = config.remove_empty_directories || false;
-		elements.searchQuery.value = appState.search_query;
-		elements.extensionFilter.value = appState.extension_filter;
-		elements.contentSearchQuery.value = appState.content_search_query;
-
-		const hasSelection = appState.selected_files_count > 0;
+		const hasSelection = s.selected_files_count > 0;
 		const hasVisibleItems = tree.length > 0;
 
-		elements.rescanBtn.disabled = is_scanning || !appState.current_path;
-
+		// File list header buttons (not in Sidebar)
 		elements.expandAllBtn.disabled = is_scanning || !hasVisibleItems;
 		elements.selectAllBtn.disabled = is_scanning || !hasVisibleItems;
 		elements.collapseAllBtn.disabled = is_scanning || !hasVisibleItems;
 		elements.deselectAllBtn.disabled = is_scanning || !hasSelection;
 
-		const iconScan = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>`;
-		const iconScanning = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>`;
+		// Generate / Cancel button in bottom bar
 		const iconGenerate = `<svg class="icon icon-lightning-light" viewBox="0 0 24 24"><path d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"></path></svg>`;
 		const iconCancel = `<svg class="icon" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
-
-		if (is_scanning) {
-			elements.rescanBtn.innerHTML = `${iconScanning} Scanning...`;
-		} else {
-			elements.rescanBtn.innerHTML = `${iconScan} Re-Scan`;
-			if (appState.patterns_need_rescan) {
-				elements.rescanBtn.classList.add('needs-rescan');
-				elements.rescanBtn.title =
-					'Ignore patterns were removed - Re-scan recommended to find previously hidden files';
-				const iconPulse = `<svg class="icon pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-		<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
-		<path d="M21 3v5h-5"/>
-		<path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
-		<path d="M3 21v-5h5"/>
-	</svg>`;
-				elements.rescanBtn.innerHTML = `${iconPulse} Re-Scan`;
-			} else {
-				elements.rescanBtn.classList.remove('needs-rescan');
-				elements.rescanBtn.title = 'Re-scan with current ignore patterns';
-			}
-		}
 
 		const wasGenerating = elements.generateBtn.classList.contains('is-generating');
 
@@ -495,6 +366,7 @@
 			elements.generateBtn.disabled = !hasSelection || is_scanning;
 		}
 
+		// File tree rendering
 		elements.fileTreeContainer.innerHTML = '';
 
 		if (is_scanning && tree.length === 0) {
@@ -504,10 +376,10 @@
 				cancelBtn.addEventListener('click', () => {
 					post('cancelScan');
 					(cancelBtn as HTMLButtonElement).disabled = true;
-					cancelBtn.innerHTML = `${iconScanning} Cancelling...`;
+					cancelBtn.innerHTML = `${`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>`} Cancelling...`;
 				});
 			}
-		} else if (!appState.current_path) {
+		} else if (!s.current_path) {
 			elements.fileTreeContainer.appendChild(createDirectorySelectionPlaceholder());
 		} else if (tree.length > 0) {
 			virtualScrollContainer = document.createElement('div');
@@ -523,7 +395,7 @@
 			flatTree = flattenTree(tree);
 			renderVirtualTree();
 		} else {
-			const hasFilters = hasActiveFilters(appState);
+			const hasFilters = hasActiveFilters(s);
 			if (hasFilters) {
 				const noResultsIcon = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>`;
 				elements.fileTreeContainer.appendChild(
@@ -538,37 +410,10 @@
 		}
 
 		const { totalFiles, totalFolders } = countTreeItems(tree);
-		elements.fileStats.textContent = `Files: ${appState.selected_files_count} selected of ${totalFiles} • Folders: ${totalFolders}`;
-
-		setupCommonPatterns();
-		renderIgnorePatterns();
+		elements.fileStats.textContent = `Files: ${s.selected_files_count} selected of ${totalFiles} • Folders: ${totalFolders}`;
 	}
 
-	// --- LOGIC MOVED FROM eventListeners.ts ---
-	function shouldEnableSearch(): boolean {
-		const currentAppState = getState();
-		return !!(currentAppState.current_path && !currentAppState.is_scanning);
-	}
-
-	function updateSearchInputsState() {
-		const searchEnabled = shouldEnableSearch();
-
-		elements.searchQuery.disabled = !searchEnabled;
-		elements.extensionFilter.disabled = !searchEnabled;
-		elements.contentSearchQuery.disabled = !searchEnabled;
-
-		if (!searchEnabled) {
-			elements.searchQuery.placeholder = 'Select a directory first...';
-			elements.extensionFilter.placeholder = 'Select a directory first...';
-			elements.contentSearchQuery.placeholder = 'Select a directory first...';
-		} else {
-			elements.searchQuery.placeholder = 'Search filenames...';
-			elements.extensionFilter.placeholder = 'Filter by extension (e.g., rs, py)';
-			elements.contentSearchQuery.placeholder = 'Search text inside files...';
-		}
-	}
-
-	// --- LOGIC MOVED FROM main.ts ---
+	// --- Monaco decoration sync ---
 	function updateEditorDecorations() {
 		const editor = get(editorInstance);
 		const state = getState();
