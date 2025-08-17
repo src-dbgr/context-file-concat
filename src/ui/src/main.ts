@@ -2,29 +2,20 @@ import "../style.css";
 
 import { mount } from "svelte";
 import { post } from "./lib/services/backend";
+import { appState, getState } from "./lib/stores/app";
 import {
-  appState,
-  editorDecorations,
-  editorInstance,
-  previewedPath,
-  getState,
-} from "./lib/stores/app";
-import {
-  initEditor,
   showPreviewContent,
   showGeneratedContent,
   clearPreview,
 } from "./lib/modules/editor";
-import { renderUI } from "./lib/modules/renderer";
 import { setupEventListeners } from "./lib/modules/eventListeners";
 import { setupGlobalKeyboardListeners } from "./lib/modules/keyboard";
 import { setupResizerListeners } from "./lib/modules/resizer";
 import App from "./App.svelte";
 import type { AppState } from "./lib/types";
-import { get } from "svelte/store";
-import type * as monaco from "monaco-editor";
+import { initEditor } from "./lib/modules/editor";
 
-const app = mount(App, {
+mount(App, {
   target: document.getElementById("svelte-root")!,
 });
 
@@ -43,89 +34,22 @@ declare global {
     showStatus: (msg: string) => void;
     fileSaveStatus: (success: boolean, path: string) => void;
     setDragState: (isDragging: boolean) => void;
-    updateSearchInputsState?: () => void;
   }
 }
 
+/**
+ * The main entry point for updates from the Rust backend.
+ * This function now has a single responsibility: updating the central Svelte store.
+ * All rendering and side effects are handled reactively within the App.svelte component.
+ */
 window.render = (newState: AppState) => {
-  // ==================================================================
-  //                        **LOGGING-CODE**
-  // ==================================================================
-  console.log("----------- FROM_BACKEND: -----------");
-  console.log("New state received from Rust backend.");
-  console.table({
-    "Config Patterns": newState.config.ignore_patterns.join(", "),
-    "Active Patterns": newState.active_ignore_patterns.join(", "),
-  });
-  console.log("Full State Object:", newState);
-  console.log("-------------------------------------");
-  // ==================================================================
-
-  const previousState = getState();
-  const scrollContainer = document.querySelector(".virtual-scroll-container");
-  const scrollPosition = scrollContainer ? scrollContainer.scrollTop : 0;
-  const wasScanning = previousState.is_scanning && !newState.is_scanning;
+  const previousPath = getState().current_path;
 
   appState.set(newState);
-  renderUI();
 
-  const newScrollContainer = document.querySelector(
-    ".virtual-scroll-container"
-  );
-  if (newScrollContainer) {
-    requestAnimationFrame(() => {
-      newScrollContainer.scrollTop = scrollPosition;
-    });
-  }
-
-  if (previousState.current_path && !newState.current_path) {
+  // If the directory was cleared, explicitly clear the editor preview.
+  if (previousPath && !newState.current_path) {
     clearPreview();
-  }
-
-  if (
-    previousState.current_path !== newState.current_path &&
-    window.updateSearchInputsState
-  ) {
-    window.updateSearchInputsState();
-  }
-
-  const editor = get(editorInstance);
-  if (editor && get(previewedPath)) {
-    const model = editor.getModel();
-    if (!model) return;
-
-    const searchTerm = newState.content_search_query;
-    const matchCase = newState.config.case_sensitive_search;
-    let newDecorations: monaco.editor.IModelDeltaDecoration[] = [];
-    if (searchTerm && searchTerm.trim() !== "") {
-      const matches = model.findMatches(
-        searchTerm,
-        true,
-        false,
-        matchCase,
-        null,
-        true
-      );
-      newDecorations = matches.map((match: monaco.editor.FindMatch) => ({
-        range: match.range,
-        options: { inlineClassName: "search-highlight" },
-      }));
-    }
-    const currentDecorations = get(editorDecorations);
-    const newDecorationIds = editor.deltaDecorations(
-      currentDecorations,
-      newDecorations
-    );
-    editorDecorations.set(newDecorationIds);
-  }
-
-  if (wasScanning) {
-    const progressFill = document.getElementById("scan-progress-fill");
-    if (progressFill) {
-      progressFill.style.width = "100%";
-      progressFill.classList.add("scan-complete");
-    }
-    setTimeout(renderUI, 500);
   }
 };
 
@@ -212,5 +136,3 @@ function initialize() {
 }
 
 document.addEventListener("DOMContentLoaded", initialize);
-
-export default app;

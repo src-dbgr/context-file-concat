@@ -3,7 +3,6 @@ import { post } from "../services/backend.js";
 import { getState, patternFilter, editorInstance } from "../stores/app.js";
 import { clearPreview } from "./editor.js";
 import { handleCopy } from "./clipboard.js";
-import { renderUI } from "./renderer.js";
 import { getUndoManagerForElement } from "./undo.js";
 import { get } from "svelte/store";
 
@@ -23,29 +22,6 @@ function onFilterChange() {
       contentSearchQuery: elements.contentSearchQuery.value,
     });
   }, 300);
-}
-
-function shouldEnableSearch(): boolean {
-  const currentAppState = getState();
-  return !!(currentAppState.current_path && !currentAppState.is_scanning);
-}
-
-function updateSearchInputsState() {
-  const searchEnabled = shouldEnableSearch();
-
-  elements.searchQuery.disabled = !searchEnabled;
-  elements.extensionFilter.disabled = !searchEnabled;
-  elements.contentSearchQuery.disabled = !searchEnabled;
-
-  if (!searchEnabled) {
-    elements.searchQuery.placeholder = "Select a directory first...";
-    elements.extensionFilter.placeholder = "Select a directory first...";
-    elements.contentSearchQuery.placeholder = "Select a directory first...";
-  } else {
-    elements.searchQuery.placeholder = "Search filenames...";
-    elements.extensionFilter.placeholder = "Filter by extension (e.g., rs, py)";
-    elements.contentSearchQuery.placeholder = "Search text inside files...";
-  }
 }
 
 function onConfigChange() {
@@ -142,8 +118,8 @@ export function setupEventListeners() {
 
     elements.filterPatterns.addEventListener(evt, (e: Event) => {
       const target = e.target as HTMLInputElement;
+      // Simply update the store. The App component will react and re-render.
       patternFilter.set(target.value.toLowerCase());
-      renderUI();
     });
   });
 
@@ -176,7 +152,4 @@ export function setupEventListeners() {
       getUndoManagerForElement(target).recordState();
     }
   });
-
-  updateSearchInputsState();
-  window.updateSearchInputsState = updateSearchInputsState;
 }
