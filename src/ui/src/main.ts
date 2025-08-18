@@ -11,12 +11,13 @@ import {
 } from "$lib/modules/editor";
 import { setupEventListeners } from "$lib/modules/eventListeners";
 import { setupGlobalKeyboardListeners } from "$lib/modules/keyboard";
-import { setupResizerListeners } from "$lib/modules/resizer";
+import { verticalResizer, sidebarResizer } from "$lib/actions/resizer";
 import App from "./App.svelte";
 import Header from "$lib/components/Header.svelte";
 import Sidebar from "$lib/components/Sidebar.svelte";
 import PreviewPanel from "$lib/components/PreviewPanel.svelte";
 import FileTree from "$lib/components/FileTree.svelte";
+import Footer from "$lib/components/Footer.svelte";
 import type { AppState } from "$lib/types";
 import {
   applyExpansionMemory,
@@ -29,6 +30,7 @@ mount(Header, { target: document.getElementById("header-root")! });
 mount(Sidebar, { target: document.getElementById("sidebar-root")! });
 mount(FileTree, { target: document.getElementById("file-tree-container")! });
 mount(PreviewPanel, { target: document.getElementById("preview-panel")! });
+mount(Footer, { target: document.getElementById("footer-root")! });
 
 declare global {
   interface Window {
@@ -50,23 +52,12 @@ declare global {
 
 let lastPath: string | null = null;
 
-/**
- * Main entry point called by the backend. It:
- * 1) Preserves expansion state across renders.
- * 2) Resets expansion memory when the base directory changes.
- * 3) Avoids duplicating "Status:" prefixes.
- * 4) Clears the editor when the directory is cleared.
- */
 window.render = (incoming: AppState) => {
   try {
-    // Capture previous state BEFORE mutating the store
     const prev = getState();
-
-    // Normalize/guard incoming payload
     const nextPath = incoming?.current_path ?? null;
     const safeTree = Array.isArray(incoming?.tree) ? incoming.tree : [];
 
-    // Avoid double "Status:" prefixes
     if (incoming?.status_message) {
       incoming.status_message = incoming.status_message.startsWith("Status:")
         ? incoming.status_message
@@ -75,25 +66,16 @@ window.render = (incoming: AppState) => {
       incoming.status_message = "Status: Ready.";
     }
 
-    // Reset expansion memory whenever the root directory path actually changes
-    if (lastPath !== nextPath) {
-      clearExpansionMemory();
-    }
+    if (lastPath !== nextPath) clearExpansionMemory();
 
-    // Apply remembered expand/collapse intent before committing to the store
     const patched: AppState = {
       ...incoming,
       tree: applyExpansionMemory(safeTree),
     };
-
     appState.set(patched);
 
-    // If the directory was cleared, also clear the editor preview
-    if (prev.current_path && !patched.current_path) {
-      clearPreview();
-    }
+    if (prev.current_path && !patched.current_path) clearPreview();
 
-    // Update path snapshot after successful commit
     lastPath = nextPath;
   } catch (err) {
     console.error("render() failed:", err);
@@ -161,12 +143,13 @@ window.showStatus = (msg: string) => {
 };
 
 window.fileSaveStatus = (success: boolean, path: string) => {
-  let msg = "";
-  if (path === "cancelled") {
-    msg = "Status: Save cancelled.";
-  } else {
-    msg = success ? `Status: Saved to ${path}` : `Error: Failed to save file.`;
-  }
+  const msg =
+    path === "cancelled"
+      ? "Status: Save cancelled."
+      : success
+        ? `Status: Saved to ${path}`
+        : `Error: Failed to save file.`;
+
   appState.update((s: AppState) => {
     s.status_message = msg;
     return s;
@@ -181,13 +164,24 @@ window.setDragState = (isDragging: boolean) => {
 
 function initialize() {
   console.log("App initializing with Svelte 5 & TypeScript...");
-  setupEventListeners();
-  setupResizerListeners();
 
-  // Create Monaco AFTER the PreviewPanel exists in the DOM
+  // Bind actions
+  const resizerEl = document.getElementById("resizer") as HTMLElement | null;
+  const sidebarEl = document.querySelector(".sidebar") as HTMLElement | null;
+  const resizerAction = resizerEl ? verticalResizer(resizerEl) : undefined;
+  const sidebarAction = sidebarEl ? sidebarResizer(sidebarEl) : undefined;
+
+  setupEventListeners();
+
   initEditor(() => {
     console.log("Monaco Editor is ready.");
     setupGlobalKeyboardListeners();
+  });
+
+  // Cleanup
+  window.addEventListener("beforeunload", () => {
+    resizerAction?.destroy?.();
+    sidebarAction?.destroy?.();
   });
 
   post("initialize");

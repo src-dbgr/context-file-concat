@@ -9,7 +9,7 @@ import { post } from "../services/backend.js";
 import { get } from "svelte/store";
 import { previewMode, generatedTokenCount } from "../stores/preview.js";
 
-// --- START: Direct Monaco Integration (Plugin-Free) ---
+// --- Monaco Setup (workers) ---
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
@@ -17,36 +17,23 @@ import cssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
 
-// Configure the Monaco environment to use the imported workers
-// This must be done before the editor is created.
 self.MonacoEnvironment = {
   getWorker(_, label) {
-    if (label === "json") {
-      return new jsonWorker();
-    }
-    if (label === "css" || label === "scss" || label === "less") {
+    if (label === "json") return new jsonWorker();
+    if (label === "css" || label === "scss" || label === "less")
       return new cssWorker();
-    }
-    if (label === "html" || label === "handlebars" || label === "razor") {
+    if (label === "html" || label === "handlebars" || label === "razor")
       return new htmlWorker();
-    }
-    if (label === "typescript" || label === "javascript") {
-      return new tsWorker();
-    }
+    if (label === "typescript" || label === "javascript") return new tsWorker();
     return new editorWorker();
   },
 };
-// --- END: Direct Monaco Integration ---
 
 let contentChangeListener: monaco.IDisposable | null = null;
 
-/** Schedule a safe layout pass for Monaco (next frame, plus micro delay). */
 export function layoutEditorSoon() {
   const editor = get(editorInstance);
   if (!editor) return;
-
-  // Manche Flex/Resize-Kaskaden liefern im gleichen Frame noch falsche Größen.
-  // Darum: zweimal schedulen.
   requestAnimationFrame(() => {
     try {
       editor.layout();
@@ -76,10 +63,7 @@ export function initEditor(onFinished?: () => void) {
     smoothScrolling: true,
   });
   editorInstance.set(editor);
-
-  // Erstlayout nach Erzeugung
   layoutEditorSoon();
-
   if (onFinished) onFinished();
 }
 
@@ -138,7 +122,6 @@ export function showPreviewContent(
   previewMode.set("file");
   generatedTokenCount.set(null);
 
-  // Kritisch: Layout nach Content/Mode-Wechsel erzwingen
   layoutEditorSoon();
 }
 
@@ -155,19 +138,13 @@ export function showGeneratedContent(content: string, tokenCount: number) {
   editor.setValue(content);
   editorDecorations.set(editor.deltaDecorations(get(editorDecorations), []));
   const model = editor.getModel();
-  if (model) {
-    monaco.editor.setModelLanguage(model, "plaintext");
-  }
+  if (model) monaco.editor.setModelLanguage(model, "plaintext");
   editor.updateOptions({ readOnly: false });
 
-  // Keep Save button behavior outside of the component (belongs to footer)
-  elements.saveBtn.disabled = false;
-
-  // -- New: component-driven UI --
+  // State for UI
   previewMode.set("generated");
   generatedTokenCount.set(tokenCount);
 
-  // Kritisch: Layout nach Content/Mode-Wechsel erzwingen
   layoutEditorSoon();
 }
 
@@ -182,16 +159,10 @@ export function clearPreview() {
   editorDecorations.set(editor.deltaDecorations(get(editorDecorations), []));
   editor.updateOptions({ readOnly: true });
   const model = editor.getModel();
-  if (model) {
-    monaco.editor.setModelLanguage(model, "plaintext");
-  }
-
-  // Footer save button state remains controlled here
-  elements.saveBtn.disabled = true;
+  if (model) monaco.editor.setModelLanguage(model, "plaintext");
 
   previewMode.set("idle");
   generatedTokenCount.set(null);
 
-  // Layout nach Header-Umschaltung
   layoutEditorSoon();
 }
