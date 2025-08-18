@@ -5,6 +5,8 @@
   import type { AppState, TreeNode } from "$lib/types";
   import TreeItem from "./TreeItem.svelte";
   import { recordBulkExpanded } from "$lib/modules/treeExpansion";
+  import Spinner from "$lib/components/Spinner.svelte";
+  import LinearProgress from "$lib/components/LinearProgress.svelte";
 
   // Virtualization constants
   const ITEM_HEIGHT = 28;
@@ -193,9 +195,7 @@
           <button on:click={onCollapseAll} disabled={$appState.is_scanning || !$appState.tree.length}>Collapse All</button>
         </div>
       </div>
-      <div class="stats">
-        {statsTextMain}<span class="stats-secondary">{statsTextSecondary}</span>
-      </div>
+      <div class="stats" aria-live="polite">{statsTextMain}<span class="stats-secondary">{statsTextSecondary}</span></div>
     </div>
   {/if}
 
@@ -203,8 +203,8 @@
     {#if $appState.is_scanning && $appState.tree.length === 0}
       <div class="scan-progress-container">
         <div class="scan-progress-header">
-          <div class="scan-status">
-            <div class="scan-spinner"></div>
+          <div class="scan-status" role="status" aria-live="polite">
+            <Spinner size={16} ariaLabel="Scanning directory" />
             <span class="scan-text">Scanning directory...</span>
           </div>
           <button
@@ -220,10 +220,11 @@
             Cancel
           </button>
         </div>
-        <div class="scan-progress-bar">
-          <div class="scan-progress-fill" id="scan-progress-fill"></div>
-        </div>
-        <div class="scan-details">
+
+        <!-- Keeps legacy #scan-progress-fill for IPC updates -->
+        <LinearProgress idForFill="scan-progress-fill" ariaLabel="Scan progress" indeterminate />
+
+        <div class="scan-details" aria-live="polite">
           <span id="scan-files-count">0 files processed</span>
           <span id="scan-current-path">Starting scan...</span>
           <span id="scan-skipped-count"></span>
@@ -246,6 +247,8 @@
         bind:this={scrollEl}
         on:scroll={onScroll}
         style="overflow:auto; height:100%; min-height:0; flex:1 1 auto;"
+        role="tree"
+        aria-label="Project files"
       >
         <div class="virtual-scroll-sizer" style="height:{totalHeight}px; position:relative;">
           {#each visibleSlice as item (item.node.path)}
@@ -261,7 +264,7 @@
 
     {:else}
       {#if hasActiveFilters($appState)}
-        <div class="message-display">
+        <div class="message-display" role="status" aria-live="polite">
           <div class="message-icon">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="11" cy="11" r="8" />
@@ -273,7 +276,7 @@
           <p class="message-text">No files found matching filters.</p>
         </div>
       {:else}
-        <div class="message-display">
+        <div class="message-display" role="status" aria-live="polite">
           <div class="message-icon">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
@@ -317,4 +320,9 @@
   :global(.file-list-panel),
   :global(.file-tree-container),
   .tree { min-height: 0; }
+
+  /* Scan area spacing */
+  .scan-progress-container { width: 100%; display: flex; flex-direction: column; gap: var(--space-6); max-width: 720px; }
+  .scan-progress-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); }
+  .scan-status { display: inline-flex; align-items: center; gap: var(--space-5); color: var(--color-text); }
 </style>

@@ -617,7 +617,6 @@ button {
 button:hover:not(:disabled) {
   border-color: var(--color-accent);
   box-shadow: var(--shadow-1);
-  background-color: var(--button-hover-bg);
 }
 
 button:disabled {
