@@ -40,5 +40,8 @@
     "tslib": "^2.6.3",
     "typescript": "^5.5.4",
     "vite": "^7.1.2"
+  },
+  "dependencies": {
+    "zod": "^4.0.17"
   }
 }

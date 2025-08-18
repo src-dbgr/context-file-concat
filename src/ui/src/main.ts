@@ -4,8 +4,8 @@ import { mount } from "svelte";
 import { post } from "$lib/services/backend";
 import { appState, getState } from "$lib/stores/app";
 import {
-  showPreviewContent,
-  showGeneratedContent,
+  showPreviewContent as showPreviewContentImpl,
+  showGeneratedContent as showGeneratedContentImpl,
   clearPreview,
   initEditor,
 } from "$lib/modules/editor";
@@ -23,6 +23,15 @@ import {
   applyExpansionMemory,
   clearExpansionMemory,
 } from "$lib/modules/treeExpansion";
+import {
+  UiStateSchema,
+  ScanProgressSchema,
+  ShowPreviewArgsSchema,
+  ShowGeneratedArgsSchema,
+  StatusMessageSchema,
+  FileSaveStatusArgsSchema,
+  DragStateSchema,
+} from "$lib/ipc/schema";
 
 // Mount core UI fragments
 mount(App, { target: document.getElementById("svelte-root")! });
@@ -35,11 +44,15 @@ mount(Footer, { target: document.getElementById("footer-root")! });
 declare global {
   interface Window {
     render: (newState: AppState) => void;
-    updateScanProgress: (progress: any) => void;
+    updateScanProgress: (progress: {
+      files_scanned: number;
+      current_scanning_path: string;
+      large_files_skipped: number;
+    }) => void;
     showPreviewContent: (
       content: string,
       language: string,
-      searchTerm: string,
+      searchTerm: string | null | undefined,
       path: string
     ) => void;
     showGeneratedContent: (content: string, tokenCount: number) => void;
@@ -53,23 +66,33 @@ declare global {
 let lastPath: string | null = null;
 
 window.render = (incoming: AppState) => {
+  const parsed = UiStateSchema.safeParse(incoming);
+  if (!parsed.success) {
+    console.warn(
+      "[IPC] Ignored invalid render() payload:",
+      parsed.error.flatten()
+    );
+    return;
+  }
+  const input = parsed.data as unknown as AppState;
+
   try {
     const prev = getState();
-    const nextPath = incoming?.current_path ?? null;
-    const safeTree = Array.isArray(incoming?.tree) ? incoming.tree : [];
+    const nextPath = input?.current_path ?? null;
+    const safeTree = Array.isArray(input?.tree) ? input.tree : [];
 
-    if (incoming?.status_message) {
-      incoming.status_message = incoming.status_message.startsWith("Status:")
-        ? incoming.status_message
-        : `Status: ${incoming.status_message}`;
+    if (input?.status_message) {
+      input.status_message = input.status_message.startsWith("Status:")
+        ? input.status_message
+        : `Status: ${input.status_message}`;
     } else {
-      incoming.status_message = "Status: Ready.";
+      input.status_message = "Status: Ready.";
     }
 
     if (lastPath !== nextPath) clearExpansionMemory();
 
     const patched: AppState = {
-      ...incoming,
+      ...input,
       tree: applyExpansionMemory(safeTree),
     };
     appState.set(patched);
@@ -93,8 +116,16 @@ window.updateScanProgress = (progress: {
 }) => {
   if (!getState().is_scanning) return;
 
+  const parsed = ScanProgressSchema.safeParse(progress);
+  if (!parsed.success) {
+    console.warn(
+      "[IPC] Ignored invalid updateScanProgress() payload:",
+      parsed.error.flatten()
+    );
+    return;
+  }
   const { files_scanned, current_scanning_path, large_files_skipped } =
-    progress;
+    parsed.data;
 
   const scanTextEl = document.querySelector(".scan-text");
   if (scanTextEl)
@@ -102,15 +133,17 @@ window.updateScanProgress = (progress: {
 
   const filesCountEl = document.getElementById("scan-files-count");
   if (filesCountEl)
-    filesCountEl.textContent = `${files_scanned} files processed`;
+    (filesCountEl as HTMLElement).textContent =
+      `${files_scanned} files processed`;
 
   const currentPathEl = document.getElementById("scan-current-path");
   if (currentPathEl)
-    currentPathEl.textContent = current_scanning_path || "Processing...";
+    (currentPathEl as HTMLElement).textContent =
+      current_scanning_path || "Processing...";
 
   const skippedEl = document.getElementById("scan-skipped-count");
   if (skippedEl) {
-    skippedEl.textContent =
+    (skippedEl as HTMLElement).textContent =
       large_files_skipped > 0
         ? `${large_files_skipped} large files skipped`
         : "";
@@ -120,35 +153,97 @@ window.updateScanProgress = (progress: {
 
   const fillEl = document.getElementById("scan-progress-fill");
   if (fillEl && files_scanned > 0) {
-    (fillEl as HTMLElement).style.width =
-      `${Math.min(90, (files_scanned / 1000) * 100)}%`;
+    (fillEl as HTMLElement).style.width = `${Math.min(
+      90,
+      (files_scanned / 1000) * 100
+    )}%`;
   }
 };
 
-window.showPreviewContent = showPreviewContent;
-window.showGeneratedContent = showGeneratedContent;
+window.showPreviewContent = (
+  content: string,
+  language: string,
+  searchTerm: string | null | undefined,
+  path: string
+) => {
+  const parsed = ShowPreviewArgsSchema.safeParse([
+    content,
+    language,
+    searchTerm,
+    path,
+  ]);
+  if (!parsed.success) {
+    console.warn(
+      "[IPC] Ignored invalid showPreviewContent() payload:",
+      parsed.error.flatten()
+    );
+    return;
+  }
+  const [c, l, s, p] = parsed.data;
+  // Die Impl erwartet vermutlich einen string – ggf. leeren Fallback geben
+  showPreviewContentImpl(c, l, s ?? "", p);
+};
+
+window.showGeneratedContent = (content: string, tokenCount: number) => {
+  const parsed = ShowGeneratedArgsSchema.safeParse([content, tokenCount]);
+  if (!parsed.success) {
+    console.warn(
+      "[IPC] Ignored invalid showGeneratedContent() payload:",
+      parsed.error.flatten()
+    );
+    return;
+  }
+  const [c, t] = parsed.data;
+  showGeneratedContentImpl(c, t);
+};
 
 window.showError = (msg: string) => {
+  const parsed = StatusMessageSchema.safeParse(msg);
+  if (!parsed.success) {
+    console.warn(
+      "[IPC] Ignored invalid showError() payload:",
+      parsed.error.flatten()
+    );
+    return;
+  }
   appState.update((s: AppState) => {
-    s.status_message = `Error: ${msg}`;
+    s.status_message = `Error: ${parsed.data}`;
     return s;
   });
 };
 
 window.showStatus = (msg: string) => {
+  const parsed = StatusMessageSchema.safeParse(msg);
+  if (!parsed.success) {
+    console.warn(
+      "[IPC] Ignored invalid showStatus() payload:",
+      parsed.error.flatten()
+    );
+    return;
+  }
   appState.update((s: AppState) => {
-    s.status_message = `Status: ${msg}`;
+    s.status_message = `Status: ${parsed.data}`;
     return s;
   });
 };
 
 window.fileSaveStatus = (success: boolean, path: string) => {
+  const parsed = FileSaveStatusArgsSchema.safeParse([success, path]);
+  if (!parsed.success) {
+    console.warn(
+      "[IPC] Ignored invalid fileSaveStatus() payload:",
+      parsed.error.flatten()
+    );
+    return;
+  }
+  const [ok, p] = parsed.data;
+
   const msg =
-    path === "cancelled"
+    p === "cancelled"
       ? "Status: Save cancelled."
-      : success
-        ? `Status: Saved to ${path}`
-        : `Error: Failed to save file.`;
+      : ok
+        ? `Status: Saved to ${p}`
+        : "Error: Failed to save file.";
 
   appState.update((s: AppState) => {
     s.status_message = msg;
@@ -157,8 +252,16 @@ window.fileSaveStatus = (success: boolean, path: string) => {
 };
 
 window.setDragState = (isDragging: boolean) => {
+  const parsed = DragStateSchema.safeParse(isDragging);
+  if (!parsed.success) {
+    console.warn(
+      "[IPC] Ignored invalid setDragState() payload:",
+      parsed.error.flatten()
+    );
+    return;
+  }
   const container = document.getElementById("file-tree-container");
-  if (isDragging) container?.classList.add("drag-over");
+  if (parsed.data) container?.classList.add("drag-over");
   else container?.classList.remove("drag-over");
 };
 
