@@ -1,0 +1,138 @@
+/* 
+ * Design Tokens
+ * Single Source of Truth for spacing, radii, shadows, typography, z-layers, and semantic colors.
+ * Theme mapping is attribute-driven via [data-theme="light" | "dark"] on :root.
+ * Default theme is provided by themes/dark.css.
+ */
+
+/* ---------- Core scales (theme-agnostic) ---------- */
+:root {
+  /* Typography */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  --font-mono:
+    -apple-system, BlinkMacSystemFont, "SF Mono", Monaco, "Cascadia Code",
+    "Roboto Mono", Consolas, "Courier New", monospace;
+
+  --text-size-xs: 12px;
+  --text-size-sm: 13px;
+  --text-size-base: 14px;
+  --text-size-md: 16px;
+  --text-size-lg: 18px;
+
+  --line-height-tight: 1.2;
+  --line-height-base: 1.5;
+
+  /* Spacing scale (8px grid with half steps) */
+  --space-0: 0px;
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 12px;
+  --space-6: 16px;
+  --space-7: 20px;
+  --space-8: 24px;
+  --space-9: 32px;
+  --space-10: 40px;
+
+  /* Radii */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+
+  /* Shadows */
+  --shadow-1: 0 2px 8px rgba(0, 0, 0, 0.2);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-3: 0 12px 32px rgba(0, 0, 0, 0.5);
+
+  /* Z-index */
+  --z-base: 0;
+  --z-sticky: 100;
+  --z-popover: 1000;
+  --z-modal: 1100;
+  --z-toast: 1200;
+
+  /* Sizes */
+  --size-icon: 16px;
+  --size-input-min-height: 36px;
+  --size-kbd: 20px;
+
+  /* Component-level semantic aliases (built from semantic tokens below) */
+  --button-bg: var(--surface-2);
+  --button-hover-bg: color-mix(
+    in srgb,
+    var(--surface-2) 85%,
+    var(--color-bg) 15%
+  );
+  --focus-ring-color: var(--color-accent);
+  --focus-ring-width: 2px;
+  --focus-ring-shadow: 0 0 0 var(--focus-ring-width)
+    color-mix(in srgb, var(--color-accent) 25%, transparent);
+
+  /* Alpha helpers (computed from semantic colors at usage sites mostly; kept here for convenience) */
+  --alpha-accent-10: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  --alpha-accent-20: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  --alpha-warning-30: color-mix(in srgb, var(--color-warning) 30%, transparent);
+  --alpha-warning-70: color-mix(in srgb, var(--color-warning) 70%, transparent);
+}
+
+/* ---------- Palettes ---------- */
+/* Light palette */
+:root {
+  --palette-light-bg: #ffffff;
+  --palette-light-surface-1: #f6f7f9;
+  --palette-light-surface-2: #eef0f4;
+  --palette-light-border: #d0d5dd;
+  --palette-light-text: #1f2328;
+  --palette-light-muted: #667085;
+
+  --palette-light-accent: #3a7fd5;
+  --palette-light-success: #16a34a;
+  --palette-light-warning: #ffc107;
+  --palette-light-info: #0ea5e9;
+  --palette-light-error: #e54b4b;
+
+  --palette-light-on-accent: #ffffff;
+}
+
+/* Dark palette (matches existing visual design) */
+:root {
+  --palette-dark-bg: #1e1f22;
+  --palette-dark-surface-1: #2c2e33;
+  --palette-dark-surface-2: #3a3d44;
+  --palette-dark-border: #4a4d55;
+  --palette-dark-text: #d4d4d4;
+  --palette-dark-muted: #9a9a9a;
+
+  --palette-dark-accent: #3a7fd5;
+  --palette-dark-success: #4caf50;
+  --palette-dark-warning: #ffc107;
+  --palette-dark-info: #fd7e14;
+  --palette-dark-error: #e54b4b;
+
+  --palette-dark-on-accent: #ffffff;
+}
+
+/* ---------- Semantic color mapping (Light) ---------- */
+/* When the app sets data-theme="light" on :root, these apply. */
+:root[data-theme="light"] {
+  --color-bg: var(--palette-light-bg);
+  --surface-1: var(--palette-light-surface-1);
+  --surface-2: var(--palette-light-surface-2);
+  --color-border: var(--palette-light-border);
+  --color-text: var(--palette-light-text);
+  --color-muted: var(--palette-light-muted);
+
+  --color-accent: var(--palette-light-accent);
+  --color-success: var(--palette-light-success);
+  --color-warning: var(--palette-light-warning);
+  --color-info: var(--palette-light-info);
+  --color-error: var(--palette-light-error);
+
+  --color-on-accent: var(--palette-light-on-accent);
+}
