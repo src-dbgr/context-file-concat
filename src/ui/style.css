@@ -183,7 +183,10 @@ body.vertical-resizing {
   height: 40%;
   display: flex;
   flex-direction: column;
-  padding: 10px;
+  padding-top: 10px;
+  padding-left: 10px;
+  padding-right: 10px;
+  padding-bottom: 0px;
   min-height: 100px;
 }
 
@@ -914,14 +917,21 @@ button#generate-btn {
   flex-direction: column;
 }
 
-/* Center content only when it's the sole child */
-.file-tree-container:has(.message-display),
-.file-tree-container:has(.scan-progress-container),
-.file-tree-container:has(.placeholder:only-child) {
+/* NEW: body wrapper for the tree/empty states.
+   We center inside this wrapper so the header stays fixed at the top. */
+.file-tree-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+.file-tree-body.center {
   justify-content: center;
   align-items: center;
 }
 
+/* Drag-over visuals still apply to placeholder inside the body */
 .file-tree-container.drag-over .placeholder {
   background-color: rgba(58, 127, 213, 0.15);
   border-color: var(--accent-color);
@@ -1148,7 +1158,6 @@ input[type="checkbox"][data-indeterminate="true"]::before {
   width: 100%;
   /* height and top set by JS */
 }
-
 /* --- END: Virtualized Tree Styling & Fixes --- */
 
 #editor-container {

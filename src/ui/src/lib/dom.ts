@@ -1,17 +1,13 @@
 /**
- * A helper function to safely get an element by its ID.
- * The query is executed when the function is called, not on module load.
+ * Safe getter for elements by ID (resolved at access time).
  */
 const getEl = (id: string) => document.getElementById(id);
 
 /**
- * An object that provides access to DOM elements using getters.
- * This ensures that `document.getElementById` is only called when an element
- * is actually accessed, preventing errors where the script executes before
- * the DOM is fully parsed.
+ * Central element accessors. Only keep what is still used after refactor.
  */
 export const elements = {
-  // Top bar (partially managed by Header.svelte, but IDs still exist)
+  // Top bar
   get selectDirBtn() {
     return getEl("select-dir-btn") as HTMLButtonElement;
   },
@@ -69,22 +65,7 @@ export const elements = {
     return getEl("current-patterns-container") as HTMLDivElement;
   },
 
-  // File List
-  get fileStats() {
-    return getEl("file-stats") as HTMLDivElement;
-  },
-  get selectAllBtn() {
-    return getEl("select-all-btn") as HTMLButtonElement;
-  },
-  get deselectAllBtn() {
-    return getEl("deselect-all-btn") as HTMLButtonElement;
-  },
-  get expandAllBtn() {
-    return getEl("expand-all-btn") as HTMLButtonElement;
-  },
-  get collapseAllBtn() {
-    return getEl("collapse-all-btn") as HTMLButtonElement;
-  },
+  // File list container (Svelte mounts inside)
   get fileTreeContainer() {
     return getEl("file-tree-container") as HTMLDivElement;
   },
@@ -103,7 +84,7 @@ export const elements = {
     return getEl("editor-container") as HTMLDivElement;
   },
 
-  // Bottom Panel
+  // Bottom panel
   get generateBtn() {
     return getEl("generate-btn") as HTMLButtonElement;
   },
@@ -111,7 +92,7 @@ export const elements = {
     return getEl("save-btn") as HTMLButtonElement;
   },
 
-  // Other
+  // Layout helpers
   get resizer() {
     return getEl("resizer") as HTMLDivElement;
   },

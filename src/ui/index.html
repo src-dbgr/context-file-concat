@@ -7,31 +7,19 @@
   </head>
   <body>
     <div class="container" style="height: calc(100% - 30px)">
-      <!-- Sidebar is again a direct flex child to preserve original layout -->
       <aside id="sidebar-root" class="sidebar"></aside>
 
       <main class="main-content">
         <div id="header-root"></div>
+
         <div class="content-splitter">
           <div id="file-list-panel" class="file-list-panel">
-            <div class="panel-header files-header">
-              <div class="files-title-section">
-                <h3>Files</h3>
-                <div class="button-group">
-                  <button id="select-all-btn">Select All</button>
-                  <button id="deselect-all-btn">Deselect All</button>
-                  <button id="expand-all-btn">Expand All</button>
-                  <button id="collapse-all-btn">Collapse All</button>
-                </div>
-              </div>
-              <div class="stats" id="file-stats"></div>
-            </div>
+            <!-- Header/buttons/stats are rendered by FileTree.svelte -->
             <div id="file-tree-container" class="file-tree-container"></div>
           </div>
 
           <div id="resizer" class="resizer"></div>
 
-          <!-- RESTORED: the preview panel must be a direct flex child -->
           <div id="preview-panel" class="preview-panel"></div>
         </div>
 
@@ -65,6 +53,7 @@
         </footer>
       </main>
     </div>
+
     <div id="svelte-root"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
