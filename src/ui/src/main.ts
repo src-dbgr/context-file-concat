@@ -16,28 +16,19 @@ import App from "./App.svelte";
 import Header from "$lib/components/Header.svelte";
 import Sidebar from "$lib/components/Sidebar.svelte";
 import PreviewPanel from "$lib/components/PreviewPanel.svelte";
+import FileTree from "$lib/components/FileTree.svelte";
 import type { AppState } from "$lib/types";
+import {
+  applyExpansionMemory,
+  clearExpansionMemory,
+} from "$lib/modules/treeExpansion";
 
-// Mount the main App component (bridge + StatusBar)
-mount(App, {
-  target: document.getElementById("svelte-root")!,
-});
-
-// Mount Header
-mount(Header, {
-  target: document.getElementById("header-root")!,
-});
-
-// Mount Sidebar
-mount(Sidebar, {
-  target: document.getElementById("sidebar-root")!,
-});
-
-// Mount Preview Panel INTO the existing #preview-panel element,
-// preserving flex layout & the resizer's height handling.
-mount(PreviewPanel, {
-  target: document.getElementById("preview-panel")!,
-});
+// Mount core UI fragments
+mount(App, { target: document.getElementById("svelte-root")! });
+mount(Header, { target: document.getElementById("header-root")! });
+mount(Sidebar, { target: document.getElementById("sidebar-root")! });
+mount(FileTree, { target: document.getElementById("file-tree-container")! });
+mount(PreviewPanel, { target: document.getElementById("preview-panel")! });
 
 declare global {
   interface Window {
@@ -57,20 +48,59 @@ declare global {
   }
 }
 
+let lastPath: string | null = null;
+
 /**
- * Main entry point for backend updates — updates central Svelte store.
+ * Main entry point called by the backend. It:
+ * 1) Preserves expansion state across renders.
+ * 2) Resets expansion memory when the base directory changes.
+ * 3) Avoids duplicating "Status:" prefixes.
+ * 4) Clears the editor when the directory is cleared.
  */
-window.render = (newState: AppState) => {
-  const previousPath = getState().current_path;
+window.render = (incoming: AppState) => {
+  try {
+    // Capture previous state BEFORE mutating the store
+    const prev = getState();
 
-  // Uniform status prefix
-  newState.status_message = `Status: ${newState.status_message}`;
+    // Normalize/guard incoming payload
+    const nextPath = incoming?.current_path ?? null;
+    const safeTree = Array.isArray(incoming?.tree) ? incoming.tree : [];
 
-  appState.set(newState);
+    // Avoid double "Status:" prefixes
+    if (incoming?.status_message) {
+      incoming.status_message = incoming.status_message.startsWith("Status:")
+        ? incoming.status_message
+        : `Status: ${incoming.status_message}`;
+    } else {
+      incoming.status_message = "Status: Ready.";
+    }
 
-  // If directory was cleared, clear editor preview
-  if (previousPath && !newState.current_path) {
-    clearPreview();
+    // Reset expansion memory whenever the root directory path actually changes
+    if (lastPath !== nextPath) {
+      clearExpansionMemory();
+    }
+
+    // Apply remembered expand/collapse intent before committing to the store
+    const patched: AppState = {
+      ...incoming,
+      tree: applyExpansionMemory(safeTree),
+    };
+
+    appState.set(patched);
+
+    // If the directory was cleared, also clear the editor preview
+    if (prev.current_path && !patched.current_path) {
+      clearPreview();
+    }
+
+    // Update path snapshot after successful commit
+    lastPath = nextPath;
+  } catch (err) {
+    console.error("render() failed:", err);
+    appState.update((s) => {
+      s.status_message = "Error: Failed to render state.";
+      return s;
+    });
   }
 };
 
@@ -80,6 +110,7 @@ window.updateScanProgress = (progress: {
   large_files_skipped: number;
 }) => {
   if (!getState().is_scanning) return;
+
   const { files_scanned, current_scanning_path, large_files_skipped } =
     progress;
 
@@ -152,6 +183,7 @@ function initialize() {
   console.log("App initializing with Svelte 5 & TypeScript...");
   setupEventListeners();
   setupResizerListeners();
+
   // Create Monaco AFTER the PreviewPanel exists in the DOM
   initEditor(() => {
     console.log("Monaco Editor is ready.");
