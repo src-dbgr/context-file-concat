@@ -1,6 +1,7 @@
 import { editorInstance } from "../stores/app.js";
 import type { FocusContext } from "../types.js";
 import { get } from "svelte/store";
+import * as monaco from "monaco-editor";
 
 function findWordBoundary(
   value: string,
@@ -98,8 +99,7 @@ export function selectAll(context: FocusContext) {
     const editor = get(editorInstance);
     if (!editor) return;
     const model = editor.getModel();
-    const monaco = (window as any).monaco;
-    if (model && monaco) {
+    if (model) {
       editor.setSelection(
         new monaco.Selection(
           1,

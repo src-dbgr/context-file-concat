@@ -37,11 +37,15 @@ export function layoutEditorSoon() {
   requestAnimationFrame(() => {
     try {
       editor.layout();
-    } catch {}
+    } catch {
+      /* noop */
+    }
     setTimeout(() => {
       try {
         editor.layout();
-      } catch {}
+      } catch {
+        /* noop */
+      }
     }, 0);
   });
 }

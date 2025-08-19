@@ -98,7 +98,7 @@ pub fn save_config(config: &AppConfig, path_override: Option<&Path>) -> Result<(
 }
 
 /// Exports the current configuration to a user-specified JSON file.
-pub fn export_config(config: &AppConfig, export_path: &PathBuf) -> Result<()> {
+pub fn export_config(config: &AppConfig, export_path: &Path) -> Result<()> {
     save_config(config, Some(export_path))
 }
 

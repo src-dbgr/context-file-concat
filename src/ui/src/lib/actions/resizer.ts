@@ -6,18 +6,18 @@
  * Is bound in `main.ts` directly onto #resizer.
  */
 export function verticalResizer(node: HTMLElement) {
-  const contentSplitter = node.closest(
-    ".content-splitter"
-  ) as HTMLElement | null;
-  const fileListPanel = document.getElementById(
-    "file-list-panel"
-  ) as HTMLElement | null;
-  const previewPanel = document.getElementById(
-    "preview-panel"
-  ) as HTMLElement | null;
+  const contentSplitter = node.closest(".content-splitter");
+  const fileListPanel = document.getElementById("file-list-panel");
+  const previewPanel = document.getElementById("preview-panel");
 
   function onPointerDown(e: PointerEvent) {
-    if (!fileListPanel || !previewPanel || !contentSplitter) return;
+    if (
+      !(fileListPanel instanceof HTMLElement) ||
+      !(previewPanel instanceof HTMLElement) ||
+      !(contentSplitter instanceof HTMLElement)
+    ) {
+      return;
+    }
 
     e.preventDefault();
     node.setPointerCapture(e.pointerId);
@@ -41,7 +41,9 @@ export function verticalResizer(node: HTMLElement) {
     const onUp = () => {
       try {
         node.releasePointerCapture(e.pointerId);
-      } catch {}
+      } catch {
+        /* noop – pointer already released */
+      }
       document.body.classList.remove("vertical-resizing");
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);

@@ -4,13 +4,16 @@
   import { get } from "svelte/store";
   import { canGenerate, canSave, isGenerating } from "$lib/stores/uiStores";
   import LogoMark from "$lib/components/LogoMark.svelte";
+  import { onDestroy } from "svelte";
 
   let generatingIntervalId: ReturnType<typeof setInterval> | null = null;
   let generatingDots = "";
 
-  $: {
-    if ($isGenerating) {
+  // Subscribe to the store instead of using a reactive block to avoid a potential infinite loop warning.
+  const unsubscribeGenerating = isGenerating.subscribe((active) => {
+    if (active) {
       if (generatingIntervalId) clearInterval(generatingIntervalId);
+      generatingDots = "";
       generatingIntervalId = setInterval(() => {
         generatingDots = generatingDots.length >= 3 ? "" : generatingDots + ".";
       }, 500);
@@ -19,7 +22,12 @@
       generatingIntervalId = null;
       generatingDots = "";
     }
-  }
+  });
+
+  onDestroy(() => {
+    unsubscribeGenerating();
+    if (generatingIntervalId) clearInterval(generatingIntervalId);
+  });
 
   function onGenerateClick() {
     if ($isGenerating) post("cancelGeneration");

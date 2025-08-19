@@ -4,10 +4,8 @@
   import { COMMON_IGNORE_PATTERNS } from '$lib/config';
   import { sidebarResizer } from '$lib/actions/resizer';
 
-  // --- Derived UI state ---
   $: searchEnabled = Boolean($appState.current_path && !$appState.is_scanning);
 
-  // --- Filter inputs: debounce push to backend ---
   let filterTimer: ReturnType<typeof setTimeout> | null = null;
   function pushFilters() {
     if (!$appState.current_path) return;
@@ -22,7 +20,6 @@
     filterTimer = setTimeout(pushFilters, 300);
   }
 
-  // --- Config toggles ---
   function onCaseSensitiveChange() {
     post('updateConfig', $appState.config);
     pushFilters();
@@ -31,7 +28,6 @@
     post('updateConfig', $appState.config);
   }
 
-  // --- Ignore patterns add/remove ---
   let newPattern = '';
   function addPattern() {
     const p = newPattern.trim();
@@ -54,19 +50,16 @@
     post('updateConfig', { ...$appState.config, ignore_patterns: [] });
   }
 
-  // Rescan
   function handleRescan() {
     post('rescanDirectory');
   }
 
-  // --- Computed lists for rendering ---
   $: availableCommon = COMMON_IGNORE_PATTERNS.filter(
     (p) => !$appState.config.ignore_patterns.includes(p)
   );
   $: allPatterns = Array.from(new Set($appState.config.ignore_patterns || []));
   $: activeSet = new Set($appState.active_ignore_patterns || []);
 
-  // patternFilter UI binding (Store enthält lowercase)
   function onPatternFilterInput(e: Event) {
     const v = (e.currentTarget as HTMLInputElement).value.toLowerCase();
     patternFilter.set(v);
@@ -80,10 +73,8 @@
   })();
 </script>
 
-<!-- Hidden hook element to attach sidebar resize action to the enclosing <aside.sidebar> -->
 <div use:sidebarResizer style="display: none" aria-hidden="true"></div>
 
-<!-- IMPORTANT: No outer <aside>. This content is mounted inside <aside.sidebar#sidebar-root> -->
 <div class="panel">
   <div class="panel-header">
     <h3>
@@ -152,11 +143,26 @@
       disabled={$appState.is_scanning || !$appState.current_path}
       on:click={handleRescan}
     >
-      {@html $appState.is_scanning
-        ? '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>'
-        : ($appState.patterns_need_rescan
-          ? `<svg class="icon pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>`
-          : '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>')}
+      {#if $appState.is_scanning}
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="12,6 12,12 16,14" />
+        </svg>
+      {:else if $appState.patterns_need_rescan}
+        <svg class="icon pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+          <path d="M21 3v5h-5"/>
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1 -6.74 -2.74L3 16"/>
+          <path d="M3 21v-5h5"/>
+        </svg>
+      {:else}
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+          <path d="M21 3v5h-5"/>
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1 -6.74 -2.74L3 16"/>
+          <path d="M3 21v-5h5"/>
+        </svg>
+      {/if}
       {$appState.is_scanning ? 'Scanning...' : 'Re-Scan'}
     </button>
   </div>
@@ -203,7 +209,7 @@
       role="group"
       aria-labelledby="common-patterns-heading"
     >
-      {#each availableCommon as pattern}
+      {#each availableCommon as pattern (pattern)}
         <button
           class="common-pattern-chip"
           on:click={() =>
@@ -228,7 +234,7 @@
   />
 
   <div id="current-patterns-container" class="current-patterns" role="list">
-    {#each filteredPatterns as p}
+    {#each filteredPatterns as p (p)}
       <div
         class="current-pattern-chip {activeSet.has(p) ? 'active-pattern' : ''}"
         title={activeSet.has(p)

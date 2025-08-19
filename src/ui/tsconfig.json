@@ -13,7 +13,12 @@
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "esModuleInterop": true,
-    "types": ["svelte", "svelte/elements", "monaco-editor"],
+    "types": [
+      "svelte",
+      "svelte/elements",
+      "monaco-editor",
+      "vite/client" /* ImportMeta.env + ?worker Typen */
+    ],
     /* Path Alias Configuration */
     "baseUrl": ".",
     "paths": {

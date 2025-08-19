@@ -2,6 +2,7 @@
 // Keep this file framework-agnostic; only data shapes + type utilities live here.
 
 import { z } from "zod";
+import type { TreeNode } from "../types";
 
 /* ---------------------------------- Common --------------------------------- */
 export const PathString = z.string().min(1);
@@ -29,7 +30,7 @@ export const ConfigSchema = z
   .passthrough();
 
 /* ---------------------------------- Tree ----------------------------------- */
-export const TreeNodeSchema: z.ZodType<any> = z.lazy(() =>
+export const TreeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>
   z
     .object({
       path: z.string(),
@@ -97,7 +98,6 @@ export const FileSaveStatusArgsSchema = z.tuple([z.boolean(), z.string()]);
 export const DragStateSchema = z.boolean();
 
 /* ------------------------------ Outgoing IPC ------------------------------- */
-/** Individual payload schemas */
 const NullPayload = z.null();
 const UpdateFiltersPayload = z
   .object({
@@ -113,7 +113,7 @@ const UpdateConfigPayload = ConfigSchema;
 
 /**
  * Single source of truth: command → payload schema.
- * ⚠️ Names and shapes must match the Rust backend exactly.
+ * Names and shapes must match the Rust backend exactly.
  */
 export const CommandSchemas = {
   selectDirectory: NullPayload,
@@ -145,12 +145,6 @@ export const CommandSchemas = {
 
 export type CommandName = keyof typeof CommandSchemas;
 
-/**
- * Compile-time mapping: command name → payload type accepted at callsite.
- * - For most commands we use `z.input<schema>` (pre-parse type).
- * - Special-case: `updateConfig` should accept the *frontend* Config interface at compile-time,
- *   while still being validated against the full backend `ConfigSchema` at runtime.
- */
 type FrontendConfig = import("../types").Config;
 type _PayloadForBase<T extends CommandName> = z.input<
   (typeof CommandSchemas)[T]
@@ -159,7 +153,6 @@ export type PayloadFor<T extends CommandName> = T extends "updateConfig"
   ? FrontendConfig
   : _PayloadForBase<T>;
 
-/** Helpers for typed overloading in `post()` */
 type CommandsByOutput<TOut> = {
   [K in CommandName]: z.output<(typeof CommandSchemas)[K]> extends TOut
     ? K
@@ -170,10 +163,6 @@ export type NullaryCommandName = CommandsByOutput<null>;
 export type NonNullCommandName = Exclude<CommandName, NullaryCommandName>;
 
 /* ----------------------- Dev-time validation union ------------------------- */
-/**
- * Build the union members programmatically, then assert a non-empty tuple type.
- * svelte-check/TS expects a variadic tuple for `z.union`, not a plain array.
- */
 const _commandObjectSchemas = (
   Object.keys(CommandSchemas) as CommandName[]
 ).map((name) =>
@@ -183,9 +172,7 @@ const _commandObjectSchemas = (
   })
 );
 
-// Generic non-empty tuple helper
 type NonEmptyTuple<T> = [T, ...T[]];
-// Assert as a non-empty tuple for z.union()
 const _commandObjectSchemasTuple =
   _commandObjectSchemas as unknown as NonEmptyTuple<z.ZodTypeAny>;
 

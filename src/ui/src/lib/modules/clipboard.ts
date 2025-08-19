@@ -7,8 +7,8 @@ import { get } from "svelte/store";
 async function readFromClipboardWithFallback(): Promise<string | null> {
   try {
     return await navigator.clipboard.readText();
-  } catch (err) {
-    console.warn("Clipboard read API failed.", err);
+  } catch {
+    console.warn("Clipboard read API failed.");
     return prompt("Could not access clipboard. Please paste your text here:");
   }
 }
@@ -18,8 +18,8 @@ async function copyWithFallback(content: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(content);
     return true;
-  } catch (err) {
-    console.warn("Clipboard API failed, trying legacy fallback.", err);
+  } catch {
+    console.warn("Clipboard API failed, trying legacy fallback.");
     const textArea = document.createElement("textarea");
     textArea.value = content;
     textArea.style.position = "fixed";
@@ -29,7 +29,7 @@ async function copyWithFallback(content: string): Promise<boolean> {
     textArea.select();
     try {
       return document.execCommand("copy");
-    } catch (e) {
+    } catch {
       return false;
     } finally {
       document.body.removeChild(textArea);
