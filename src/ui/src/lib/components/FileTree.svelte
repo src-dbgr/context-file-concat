@@ -17,6 +17,10 @@
   let scrollTop = 0;
   let viewportHeight = 0;
 
+  // Track last path & filters to reset scroll when needed
+  let lastPath: string | null = null;
+  let lastFilterKey = "";
+
   type FlatItem = { node: TreeNode; level: number; index: number };
 
   function flattenTree(nodes: TreeNode[], level = 0, acc: FlatItem[] = []): FlatItem[] {
@@ -37,20 +41,62 @@
   // Total virtual height
   $: totalHeight = flatTree.length * ITEM_HEIGHT;
 
-  // Visible slice
+  // Visible slice (robust against stale/too-large scrollTop)
   let visibleSlice: FlatItem[] = [];
   $: {
-    const startRaw = Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN;
-    const endRaw = Math.ceil((scrollTop + viewportHeight) / ITEM_HEIGHT) + OVERSCAN;
-    const startIndex = Math.max(0, startRaw | 0);
-    const endIndex = Math.min(flatTree.length - 1, endRaw | 0);
-    visibleSlice = startIndex <= endIndex ? flatTree.slice(startIndex, endIndex + 1) : [];
+    const rawStart = Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN;
+    const rawEnd = Math.ceil((scrollTop + viewportHeight) / ITEM_HEIGHT) + OVERSCAN;
+
+    const maxIndex = Math.max(0, flatTree.length - 1);
+    const startIndex = Math.max(0, Math.min(maxIndex, rawStart | 0));
+    const endIndex = Math.max(startIndex, Math.min(maxIndex, rawEnd | 0));
+
+    visibleSlice = flatTree.slice(startIndex, endIndex + 1);
     for (let i = 0; i < visibleSlice.length; i++) visibleSlice[i].index = startIndex + i;
   }
 
   function onScroll() {
     if (!scrollEl) return;
     scrollTop = scrollEl.scrollTop;
+  }
+
+  // Helper: reset both internal & DOM scroll position
+  function resetScroll() {
+    scrollTop = 0;
+    if (scrollEl) scrollEl.scrollTop = 0;
+  }
+
+  // Reset scroll when directory path changes (handles Clear → Select Directory)
+  $: if ($appState.current_path !== lastPath) {
+    lastPath = $appState.current_path;
+    resetScroll();
+  }
+
+  // Reset scroll whenever filters change (filename/extension/content)
+  $: {
+    const currentFilterKey =
+      ($appState.search_query ?? "") +
+      "|" +
+      ($appState.extension_filter ?? "") +
+      "|" +
+      ($appState.content_search_query ?? "");
+    if (currentFilterKey !== lastFilterKey) {
+      lastFilterKey = currentFilterKey;
+      resetScroll();
+    }
+  }
+
+  // If result list goes from 0 → >0 (z. B. Filter wieder gelöscht), scroll an den Anfang
+  let lastHadItems = false;
+  $: {
+    const hasItems = flatTree.length > 0;
+    if (hasItems && !lastHadItems) resetScroll();
+    lastHadItems = hasItems;
+  }
+
+  // Keep DOM scroller in sync if we programmatically change scrollTop
+  $: if (scrollEl && scrollEl.scrollTop !== scrollTop) {
+    scrollEl.scrollTop = scrollTop;
   }
 
   // Viewport measurement
