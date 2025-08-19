@@ -178,6 +178,7 @@ fn migrate_legacy_config(config_content: &str) -> Result<AppConfig> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::utils::test_helpers::running_as_root;
     use serde::ser::{Error, Serializer};
     use serde::Serialize;
     use serde_json::json;
@@ -364,6 +365,11 @@ pub mod tests {
 
     #[test]
     fn test_io_failures_on_readonly_directory() {
+        #[cfg(unix)]
+        if running_as_root() {
+            eprintln!("Skipping permission-based test because process runs as root (Docker/act).");
+            return;
+        }
         let temp_dir = tempfile::tempdir().unwrap();
         let readonly_dir = temp_dir.path().join("readonly");
         fs::create_dir(&readonly_dir).unwrap();

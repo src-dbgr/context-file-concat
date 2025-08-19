@@ -554,6 +554,7 @@ dependencies = [
  "dirs",
  "ignore",
  "insta",
+ "libc",
  "proptest",
  "rayon",
  "regex",

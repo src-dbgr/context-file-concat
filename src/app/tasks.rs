@@ -599,6 +599,7 @@ mod tests {
     use super::*;
     use crate::app::view_model::UiState;
     use crate::config::AppConfig;
+    use crate::utils::test_helpers::running_as_root;
     use std::time::Duration;
     use tempfile::{tempdir, TempDir};
     use tokio::sync::{mpsc, oneshot};
@@ -1716,6 +1717,10 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)] // This test relies on Unix-style permissions.
     async fn search_in_files_with_real_searcher_handles_read_error() {
+        if running_as_root() {
+            eprintln!("Skipping permission-based test because process runs as root (Docker/act).");
+            return;
+        }
         // Arrange
         use std::os::unix::fs::PermissionsExt;
 

@@ -16,3 +16,19 @@ pub fn setup_test_logging() {
             .ok(); // Ignore the error if it's already set by another crate.
     });
 }
+
+/// Returns true when the current process runs as root (UID 0).
+/// We use this to skip permission-sensitive tests in Docker/act.
+#[cfg(any(test, doctest))]
+#[inline]
+pub fn running_as_root() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: libc call has no side effects; used for testing only.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}

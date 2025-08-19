@@ -237,6 +237,7 @@ impl DirectoryScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_helpers::running_as_root;
     use crate::utils::test_helpers::setup_test_logging;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -524,6 +525,10 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)] // Relies on Unix-style permissions.
     async fn test_scan_unreadable_directory() {
+        if running_as_root() {
+            eprintln!("Skipping permission-based test because process runs as root (Docker/act).");
+            return;
+        }
         setup_test_logging();
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();

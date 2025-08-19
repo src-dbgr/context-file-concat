@@ -43,6 +43,7 @@ tempfile = "3.20"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-test = "0.2"
 serial_test = "3.2" 
+libc = "0.2"
 
 # For better Performance in Release-Build
 [profile.release]
