@@ -4,8 +4,9 @@
   import { formatFileSize } from '$lib/utils';
   import { recordDirExpanded } from '$lib/modules/treeExpansion';
 
-  export let node: TreeNode;
-  export let level = 0;
+  // Runes props (no `export let` in Svelte 5)
+  type Props = { node: TreeNode; level?: number };
+  let { node, level = 0 }: Props = $props();
 
   const indentWidth = () => level * 21;
 
@@ -64,14 +65,14 @@
 			data-type="directory"
 			role="button"
 			tabindex="0"
-			on:click={toggleDir}
-			on:keydown={(e) => onActivate(e, toggleDir)}
+			onclick={toggleDir}
+			onkeydown={(e) => onActivate(e, toggleDir)}
 		></span>
 		<input
 			type="checkbox"
 			checked={node.selection_state === 'full'}
 			use:indeterminate={node.selection_state === 'partial'}
-			on:click|preventDefault={toggleDirCheckbox}
+			onclick={toggleDirCheckbox}
 			data-path={node.path}
 			data-type="dir-checkbox"
 			aria-label="Toggle directory selection"
@@ -83,8 +84,8 @@
 				data-type="label"
 				role="button"
 				tabindex="0"
-				on:click={toggleDir}
-				on:keydown={(e) => onActivate(e, toggleDir)}
+				onclick={toggleDir}
+				onkeydown={(e) => onActivate(e, toggleDir)}
 			>
 				<svg class="icon" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
 				{node.name}
@@ -93,7 +94,7 @@
 				class="ignore-btn"
 				title="Add this directory to ignore patterns"
 				aria-label="Add directory to ignore patterns"
-				on:click|stopPropagation={addIgnore}
+				onclick={addIgnore}
 				data-path={node.path}
 				data-type="ignore"
 			>
@@ -114,7 +115,7 @@
 		<input
 			type="checkbox"
 			checked={node.selection_state === 'full'}
-			on:click|preventDefault={toggleFileCheckbox}
+			onclick={toggleFileCheckbox}
 			data-path={node.path}
 			data-type="file-checkbox"
 			aria-label="Toggle file selection"
@@ -126,8 +127,8 @@
 				data-type="label"
 				role="button"
 				tabindex="0"
-				on:click={openFile}
-				on:keydown={(e) => onActivate(e, openFile)}
+				onclick={openFile}
+				onkeydown={(e) => onActivate(e, openFile)}
 			>
 				{#if node.is_binary}
 					<svg class="icon" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
@@ -140,7 +141,7 @@
 				class="ignore-btn"
 				title="Add this file to ignore patterns"
 				aria-label="Add file to ignore patterns"
-				on:click|stopPropagation={addIgnore}
+				onclick={addIgnore}
 				data-path={node.path}
 				data-type="ignore"
 			>

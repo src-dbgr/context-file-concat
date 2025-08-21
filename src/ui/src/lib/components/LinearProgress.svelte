@@ -1,38 +1,32 @@
 <script lang="ts">
   /**
-   * Accessible linear progress bar.
-   *
-   * Examples:
-   *  - Determinate:    <LinearProgress value={42} ariaLabel="Scanning" />
-   *  - Indeterminate:  <LinearProgress indeterminate ariaLabel="Working..." />
-   *  - Legacy external control (IPC): keep idForFill to let external code set width.
-   *      <LinearProgress idForFill="scan-progress-fill" indeterminate />
+   * Accessible linear progress bar (Svelte 5 Runes).
+   * - Determinate:   <LinearProgress value={42} ariaLabel="Scanning" />
+   * - Indeterminate: <LinearProgress indeterminate ariaLabel="Working..." />
+   * - Legacy IPC control: keep idForFill so external width updates still work.
    */
 
-  /** Screen-reader label */
-  export let ariaLabel: string = "Progress";
+  type Props = {
+    ariaLabel?: string;
+    value?: number;           // 0..100 (determinate) – leave undefined for indeterminate
+    indeterminate?: boolean;  // true => animated bar
+    idForFill?: string;       // optional id on inner fill for legacy updates
+  };
 
-  /** 0..100 for determinate mode; leave undefined for indeterminate */
-  export let value: number | undefined = undefined;
-
-  /** Show animated indeterminate bar */
-  export let indeterminate: boolean = false;
-
-  /**
-   * Optional id on the inner fill element (for legacy external width updates).
-   * E.g. document.getElementById(id)?.style.width = "37%".
-   */
-  export let idForFill: string | undefined = undefined;
+  let {
+    ariaLabel = "Progress",
+    value,
+    indeterminate = false,
+    idForFill
+  }: Props = $props();
 
   const clamp100 = (n: number) => Math.max(0, Math.min(100, n));
 
   // Derived aria-valuenow (only in determinate mode)
-  let valueNow: number | undefined;
-  $: valueNow = !indeterminate && typeof value === "number" ? clamp100(value) : undefined;
+  const valueNow = $derived(!indeterminate && typeof value === "number" ? clamp100(value) : undefined);
 
   // Inline width style for determinate mode
-  let widthStyle: string | undefined;
-  $: widthStyle = valueNow !== undefined ? `width:${valueNow}%` : undefined;
+  const widthStyle = $derived(valueNow !== undefined ? `width:${valueNow}%` : undefined);
 </script>
 
 <div
@@ -45,17 +39,12 @@
   aria-valuemax="100"
   aria-valuenow={valueNow}
 >
-  <div
-    class="scan-progress-fill"
-    id={idForFill}
-    style={widthStyle}
-  ></div>
+  <!-- NOTE: non-void element must not be self-closing -->
+  <div class="scan-progress-fill" id={idForFill} style={widthStyle}></div>
 </div>
 
 <style>
-  /* Minimal fallback visuals for indeterminate mode.
-     Your global CSS already styles .scan-progress-bar/.scan-progress-fill.
-     This ensures a nice animation even if no external width is applied. */
+  /* Minimal fallback visuals for indeterminate mode. */
   .scan-progress-bar {
     position: relative;
     height: 8px;

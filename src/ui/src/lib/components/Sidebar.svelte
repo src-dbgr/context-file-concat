@@ -4,9 +4,14 @@
   import { COMMON_IGNORE_PATTERNS } from '$lib/config';
   import { sidebarResizer } from '$lib/actions/resizer';
 
-  $: searchEnabled = Boolean($appState.current_path && !$appState.is_scanning);
+  // Runes: derived flags/collections
+  const searchEnabled = $derived(Boolean($appState.current_path && !$appState.is_scanning));
+  const availableCommon = $derived(COMMON_IGNORE_PATTERNS.filter((p) => !$appState.config.ignore_patterns.includes(p)));
+  const allPatterns = $derived(Array.from(new Set($appState.config.ignore_patterns || [])));
+  const activeSet = $derived(new Set($appState.active_ignore_patterns || []));
 
   let filterTimer: ReturnType<typeof setTimeout> | null = null;
+
   function pushFilters() {
     if (!$appState.current_path) return;
     post('updateFilters', {
@@ -28,7 +33,8 @@
     post('updateConfig', $appState.config);
   }
 
-  let newPattern = '';
+  let newPattern = $state('');
+
   function addPattern() {
     const p = newPattern.trim();
     if (!p) return;
@@ -54,26 +60,21 @@
     post('rescanDirectory');
   }
 
-  $: availableCommon = COMMON_IGNORE_PATTERNS.filter(
-    (p) => !$appState.config.ignore_patterns.includes(p)
-  );
-  $: allPatterns = Array.from(new Set($appState.config.ignore_patterns || []));
-  $: activeSet = new Set($appState.active_ignore_patterns || []);
-
   function onPatternFilterInput(e: Event) {
     const v = (e.currentTarget as HTMLInputElement).value.toLowerCase();
     patternFilter.set(v);
   }
 
-  $: filteredPatterns = (() => {
+  const filteredPatterns = $derived((() => {
     const pf = ($patternFilter || '').trim();
     const base = [...allPatterns].sort((a, b) => a.localeCompare(b));
     const filtered = pf ? base.filter((p) => p.toLowerCase().includes(pf)) : base;
     return filtered.sort((a, b) => Number(activeSet.has(b)) - Number(activeSet.has(a)));
-  })();
+  })());
 </script>
 
-<div use:sidebarResizer style="display: none" aria-hidden="true"></div>
+<!-- IMPORTANT: do not hide the resizer mount; the action will size/style it. -->
+<div use:sidebarResizer aria-hidden="true"></div>
 
 <div class="panel">
   <div class="panel-header">
@@ -92,7 +93,7 @@
     placeholder={searchEnabled ? 'Search filenames...' : 'Select a directory first...'}
     bind:value={$appState.search_query}
     disabled={!searchEnabled}
-    on:input={onFiltersInput}
+    oninput={onFiltersInput}
   />
 
   <input
@@ -101,7 +102,7 @@
     placeholder={searchEnabled ? 'Filter by extension (e.g., rs, py)' : 'Select a directory first...'}
     bind:value={$appState.extension_filter}
     disabled={!searchEnabled}
-    on:input={onFiltersInput}
+    oninput={onFiltersInput}
   />
 
   <input
@@ -110,7 +111,7 @@
     placeholder={searchEnabled ? 'Search text inside files...' : 'Select a directory first...'}
     bind:value={$appState.content_search_query}
     disabled={!searchEnabled}
-    on:input={onFiltersInput}
+    oninput={onFiltersInput}
   />
 
   <label>
@@ -118,7 +119,7 @@
       type="checkbox"
       id="case-sensitive"
       bind:checked={$appState.config.case_sensitive_search}
-      on:change={onCaseSensitiveChange}
+      onchange={onCaseSensitiveChange}
     />
     Case Sensitive
   </label>
@@ -141,7 +142,7 @@
         : 'Re-scan with current ignore patterns'}
       class:needs-rescan={$appState.patterns_need_rescan}
       disabled={$appState.is_scanning || !$appState.current_path}
-      on:click={handleRescan}
+      onclick={handleRescan}
     >
       {#if $appState.is_scanning}
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -160,7 +161,7 @@
           <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
           <path d="M21 3v5h-5"/>
           <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1 -6.74 -2.74L3 16"/>
-          <path d="M3 21v-5h5"/>
+          <path d="M3 21v-5h-5"/>
         </svg>
       {/if}
       {$appState.is_scanning ? 'Scanning...' : 'Re-Scan'}
@@ -173,14 +174,14 @@
       id="new-ignore-pattern"
       placeholder="Add pattern (*.log, build/)"
       bind:value={newPattern}
-      on:keydown={(e) => e.key === 'Enter' && addPattern()}
+      onkeydown={(e) => e.key === 'Enter' && addPattern()}
     />
-    <button id="add-pattern-btn" on:click={addPattern}>Add</button>
+    <button id="add-pattern-btn" onclick={addPattern}>Add</button>
   </div>
 
   <div class="ignore-options">
     <div class="ignore-actions">
-      <button id="delete-all-patterns-btn" title="Remove all ignore patterns" on:click={deleteAllPatterns}>
+      <button id="delete-all-patterns-btn" title="Remove all ignore patterns" onclick={deleteAllPatterns}>
         Delete All
       </button>
       <label>
@@ -188,7 +189,7 @@
           type="checkbox"
           id="remove-empty-dirs"
           bind:checked={$appState.config.remove_empty_directories}
-          on:change={onRemoveEmptyDirsChange}
+          onchange={onRemoveEmptyDirsChange}
         />
         Remove empty dirs
       </label>
@@ -212,7 +213,7 @@
       {#each availableCommon as pattern (pattern)}
         <button
           class="common-pattern-chip"
-          on:click={() =>
+          onclick={() =>
             post('updateConfig', {
               ...$appState.config,
               ignore_patterns: [...$appState.config.ignore_patterns, pattern]
@@ -230,7 +231,7 @@
     id="filter-patterns"
     placeholder="Filter currently assigned ignore patterns..."
     value={$patternFilter}
-    on:input={onPatternFilterInput}
+    oninput={onPatternFilterInput}
   />
 
   <div id="current-patterns-container" class="current-patterns" role="list">
@@ -245,7 +246,7 @@
         <span>{p}</span>
         <button
           class="remove-pattern-btn"
-          on:click={() => removePattern(p)}
+          onclick={() => removePattern(p)}
           aria-label={`Remove pattern ${p}`}
         >
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">

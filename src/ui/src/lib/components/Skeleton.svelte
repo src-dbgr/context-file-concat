@@ -1,35 +1,42 @@
 <script lang="ts">
-  export let width: string = "100%";
-  export let height: string = "1rem";
-  export let radius: string = "var(--radius-md)";
-  export let animated: boolean = true;
-  export let ariaLabel: string = "Loading content";
+  // Lightweight skeleton block with inline width/height
+  type Props = {
+    width?: string;
+    height?: string;
+    radius?: string;
+    ariaLabel?: string;
+  };
+  let {
+    width = "100%",
+    height = "1rem",
+    radius = "4px",
+    ariaLabel = "Loading content"
+  }: Props = $props();
 </script>
 
 <div
   class="cfc-skeleton"
-  class:no-animate={!animated}
-  style={`--_w:${width};--_h:${height};--_r:${radius}`}
-  aria-hidden="true"
-  role="presentation"
-  title={ariaLabel}
+  style={`width:${width}; height:${height}; border-radius:${radius};`}
+  role="status"
+  aria-label={ariaLabel}
+  aria-live="polite"
 ></div>
 
 <style>
   .cfc-skeleton {
-    width: var(--_w);
-    height: var(--_h);
-    border-radius: var(--_r);
+    --shine: linear-gradient(90deg,
+      rgba(0,0,0,0) 0%,
+      rgba(255,255,255,.25) 50%,
+      rgba(0,0,0,0) 100%
+    );
     background:
-      linear-gradient(90deg,
-        color-mix(in srgb, var(--surface-2) 70%, transparent) 25%,
-        color-mix(in srgb, var(--surface-1) 95%, transparent) 37%,
-        color-mix(in srgb, var(--surface-2) 70%, transparent) 63%
-      );
-    background-size: 400% 100%;
-    animation: cfc-skeleton 1.25s ease-in-out infinite;
+      var(--shine),
+      color-mix(in srgb, var(--color-border) 30%, transparent);
+    background-size: 200% 100%, 100% 100%;
+    animation: cfc-skeleton-shimmer 1.2s linear infinite;
   }
-  :global(.no-animate) .cfc-skeleton,
-  .cfc-skeleton:not(:where(:has(+ *))) { animation: none; background: var(--surface-2); }
-  @keyframes cfc-skeleton { 0% {background-position: 100% 50%} 100%{background-position: 0% 50%} }
+  @keyframes cfc-skeleton-shimmer {
+    from { background-position: -100% 0, 0 0; }
+    to   { background-position: 100% 0, 0 0; }
+  }
 </style>

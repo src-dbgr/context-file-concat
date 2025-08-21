@@ -1,8 +1,11 @@
 <script lang="ts">
-  export let size: number = 16;
-  export let ariaLabel: string = "Loading";
-  // If used purely decorative, set ariaHidden=true and omit ariaLabel from parent.
-  export let ariaHidden: boolean = false;
+  // Runes props
+  type Props = {
+    size?: number;
+    ariaLabel?: string;
+    ariaHidden?: boolean;
+  };
+  let { size = 16, ariaLabel = "Loading", ariaHidden = false }: Props = $props();
 </script>
 
 <span

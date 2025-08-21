@@ -12,14 +12,14 @@
   const ITEM_HEIGHT = 28;
   const OVERSCAN = 5;
 
-  // Local virtualization state
-  let scrollEl: HTMLDivElement | null = null;
-  let scrollTop = 0;
-  let viewportHeight = 0;
+  // Local virtualization state (Runes)
+  let scrollEl = $state<HTMLDivElement | null>(null);
+  let scrollTop = $state(0);
+  let viewportHeight = $state(0);
 
   // Track last path & filters to reset scroll when needed
-  let lastPath: string | null = null;
-  let lastFilterKey = "";
+  let lastPath = $state<string | null>(null);
+  let lastFilterKey = $state("");
 
   type FlatItem = { node: TreeNode; level: number; index: number };
 
@@ -34,16 +34,14 @@
     return acc;
   }
 
-  // Reactive flatten
-  let flatTree: FlatItem[] = [];
-  $: flatTree = flattenTree($appState.tree);
+  // Reactive flatten (Runes)
+  const flatTree = $derived(flattenTree($appState.tree));
 
   // Total virtual height
-  $: totalHeight = flatTree.length * ITEM_HEIGHT;
+  const totalHeight = $derived(flatTree.length * ITEM_HEIGHT);
 
-  // Visible slice (robust against stale/too-large scrollTop)
-  let visibleSlice: FlatItem[] = [];
-  $: {
+  // Visible slice (IIFE in $derived to produce an array value, not a function)
+  const visibleSlice = $derived((() => {
     const rawStart = Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN;
     const rawEnd = Math.ceil((scrollTop + viewportHeight) / ITEM_HEIGHT) + OVERSCAN;
 
@@ -51,9 +49,13 @@
     const startIndex = Math.max(0, Math.min(maxIndex, rawStart | 0));
     const endIndex = Math.max(startIndex, Math.min(maxIndex, rawEnd | 0));
 
-    visibleSlice = flatTree.slice(startIndex, endIndex + 1);
-    for (let i = 0; i < visibleSlice.length; i++) visibleSlice[i].index = startIndex + i;
-  }
+    const slice = flatTree.slice(startIndex, endIndex + 1).map((it: FlatItem, i: number) => ({
+      node: it.node,
+      level: it.level,
+      index: startIndex + i
+    }));
+    return slice;
+  })());
 
   function onScroll() {
     if (!scrollEl) return;
@@ -67,37 +69,44 @@
   }
 
   // Reset scroll when directory path changes (handles Clear → Select Directory)
-  $: if ($appState.current_path !== lastPath) {
-    lastPath = $appState.current_path;
-    resetScroll();
-  }
+  $effect(() => {
+    const p = $appState.current_path;
+    if (p !== lastPath) {
+      lastPath = p;
+      resetScroll();
+    }
+  });
 
   // Reset scroll whenever filters change (filename/extension/content)
-  $: {
-    const currentFilterKey =
-      ($appState.search_query ?? "") +
+  const currentFilterKey = $derived(
+    ($appState.search_query ?? "") +
       "|" +
       ($appState.extension_filter ?? "") +
       "|" +
-      ($appState.content_search_query ?? "");
-    if (currentFilterKey !== lastFilterKey) {
-      lastFilterKey = currentFilterKey;
+      ($appState.content_search_query ?? "")
+  );
+  $effect(() => {
+    const k = currentFilterKey;
+    if (k !== lastFilterKey) {
+      lastFilterKey = k;
       resetScroll();
     }
-  }
+  });
 
-  // If result list goes from 0 → >0 (z. B. Filter wieder gelöscht), scroll an den Anfang
-  let lastHadItems = false;
-  $: {
+  // If result list goes from 0 → >0 (e.g., filters cleared), scroll to start
+  let lastHadItems = $state(false);
+  $effect(() => {
     const hasItems = flatTree.length > 0;
     if (hasItems && !lastHadItems) resetScroll();
     lastHadItems = hasItems;
-  }
+  });
 
   // Keep DOM scroller in sync if we programmatically change scrollTop
-  $: if (scrollEl && scrollEl.scrollTop !== scrollTop) {
-    scrollEl.scrollTop = scrollTop;
-  }
+  $effect(() => {
+    const el = scrollEl;
+    const top = scrollTop;
+    if (el && el.scrollTop !== top) el.scrollTop = top;
+  });
 
   // Viewport measurement
   let ro: ResizeObserver | null = null;
@@ -120,9 +129,13 @@
     step();
   }
 
-  $: if (flatTree) {
+  // Re-measure on tree changes
+  $effect(() => {
+    void flatTree.length;
     requestAnimationFrame(() => measureViewportDeferred(2));
-  }
+  });
+
+  function onWindowResize() { measureViewportDeferred(2); }
 
   onMount(() => {
     measureViewportDeferred();
@@ -131,10 +144,6 @@
     window.addEventListener("resize", onWindowResize, { passive: true });
   });
 
-  function onWindowResize() {
-    measureViewportDeferred(2);
-  }
-
   onDestroy(() => {
     if (ro && scrollEl) ro.unobserve(scrollEl);
     ro = null;
@@ -142,14 +151,8 @@
   });
 
   // --- Toolbar actions -------------------------------------------------------
-
-  function onSelectAll() {
-    post("selectAll");
-  }
-
-  function onDeselectAll() {
-    post("deselectAll");
-  }
+  function onSelectAll()   { post("selectAll"); }
+  function onDeselectAll() { post("deselectAll"); }
 
   /** Collect all directory paths that need a toggle to reach the target expansion state. */
   function collectToggleTargets(nodes: TreeNode[], expand: boolean, acc: string[] = []): string[] {
@@ -164,14 +167,13 @@
 
   /** Bulk set expansion by sending toggleExpansion for each directory that differs. */
   function bulkSetExpansion(expand: boolean) {
-    // Optimistically remember desired state to avoid flicker on next render.
     recordBulkExpanded($appState.tree, expand);
     const targets = collectToggleTargets($appState.tree, expand);
     for (const path of targets) post("toggleExpansion", path);
   }
 
-  function onExpandAll()  { bulkSetExpansion(true); }
-  function onCollapseAll(){ bulkSetExpansion(false); }
+  function onExpandAll()   { bulkSetExpansion(true); }
+  function onCollapseAll() { bulkSetExpansion(false); }
 
   // Keyboard activation for the placeholder
   function activateSelectDir(e: KeyboardEvent) {
@@ -185,8 +187,7 @@
   type TreeCounts = { files: number; folders: number };
 
   function countFilesAndFolders(nodes: TreeNode[]): TreeCounts {
-    let files = 0;
-    let folders = 0;
+    let files = 0; let folders = 0;
     const stack = [...(nodes || [])];
     while (stack.length) {
       const n = stack.pop()!;
@@ -201,20 +202,23 @@
   }
 
   // Always count visible (filtered) tree
-  $: visibleCounts = countFilesAndFolders($appState.tree);
+  const visibleCounts = $derived(countFilesAndFolders($appState.tree));
 
   // Baseline = last unfiltered counts. Update only when there is no active filter.
-  let baselineCounts: TreeCounts = { files: 0, folders: 0 };
-  $: if (!hasActiveFilters($appState)) {
-    baselineCounts = visibleCounts;
-  }
+  let baselineCounts = $state<TreeCounts>({ files: 0, folders: 0 });
+  $effect(() => {
+    if (!hasActiveFilters($appState)) {
+      baselineCounts = visibleCounts;
+    }
+  });
 
   // Stats texts
-  $: statsTextMain =
-    `Files: ${$appState.selected_files_count} selected of ${baselineCounts.files} • ` +
-    `Folders: ${baselineCounts.folders}`;
-  $: statsTextSecondary =
-    hasActiveFilters($appState) ? ` • Files Visible: ${visibleCounts.files}` : "";
+  const statsTextMain = $derived(
+    `Files: ${$appState.selected_files_count} selected of ${baselineCounts.files} • Folders: ${baselineCounts.folders}`
+  );
+  const statsTextSecondary = $derived(
+    hasActiveFilters($appState) ? ` • Files Visible: ${visibleCounts.files}` : ""
+  );
 
   // --- Helpers ---------------------------------------------------------------
   function hasActiveFilters(s: AppState): boolean {
@@ -222,23 +226,23 @@
   }
 
   // Center only the body (not the header) when showing placeholder/empty/scan states
-  $: centerBody =
+  const centerBody = $derived(
     !$appState.current_path ||
     $appState.tree.length === 0 ||
-    ($appState.is_scanning && $appState.tree.length === 0);
+    ($appState.is_scanning && $appState.tree.length === 0)
+  );
 </script>
 
-<!-- Root wrapper keeps the header fixed at the top -->
 <div class="file-tree-root">
   {#if $appState.current_path}
     <div class="panel-header files-header">
       <div class="files-title-section">
         <h3>Files</h3>
         <div class="button-group">
-          <button on:click={onSelectAll} disabled={$appState.is_scanning || !$appState.tree.length}>Select All</button>
-          <button on:click={onDeselectAll} disabled={$appState.is_scanning || !$appState.tree.length}>Deselect All</button>
-          <button on:click={onExpandAll} disabled={$appState.is_scanning || !$appState.tree.length}>Expand All</button>
-          <button on:click={onCollapseAll} disabled={$appState.is_scanning || !$appState.tree.length}>Collapse All</button>
+          <button onclick={onSelectAll}   disabled={$appState.is_scanning || !$appState.tree.length}>Select All</button>
+          <button onclick={onDeselectAll} disabled={$appState.is_scanning || !$appState.tree.length}>Deselect All</button>
+          <button onclick={onExpandAll}   disabled={$appState.is_scanning || !$appState.tree.length}>Expand All</button>
+          <button onclick={onCollapseAll} disabled={$appState.is_scanning || !$appState.tree.length}>Collapse All</button>
         </div>
       </div>
       <div class="stats" aria-live="polite">{statsTextMain}<span class="stats-secondary">{statsTextSecondary}</span></div>
@@ -253,12 +257,7 @@
             <Spinner size={16} ariaLabel="Scanning directory" />
             <span class="scan-text">Scanning directory...</span>
           </div>
-          <button
-            id="cancel-scan-btn"
-            class="cancel-scan-btn"
-            title="Cancel current scan"
-            on:click={() => post("cancelScan")}
-          >
+          <button id="cancel-scan-btn" class="cancel-scan-btn" title="Cancel current scan" onclick={() => post("cancelScan")}>
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
@@ -267,7 +266,6 @@
           </button>
         </div>
 
-        <!-- Keeps legacy #scan-progress-fill for IPC updates -->
         <LinearProgress idForFill="scan-progress-fill" ariaLabel="Scan progress" indeterminate />
 
         <div class="scan-details" aria-live="polite">
@@ -281,8 +279,8 @@
       <button
         type="button"
         class="placeholder"
-        on:click={() => post("selectDirectory")}
-        on:keydown={activateSelectDir}
+        onclick={() => post("selectDirectory")}
+        onkeydown={activateSelectDir}
       >
         Choose Directory
       </button>
@@ -291,7 +289,7 @@
       <div
         class="tree"
         bind:this={scrollEl}
-        on:scroll={onScroll}
+        onscroll={onScroll}
         style="overflow:auto; height:100%; min-height:0; flex:1 1 auto;"
         role="tree"
         aria-label="Project files"
@@ -309,7 +307,7 @@
       </div>
 
     {:else}
-      {#if hasActiveFilters($appState)}
+      {#if ($appState.search_query?.trim() || $appState.extension_filter?.trim() || $appState.content_search_query?.trim())}
         <div class="message-display" role="status" aria-live="polite">
           <div class="message-icon">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -326,8 +324,7 @@
           <div class="message-icon">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
-              <path d="M12 10v6" />
-              <path d="M9 13h6" />
+              <path d="M12 10v6" /><path d="M9 13h6" />
             </svg>
           </div>
           <p class="message-text">No files found in this directory.</p>
@@ -338,36 +335,20 @@
 </div>
 
 <style>
-  /* Keep tree from forcing parent to grow */
   .tree { min-height: 0; height: 100%; overflow: auto; flex: 1 1 auto; }
   .virtual-scroll-item { will-change: transform; }
 
-  /* Root wrapper keeps header fixed */
   .file-tree-root {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    height: 100%;
+    display: flex; flex-direction: column; min-height: 0; height: 100%;
   }
 
-  /* Body can be centered independently of the header */
   .file-tree-body {
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
+    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
   }
-  .file-tree-body.centered {
-    justify-content: center;
-    align-items: center;
-  }
+  .file-tree-body.centered { justify-content: center; align-items: center; }
 
-  /* Ensure outer slots don't collapse */
-  :global(.file-list-panel),
-  :global(.file-tree-container),
-  .tree { min-height: 0; }
+  :global(.file-list-panel), :global(.file-tree-container), .tree { min-height: 0; }
 
-  /* Scan area spacing */
   .scan-progress-container { width: 100%; display: flex; flex-direction: column; gap: var(--space-6); max-width: 720px; }
   .scan-progress-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); }
   .scan-status { display: inline-flex; align-items: center; gap: var(--space-5); color: var(--color-text); }

@@ -8,8 +8,8 @@
   import LinearProgress from '$lib/components/LinearProgress.svelte';
   import Skeleton from '$lib/components/Skeleton.svelte';
 
-  // Live stats recomputation when editor content changes
-  let contentVersion = 0;
+  // Track editor content changes to recompute live stats
+  let contentVersion = $state(0);
   let modelDispose: { dispose: () => void } | null = null;
 
   onMount(() => {
@@ -22,7 +22,7 @@
       if (editor && editor.getModel()) {
         modelDispose = editor.getModel()!.onDidChangeContent(() => {
           // trigger reactive recomputation
-          contentVersion += 1;
+          contentVersion = contentVersion + 1;
         });
       }
     });
@@ -43,38 +43,45 @@
     });
   }
 
-  // --- Reactive, component-scoped title + stats ---
+  // ---- Runes-derived title & stats (IIFE to return a value, not a function) ----
 
-  let pathPart = '';
-  let filename = '';
-  let statsText = 'Select a file to preview';
-
-  $: {
-    // Ensure this block depends on editor content changes
-    void contentVersion;
-
+  const pathPart = $derived((() => {
+    void contentVersion; // depend on content changes
     const mode = $previewMode;
     const editor = $editorInstance;
-
-    if (!editor || mode === 'idle') {
-      pathPart = '';
-      filename = 'Preview';
-      statsText = 'Select a file to preview';
-    } else if (mode === 'file') {
-      const content = editor.getValue();
+    if (!editor || mode === 'idle') return '';
+    if (mode === 'file') {
       const fullPath = $previewedPath ?? '';
       const res = splitPathForDisplay(fullPath, $appState.current_path);
-      pathPart = res.pathPart;
-      filename = res.filename;
-      statsText = generateStatsString(content, 'Read-only', undefined);
-    } else {
-      // generated
-      const content = editor.getValue();
-      pathPart = '';
-      filename = '';
-      statsText = generateStatsString(content, 'Editable', $generatedTokenCount ?? undefined);
+      return res.pathPart;
     }
-  }
+    return '';
+  })());
+
+  const filename = $derived((() => {
+    void contentVersion;
+    const mode = $previewMode;
+    const editor = $editorInstance;
+    if (!editor || mode === 'idle') return 'Preview';
+    if (mode === 'file') {
+      const fullPath = $previewedPath ?? '';
+      const res = splitPathForDisplay(fullPath, $appState.current_path);
+      return res.filename;
+    }
+    // mode === 'generated'
+    return '';
+  })());
+
+  const statsText = $derived((() => {
+    void contentVersion;
+    const mode = $previewMode;
+    const editor = $editorInstance;
+    if (!editor || mode === 'idle') return 'Select a file to preview';
+    const content = editor.getValue();
+    return (mode === 'file')
+      ? generateStatsString(content, 'Read-only', undefined)
+      : generateStatsString(content, 'Editable', $generatedTokenCount ?? undefined);
+  })());
 </script>
 
 <!--
@@ -112,7 +119,7 @@
       <button
         id="copy-btn"
         style:display={$previewMode !== 'idle' ? 'inline-block' : 'none'}
-        on:click={onCopyClick}
+        onclick={onCopyClick}
         disabled={$previewMode === 'idle'}
       >
         <svg
@@ -131,7 +138,7 @@
       <button
         id="clear-preview-btn"
         style:display={$previewMode !== 'idle' ? 'inline-block' : 'none'}
-        on:click={clearPreview}
+        onclick={clearPreview}
         disabled={$previewMode === 'idle'}
       >
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -145,7 +152,7 @@
 
   <!-- Generation progress hint (indeterminate) -->
   {#if $appState.is_generating}
-    <div class="gen-progress" aria-hidden="false">
+    <div class="gen-progress" aria-hidden={false}>
       <LinearProgress ariaLabel="Generating preview" indeterminate />
     </div>
   {/if}

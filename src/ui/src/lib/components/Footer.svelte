@@ -4,29 +4,22 @@
   import { get } from "svelte/store";
   import { canGenerate, canSave, isGenerating } from "$lib/stores/uiStores";
   import LogoMark from "$lib/components/LogoMark.svelte";
-  import { onDestroy } from "svelte";
 
-  let generatingIntervalId: ReturnType<typeof setInterval> | null = null;
-  let generatingDots = "";
+  // Local UI state for the animated "Concat…" dots
+  let generatingDots = $state("");
 
-  // Subscribe to the store instead of using a reactive block to avoid a potential infinite loop warning.
-  const unsubscribeGenerating = isGenerating.subscribe((active) => {
-    if (active) {
-      if (generatingIntervalId) clearInterval(generatingIntervalId);
+  // Drive the dots from $isGenerating via a Runes effect
+  $effect(() => {
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    if ($isGenerating) {
       generatingDots = "";
-      generatingIntervalId = setInterval(() => {
+      intervalId = setInterval(() => {
         generatingDots = generatingDots.length >= 3 ? "" : generatingDots + ".";
       }, 500);
     } else {
-      if (generatingIntervalId) clearInterval(generatingIntervalId);
-      generatingIntervalId = null;
       generatingDots = "";
     }
-  });
-
-  onDestroy(() => {
-    unsubscribeGenerating();
-    if (generatingIntervalId) clearInterval(generatingIntervalId);
+    return () => { if (intervalId) clearInterval(intervalId); };
   });
 
   function onGenerateClick() {
@@ -45,7 +38,7 @@
     id="generate-btn"
     class:is-generating={$isGenerating}
     class:button-cta={!$isGenerating}
-    on:click={onGenerateClick}
+    onclick={onGenerateClick}
     disabled={!$canGenerate && !$isGenerating}
     aria-busy={$isGenerating}
     aria-live="polite"
@@ -68,7 +61,7 @@
   <button
     id="save-btn"
     class="button-secondary"
-    on:click={onSaveClick}
+    onclick={onSaveClick}
     disabled={!$canSave}
     aria-disabled={!$canSave}
   >
