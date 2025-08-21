@@ -2,7 +2,6 @@
   import { appState, patternFilter } from '$lib/stores/app';
   import { post } from '$lib/services/backend';
   import { COMMON_IGNORE_PATTERNS } from '$lib/config';
-  import { sidebarResizer } from '$lib/actions/resizer';
 
   // Runes: derived flags/collections
   const searchEnabled = $derived(Boolean($appState.current_path && !$appState.is_scanning));
@@ -74,7 +73,7 @@
 </script>
 
 <!-- IMPORTANT: do not hide the resizer mount; the action will size/style it. -->
-<div use:sidebarResizer aria-hidden="true"></div>
+<div class="sidebar-resize-handle-left" aria-hidden="true"></div>
 
 <div class="panel">
   <div class="panel-header">

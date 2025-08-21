@@ -3,6 +3,10 @@
 @import "./src/lib/design/themes/dark.css";
 @import "./src/lib/design/utilities.css";
 
+:root {
+  --resize-zone: 9px;
+}
+
 /* ---------- Reset / Base ---------- */
 *,
 *::before,
@@ -93,12 +97,34 @@ body.vertical-resizing {
   transition: border-right-color 0.2s ease;
 }
 
+.sidebar-resize-handle-left,
+.sidebar-resize-handle-right {
+  position: absolute;
+  top: 0;
+  width: var(--resize-zone);
+  height: 100%;
+  cursor: ew-resize;
+  z-index: var(--z-popover);
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.sidebar-resize-handle-left {
+  right: 0;
+}
+
+.sidebar-resize-handle-right {
+  left: -1px;
+  width: calc(var(--resize-zone) + 1px);
+}
+
 /* ---------- Main content ---------- */
 .main-content {
   flex-grow: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
+  position: relative;
 }
 
 .top-bar {
@@ -186,10 +212,10 @@ body.vertical-resizing {
 .resizer::before {
   content: "";
   position: absolute;
-  top: -8px;
+  top: calc(-1 * var(--resize-zone));
   left: 0;
   right: 0;
-  height: 18px;
+  height: calc(2 * var(--resize-zone));
   cursor: ns-resize;
   z-index: 1;
 }

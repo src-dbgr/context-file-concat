@@ -20,7 +20,6 @@ export function verticalResizer(node: HTMLElement) {
     }
 
     e.preventDefault();
-    node.setPointerCapture(e.pointerId);
     document.body.classList.add("vertical-resizing");
 
     const splitterTop = contentSplitter.getBoundingClientRect().top;
@@ -39,18 +38,15 @@ export function verticalResizer(node: HTMLElement) {
     };
 
     const onUp = () => {
-      try {
-        node.releasePointerCapture(e.pointerId);
-      } catch {
-        /* noop – pointer already released */
-      }
       document.body.classList.remove("vertical-resizing");
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
 
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }
 
   node.addEventListener("pointerdown", onPointerDown);
@@ -63,60 +59,69 @@ export function verticalResizer(node: HTMLElement) {
 
 /**
  * Sidebar-Resizer: expects the **concrete Sidebar-HTMLElement-reference**.
- * In bound in `main.ts` after mount to `<aside.sidebar>`.
+ * Bound in `main.ts` to `<aside.sidebar>`.
+ *
+ * Zone-widht comes from CSS-Variable --resize-zone (px).
  */
 export function sidebarResizer(sidebarEl: HTMLElement) {
-  let isDrag = false;
+  const MIN = 280;
+  const MAX = 600;
+
+  function getZone(): number {
+    const raw = getComputedStyle(document.documentElement)
+      .getPropertyValue("--resize-zone")
+      .trim();
+    const num = parseFloat(raw);
+    return Number.isFinite(num) ? num : 12;
+  }
+
+  let dragging = false;
   let startX = 0;
   let startWidth = 0;
 
-  function isNearRightEdge(x: number) {
-    const rect = sidebarEl.getBoundingClientRect();
-    return x >= rect.right - 5 && x <= rect.right + 5;
+  function inZone(e: PointerEvent): boolean {
+    const zone = getZone();
+    const r = sidebarEl.getBoundingClientRect();
+    return (
+      e.clientX >= r.right - zone &&
+      e.clientX <= r.right + zone &&
+      e.clientY >= r.top &&
+      e.clientY <= r.bottom
+    );
   }
 
-  function onMouseDown(e: MouseEvent) {
-    if (!isNearRightEdge(e.clientX)) return;
-    e.preventDefault();
-    isDrag = true;
+  function onPointerDown(e: PointerEvent) {
+    if (!inZone(e)) return;
+    dragging = true;
     startX = e.clientX;
-    startWidth = parseInt(getComputedStyle(sidebarEl).width, 10);
+    startWidth = sidebarEl.getBoundingClientRect().width;
     document.body.classList.add("sidebar-resizing");
+    e.preventDefault();
   }
 
-  function onMouseMove(e: MouseEvent) {
-    if (isDrag) {
-      const newWidth = Math.max(
-        280,
-        Math.min(600, startWidth + e.clientX - startX)
-      );
-      sidebarEl.style.width = `${newWidth}px`;
-    } else {
-      if (isNearRightEdge(e.clientX)) {
-        document.body.style.cursor = "ew-resize";
-      } else if (document.body.style.cursor === "ew-resize") {
-        document.body.style.cursor = "default";
-      }
-    }
+  function onPointerMove(e: PointerEvent) {
+    if (!dragging) return;
+    const w = Math.max(MIN, Math.min(MAX, startWidth + (e.clientX - startX)));
+    sidebarEl.style.width = `${w}px`;
   }
 
-  function onMouseUp() {
-    if (isDrag) {
-      isDrag = false;
-      document.body.classList.remove("sidebar-resizing");
-      document.body.style.cursor = "default";
-    }
+  function onPointerUp() {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("sidebar-resizing");
   }
 
-  document.addEventListener("mousedown", onMouseDown);
-  document.addEventListener("mousemove", onMouseMove);
-  document.addEventListener("mouseup", onMouseUp);
+  window.addEventListener("pointerdown", onPointerDown);
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerUp);
 
   return {
     destroy() {
-      document.removeEventListener("mousedown", onMouseDown);
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
     },
   };
 }
