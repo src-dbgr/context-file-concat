@@ -1,7 +1,6 @@
 <script lang="ts">
   import { editorInstance } from "$lib/stores/app";
   import { post } from "$lib/services/backend";
-  import { get } from "svelte/store";
   import { canGenerate, canSave, isGenerating } from "$lib/stores/uiStores";
   import LogoMark from "$lib/components/LogoMark.svelte";
 
@@ -28,7 +27,7 @@
   }
 
   function onSaveClick() {
-    const editor = get(editorInstance);
+    const editor = $editorInstance;
     if (editor) post("saveFile", editor.getValue());
   }
 </script>

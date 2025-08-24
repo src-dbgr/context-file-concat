@@ -1,4 +1,4 @@
-// ESLint 9 Flat Config – Svelte 5 + TypeScript (non-typed, CI-freundlich)
+// ESLint 9 Flat Config – Svelte 5 + TypeScript (non-typed, CI-friendly)
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import svelte from "eslint-plugin-svelte";
@@ -15,7 +15,7 @@ export default [
       ".vite/**",
       ".idea/**",
       ".vscode/**",
-      // Konfigurationsdateien überspringen (verhindert ProjectService-Parsing)
+      // Skip config files (avoid unnecessary parser work)
       "eslint.config.js",
       "svelte.config.js",
     ],
@@ -24,15 +24,15 @@ export default [
   // Base JS rules
   js.configs.recommended,
 
-  // TypeScript – Not typed
+  // TypeScript – not typed (fast CI defaults)
   ...tseslint.configs.recommended,
 
   // Svelte Flat Configs
   ...svelte.configs["flat/recommended"],
-  // Important: This preset ist an Array → spread!
+  // Prettier compatibility
   ...svelte.configs["flat/prettier"],
 
-  // Projektweite Optionen/Regeln
+  // Project-wide options/rules
   {
     languageOptions: {
       parserOptions: {
@@ -48,21 +48,48 @@ export default [
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
-      // Bis wir typed linting wieder aktivieren:
+      // Until typed linting is re-enabled:
       "@typescript-eslint/consistent-type-imports": "off",
       "@typescript-eslint/triple-slash-reference": "off",
     },
   },
 
-  // .svelte-spezifische Ergänzungen
+  // Svelte-specific overrides
   {
     files: ["**/*.svelte"],
     languageOptions: {
-      // Der svelte-eslint-parser nutzt diesen Parser für <script lang="ts">
+      // svelte-eslint-parser uses this parser for <script lang="ts">
       parserOptions: { parser: tseslint.parser },
     },
     rules: {
       "svelte/valid-compile": ["error", { ignoreWarnings: false }],
+
+      // ❌ Forbid legacy reactive statements ($:)
+      // Use $derived/$effect instead.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "SvelteReactiveStatement",
+          message:
+            "Legacy reactive statements ($:) are forbidden. Use $derived/$effect.",
+        },
+      ],
+
+      // ❌ In Svelte components do not import `get` from 'svelte/store'.
+      // Read stores via $store or derive via $derived/$effect.
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "svelte/store",
+              importNames: ["get"],
+              message:
+                "Do not use get() inside Svelte components. Use $store or $derived/$effect instead.",
+            },
+          ],
+        },
+      ],
     },
   },
 ];
