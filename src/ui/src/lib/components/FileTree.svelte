@@ -4,7 +4,7 @@
   import { post } from "$lib/services/backend";
   import type { AppState, TreeNode } from "$lib/types";
   import TreeItem from "./TreeItem.svelte";
-  import { recordBulkExpanded } from "$lib/modules/treeExpansion";
+  import { recordBulkExpanded, recordDirExpanded } from "$lib/modules/treeExpansion";
   import Spinner from "$lib/components/Spinner.svelte";
   import LinearProgress from "$lib/components/LinearProgress.svelte";
 
@@ -372,7 +372,7 @@
   // Central key handler for roving navigation & item actions
   function onTreeKeyDown(e: KeyboardEvent) {
     if (focusedIndex < 0 || focusedIndex >= flatTree.length) {
-      // Allow starting typeahead even if nothing focused
+      // allow starting typeahead even if nothing focused
       if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
         pushTypeahead(e.key);
         e.preventDefault();
@@ -383,7 +383,7 @@
     const item = flatTree[focusedIndex];
     const node = item.node;
 
-    // Navigation keys
+    // Navigation
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setFocusByIndex(focusedIndex + 1);
@@ -415,28 +415,32 @@
       return;
     }
 
-    // Expand/Collapse semantics per WAI-ARIA Tree pattern
+    // Expand/Collapse per WAI-ARIA Tree pattern
     if (e.key === "ArrowRight") {
       e.preventDefault();
       if (node.is_directory) {
         if (!node.is_expanded) {
+          // keep memory in sync so backend render won't override
+          recordDirExpanded(node.path, true);
           post("toggleExpansion", node.path);
         } else {
-          // Move to first child if expanded and has children
+          // move to first child
           const next = focusedIndex + 1;
           if (next < flatTree.length && flatTree[next].level === item.level + 1) {
             setFocusByIndex(next);
           }
         }
       } else {
-        // For files: open preview
         post("loadFilePreview", node.path);
       }
       return;
     }
+
     if (e.key === "ArrowLeft") {
       e.preventDefault();
       if (node.is_directory && node.is_expanded) {
+        // mirror collapse into memory
+        recordDirExpanded(node.path, false);
         post("toggleExpansion", node.path);
       } else {
         const parent = findParentIndex(focusedIndex);
@@ -449,26 +453,22 @@
     if (e.key === "Enter") {
       e.preventDefault();
       if (node.is_directory) {
+        recordDirExpanded(node.path, !node.is_expanded);
         post("toggleExpansion", node.path);
       } else {
         post("loadFilePreview", node.path);
       }
       return;
     }
+
     if (e.key === " ") {
       e.preventDefault();
       if (node.is_directory) post("toggleDirectorySelection", node.path);
       else post("toggleSelection", node.path);
       return;
     }
-    // Optional: quick ignore via "i"
-    if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === "i" || e.key === "I")) {
-      e.preventDefault();
-      post("addIgnorePath", node.path);
-      return;
-    }
 
-    // Typeahead (letters/numbers/.-_)
+    // Typeahead
     if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
       pushTypeahead(e.key);
       e.preventDefault();
