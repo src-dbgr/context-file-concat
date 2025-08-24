@@ -82,7 +82,8 @@ fi
 print_status "Building frontend..."
 if [ "$DRY_RUN" = false ]; then
     cd src/ui
-    npm install
+    # Deterministic install
+    npm ci
     npm run build
     cd ../..
 else

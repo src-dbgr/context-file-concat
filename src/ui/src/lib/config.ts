@@ -1,5 +1,5 @@
 export const MONACO_VS_PATH =
-  "https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs";
+  "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs";
 
 export const COMMON_IGNORE_PATTERNS = [
   "node_modules",

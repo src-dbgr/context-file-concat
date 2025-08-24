@@ -128,7 +128,7 @@
   .svg { width: 100%; height: 100%; }
 
   .bolt-fill   { fill: currentColor; transition: fill 120ms ease; }
-  .bolt-stroke { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; opacity: 0.85; }
+  .bolt-stroke { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; opacity: 0; }
   .bolt-flash  { fill: var(--flash, #ffe066); opacity: 0; }
 
   .cfc-logo.bolt .bolt-stroke {
@@ -152,7 +152,7 @@
   .cfc-logo.is-striking .bolt-stroke {
     stroke-dasharray: none;
     animation: none;
-    stroke-width: calc(1.5px + .7px * var(--amp));
+    /* stroke-width: calc(1.5px + .7px * var(--amp)); */
     opacity: 1;
     filter: drop-shadow(0 0 calc(1px + 1px * var(--amp)) currentColor) drop-shadow(0 0 calc(6px + 10px * var(--amp)) currentColor);
   }

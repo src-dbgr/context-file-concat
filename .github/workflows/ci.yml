@@ -31,14 +31,31 @@ jobs:
             librsvg2-dev \
             libwebkit2gtk-4.1-dev
 
-      - name: Setup Node.js
+      - name: Setup Node.js (24.x)
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
+          check-latest: true
           cache: "npm"
           cache-dependency-path: "./src/ui/package-lock.json"
 
-      - name: Install npm dependencies
+      - name: Use npm 11 (align with packageManager)
+        shell: bash
+        run: |
+          if [ "$(npm -v | cut -d. -f1)" != "11" ]; then
+            npm i -g npm@11
+          fi
+          echo "Node: $(node -v)"
+          echo "npm : $(npm -v)"
+
+      - name: Enforce npm engine strictness (Node 24)
+        run: |
+          npm config set engine-strict true
+          node -v
+          npm -v
+        working-directory: ./src/ui
+
+      - name: Install npm dependencies (clean, deterministic)
         run: npm ci
         working-directory: ./src/ui
 
