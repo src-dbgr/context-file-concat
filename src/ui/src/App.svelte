@@ -2,6 +2,7 @@
   import { appState, editorInstance, editorDecorations, previewedPath } from '$lib/stores/app';
   import type * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
   import StatusBar from '$lib/components/StatusBar.svelte';
+  import ToastHost from '$lib/components/ToastHost.svelte';
 
   // Non reactive store – avoids Self-trigger
   let lastDecorationIds: string[] = [];
@@ -64,3 +65,4 @@
 </script>
 
 <StatusBar />
+<ToastHost />

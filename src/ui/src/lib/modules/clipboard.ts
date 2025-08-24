@@ -3,6 +3,7 @@ import { getUndoManagerForElement } from "./undo.js";
 import { elements } from "../dom.js";
 import type { FocusContext } from "../types.js";
 import { get } from "svelte/store";
+import { toast } from "../stores/toast.js";
 
 async function readFromClipboardWithFallback(): Promise<string | null> {
   try {
@@ -79,6 +80,13 @@ export async function handleCopy(context: FocusContext) {
       : "✗ Failed to copy to clipboard.";
   }
 
+  // Toast feedback (non-intrusive, timed)
+  if (success) {
+    toast.success("Copied to clipboard");
+  } else {
+    toast.error("Failed to copy to clipboard");
+  }
+
   if (isEditorFocused && elements.copyBtn) {
     if (success) {
       elements.copyBtn.innerHTML = `... Copied!`;
@@ -114,19 +122,23 @@ export async function handlePaste(context: FocusContext) {
     if (text) {
       document.execCommand("insertText", false, text);
       statusEl.textContent = `✓ Content pasted.`;
+      toast.success("Pasted content");
       activeEl.dispatchEvent(new Event("input", { bubbles: true }));
     } else {
       statusEl.textContent = `✗ Paste failed or clipboard empty.`;
+      toast.warning("Clipboard is empty");
     }
   } else if (isEditorFocused) {
     const clipboardText = await readFromClipboardWithFallback();
 
     if (clipboardText === null) {
       statusEl.textContent = "Status: Paste cancelled.";
+      toast.info("Paste cancelled");
       return;
     }
     if (!clipboardText) {
       statusEl.textContent = "Status: Clipboard is empty.";
+      toast.warning("Clipboard is empty");
       return;
     }
 
@@ -136,9 +148,11 @@ export async function handlePaste(context: FocusContext) {
     if (selection) {
       editor.executeEdits("paste", [{ range: selection, text: clipboardText }]);
       statusEl.textContent = `✓ Content pasted.`;
+      toast.success("Pasted into editor");
     }
   } else {
     statusEl.textContent = "✗ Paste not supported here.";
+    toast.error("Paste not supported here");
   }
 }
 
@@ -181,4 +195,6 @@ export async function handleCut(context: FocusContext) {
   }
 
   statusEl.textContent = success ? `✓ Text cut to clipboard.` : `✗ Cut failed.`;
+  if (success) toast.success("Cut to clipboard");
+  else toast.error("Cut failed");
 }

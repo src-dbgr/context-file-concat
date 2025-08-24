@@ -1503,3 +1503,15 @@ input[type="checkbox"][data-indeterminate="true"]::before {
     transform: rotate(30deg);
   }
 }
+
+/* ---------- Toast host (visual tweaks for global placement) ----------
+ * NOTE: The main toast CSS lives in ToastHost.svelte (scoped).
+ * These rules are intentionally minimal/global or responsive if needed.
+ */
+@media (max-width: 600px) {
+  .toast-host {
+    right: 8px !important;
+    left: 8px !important;
+    bottom: 50px !important;
+  }
+}

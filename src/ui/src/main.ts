@@ -32,6 +32,7 @@ import {
   FileSaveStatusArgsSchema,
   DragStateSchema,
 } from "$lib/ipc/schema";
+import { toast } from "$lib/stores/toast";
 
 // Mount core UI fragments
 mount(App, { target: document.getElementById("svelte-root")! });
@@ -106,6 +107,7 @@ window.render = (incoming: AppState) => {
       s.status_message = "Error: Failed to render state.";
       return s;
     });
+    toast.error("Failed to render state");
   }
 };
 
@@ -210,6 +212,7 @@ window.showError = (msg: string) => {
     s.status_message = `Error: ${parsed.data}`;
     return s;
   });
+  toast.error(parsed.data);
 };
 
 window.showStatus = (msg: string) => {
@@ -225,6 +228,7 @@ window.showStatus = (msg: string) => {
     s.status_message = `Status: ${parsed.data}`;
     return s;
   });
+  // Intentionally NOT toasting generic status updates to avoid noise.
 };
 
 window.fileSaveStatus = (success: boolean, path: string) => {
@@ -249,6 +253,15 @@ window.fileSaveStatus = (success: boolean, path: string) => {
     s.status_message = msg;
     return s;
   });
+
+  // Toasts for user feedback
+  if (p === "cancelled") {
+    toast.info("Save cancelled");
+  } else if (ok) {
+    toast.success("File saved");
+  } else {
+    toast.error("Failed to save file");
+  }
 };
 
 window.setDragState = (isDragging: boolean) => {
