@@ -10,6 +10,10 @@
 
   const indentWidth = () => level * 21;
 
+  // Auswahl-Zustände (nur für Directory relevant)
+  const isDirPartial = $derived(node.is_directory && node.selection_state === 'partial');
+  const isDirFull = $derived(node.is_directory && node.selection_state === 'full');
+
   function toggleDir() {
     // Optimistically remember the desired state so a later backend render
     // cannot collapse the node again.
@@ -32,22 +36,13 @@
     post('addIgnorePath', node.path);
   }
 
-  // keep checkbox indeterminate in sync
-  function indeterminate(el: HTMLInputElement, value: boolean) {
-    el.indeterminate = value;
-    return {
-      update(v: boolean) {
-        el.indeterminate = v;
-      }
-    };
-  }
-
   function onActivate(e: KeyboardEvent, action: () => void) {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       action();
     }
   }
+  
 </script>
 
 {#if node.is_directory}
@@ -73,8 +68,9 @@
 		></span>
 		<input
 			type="checkbox"
-			checked={node.selection_state === 'full'}
-			use:indeterminate={node.selection_state === 'partial'}
+			checked={isDirFull}
+			data-indeterminate={isDirPartial ? 'true' : 'false'}
+			aria-checked={isDirPartial ? 'mixed' : (isDirFull ? 'true' : 'false')}
 			onclick={toggleDirCheckbox}
 			data-path={node.path}
 			data-type="dir-checkbox"
