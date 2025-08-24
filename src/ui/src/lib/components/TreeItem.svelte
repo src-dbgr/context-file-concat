@@ -5,8 +5,8 @@
   import { recordDirExpanded } from '$lib/modules/treeExpansion';
 
   // Runes props (no `export let` in Svelte 5)
-  type Props = { node: TreeNode; level?: number };
-  let { node, level = 0 }: Props = $props();
+	type Props = { node: TreeNode; level?: number; index?: number; focused?: boolean };
+	let { node, level = 0, index = 0, focused = false }: Props = $props();
 
   const indentWidth = () => level * 21;
 
@@ -55,9 +55,12 @@
 		class="tree-item-container directory-item"
 		data-path={node.path}
 		data-type="directory"
+		data-index={index}
 		role="treeitem"
 		aria-level={level + 1}
 		aria-selected="false"
+		aria-expanded={node.is_expanded ? 'true' : 'false'}
+		tabindex={focused ? 0 : -1}
 	>
 		<span style="width: {indentWidth()}px; flex-shrink: 0;"></span>
 		<span
@@ -106,9 +109,11 @@
 	<div
 		class="tree-item-container file-item {node.is_previewed ? 'previewed' : ''}"
 		data-path={node.path}
+		data-index={index}
 		role="treeitem"
 		aria-level={level + 1}
 		aria-selected={node.is_previewed ? 'true' : 'false'}
+		tabindex={focused ? 0 : -1}
 	>
 		<span style="width: {indentWidth()}px; flex-shrink: 0;"></span>
 		<span class="spacer"></span>

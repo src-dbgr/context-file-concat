@@ -21,6 +21,76 @@
   let lastPath = $state<string | null>(null);
   let lastFilterKey = $state("");
 
+  // Roving tabindex / keyboard a11y -------------------------------------------
+  let focusedIndex = $state<number>(-1); // index in flatTree
+  let typeaheadBuffer = $state<string>("");
+  let typeaheadTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function setFocusByIndex(next: number, opts: { ensureView?: boolean } = { ensureView: true }) {
+    if (!flatTree.length) {
+      focusedIndex = -1;
+      return;
+    }
+    const clamped = Math.max(0, Math.min(flatTree.length - 1, next | 0));
+    focusedIndex = clamped;
+    if (opts.ensureView) ensureItemVisible(clamped);
+    // Focus DOM target after the next frame (virtualization might re-render)
+    requestAnimationFrame(() => {
+      const node = document.querySelector<HTMLElement>(
+        `.tree [data-index="${clamped}"]`
+      );
+      node?.focus();
+    });
+  }
+
+  // When tree content appears for the first time, focus the first item
+  $effect(() => {
+    if (flatTree.length && focusedIndex === -1) setFocusByIndex(0, { ensureView: false });
+  });
+
+  // Preserve focus by path across re-renders if possible
+  let lastFocusedPath = $state<string | null>(null);
+  $effect(() => {
+    const idx = focusedIndex;
+    if (idx >= 0 && idx < flatTree.length) {
+      lastFocusedPath = flatTree[idx].node.path;
+    }
+  });
+  $effect(() => {
+    // Try to restore focus to the same path after tree changes
+    const path = lastFocusedPath;
+    if (!path) return;
+    const idx = flatTree.findIndex((it) => it.node.path === path);
+    if (idx !== -1) {
+      focusedIndex = idx;
+    } else if (flatTree.length) {
+      focusedIndex = Math.min(focusedIndex, flatTree.length - 1);
+    } else {
+      focusedIndex = -1;
+    }
+  });
+
+  // Typeahead search within the tree
+  function pushTypeahead(char: string) {
+    const c = char.toLowerCase();
+    if (!/^[a-z0-9._-]$/i.test(c)) return;
+    if (typeaheadTimer) clearTimeout(typeaheadTimer);
+    typeaheadBuffer = (typeaheadBuffer + c).slice(0, 40);
+    typeaheadTimer = setTimeout(() => (typeaheadBuffer = ""), 800);
+
+    const start = Math.max(0, focusedIndex) + 1;
+    const matchFrom = (from: number, to: number) => {
+      for (let i = from; i < to; i++) {
+        const name = flatTree[i].node.name.toLowerCase();
+        if (name.startsWith(typeaheadBuffer)) return i;
+      }
+      return -1;
+    };
+    let idx = matchFrom(start, flatTree.length);
+    if (idx === -1) idx = matchFrom(0, start);
+    if (idx !== -1) setFocusByIndex(idx);
+  }
+
   type FlatItem = { node: TreeNode; level: number; index: number };
 
   function flattenTree(nodes: TreeNode[], level = 0, acc: FlatItem[] = []): FlatItem[] {
@@ -40,11 +110,7 @@
   // Total virtual height
   const totalHeight = $derived(flatTree.length * ITEM_HEIGHT);
 
-  /**
-   * Clamp and synchronize the scroll position with the DOM.
-   * This prevents "gaps" when the container is resized and the browser
-   * silently adjusts scrollTop without emitting a scroll event.
-   */
+  /** Clamp and synchronize the scroll position with the DOM. */
   function clampAndSyncScroll() {
     const el = scrollEl;
     if (!el) return;
@@ -59,7 +125,6 @@
     const contentPx = totalHeight;
     const vp = Math.max(0, viewportHeight);
 
-    // If the viewport is large enough to show everything, don't virtualize.
     if (vp >= contentPx) {
       return flatTree.map((it, i) => ({ node: it.node, level: it.level, index: i }));
     }
@@ -95,6 +160,8 @@
     if (p !== lastPath) {
       lastPath = p;
       resetScroll();
+      // place focus at the top when path changes
+      focusedIndex = flatTree.length ? 0 : -1;
     }
   });
 
@@ -111,6 +178,8 @@
     if (k !== lastFilterKey) {
       lastFilterKey = k;
       resetScroll();
+      // Reset roving focus to the first result when filters change
+      focusedIndex = flatTree.length ? 0 : -1;
     }
   });
 
@@ -135,7 +204,6 @@
   async function measureViewport() {
     await tick();
     viewportHeight = scrollEl?.clientHeight ?? 0;
-    // Important: after a height change, ensure a valid scrollTop
     clampAndSyncScroll();
   }
 
@@ -159,7 +227,6 @@
   });
 
   function onWindowResize() { measureViewportDeferred(2); }
-
   function onLayout() { measureViewportDeferred(1); }
 
   onMount(() => {
@@ -258,6 +325,155 @@
     $appState.tree.length === 0 ||
     ($appState.is_scanning && $appState.tree.length === 0)
   );
+
+  // Ensure an item is visible in the viewport (adjust scrollTop if needed)
+  function ensureItemVisible(index: number) {
+    const el = scrollEl;
+    if (!el) return;
+    const itemTop = index * ITEM_HEIGHT;
+    const itemBottom = itemTop + ITEM_HEIGHT;
+    const viewTop = el.scrollTop;
+    const viewBottom = el.scrollTop + el.clientHeight;
+
+    if (itemTop < viewTop) {
+      el.scrollTop = itemTop;
+      scrollTop = el.scrollTop;
+    } else if (itemBottom > viewBottom) {
+      el.scrollTop = itemBottom - el.clientHeight;
+      scrollTop = el.scrollTop;
+    }
+  }
+
+  // Find parent index by walking backwards to the first node with a smaller level
+  function findParentIndex(idx: number): number {
+    if (idx <= 0 || idx >= flatTree.length) return -1;
+    const level = flatTree[idx].level;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (flatTree[i].level < level) return i;
+    }
+    return -1;
+  }
+
+  function itemsPerPage(): number {
+    return Math.max(1, Math.floor(viewportHeight / ITEM_HEIGHT) || 1);
+    }
+
+  // Delegated focus tracking (when user clicks or tabs into an item)
+  function onTreeFocusIn(e: FocusEvent) {
+    const target = (e.target as HTMLElement).closest<HTMLElement>(".tree-item-container");
+    if (!target) return;
+    const idxAttr = target.getAttribute("data-index");
+    if (idxAttr) {
+      const idx = Number(idxAttr);
+      if (Number.isFinite(idx)) focusedIndex = idx;
+    }
+  }
+
+  // Central key handler for roving navigation & item actions
+  function onTreeKeyDown(e: KeyboardEvent) {
+    if (focusedIndex < 0 || focusedIndex >= flatTree.length) {
+      // Allow starting typeahead even if nothing focused
+      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        pushTypeahead(e.key);
+        e.preventDefault();
+      }
+      return;
+    }
+
+    const item = flatTree[focusedIndex];
+    const node = item.node;
+
+    // Navigation keys
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setFocusByIndex(focusedIndex + 1);
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setFocusByIndex(focusedIndex - 1);
+      return;
+    }
+    if (e.key === "Home") {
+      e.preventDefault();
+      setFocusByIndex(0);
+      return;
+    }
+    if (e.key === "End") {
+      e.preventDefault();
+      setFocusByIndex(flatTree.length - 1);
+      return;
+    }
+    if (e.key === "PageDown") {
+      e.preventDefault();
+      setFocusByIndex(focusedIndex + itemsPerPage());
+      return;
+    }
+    if (e.key === "PageUp") {
+      e.preventDefault();
+      setFocusByIndex(focusedIndex - itemsPerPage());
+      return;
+    }
+
+    // Expand/Collapse semantics per WAI-ARIA Tree pattern
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      if (node.is_directory) {
+        if (!node.is_expanded) {
+          post("toggleExpansion", node.path);
+        } else {
+          // Move to first child if expanded and has children
+          const next = focusedIndex + 1;
+          if (next < flatTree.length && flatTree[next].level === item.level + 1) {
+            setFocusByIndex(next);
+          }
+        }
+      } else {
+        // For files: open preview
+        post("loadFilePreview", node.path);
+      }
+      return;
+    }
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      if (node.is_directory && node.is_expanded) {
+        post("toggleExpansion", node.path);
+      } else {
+        const parent = findParentIndex(focusedIndex);
+        if (parent !== -1) setFocusByIndex(parent);
+      }
+      return;
+    }
+
+    // Activate / select
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (node.is_directory) {
+        post("toggleExpansion", node.path);
+      } else {
+        post("loadFilePreview", node.path);
+      }
+      return;
+    }
+    if (e.key === " ") {
+      e.preventDefault();
+      if (node.is_directory) post("toggleDirectorySelection", node.path);
+      else post("toggleSelection", node.path);
+      return;
+    }
+    // Optional: quick ignore via "i"
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === "i" || e.key === "I")) {
+      e.preventDefault();
+      post("addIgnorePath", node.path);
+      return;
+    }
+
+    // Typeahead (letters/numbers/.-_)
+    if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      pushTypeahead(e.key);
+      e.preventDefault();
+    }
+  }
 </script>
 
 <div class="file-tree-root">
@@ -317,9 +533,13 @@
         class="tree"
         bind:this={scrollEl}
         onscroll={onScroll}
+        onfocusin={onTreeFocusIn}
+        onkeydown={onTreeKeyDown}
         style="overflow:auto; height:100%; min-height:0; flex:1 1 auto;"
         role="tree"
         aria-label="Project files"
+        aria-multiselectable="true"
+        tabindex="0"
       >
         <div class="virtual-scroll-sizer" style="height:{totalHeight}px; position:relative;">
           {#each visibleSlice as item (item.node.path)}
@@ -327,12 +547,16 @@
               class="virtual-scroll-item"
               style="position:absolute; left:0; right:0; top:{item.index * ITEM_HEIGHT}px; height:{ITEM_HEIGHT}px;"
             >
-              <TreeItem node={item.node} level={item.level} />
+              <TreeItem
+                node={item.node}
+                level={item.level}
+                index={item.index}
+                focused={item.index === focusedIndex}
+              />
             </div>
           {/each}
         </div>
       </div>
-
     {:else}
       {#if ($appState.search_query?.trim() || $appState.extension_filter?.trim() || $appState.content_search_query?.trim())}
         <div class="message-display" role="status" aria-live="polite">
@@ -365,13 +589,8 @@
   .tree { min-height: 0; height: 100%; overflow: auto; flex: 1 1 auto; }
   .virtual-scroll-item { will-change: transform; }
 
-  .file-tree-root {
-    display: flex; flex-direction: column; min-height: 0; height: 100%;
-  }
-
-  .file-tree-body {
-    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
-  }
+  .file-tree-root { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+  .file-tree-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
   .file-tree-body.centered { justify-content: center; align-items: center; }
 
   :global(.file-list-panel), :global(.file-tree-container), .tree { min-height: 0; }

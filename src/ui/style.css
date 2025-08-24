@@ -1019,9 +1019,18 @@ input[type="checkbox"][data-indeterminate="true"]::before {
   width: 100%;
   overflow: hidden;
 }
+
 .tree summary:hover,
-.tree .tree-item-container:hover {
+.tree .tree-item-container:hover,
+.tree .tree-item-container:focus,
+.tree .tree-item-container:focus-visible {
   background-color: var(--surface-2);
+}
+
+.tree .tree-item-container[tabindex="0"] {
+  outline: 0.5px solid var(--color-accent) !important;
+  outline-offset: -1px;
+  background: none;
 }
 
 .tree .tree-item-container.previewed,
