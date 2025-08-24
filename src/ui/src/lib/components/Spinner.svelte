@@ -5,7 +5,11 @@
     ariaLabel?: string;
     ariaHidden?: boolean;
   };
-  let { size = 16, ariaLabel = "Loading", ariaHidden = false }: Props = $props();
+  let {
+    size = 16,
+    ariaLabel = "Loading",
+    ariaHidden = false,
+  }: Props = $props();
 </script>
 
 <span
@@ -15,9 +19,22 @@
   aria-label={ariaHidden ? undefined : ariaLabel}
   style={`--_s:${size}px`}
 >
-  <svg viewBox="0 0 50 50" class="cfc-spinner-svg" aria-hidden="true" focusable="false">
+  <svg
+    viewBox="0 0 50 50"
+    class="cfc-spinner-svg"
+    aria-hidden="true"
+    focusable="false"
+  >
     <circle class="track" cx="25" cy="25" r="20" fill="none" stroke-width="5" />
-    <circle class="arc" cx="25" cy="25" r="20" fill="none" stroke-width="5" stroke-linecap="round" />
+    <circle
+      class="arc"
+      cx="25"
+      cy="25"
+      r="20"
+      fill="none"
+      stroke-width="5"
+      stroke-linecap="round"
+    />
   </svg>
 </span>
 
@@ -29,20 +46,41 @@
     width: var(--_s);
     height: var(--_s);
   }
-  .cfc-spinner-svg { width: 100%; height: 100%; }
-  .track { stroke: color-mix(in srgb, var(--color-border) 60%, transparent); opacity: .6; }
+  .cfc-spinner-svg {
+    width: 100%;
+    height: 100%;
+  }
+  .track {
+    stroke: color-mix(in srgb, var(--color-border) 60%, transparent);
+    opacity: 0.6;
+  }
   .arc {
     stroke: var(--color-accent);
     transform-origin: 50% 50%;
-    animation: cfc-spin 1s linear infinite, cfc-sweep 1.25s ease-in-out infinite;
+    animation:
+      cfc-spin 1s linear infinite,
+      cfc-sweep 1.25s ease-in-out infinite;
     stroke-dasharray: 1, 150;
     stroke-dashoffset: 0;
   }
 
-  @keyframes cfc-spin { to { transform: rotate(360deg); } }
+  @keyframes cfc-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
   @keyframes cfc-sweep {
-    0%   { stroke-dasharray: 1, 150; stroke-dashoffset: 0; }
-    50%  { stroke-dasharray: 90, 150; stroke-dashoffset: -35; }
-    100% { stroke-dasharray: 90, 150; stroke-dashoffset: -124; }
+    0% {
+      stroke-dasharray: 1, 150;
+      stroke-dashoffset: 0;
+    }
+    50% {
+      stroke-dasharray: 90, 150;
+      stroke-dashoffset: -35;
+    }
+    100% {
+      stroke-dasharray: 90, 150;
+      stroke-dashoffset: -124;
+    }
   }
 </style>

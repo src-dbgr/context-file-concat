@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { appState } from '$lib/stores/app';
-  import { post } from '$lib/services/backend';
+  import { appState } from "$lib/stores/app";
+  import { post } from "$lib/services/backend";
 
   // Runes derived fields
   const current_path = $derived($appState.current_path);
@@ -12,7 +12,7 @@
   <div class="path-selection">
     <button
       id="select-dir-btn"
-      onclick={() => post('selectDirectory')}
+      onclick={() => post("selectDirectory")}
       disabled={is_scanning}
     >
       {#if is_scanning}
@@ -33,8 +33,8 @@
     <button
       id="clear-dir-btn"
       title="Clear current directory"
-      style:display={current_path ? 'inline-flex' : 'none'}
-      onclick={() => post('clearDirectory')}
+      style:display={current_path ? "inline-flex" : "none"}
+      onclick={() => post("clearDirectory")}
       disabled={is_scanning}
     >
       <svg class="icon" viewBox="0 0 24 24">
@@ -43,15 +43,19 @@
       </svg>
       Clear
     </button>
-    <span id="current-path" title={current_path ?? ''}>
-      {current_path || 'No directory selected.'}
+    <span id="current-path" title={current_path ?? ""}>
+      {current_path || "No directory selected."}
     </span>
   </div>
   <div class="config-buttons">
     <span id="current-config-filename" class="config-filename">
-      {current_config_filename || ''}
+      {current_config_filename || ""}
     </span>
-    <button id="import-config-btn" onclick={() => post('importConfig')} disabled={is_scanning}>
+    <button
+      id="import-config-btn"
+      onclick={() => post("importConfig")}
+      disabled={is_scanning}
+    >
       <svg class="icon" viewBox="0 0 24 24">
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
         <polyline points="14,2 14,8 20,8" />
@@ -63,11 +67,13 @@
     </button>
     <button
       id="export-config-btn"
-      onclick={() => post('exportConfig')}
+      onclick={() => post("exportConfig")}
       disabled={is_scanning || !current_path}
     >
       <svg class="icon" viewBox="0 0 24 24">
-        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+        <path
+          d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"
+        />
         <polyline points="17,21 17,13 7,13 7,21" />
         <polyline points="7,3 7,8 15,8" />
       </svg>

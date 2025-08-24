@@ -91,7 +91,7 @@ export async function handleCopy(context: FocusContext) {
     if (success) {
       elements.copyBtn.innerHTML = `... Copied!`;
       elements.copyBtn.style.backgroundColor = "#4caf50";
-      elements.copyBtn.style.color = "#2c2e33";
+      elements.copyBtn.style.color = "#d4d4d4";
     } else {
       elements.copyBtn.innerHTML = `... Failed`;
       elements.copyBtn.style.backgroundColor = "#e54b4b";

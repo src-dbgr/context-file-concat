@@ -8,25 +8,29 @@
 
   type Props = {
     ariaLabel?: string;
-    value?: number;           // 0..100 (determinate) – leave undefined for indeterminate
-    indeterminate?: boolean;  // true => animated bar
-    idForFill?: string;       // optional id on inner fill for legacy updates
+    value?: number; // 0..100 (determinate) – leave undefined for indeterminate
+    indeterminate?: boolean; // true => animated bar
+    idForFill?: string; // optional id on inner fill for legacy updates
   };
 
   let {
     ariaLabel = "Progress",
     value,
     indeterminate = false,
-    idForFill
+    idForFill,
   }: Props = $props();
 
   const clamp100 = (n: number) => Math.max(0, Math.min(100, n));
 
   // Derived aria-valuenow (only in determinate mode)
-  const valueNow = $derived(!indeterminate && typeof value === "number" ? clamp100(value) : undefined);
+  const valueNow = $derived(
+    !indeterminate && typeof value === "number" ? clamp100(value) : undefined
+  );
 
   // Inline width style for determinate mode
-  const widthStyle = $derived(valueNow !== undefined ? `width:${valueNow}%` : undefined);
+  const widthStyle = $derived(
+    valueNow !== undefined ? `width:${valueNow}%` : undefined
+  );
 </script>
 
 <div
@@ -66,8 +70,14 @@
   }
 
   @keyframes cfc-indeterminate-slide {
-    0%   { left: -40%; }
-    50%  { left: 60%; }
-    100% { left: 100%; }
+    0% {
+      left: -40%;
+    }
+    50% {
+      left: 60%;
+    }
+    100% {
+      left: 100%;
+    }
   }
 </style>

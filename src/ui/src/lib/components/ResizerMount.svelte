@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { verticalResizer } from '$lib/actions/resizer';
+  import { verticalResizer } from "$lib/actions/resizer";
 </script>
 
 <!-- This component is mounted into #resizer to attach the action -->

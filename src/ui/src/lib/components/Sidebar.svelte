@@ -1,22 +1,30 @@
 <script lang="ts">
-  import { appState, patternFilter } from '$lib/stores/app';
-  import { post } from '$lib/services/backend';
-  import { COMMON_IGNORE_PATTERNS } from '$lib/config';
+  import { appState, patternFilter } from "$lib/stores/app";
+  import { post } from "$lib/services/backend";
+  import { COMMON_IGNORE_PATTERNS } from "$lib/config";
 
   // Runes: derived flags/collections
-  const searchEnabled = $derived(Boolean($appState.current_path && !$appState.is_scanning));
-  const availableCommon = $derived(COMMON_IGNORE_PATTERNS.filter((p) => !$appState.config.ignore_patterns.includes(p)));
-  const allPatterns = $derived(Array.from(new Set($appState.config.ignore_patterns || [])));
+  const searchEnabled = $derived(
+    Boolean($appState.current_path && !$appState.is_scanning)
+  );
+  const availableCommon = $derived(
+    COMMON_IGNORE_PATTERNS.filter(
+      (p) => !$appState.config.ignore_patterns.includes(p)
+    )
+  );
+  const allPatterns = $derived(
+    Array.from(new Set($appState.config.ignore_patterns || []))
+  );
   const activeSet = $derived(new Set($appState.active_ignore_patterns || []));
 
   let filterTimer: ReturnType<typeof setTimeout> | null = null;
 
   function pushFilters() {
     if (!$appState.current_path) return;
-    post('updateFilters', {
+    post("updateFilters", {
       searchQuery: $appState.search_query,
       extensionFilter: $appState.extension_filter,
-      contentSearchQuery: $appState.content_search_query
+      contentSearchQuery: $appState.content_search_query,
     });
   }
   function onFiltersInput() {
@@ -25,38 +33,38 @@
   }
 
   function onCaseSensitiveChange() {
-    post('updateConfig', $appState.config);
+    post("updateConfig", $appState.config);
     pushFilters();
   }
   function onRemoveEmptyDirsChange() {
-    post('updateConfig', $appState.config);
+    post("updateConfig", $appState.config);
   }
 
-  let newPattern = $state('');
+  let newPattern = $state("");
 
   function addPattern() {
     const p = newPattern.trim();
     if (!p) return;
     if (!$appState.config.ignore_patterns.includes(p)) {
-      post('updateConfig', {
+      post("updateConfig", {
         ...$appState.config,
-        ignore_patterns: [...$appState.config.ignore_patterns, p]
+        ignore_patterns: [...$appState.config.ignore_patterns, p],
       });
     }
-    newPattern = '';
+    newPattern = "";
   }
   function removePattern(p: string) {
-    post('updateConfig', {
+    post("updateConfig", {
       ...$appState.config,
-      ignore_patterns: $appState.config.ignore_patterns.filter((x) => x !== p)
+      ignore_patterns: $appState.config.ignore_patterns.filter((x) => x !== p),
     });
   }
   function deleteAllPatterns() {
-    post('updateConfig', { ...$appState.config, ignore_patterns: [] });
+    post("updateConfig", { ...$appState.config, ignore_patterns: [] });
   }
 
   function handleRescan() {
-    post('rescanDirectory');
+    post("rescanDirectory");
   }
 
   function onPatternFilterInput(e: Event) {
@@ -64,12 +72,18 @@
     patternFilter.set(v);
   }
 
-  const filteredPatterns = $derived((() => {
-    const pf = ($patternFilter || '').trim();
-    const base = [...allPatterns].sort((a, b) => a.localeCompare(b));
-    const filtered = pf ? base.filter((p) => p.toLowerCase().includes(pf)) : base;
-    return filtered.sort((a, b) => Number(activeSet.has(b)) - Number(activeSet.has(a)));
-  })());
+  const filteredPatterns = $derived(
+    (() => {
+      const pf = ($patternFilter || "").trim();
+      const base = [...allPatterns].sort((a, b) => a.localeCompare(b));
+      const filtered = pf
+        ? base.filter((p) => p.toLowerCase().includes(pf))
+        : base;
+      return filtered.sort(
+        (a, b) => Number(activeSet.has(b)) - Number(activeSet.has(a))
+      );
+    })()
+  );
 </script>
 
 <!-- IMPORTANT: do not hide the resizer mount; the action will size/style it. -->
@@ -78,7 +92,13 @@
 <div class="panel">
   <div class="panel-header">
     <h3>
-      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg
+        class="icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+      >
         <circle cx="11" cy="11" r="8" />
         <path d="m21 21-4.35-4.35" />
       </svg>
@@ -89,7 +109,9 @@
   <input
     type="text"
     id="search-query"
-    placeholder={searchEnabled ? 'Search filenames...' : 'Select a directory first...'}
+    placeholder={searchEnabled
+      ? "Search filenames..."
+      : "Select a directory first..."}
     bind:value={$appState.search_query}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
@@ -98,7 +120,9 @@
   <input
     type="text"
     id="extension-filter"
-    placeholder={searchEnabled ? 'Filter by extension (e.g., rs, py)' : 'Select a directory first...'}
+    placeholder={searchEnabled
+      ? "Filter by extension (e.g., rs, py)"
+      : "Select a directory first..."}
     bind:value={$appState.extension_filter}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
@@ -107,7 +131,9 @@
   <input
     type="text"
     id="content-search-query"
-    placeholder={searchEnabled ? 'Search text inside files...' : 'Select a directory first...'}
+    placeholder={searchEnabled
+      ? "Search text inside files..."
+      : "Select a directory first..."}
     bind:value={$appState.content_search_query}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
@@ -127,7 +153,13 @@
 <div class="panel ignore-patterns-panel">
   <div class="panel-header">
     <h3>
-      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg
+        class="icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+      >
         <circle cx="12" cy="12" r="10" />
         <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
       </svg>
@@ -137,33 +169,51 @@
     <button
       id="rescan-btn"
       title={$appState.patterns_need_rescan
-        ? 'Ignore patterns were removed - Re-scan recommended to find previously hidden files'
-        : 'Re-scan with current ignore patterns'}
+        ? "Ignore patterns were removed - Re-scan recommended to find previously hidden files"
+        : "Re-scan with current ignore patterns"}
       class:needs-rescan={$appState.patterns_need_rescan}
       disabled={$appState.is_scanning || !$appState.current_path}
       onclick={handleRescan}
     >
       {#if $appState.is_scanning}
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <svg
+          class="icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
           <circle cx="12" cy="12" r="10" />
           <polyline points="12,6 12,12 16,14" />
         </svg>
       {:else if $appState.patterns_need_rescan}
-        <svg class="icon pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
-          <path d="M21 3v5h-5"/>
-          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1 -6.74 -2.74L3 16"/>
-          <path d="M3 21v-5h5"/>
+        <svg
+          class="icon pulse"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+          <path d="M21 3v5h-5" />
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1 -6.74 -2.74L3 16" />
+          <path d="M3 21v-5h5" />
         </svg>
       {:else}
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
-          <path d="M21 3v5h-5"/>
-          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1 -6.74 -2.74L3 16"/>
-          <path d="M3 21v-5h-5"/>
+        <svg
+          class="icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+          <path d="M21 3v5h-5" />
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1 -6.74 -2.74L3 16" />
+          <path d="M3 21v-5h-5" />
         </svg>
       {/if}
-      {$appState.is_scanning ? 'Scanning...' : 'Re-Scan'}
+      {$appState.is_scanning ? "Scanning..." : "Re-Scan"}
     </button>
   </div>
 
@@ -173,14 +223,18 @@
       id="new-ignore-pattern"
       placeholder="Add pattern (*.log, build/)"
       bind:value={newPattern}
-      onkeydown={(e) => e.key === 'Enter' && addPattern()}
+      onkeydown={(e) => e.key === "Enter" && addPattern()}
     />
     <button id="add-pattern-btn" onclick={addPattern}>Add</button>
   </div>
 
   <div class="ignore-options">
     <div class="ignore-actions">
-      <button id="delete-all-patterns-btn" title="Remove all ignore patterns" onclick={deleteAllPatterns}>
+      <button
+        id="delete-all-patterns-btn"
+        title="Remove all ignore patterns"
+        onclick={deleteAllPatterns}
+      >
         Delete All
       </button>
       <label>
@@ -199,7 +253,7 @@
     <p
       id="common-patterns-heading"
       class="common-patterns-label"
-      style:display={availableCommon.length > 0 ? 'block' : 'none'}
+      style:display={availableCommon.length > 0 ? "block" : "none"}
     >
       Common Ignore Pattern:
     </p>
@@ -213,9 +267,9 @@
         <button
           class="common-pattern-chip"
           onclick={() =>
-            post('updateConfig', {
+            post("updateConfig", {
               ...$appState.config,
-              ignore_patterns: [...$appState.config.ignore_patterns, pattern]
+              ignore_patterns: [...$appState.config.ignore_patterns, pattern],
             })}
           title={`Click to add "${pattern}" to ignore patterns`}
         >
@@ -238,8 +292,8 @@
       <div
         class="current-pattern-chip {activeSet.has(p) ? 'active-pattern' : ''}"
         title={activeSet.has(p)
-          ? 'This pattern was active and matched one or more files/directories.'
-          : ''}
+          ? "This pattern was active and matched one or more files/directories."
+          : ""}
         role="listitem"
       >
         <span>{p}</span>
@@ -248,7 +302,14 @@
           onclick={() => removePattern(p)}
           aria-label={`Remove pattern ${p}`}
         >
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <svg
+            class="icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            aria-hidden="true"
+          >
             <line x1="18" y1="6" x2="6" y2="18" />
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>

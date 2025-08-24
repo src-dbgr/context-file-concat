@@ -10,7 +10,7 @@
     width = "100%",
     height = "1rem",
     radius = "4px",
-    ariaLabel = "Loading content"
+    ariaLabel = "Loading content",
   }: Props = $props();
 </script>
 
@@ -24,19 +24,29 @@
 
 <style>
   .cfc-skeleton {
-    --shine: linear-gradient(90deg,
-      rgba(0,0,0,0) 0%,
-      rgba(255,255,255,.25) 50%,
-      rgba(0,0,0,0) 100%
+    --shine: linear-gradient(
+      90deg,
+      rgba(0, 0, 0, 0) 0%,
+      rgba(255, 255, 255, 0.25) 50%,
+      rgba(0, 0, 0, 0) 100%
     );
     background:
-      var(--shine),
-      color-mix(in srgb, var(--color-border) 30%, transparent);
-    background-size: 200% 100%, 100% 100%;
+      var(--shine), color-mix(in srgb, var(--color-border) 30%, transparent);
+    background-size:
+      200% 100%,
+      100% 100%;
     animation: cfc-skeleton-shimmer 1.2s linear infinite;
   }
   @keyframes cfc-skeleton-shimmer {
-    from { background-position: -100% 0, 0 0; }
-    to   { background-position: 100% 0, 0 0; }
+    from {
+      background-position:
+        -100% 0,
+        0 0;
+    }
+    to {
+      background-position:
+        100% 0,
+        0 0;
+    }
   }
 </style>

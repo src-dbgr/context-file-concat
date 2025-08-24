@@ -1,14 +1,21 @@
 <script lang="ts">
-  import { appState, editorInstance, editorDecorations, previewedPath } from '$lib/stores/app';
-  import type * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
-  import StatusBar from '$lib/components/StatusBar.svelte';
-  import ToastHost from '$lib/components/ToastHost.svelte';
+  import {
+    appState,
+    editorInstance,
+    editorDecorations,
+    previewedPath,
+  } from "$lib/stores/app";
+  import type * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+  import StatusBar from "$lib/components/StatusBar.svelte";
+  import ToastHost from "$lib/components/ToastHost.svelte";
 
   // Non reactive store – avoids Self-trigger
   let lastDecorationIds: string[] = [];
   let lastModel: monaco.editor.ITextModel | null = null;
 
-  function clearDecorations(editor: monaco.editor.IStandaloneCodeEditor | null) {
+  function clearDecorations(
+    editor: monaco.editor.IStandaloneCodeEditor | null
+  ) {
     if (!editor) return;
     if (lastDecorationIds.length) {
       try {
@@ -47,15 +54,22 @@
 
     // calcuate new decos
     let newDecorations: monaco.editor.IModelDeltaDecoration[] = [];
-    if (searchTerm && searchTerm.trim() !== '') {
-      const matches = model.findMatches(searchTerm, true, false, matchCase, null, true);
+    if (searchTerm && searchTerm.trim() !== "") {
+      const matches = model.findMatches(
+        searchTerm,
+        true,
+        false,
+        matchCase,
+        null,
+        true
+      );
       newDecorations = matches.map((m) => ({
         range: m.range,
-        options: { inlineClassName: 'search-highlight' }
+        options: { inlineClassName: "search-highlight" },
       }));
     }
 
-    // apply deltas - important: no read of $editorDecorations here 
+    // apply deltas - important: no read of $editorDecorations here
     const newIds = editor.deltaDecorations(lastDecorationIds, newDecorations);
     lastDecorationIds = newIds;
 

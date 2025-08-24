@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { appState, editorInstance, previewedPath } from '$lib/stores/app';
-  import { previewMode, generatedTokenCount } from '$lib/stores/preview';
-  import { splitPathForDisplay, generateStatsString } from '$lib/utils';
-  import { handleCopy } from '$lib/modules/clipboard';
-  import { clearPreview } from '$lib/modules/editor';
-  import { onMount } from 'svelte';
-  import LinearProgress from '$lib/components/LinearProgress.svelte';
-  import Skeleton from '$lib/components/Skeleton.svelte';
+  import { appState, editorInstance, previewedPath } from "$lib/stores/app";
+  import { previewMode, generatedTokenCount } from "$lib/stores/preview";
+  import { splitPathForDisplay, generateStatsString } from "$lib/utils";
+  import { handleCopy } from "$lib/modules/clipboard";
+  import { clearPreview } from "$lib/modules/editor";
+  import { onMount } from "svelte";
+  import LinearProgress from "$lib/components/LinearProgress.svelte";
+  import Skeleton from "$lib/components/Skeleton.svelte";
 
   // Track editor content changes to recompute live stats
   let contentVersion = $state(0);
@@ -39,49 +39,59 @@
     handleCopy({
       isEditorFocused: true,
       activeEl: document.activeElement as HTMLElement,
-      isInNormalInputField: false
+      isInNormalInputField: false,
     });
   }
 
   // ---- Runes-derived title & stats (IIFE to return a value, not a function) ----
 
-  const pathPart = $derived((() => {
-    void contentVersion; // depend on content changes
-    const mode = $previewMode;
-    const editor = $editorInstance;
-    if (!editor || mode === 'idle') return '';
-    if (mode === 'file') {
-      const fullPath = $previewedPath ?? '';
-      const res = splitPathForDisplay(fullPath, $appState.current_path);
-      return res.pathPart;
-    }
-    return '';
-  })());
+  const pathPart = $derived(
+    (() => {
+      void contentVersion; // depend on content changes
+      const mode = $previewMode;
+      const editor = $editorInstance;
+      if (!editor || mode === "idle") return "";
+      if (mode === "file") {
+        const fullPath = $previewedPath ?? "";
+        const res = splitPathForDisplay(fullPath, $appState.current_path);
+        return res.pathPart;
+      }
+      return "";
+    })()
+  );
 
-  const filename = $derived((() => {
-    void contentVersion;
-    const mode = $previewMode;
-    const editor = $editorInstance;
-    if (!editor || mode === 'idle') return 'Preview';
-    if (mode === 'file') {
-      const fullPath = $previewedPath ?? '';
-      const res = splitPathForDisplay(fullPath, $appState.current_path);
-      return res.filename;
-    }
-    // mode === 'generated'
-    return '';
-  })());
+  const filename = $derived(
+    (() => {
+      void contentVersion;
+      const mode = $previewMode;
+      const editor = $editorInstance;
+      if (!editor || mode === "idle") return "Preview";
+      if (mode === "file") {
+        const fullPath = $previewedPath ?? "";
+        const res = splitPathForDisplay(fullPath, $appState.current_path);
+        return res.filename;
+      }
+      // mode === 'generated'
+      return "";
+    })()
+  );
 
-  const statsText = $derived((() => {
-    void contentVersion;
-    const mode = $previewMode;
-    const editor = $editorInstance;
-    if (!editor || mode === 'idle') return 'Select a file to preview';
-    const content = editor.getValue();
-    return (mode === 'file')
-      ? generateStatsString(content, 'Read-only', undefined)
-      : generateStatsString(content, 'Editable', $generatedTokenCount ?? undefined);
-  })());
+  const statsText = $derived(
+    (() => {
+      void contentVersion;
+      const mode = $previewMode;
+      const editor = $editorInstance;
+      if (!editor || mode === "idle") return "Select a file to preview";
+      const content = editor.getValue();
+      return mode === "file"
+        ? generateStatsString(content, "Read-only", undefined)
+        : generateStatsString(
+            content,
+            "Editable",
+            $generatedTokenCount ?? undefined
+          );
+    })()
+  );
 </script>
 
 <!--
@@ -91,20 +101,23 @@
 <div class="preview-fragment" style="display: contents">
   <div class="panel-header">
     <h3 id="preview-title">
-      {#if $previewMode === 'generated'}
+      {#if $previewMode === "generated"}
         <div class="preview-path-container">
           <span class="preview-filename">
             <svg class="icon icon-lightning" viewBox="0 0 24 24">
-              <path d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"></path>
+              <path
+                d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"
+              ></path>
             </svg>
             <span class="generated-preview-title">Generated Preview</span>
           </span>
         </div>
         <span class="preview-stats">{statsText}</span>
-      {:else if $previewMode === 'file'}
-        <div class="preview-path-container" title={$previewedPath ?? ''}>
-          <span class="preview-path-part">{pathPart}</span
-          ><span class="preview-filename">{filename}</span>
+      {:else if $previewMode === "file"}
+        <div class="preview-path-container" title={$previewedPath ?? ""}>
+          <span class="preview-path-part">{pathPart}</span><span
+            class="preview-filename">{filename}</span
+          >
         </div>
         <span class="preview-stats">{statsText}</span>
       {:else}
@@ -118,9 +131,9 @@
     <div class="preview-header-buttons">
       <button
         id="copy-btn"
-        style:display={$previewMode !== 'idle' ? 'inline-block' : 'none'}
+        style:display={$previewMode !== "idle" ? "inline-block" : "none"}
         onclick={onCopyClick}
-        disabled={$previewMode === 'idle'}
+        disabled={$previewMode === "idle"}
       >
         <svg
           class="icon"
@@ -137,11 +150,17 @@
 
       <button
         id="clear-preview-btn"
-        style:display={$previewMode !== 'idle' ? 'inline-block' : 'none'}
+        style:display={$previewMode !== "idle" ? "inline-block" : "none"}
         onclick={clearPreview}
-        disabled={$previewMode === 'idle'}
+        disabled={$previewMode === "idle"}
       >
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <svg
+          class="icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
           <line x1="18" y1="6" x2="6" y2="18" />
           <line x1="6" y1="6" x2="18" y2="18" />
         </svg>
@@ -159,7 +178,7 @@
 
   <!-- Monaco mounts here; flex rules are on #preview-panel in CSS -->
   <div id="editor-container">
-    {#if $appState.is_generating && $previewMode === 'idle'}
+    {#if $appState.is_generating && $previewMode === "idle"}
       <!-- When there's nothing yet to show, hint content area -->
       <div class="editor-skeleton">
         <Skeleton width="70%" height="14px" />
@@ -172,6 +191,12 @@
 </div>
 
 <style>
-  .gen-progress { margin: var(--space-4) 0 var(--space-2); }
-  .editor-skeleton { display: grid; gap: var(--space-4); padding: var(--space-6); }
+  .gen-progress {
+    margin: var(--space-4) 0 var(--space-2);
+  }
+  .editor-skeleton {
+    display: grid;
+    gap: var(--space-4);
+    padding: var(--space-6);
+  }
 </style>
