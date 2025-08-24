@@ -40,21 +40,42 @@
   // Total virtual height
   const totalHeight = $derived(flatTree.length * ITEM_HEIGHT);
 
-  // Visible slice (IIFE in $derived to produce an array value, not a function)
+  /**
+   * Clamp and synchronize the scroll position with the DOM.
+   * This prevents "gaps" when the container is resized and the browser
+   * silently adjusts scrollTop without emitting a scroll event.
+   */
+  function clampAndSyncScroll() {
+    const el = scrollEl;
+    if (!el) return;
+    const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    const clamped = Math.min(Math.max(0, scrollTop), maxTop);
+    if (el.scrollTop !== clamped) el.scrollTop = clamped;
+    if (scrollTop !== el.scrollTop) scrollTop = el.scrollTop;
+  }
+
+  // Visible slice (robust: disable virtualization when viewport >= content)
   const visibleSlice = $derived((() => {
+    const contentPx = totalHeight;
+    const vp = Math.max(0, viewportHeight);
+
+    // If the viewport is large enough to show everything, don't virtualize.
+    if (vp >= contentPx) {
+      return flatTree.map((it, i) => ({ node: it.node, level: it.level, index: i }));
+    }
+
     const rawStart = Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN;
-    const rawEnd = Math.ceil((scrollTop + viewportHeight) / ITEM_HEIGHT) + OVERSCAN;
+    const rawEnd = Math.ceil((scrollTop + vp) / ITEM_HEIGHT) + OVERSCAN;
 
     const maxIndex = Math.max(0, flatTree.length - 1);
     const startIndex = Math.max(0, Math.min(maxIndex, rawStart | 0));
     const endIndex = Math.max(startIndex, Math.min(maxIndex, rawEnd | 0));
 
-    const slice = flatTree.slice(startIndex, endIndex + 1).map((it: FlatItem, i: number) => ({
+    return flatTree.slice(startIndex, endIndex + 1).map((it, i) => ({
       node: it.node,
       level: it.level,
       index: startIndex + i
     }));
-    return slice;
   })());
 
   function onScroll() {
@@ -114,6 +135,8 @@
   async function measureViewport() {
     await tick();
     viewportHeight = scrollEl?.clientHeight ?? 0;
+    // Important: after a height change, ensure a valid scrollTop
+    clampAndSyncScroll();
   }
 
   function measureViewportDeferred(attempts = 8) {
@@ -137,17 +160,21 @@
 
   function onWindowResize() { measureViewportDeferred(2); }
 
+  function onLayout() { measureViewportDeferred(1); }
+
   onMount(() => {
     measureViewportDeferred();
     ro = new ResizeObserver(() => measureViewportDeferred(2));
     if (scrollEl) ro.observe(scrollEl);
     window.addEventListener("resize", onWindowResize, { passive: true });
+    window.addEventListener("cfc:layout", onLayout, { passive: true });
   });
 
   onDestroy(() => {
     if (ro && scrollEl) ro.unobserve(scrollEl);
     ro = null;
     window.removeEventListener("resize", onWindowResize);
+    window.removeEventListener("cfc:layout", onLayout);
   });
 
   // --- Toolbar actions -------------------------------------------------------

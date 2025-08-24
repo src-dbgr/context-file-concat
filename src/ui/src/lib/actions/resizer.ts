@@ -34,6 +34,8 @@ export function verticalResizer(node: HTMLElement) {
         const newTopPercent = (newTopHeight / totalHeight) * 100;
         fileListPanel.style.height = `${newTopPercent}%`;
         previewPanel.style.height = `${100 - newTopPercent}%`;
+        // notify listeners (FileTree measures viewport on resize)
+        window.dispatchEvent(new CustomEvent("cfc:layout"));
       }
     };
 
