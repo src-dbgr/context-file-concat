@@ -2,6 +2,7 @@
   import { appState, patternFilter } from "$lib/stores/app";
   import { post } from "$lib/services/backend";
   import { COMMON_IGNORE_PATTERNS } from "$lib/config";
+  import { t } from "$lib/i18n";
 
   // Runes: derived flags/collections
   const searchEnabled = $derived(
@@ -102,7 +103,7 @@
         <circle cx="11" cy="11" r="8" />
         <path d="m21 21-4.35-4.35" />
       </svg>
-      Search & Filter
+      {$t("sidebar.title")}
     </h3>
   </div>
 
@@ -110,8 +111,8 @@
     type="text"
     id="search-query"
     placeholder={searchEnabled
-      ? "Search filenames..."
-      : "Select a directory first..."}
+      ? $t("sidebar.ph.searchFileNames")
+      : $t("sidebar.ph.selectDirFirst")}
     bind:value={$appState.search_query}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
@@ -121,8 +122,8 @@
     type="text"
     id="extension-filter"
     placeholder={searchEnabled
-      ? "Filter by extension (e.g., rs, py)"
-      : "Select a directory first..."}
+      ? $t("sidebar.ph.extensionFilter")
+      : $t("sidebar.ph.selectDirFirst")}
     bind:value={$appState.extension_filter}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
@@ -132,8 +133,8 @@
     type="text"
     id="content-search-query"
     placeholder={searchEnabled
-      ? "Search text inside files..."
-      : "Select a directory first..."}
+      ? $t("sidebar.ph.contentSearch")
+      : $t("sidebar.ph.selectDirFirst")}
     bind:value={$appState.content_search_query}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
@@ -146,7 +147,7 @@
       bind:checked={$appState.config.case_sensitive_search}
       onchange={onCaseSensitiveChange}
     />
-    Case Sensitive
+    {$t("sidebar.caseSensitive")}
   </label>
 </div>
 
@@ -163,17 +164,17 @@
         <circle cx="12" cy="12" r="10" />
         <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
       </svg>
-      Ignore Patterns
+      {$t("sidebar.ignoreTitle")}
     </h3>
 
     <button
       id="rescan-btn"
-      title={$appState.patterns_need_rescan
-        ? "Ignore patterns were removed - Re-scan recommended to find previously hidden files"
-        : "Re-scan with current ignore patterns"}
       class:needs-rescan={$appState.patterns_need_rescan}
       disabled={$appState.is_scanning || !$appState.current_path}
       onclick={handleRescan}
+      title={$appState.patterns_need_rescan
+        ? "Re-scan recommended after removing patterns"
+        : $t("action.rescan")}
     >
       {#if $appState.is_scanning}
         <svg
@@ -186,21 +187,7 @@
           <circle cx="12" cy="12" r="10" />
           <polyline points="12,6 12,12 16,14" />
         </svg>
-      {:else if $appState.patterns_need_rescan}
-        <svg
-          class="icon pulse"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="2"
-        >
-          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path>
-          <path d="M21 3v5h-5"></path>
-          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path>
-          <path d="M8 16H3v5"></path>
-        </svg>
+        {$t("sidebar.scanning")}
       {:else}
         <svg
           class="icon"
@@ -216,8 +203,8 @@
           <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path>
           <path d="M8 16H3v5"></path>
         </svg>
+        {$t("sidebar.rescan")}
       {/if}
-      {$appState.is_scanning ? "Scanning..." : "Re-Scan"}
     </button>
   </div>
 
@@ -225,21 +212,22 @@
     <input
       type="text"
       id="new-ignore-pattern"
-      placeholder="Add pattern (*.log, build/)"
+      placeholder={$t("sidebar.ph.addPattern")}
       bind:value={newPattern}
       onkeydown={(e) => e.key === "Enter" && addPattern()}
     />
-    <button id="add-pattern-btn" onclick={addPattern}>Add</button>
+    <button id="add-pattern-btn" onclick={addPattern}>{$t("action.add")}</button
+    >
   </div>
 
   <div class="ignore-options">
     <div class="ignore-actions">
       <button
         id="delete-all-patterns-btn"
-        title="Remove all ignore patterns"
+        title={$t("sidebar.removeAll")}
         onclick={deleteAllPatterns}
       >
-        Delete All
+        {$t("sidebar.removeAll")}
       </button>
       <label>
         <input
@@ -248,7 +236,7 @@
           bind:checked={$appState.config.remove_empty_directories}
           onchange={onRemoveEmptyDirsChange}
         />
-        Remove empty dirs
+        {$t("sidebar.removeEmptyDirs")}
       </label>
     </div>
   </div>
@@ -259,7 +247,7 @@
       class="common-patterns-label"
       style:display={availableCommon.length > 0 ? "block" : "none"}
     >
-      Common Ignore Pattern:
+      {$t("sidebar.commonPatterns")}
     </p>
     <div
       id="common-patterns-container"
@@ -286,7 +274,7 @@
   <input
     type="text"
     id="filter-patterns"
-    placeholder="Filter currently assigned ignore patterns..."
+    placeholder={$t("sidebar.ph.filterAssigned")}
     value={$patternFilter}
     oninput={onPatternFilterInput}
   />

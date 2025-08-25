@@ -10,6 +10,7 @@
   } from "$lib/modules/treeExpansion";
   import Spinner from "$lib/components/Spinner.svelte";
   import LinearProgress from "$lib/components/LinearProgress.svelte";
+  import { t } from "$lib/i18n";
 
   // Virtualization constants
   const ITEM_HEIGHT = 28;
@@ -344,11 +345,15 @@
 
   // Stats texts
   const statsTextMain = $derived(
-    `Files: ${$appState.selected_files_count} selected of ${baselineCounts.files} • Folders: ${baselineCounts.folders}`
+    `${$t("filetree.stats.files")}: ${$appState.selected_files_count} ${$t(
+      "filetree.stats.selectedOf"
+    )} ${baselineCounts.files} • ${$t("filetree.stats.folders")}: ${
+      baselineCounts.folders
+    }`
   );
   const statsTextSecondary = $derived(
     hasActiveFilters($appState)
-      ? ` • Files Visible: ${visibleCounts.files}`
+      ? ` • ${$t("filetree.stats.visible")}: ${visibleCounts.files}`
       : ""
   );
 
@@ -527,27 +532,27 @@
   {#if $appState.current_path}
     <div class="panel-header files-header">
       <div class="files-title-section">
-        <h3>Files</h3>
+        <h3>{$t("filetree.title")}</h3>
         <div class="button-group">
           <button
             onclick={onSelectAll}
             disabled={$appState.is_scanning || !$appState.tree.length}
-            >Select All</button
+            >{$t("filetree.selectAll")}</button
           >
           <button
             onclick={onDeselectAll}
             disabled={$appState.is_scanning || !$appState.tree.length}
-            >Deselect All</button
+            >{$t("filetree.deselectAll")}</button
           >
           <button
             onclick={onExpandAll}
             disabled={$appState.is_scanning || !$appState.tree.length}
-            >Expand All</button
+            >{$t("filetree.expandAll")}</button
           >
           <button
             onclick={onCollapseAll}
             disabled={$appState.is_scanning || !$appState.tree.length}
-            >Collapse All</button
+            >{$t("filetree.collapseAll")}</button
           >
         </div>
       </div>
@@ -562,13 +567,13 @@
       <div class="scan-progress-container">
         <div class="scan-progress-header">
           <div class="scan-status" role="status" aria-live="polite">
-            <Spinner size={16} ariaLabel="Scanning directory" />
-            <span class="scan-text">Scanning directory...</span>
+            <Spinner size={16} ariaLabel={$t("filetree.scanning")} />
+            <span class="scan-text">{$t("filetree.scanning")}</span>
           </div>
           <button
             id="cancel-scan-btn"
             class="cancel-scan-btn"
-            title="Cancel current scan"
+            title={$t("filetree.cancel")}
             onclick={() => post("cancelScan")}
           >
             <svg
@@ -581,13 +586,13 @@
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
             </svg>
-            Cancel
+            {$t("filetree.cancel")}
           </button>
         </div>
 
         <LinearProgress
           idForFill="scan-progress-fill"
-          ariaLabel="Scan progress"
+          ariaLabel={$t("aria.scanProgress")}
           indeterminate
         />
 
@@ -604,7 +609,7 @@
         onclick={() => post("selectDirectory")}
         onkeydown={activateSelectDir}
       >
-        Choose Directory
+        {$t("filetree.placeholder.chooseDir")}
       </button>
     {:else if $appState.tree.length > 0}
       <div
@@ -655,7 +660,7 @@
             <line x1="8" y1="11" x2="14" y2="11" />
           </svg>
         </div>
-        <p class="message-text">No files found matching filters.</p>
+        <p class="message-text">{$t("filetree.noMatch")}</p>
       </div>
     {:else}
       <div class="message-display" role="status" aria-live="polite">
@@ -673,7 +678,7 @@
             <path d="M12 10v6" /><path d="M9 13h6" />
           </svg>
         </div>
-        <p class="message-text">No files found in this directory.</p>
+        <p class="message-text">{$t("filetree.emptyDir")}</p>
       </div>
     {/if}
   </div>

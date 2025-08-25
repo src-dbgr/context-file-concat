@@ -3,6 +3,7 @@
   import { post } from "$lib/services/backend";
   import { canGenerate, canSave, isGenerating } from "$lib/stores/uiStores";
   import LogoMark from "$lib/components/LogoMark.svelte";
+  import { t } from "$lib/i18n";
 
   // Local UI state for the animated "Concat…" dots
   let generatingDots = $state("");
@@ -54,7 +55,9 @@
           strikeMax={4}
           color="#FFD400"
         />
-        <span class="generating-text">Concat{generatingDots}</span>
+        <span class="generating-text"
+          >{$t("footer.concat")}{generatingDots}</span
+        >
       </span>
       <span class="cancel-content">
         <svg class="icon" viewBox="0 0 24 24"
@@ -65,11 +68,11 @@
             y2="18"
           /></svg
         >
-        Cancel
+        {$t("action.cancel")}
       </span>
     {:else}
       <LogoMark size={16} ariaHidden effect="none" />
-      Generate
+      {$t("action.generate")}
     {/if}
   </button>
 
@@ -93,7 +96,7 @@
       <polyline points="17,21 17,13 7,13 7,21" />
       <polyline points="7,3 7,8 15,8" />
     </svg>
-    Save to File
+    {$t("action.saveToFile")}
   </button>
 </div>
 

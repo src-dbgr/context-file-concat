@@ -33,6 +33,8 @@ import {
   DragStateSchema,
 } from "$lib/ipc/schema";
 import { toast } from "$lib/stores/toast";
+import { t as tStore } from "$lib/i18n";
+import { get } from "svelte/store";
 
 // Mount core UI fragments
 mount(App, { target: document.getElementById("svelte-root")! });
@@ -129,9 +131,11 @@ window.updateScanProgress = (progress: {
   const { files_scanned, current_scanning_path, large_files_skipped } =
     parsed.data;
 
+  const tr = get(tStore);
+
   const scanTextEl = document.querySelector(".scan-text");
   if (scanTextEl)
-    (scanTextEl as HTMLElement).textContent = "Scanning directory...";
+    (scanTextEl as HTMLElement).textContent = tr("filetree.scanning");
 
   const filesCountEl = document.getElementById("scan-files-count");
   if (filesCountEl)
@@ -212,7 +216,8 @@ window.showError = (msg: string) => {
     s.status_message = `Error: ${parsed.data}`;
     return s;
   });
-  toast.error(parsed.data);
+  const tr = get(tStore);
+  toast.error(tr("toast.renderFailed"));
 };
 
 window.showStatus = (msg: string) => {
@@ -241,6 +246,7 @@ window.fileSaveStatus = (success: boolean, path: string) => {
     return;
   }
   const [ok, p] = parsed.data;
+  const tr = get(tStore);
 
   const msg =
     p === "cancelled"
@@ -254,13 +260,12 @@ window.fileSaveStatus = (success: boolean, path: string) => {
     return s;
   });
 
-  // Toasts for user feedback
   if (p === "cancelled") {
-    toast.info("Save cancelled");
+    toast.info(tr("toast.saveCancelled"));
   } else if (ok) {
-    toast.success("File saved");
+    toast.success(tr("toast.fileSaved"));
   } else {
-    toast.error("Failed to save file");
+    toast.error(tr("toast.saveFailed"));
   }
 };
 

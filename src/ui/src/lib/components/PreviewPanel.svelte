@@ -7,6 +7,7 @@
   import { onMount } from "svelte";
   import LinearProgress from "$lib/components/LinearProgress.svelte";
   import Skeleton from "$lib/components/Skeleton.svelte";
+  import { t } from "$lib/i18n";
 
   // Track editor content changes to recompute live stats
   let contentVersion = $state(0);
@@ -65,7 +66,7 @@
       void contentVersion;
       const mode = $previewMode;
       const editor = $editorInstance;
-      if (!editor || mode === "idle") return "Preview";
+      if (!editor || mode === "idle") return $t("preview.defaultTitle");
       if (mode === "file") {
         const fullPath = $previewedPath ?? "";
         const res = splitPathForDisplay(fullPath, $appState.current_path);
@@ -81,13 +82,13 @@
       void contentVersion;
       const mode = $previewMode;
       const editor = $editorInstance;
-      if (!editor || mode === "idle") return "Select a file to preview";
+      if (!editor || mode === "idle") return $t("preview.selectAFile");
       const content = editor.getValue();
       return mode === "file"
-        ? generateStatsString(content, "Read-only", undefined)
+        ? generateStatsString(content, $t("stats.readOnly"), undefined)
         : generateStatsString(
             content,
-            "Editable",
+            $t("stats.editable"),
             $generatedTokenCount ?? undefined
           );
     })()
@@ -109,7 +110,9 @@
                 d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"
               ></path>
             </svg>
-            <span class="generated-preview-title">Generated Preview</span>
+            <span class="generated-preview-title"
+              >{$t("preview.generated")}</span
+            >
           </span>
         </div>
         <span class="preview-stats">{statsText}</span>
@@ -122,9 +125,9 @@
         <span class="preview-stats">{statsText}</span>
       {:else}
         <div class="preview-path-container">
-          <span class="preview-filename">Preview</span>
+          <span class="preview-filename">{$t("preview.defaultTitle")}</span>
         </div>
-        <span class="preview-stats">Select a file to preview</span>
+        <span class="preview-stats">{$t("preview.selectAFile")}</span>
       {/if}
     </h3>
 
@@ -145,7 +148,7 @@
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
         </svg>
-        Copy
+        {$t("preview.copy")}
       </button>
 
       <button
@@ -164,7 +167,7 @@
           <line x1="18" y1="6" x2="6" y2="18" />
           <line x1="6" y1="6" x2="18" y2="18" />
         </svg>
-        Clear
+        {$t("preview.clear")}
       </button>
     </div>
   </div>
@@ -172,14 +175,13 @@
   <!-- Generation progress hint (indeterminate) -->
   {#if $appState.is_generating}
     <div class="gen-progress" aria-hidden={false}>
-      <LinearProgress ariaLabel="Generating preview" indeterminate />
+      <LinearProgress ariaLabel={$t("aria.generatingPreview")} indeterminate />
     </div>
   {/if}
 
   <!-- Monaco mounts here; flex rules are on #preview-panel in CSS -->
   <div id="editor-container">
     {#if $appState.is_generating && $previewMode === "idle"}
-      <!-- When there's nothing yet to show, hint content area -->
       <div class="editor-skeleton">
         <Skeleton width="70%" height="14px" />
         <Skeleton width="95%" height="12px" />

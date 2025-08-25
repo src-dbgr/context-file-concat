@@ -2,6 +2,7 @@
   import { appState } from "$lib/stores/app";
   import { post } from "$lib/services/backend";
   import Spinner from "$lib/components/Spinner.svelte";
+  import { t } from "$lib/i18n";
 
   // Runes: derived indexing indicator
   const isIndexingInProgress = $derived(
@@ -49,23 +50,25 @@
           d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"
         />
       </svg>
-      Output
+      {$t("common.output")}
     </summary>
 
     <div class="settings-content">
       <div class="setting-row">
-        <label for="output-dir">Directory:</label>
+        <label for="output-dir">{$t("status.dir")}</label>
         <input
           type="text"
           id="output-dir"
           bind:value={$appState.config.output_directory}
           onchange={handleConfigChange}
         />
-        <button onclick={() => post("pickOutputDirectory")}>Browse</button>
+        <button onclick={() => post("pickOutputDirectory")}
+          >{$t("action.browse")}</button
+        >
       </div>
 
       <div class="setting-row">
-        <label for="output-filename">Filename:</label>
+        <label for="output-filename">{$t("status.filename")}</label>
         <input
           type="text"
           id="output-filename"
@@ -82,7 +85,7 @@
             bind:checked={$appState.config.include_tree_by_default}
             onchange={handleConfigChange}
           />
-          Include directory tree
+          {$t("status.includeTree")}
         </label>
         <label>
           <input
@@ -91,7 +94,7 @@
             bind:checked={$appState.config.use_relative_paths}
             onchange={handleConfigChange}
           />
-          Use relative file paths
+          {$t("status.relativePaths")}
         </label>
       </div>
     </div>
@@ -105,7 +108,7 @@
     class="indexing-status"
     style:display={isIndexingInProgress ? "flex" : "none"}
   >
-    <Spinner size={16} ariaLabel="Indexing…" />
-    <span>Indexing...</span>
+    <Spinner size={16} ariaLabel={$t("status.indexing")} />
+    <span>{$t("status.indexing")}</span>
   </div>
 </div>

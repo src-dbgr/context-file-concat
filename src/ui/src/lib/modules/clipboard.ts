@@ -87,7 +87,7 @@ export async function handleCopy(context: FocusContext) {
     toast.error("Failed to copy to clipboard");
   }
 
-  // Visual feedback on the Copy button (no hard-coded colors; use themed classes).
+  // Visual feedback on the Copy button (theme-safe)
   if (isEditorFocused && elements.copyBtn) {
     // Clear any inline overrides first
     elements.copyBtn.style.backgroundColor = "";
