@@ -1,6 +1,7 @@
 <script lang="ts">
   import { appState } from "$lib/stores/app";
   import { post } from "$lib/services/backend";
+  import ThemeToggle from "$lib/components/ThemeToggle.svelte";
 
   // Runes derived fields
   const current_path = $derived($appState.current_path);
@@ -79,5 +80,6 @@
       </svg>
       Export Config
     </button>
+    <ThemeToggle />
   </div>
 </div>

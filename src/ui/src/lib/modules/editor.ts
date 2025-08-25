@@ -8,6 +8,7 @@ import {
 import { post } from "../services/backend.js";
 import { get } from "svelte/store";
 import { previewMode, generatedTokenCount } from "../stores/preview.js";
+import { theme } from "../stores/theme.js";
 
 // --- Monaco Setup (workers) ---
 import * as monaco from "monaco-editor";
@@ -30,6 +31,52 @@ self.MonacoEnvironment = {
 };
 
 let contentChangeListener: monaco.IDisposable | null = null;
+let themeUnsub: (() => void) | null = null;
+
+/** Map file path / hint -> a Monaco language id.
+ *  NOTE: For Svelte we fall back to 'html' to get solid base highlighting
+ *  (markup + <script>/<style> blocks) without extra deps. */
+function resolveMonacoLanguage(hint: string | null | undefined, path: string) {
+  const h = (hint ?? "").toLowerCase();
+  const p = path.toLowerCase();
+
+  // ---- Svelte quick win: use HTML tokenizer (no extra packages needed)
+  if (h === "svelte" || p.endsWith(".svelte")) return "html";
+
+  // Reasonable normalizations (helps if backend sends mime-ish values)
+  if (
+    h === "js" ||
+    h === "javascript" ||
+    p.endsWith(".mjs") ||
+    p.endsWith(".cjs")
+  )
+    return "javascript";
+  if (
+    h === "ts" ||
+    h === "typescript" ||
+    p.endsWith(".mts") ||
+    p.endsWith(".cts")
+  )
+    return "typescript";
+  if (h === "json" || p.endsWith(".json")) return "json";
+  if (h === "css" || p.endsWith(".css")) return "css";
+  if (h === "html" || p.endsWith(".html") || p.endsWith(".htm")) return "html";
+  if (h === "md" || h === "markdown" || p.endsWith(".md")) return "markdown";
+  if (h === "toml" || p.endsWith(".toml")) return "toml";
+  if (h === "yaml" || h === "yml" || p.endsWith(".yaml") || p.endsWith(".yml"))
+    return "yaml";
+  if (h === "rust" || h === "rs" || p.endsWith(".rs")) return "rust";
+  if (h === "shell" || h === "bash" || p.endsWith(".sh")) return "shell";
+  if (h) return h;
+
+  // Fallback
+  return "plaintext";
+}
+
+function applyMonacoThemeFromAppTheme() {
+  const t = get(theme);
+  monaco.editor.setTheme(t === "light" ? "vs" : "vs-dark");
+}
 
 export function layoutEditorSoon() {
   const editor = get(editorInstance);
@@ -51,10 +98,14 @@ export function layoutEditorSoon() {
 }
 
 export function initEditor(onFinished?: () => void) {
+  // Ensure Monaco theme matches the current app theme at creation time.
+  applyMonacoThemeFromAppTheme();
+
   const editor = monaco.editor.create(elements.editorContainer, {
     value: "// Select a directory to begin.",
     language: "plaintext",
-    theme: "vs-dark",
+    // Theme is also set globally via setTheme; keep here for HMR safety.
+    theme: get(theme) === "light" ? "vs" : "vs-dark",
     readOnly: true,
     automaticLayout: true,
     wordWrap: "on",
@@ -67,6 +118,14 @@ export function initEditor(onFinished?: () => void) {
     smoothScrolling: true,
   });
   editorInstance.set(editor);
+
+  // Live switch Monaco when app theme toggles.
+  if (!themeUnsub) {
+    themeUnsub = theme.subscribe((t) => {
+      monaco.editor.setTheme(t === "light" ? "vs" : "vs-dark");
+    });
+  }
+
   layoutEditorSoon();
   if (onFinished) onFinished();
 }
@@ -91,7 +150,10 @@ export function showPreviewContent(
   const model = editor.getModel();
 
   if (model) {
-    monaco.editor.setModelLanguage(model, language);
+    // Normalize language (enables .svelte → html highlighting)
+    const lang = resolveMonacoLanguage(language, path);
+    monaco.editor.setModelLanguage(model, lang);
+
     let newDecorations: monaco.editor.IModelDeltaDecoration[] = [];
     if (searchTerm && searchTerm.trim() !== "") {
       const matchCase = getState().config.case_sensitive_search;

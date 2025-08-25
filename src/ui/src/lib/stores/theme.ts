@@ -1,65 +1,75 @@
-// Theme store (Svelte 5+, TypeScript)
-// Persists choice, respects prefers-color-scheme, and applies [data-theme] on <html>.
-
 import { writable } from "svelte/store";
 
 export type Theme = "light" | "dark";
 
-const STORAGE_KEY = "cfc:theme";
+const STORAGE_KEY = "cfc-theme";
 
-function detectSystemTheme(): Theme {
-  if (typeof window === "undefined") return "dark";
-  return window.matchMedia &&
-    window.matchMedia("(prefers-color-scheme: light)").matches
-    ? "light"
-    : "dark";
-}
-
-function readInitial(): Theme {
-  if (typeof window === "undefined") return "dark";
-  const fromStorage = window.localStorage.getItem(STORAGE_KEY) as Theme | null;
-  return fromStorage ?? detectSystemTheme();
-}
-
-export const theme = writable<Theme>(readInitial());
-
-/** Apply theme attribute on :root (html element). */
-function applyTheme(t: Theme) {
-  if (typeof document === "undefined") return;
-  document.documentElement.setAttribute("data-theme", t);
-}
-
-/** Initialize side effects once on app bootstrap. */
-export function initTheme() {
-  applyTheme(readInitial());
-  const mq = window.matchMedia("(prefers-color-scheme: light)");
-  const handler = () => {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    if (!stored) {
-      // Only auto-follow system if user has no explicit preference.
-      const sys = detectSystemTheme();
-      theme.set(sys);
-      applyTheme(sys);
-    }
-  };
-  mq.addEventListener?.("change", handler);
-  // No cleanup here; call from your bootstrap if needed.
-}
-
-/** Explicitly set a theme and persist. */
-export function setTheme(next: Theme) {
-  theme.set(next);
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(STORAGE_KEY, next);
+/** Safely read localStorage value (if available) */
+function readStoredTheme(): Theme | null {
+  try {
+    const v = localStorage.getItem(STORAGE_KEY);
+    return v === "light" || v === "dark" ? v : null;
+  } catch {
+    return null;
   }
-  applyTheme(next);
 }
 
-/** Toggle between light/dark. */
+/** Detect system preference (fallback if nothing stored) */
+function detectSystemTheme(): Theme {
+  if (typeof window !== "undefined" && "matchMedia" in window) {
+    try {
+      return window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light";
+    } catch {
+      /* no-op */
+    }
+  }
+  return "dark";
+}
+
+/** Apply theme on the document element */
+function applyThemeAttr(t: Theme) {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  // Keep attribute explicit for both themes; avoids default ambiguity.
+  root.setAttribute("data-theme", t);
+}
+
+/** Persist chosen theme */
+function persistTheme(t: Theme) {
+  try {
+    localStorage.setItem(STORAGE_KEY, t);
+  } catch {
+    /* ignore storage errors in sandboxed/locked environments */
+  }
+}
+
+/** Initialize current theme value */
+const initialTheme: Theme = readStoredTheme() ?? detectSystemTheme();
+
+/**
+ * Central theme store. Subscribing applies DOM attribute and persists.
+ * Note: this module has no Svelte component dependencies and is safe to import anywhere.
+ */
+export const theme = writable<Theme>(initialTheme);
+theme.subscribe((t) => {
+  applyThemeAttr(t);
+  persistTheme(t);
+});
+
+/** Public helpers */
+export function setTheme(t: Theme) {
+  theme.set(t);
+}
 export function toggleTheme() {
-  let current: Theme = "dark";
-  const unsub = theme.subscribe((t) => (current = t));
-  unsub();
-  const next: Theme = current === "dark" ? "light" : "dark";
-  setTheme(next);
+  theme.update((t) => (t === "light" ? "dark" : "light"));
+}
+
+/**
+ * Optional explicit init hook (idempotent).
+ * Kept for clarity if one wants to call from main.ts before mounting.
+ */
+export function initTheme() {
+  applyThemeAttr(initialTheme);
 }

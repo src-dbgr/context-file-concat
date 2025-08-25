@@ -87,20 +87,28 @@ export async function handleCopy(context: FocusContext) {
     toast.error("Failed to copy to clipboard");
   }
 
+  // Visual feedback on the Copy button (no hard-coded colors; use themed classes).
   if (isEditorFocused && elements.copyBtn) {
+    // Clear any inline overrides first
+    elements.copyBtn.style.backgroundColor = "";
+    elements.copyBtn.style.color = "";
+
     if (success) {
       elements.copyBtn.innerHTML = `... Copied!`;
-      elements.copyBtn.style.backgroundColor = "#4caf50";
-      elements.copyBtn.style.color = "#d4d4d4";
+      elements.copyBtn.classList.add("button-cta");
+      elements.copyBtn.classList.remove("button-cancel-action");
     } else {
       elements.copyBtn.innerHTML = `... Failed`;
-      elements.copyBtn.style.backgroundColor = "#e54b4b";
+      elements.copyBtn.classList.add("button-cancel-action");
+      elements.copyBtn.classList.remove("button-cta");
     }
 
     setTimeout(() => {
       elements.copyBtn.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
+      elements.copyBtn.classList.remove("button-cta", "button-cancel-action");
+      // Ensure we leave styles to CSS variables (theme-safe)
       elements.copyBtn.style.backgroundColor = "";
-      elements.copyBtn.style.color = "#d4d4d4";
+      elements.copyBtn.style.color = "";
     }, 1000);
   }
 }
