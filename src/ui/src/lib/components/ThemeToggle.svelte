@@ -61,7 +61,6 @@
       <path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z" />
     </svg>
   </span>
-  <span class="label">{isLight ? "Light" : "Dark"}</span>
 </button>
 
 <style>
@@ -115,10 +114,5 @@
   :global(html[data-theme="dark"]) .theme-toggle .moon {
     opacity: 1;
     transform: rotate(0deg) scale(1);
-  }
-
-  .label {
-    font-size: var(--text-size-sm);
-    color: var(--color-muted);
   }
 </style>

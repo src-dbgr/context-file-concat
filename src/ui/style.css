@@ -665,7 +665,6 @@ button:disabled:hover {
 
 #copy-btn,
 #clear-preview-btn {
-  width: 80px;
   text-align: center;
   font-weight: 500;
 }
@@ -1352,7 +1351,7 @@ input[type="checkbox"][data-indeterminate="true"]::before {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233a7fd5' stroke-width='1.5'%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3Cpolyline points='17,8 12,3 7,8'/%3E%3Cline x1='12' y1='3' x2='12' y2='15'/%3E%3C/svg%3E");
 }
 .placeholder::after {
-  content: "Drag & drop or click to browse";
+  content: "Drag & drop";
   display: block;
   font-size: 0.8em;
   color: var(--color-muted);

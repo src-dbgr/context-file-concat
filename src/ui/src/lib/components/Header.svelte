@@ -47,7 +47,7 @@
       {$t("action.clear")}
     </button>
     <span id="current-path" title={current_path ?? ""}>
-      {current_path || "No directory selected."}
+      {current_path || $t("action.noDirectorySelected")}
     </span>
   </div>
   <div class="config-buttons">

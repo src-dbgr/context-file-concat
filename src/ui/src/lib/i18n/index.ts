@@ -106,8 +106,10 @@ register("en", {
   "action.importConfig": "Import Config",
   "action.exportConfig": "Export Config",
   "action.add": "Add",
+  "action.clear": "Clear",
   "action.generate": "Generate",
   "action.saveToFile": "Save to File",
+  "action.noDirectorySelected": "No Directory selected",
 
   // ===== Sidebar =====
   "sidebar.title": "Search & Filter",
@@ -129,9 +131,19 @@ register("en", {
   // ===== Preview =====
   "preview.defaultTitle": "Preview",
   "preview.selectAFile": "Select a file to preview",
+  "preview.copy": "Copy",
+  "preview.clear": "Clear",
+  "preview.generated": "Preview generated",
 
   // ===== Status / Common =====
   "common.output": "Output",
+
+  // ===== Footer / Output =====
+  "action.browse": "Choose Dir",
+  "status.dir": "Directory",
+  "status.filename": "Filename",
+  "status.includeTree": "Include File Tree",
+  "status.relativePaths": "Relative File Paths",
 
   // ------- Legacy/earlier keys we still ship -------
   "preview.title": "Preview",
@@ -151,6 +163,8 @@ register("en", {
   "filetree.stats.files": "Files selected",
   "filetree.stats.selectedOf": "of total files",
   "filetree.stats.folders": "Folders",
+  "stats.readOnly": "read only",
+  "stats.editable": "editable",
   "header.select_directory": "Select Directory",
   "header.scanning": "Scanning...",
   "header.clear": "Clear",
@@ -161,10 +175,14 @@ register("en", {
   "sidebar.search.extension": "Filter by extension (e.g., rs, py)",
   "sidebar.search.content": "Search text inside files...",
   "sidebar.search.case_sensitive": "Case Sensitive",
+  "sidebar.commonPatterns": "Common Ignore Pattern:",
   "sidebar.ignore.add_placeholder": "Add pattern (*.log, build/)",
   "sidebar.ignore.delete_all": "Delete All",
   "sidebar.ignore.remove_empty_dirs": "Remove empty dirs",
   "sidebar.ignore.common_label": "Common Ignore Pattern:",
+  "sidebar.ph.searchFileNames": "Search for File names",
+  "sidebar.ph.extensionFilter": "Search for File Types",
+  "sidebar.ph.contentSearch": "Search inside Files",
   "footer.generate": "Generate",
   "footer.concat": "Concat{dots}",
   "footer.cancel": "Cancel",
@@ -186,11 +204,13 @@ register("en", {
 register("de", {
   // ===== Common / Actions =====
   "action.selectDirectory": "Verzeichnis wählen",
-  "action.importConfig": "Konfig. importieren",
-  "action.exportConfig": "Konfig. exportieren",
+  "action.importConfig": "Konfiguration import",
+  "action.exportConfig": "Konfiguration export",
   "action.add": "Hinzufügen",
+  "action.clear": "Bereinigen",
   "action.generate": "Erzeugen",
   "action.saveToFile": "In Datei speichern",
+  "action.noDirectorySelected": "Kein Verzeichnis ausgewählt",
 
   // ===== Sidebar =====
   "sidebar.title": "Suche & Filter",
@@ -213,9 +233,19 @@ register("de", {
   // ===== Preview =====
   "preview.defaultTitle": "Vorschau",
   "preview.selectAFile": "Wähle eine Datei zur Vorschau",
+  "preview.copy": "Kopieren",
+  "preview.clear": "Löschen",
+  "preview.generated": "Vorschau erstellt",
 
   // ===== Status / Common =====
   "common.output": "Ausgabe",
+
+  // ===== Footer / Output =====
+  "action.browse": "Auswählen",
+  "status.dir": "Verzeichnis",
+  "status.filename": "Dateiname",
+  "status.includeTree": "File Tree addieren",
+  "status.relativePaths": "Relative Dateipfade",
 
   // ------- Legacy/earlier keys we still ship -------
   "preview.title": "Vorschau",
@@ -235,11 +265,14 @@ register("de", {
   "filetree.stats.files": "Dateien selektiert",
   "filetree.stats.selectedOf": "von gesamt Dateien",
   "filetree.stats.folders": "Verzeichnisse",
+  "stats.readOnly": "read only",
+  "stats.editable": "editierbar",
   "header.select_directory": "Verzeichnis wählen",
   "header.scanning": "Scanne...",
   "header.clear": "Leeren",
   "header.import_config": "Konfig. importieren",
   "header.export_config": "Konfig. exportieren",
+  "sidebar.commonPatterns": "Häufige Ignore-Muster",
   "sidebar.search.title": "Suche & Filter",
   "sidebar.search.filenames": "Dateinamen durchsuchen...",
   "sidebar.search.extension": "Nach Endung filtern (z. B. rs, py)",
@@ -249,6 +282,9 @@ register("de", {
   "sidebar.ignore.delete_all": "Alle löschen",
   "sidebar.ignore.remove_empty_dirs": "Leere Ordner entfernen",
   "sidebar.ignore.common_label": "Gängiges Ignore-Muster:",
+  "sidebar.ph.searchFileNames": "Suche nach Dateinamen",
+  "sidebar.ph.extensionFilter": "Suche nach Dateitypen",
+  "sidebar.ph.contentSearch": "Suche innerhalb Dateien",
   "footer.generate": "Erzeugen",
   "footer.concat": "Concat{dots}",
   "footer.cancel": "Abbrechen",
