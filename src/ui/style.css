@@ -135,7 +135,6 @@ body.vertical-resizing {
   border-bottom: 1px solid var(--color-border);
   background-color: var(--surface-1);
   flex-shrink: 0;
-  gap: var(--space-6);
 }
 
 .path-selection {
