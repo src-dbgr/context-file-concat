@@ -1,13 +1,13 @@
+// context-file-concat/src/ui/vitest.config.ts
 import { defineConfig } from "vitest/config";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 import path from "path";
 
-// Vitest v3 configuration for unit tests.
-// - Node environment (no DOM)
-// - Include both src/tests and src/**/__tests__ patterns
-// - Mirrors the $lib alias used by Vite
 export default defineConfig({
+  plugins: [svelte()],
   test: {
-    environment: "node",
+    environment: "jsdom",
+    setupFiles: ["src/tests/setup.ts"],
     include: ["src/tests/**/*.test.ts", "src/**/__tests__/**/*.test.ts"],
     passWithNoTests: false,
     coverage: {
@@ -17,6 +17,8 @@ export default defineConfig({
     },
   },
   resolve: {
+    // 👇 wichtig: so wird in Tests NICHT der server build von svelte genommen
+    conditions: ["browser", "svelte"],
     alias: {
       $lib: path.resolve(__dirname, "./src/lib"),
     },

@@ -134,6 +134,7 @@
     <div class="preview-header-buttons">
       <button
         id="copy-btn"
+        aria-label="Copy"
         style:display={$previewMode !== "idle" ? "inline-block" : "none"}
         onclick={onCopyClick}
         disabled={$previewMode === "idle"}
@@ -153,6 +154,7 @@
 
       <button
         id="clear-preview-btn"
+        aria-label="Clear"
         style:display={$previewMode !== "idle" ? "inline-block" : "none"}
         onclick={clearPreview}
         disabled={$previewMode === "idle"}
