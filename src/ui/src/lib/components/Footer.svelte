@@ -55,9 +55,13 @@
           strikeMax={4}
           color="#FFD400"
         />
-        <span class="generating-text"
-          >{$t("footer.concat")}{generatingDots}</span
-        >
+        <span class="generating-text">
+          {$t("footer.concat", { dots: "" })}
+          <span class="dots-container">
+            <span class="dots-visible">{generatingDots || "\u00A0"}</span>
+            <span class="dots-phantom">...</span>
+          </span>
+        </span>
       </span>
       <span class="cancel-content">
         <svg class="icon" viewBox="0 0 24 24"
@@ -128,5 +132,24 @@
     align-items: center;
     justify-content: center;
     gap: 6px;
+  }
+  .generating-text {
+    display: inline-flex;
+    align-items: baseline;
+  }
+
+  .dots-container {
+    display: grid;
+    align-items: center;
+    text-align: left;
+  }
+
+  .dots-visible,
+  .dots-phantom {
+    grid-area: 1 / 1;
+  }
+
+  .dots-phantom {
+    visibility: hidden;
   }
 </style>

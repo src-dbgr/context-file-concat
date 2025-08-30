@@ -140,6 +140,7 @@ register("en", {
 
   // ===== Footer / Output =====
   "action.browse": "Choose Dir",
+  "action.cancel": "Cancel",
   "status.dir": "Directory",
   "status.filename": "Filename",
   "status.includeTree": "Include File Tree",
@@ -242,6 +243,7 @@ register("de", {
 
   // ===== Footer / Output =====
   "action.browse": "Auswählen",
+  "action.cancel": "Abbrechen",
   "status.dir": "Verzeichnis",
   "status.filename": "Dateiname",
   "status.includeTree": "File Tree addieren",
