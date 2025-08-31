@@ -17,6 +17,7 @@ export default defineConfig({
       reportsDirectory: "coverage",
       all: true,
       include: [
+        // Core gate targets — keep this focused and high-signal
         "src/lib/ipc/**/*.ts",
         "src/lib/utils.ts",
         "src/lib/modules/treeExpansion.ts",
@@ -25,6 +26,8 @@ export default defineConfig({
         "src/lib/modules/undo.ts",
         "src/lib/modules/clipboard.ts",
         "src/lib/i18n/index.ts",
+        "src/lib/modules/keyboard.ts",
+        "src/lib/modules/commands.ts",
       ],
       exclude: ["**/*.d.ts"],
       thresholds: { lines: 80, statements: 80, functions: 80, branches: 70 },
