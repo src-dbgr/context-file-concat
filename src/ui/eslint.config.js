@@ -19,6 +19,7 @@ export default [
       "eslint.config.js",
       "svelte.config.js",
       "coverage/**",
+      "coverage-full/**",
     ],
   },
 

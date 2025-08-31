@@ -141,4 +141,13 @@ describe("clipboard.* (input fields)", () => {
     expect(clip.writeText).toHaveBeenCalledWith("CUTME");
     expect(execSpy).toHaveBeenCalledWith("delete");
   });
+
+  it("handleCut (input) – no selection → failure path", async () => {
+    // makeInput/ctxFor/ensureStatusAndCopyBtn kommen bereits aus dieser Datei
+    const el = makeInput("NOSEL", 0, 0); // Cursor = 0, keine Selektion
+    await handleCut(ctxFor(el));
+
+    const status = document.querySelector(".status-text") as HTMLElement;
+    expect(status.textContent).toMatch(/cut failed/i);
+  });
 });
