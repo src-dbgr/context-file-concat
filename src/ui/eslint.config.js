@@ -18,6 +18,7 @@ export default [
       // Skip config files (avoid unnecessary parser work)
       "eslint.config.js",
       "svelte.config.js",
+      "coverage/**",
     ],
   },
 

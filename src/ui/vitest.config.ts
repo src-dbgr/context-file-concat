@@ -1,7 +1,8 @@
-// vitest.config.ts
 import { defineConfig } from "vitest/config";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import path from "path";
+
+const isTest = !!process.env.VITEST;
 
 export default defineConfig({
   plugins: [svelte()],
@@ -14,31 +15,35 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "html"],
       reportsDirectory: "coverage",
-
-      // ➜ Nur die Kernlogik in die Quote nehmen
       all: true,
       include: [
-        "src/lib/ipc/**/*.ts", // Contracts/Schemas
-        "src/lib/utils.ts", // reine Hilfsfunktionen (hat Tests)
+        "src/lib/ipc/**/*.ts",
+        "src/lib/utils.ts",
         "src/lib/modules/treeExpansion.ts",
-        "src/lib/stores/app.ts", // zentrale Store-Logik (hat Tests)
+        "src/lib/stores/app.ts",
+        "src/lib/stores/toast.ts",
+        "src/lib/modules/undo.ts",
+        "src/lib/modules/clipboard.ts",
+        "src/lib/i18n/index.ts",
       ],
       exclude: ["**/*.d.ts"],
-
-      thresholds: {
-        lines: 80,
-        statements: 80,
-        functions: 80,
-        branches: 70,
-      },
+      thresholds: { lines: 80, statements: 80, functions: 80, branches: 70 },
       reportOnFailure: true,
     },
   },
   resolve: {
-    // 👇 wichtig: so wird in Tests NICHT der server build von svelte genommen
     conditions: ["browser", "svelte"],
     alias: {
       $lib: path.resolve(__dirname, "./src/lib"),
+      ...(isTest
+        ? {
+            // map monaco-editor to local stub in vitest
+            "monaco-editor": path.resolve(
+              __dirname,
+              "./src/tests/__mocks__/monaco-editor.ts"
+            ),
+          }
+        : {}),
     },
   },
 });

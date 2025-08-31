@@ -78,6 +78,29 @@ export function deleteWordBackward(
   }
 }
 
+export function deleteWordLeft(el: HTMLInputElement | HTMLTextAreaElement) {
+  const start = el.selectionStart ?? 0;
+  const end = el.selectionEnd ?? 0;
+  const value = el.value;
+
+  // Selektion vorhanden → einfach entfernen
+  if (start !== end) {
+    const min = Math.min(start, end);
+    const max = Math.max(start, end);
+    el.value = value.slice(0, min) + value.slice(max);
+    el.selectionStart = el.selectionEnd = min;
+    return;
+  }
+
+  // Nur Cursor: Wort links löschen (Whitespaces zuerst überspringen)
+  let i = start;
+  while (i > 0 && /\s/.test(value[i - 1])) i--;
+  while (i > 0 && /[\p{L}\p{N}_]/u.test(value[i - 1])) i--;
+
+  el.value = value.slice(0, i) + value.slice(start);
+  el.selectionStart = el.selectionEnd = i;
+}
+
 export function deleteLineBackward(
   element: HTMLInputElement | HTMLTextAreaElement
 ) {
