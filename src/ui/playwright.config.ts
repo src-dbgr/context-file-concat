@@ -1,28 +1,36 @@
+// src/ui/playwright.config.ts
 import { defineConfig, devices } from "@playwright/test";
 
-// We use a single Chromium project initially for speed and CI stability.
-// Preview server serves the built 'dist' on port 4173 (see package.json preview:e2e).
 export default defineConfig({
-  testDir: "e2e",
+  testDir: "./e2e",
   timeout: 30_000,
+  expect: { timeout: 5_000 },
   fullyParallel: true,
-  forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
-  reporter: [["list"]],
+
+  reporter: [
+    ["list"],
+    ["html", { open: "never", outputFolder: "playwright-report" }],
+    ["blob", { outputDir: "blob-report" }]
+  ],
+
   use: {
     baseURL: "http://localhost:4173",
-    trace: "on-first-retry",
+    trace: "retain-on-failure",
+    video: "retain-on-failure",
+    screenshot: "only-on-failure"
   },
+
   webServer: {
     command: "npm run preview:e2e",
     port: 4173,
-    reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
+    reuseExistingServer: true,
+    timeout: 120_000
   },
+
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
-    },
-  ],
+      use: { ...devices["Desktop Chrome"] }
+    }
+  ]
 });
