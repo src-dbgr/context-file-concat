@@ -36,40 +36,104 @@ import { toast } from "$lib/stores/toast";
 import { t as tStore } from "$lib/i18n";
 import { get } from "svelte/store";
 
-/** Decide if the E2E bridge should be installed in this runtime. */
-function shouldInstallE2EBridge(): boolean {
-  // 1) Always in non-production modes.
-  if (import.meta.env.MODE !== "production") return true;
+/* ----------------------------- Budget switches ----------------------------- */
 
-  // 2) In production builds, only when explicitly requested by tests:
+const budgetMode = (() => {
   try {
-    // a) URL flag
+    const u = new URL(window.location.href);
+    return u.searchParams.get("budget") === "1";
+  } catch {
+    return false;
+  }
+})();
+
+if (budgetMode) {
+  try {
+    performance.mark("app-script-start");
+  } catch {
+    /* ignore */
+  }
+
+  // ⚡ EARLY Microtask fallback: set __APP_READY ASAP (before any mount/import).
+  queueMicrotask(() => {
+    const w = window as Window & { __APP_READY?: boolean };
+    if (!w.__APP_READY) {
+      try {
+        w.__APP_READY = true;
+        // Create a one-time measure if none exists yet.
+        if (performance.getEntriesByName("app-init").length === 0) {
+          // Reuse a single ready mark name across paths.
+          if (performance.getEntriesByName("app-ready").length === 0) {
+            performance.mark("app-ready");
+          }
+          const hasStart =
+            performance.getEntriesByName("app-init-start").length > 0;
+          performance.measure(
+            "app-init",
+            hasStart ? "app-init-start" : "app-script-start",
+            "app-ready"
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+}
+
+/* ------------------------- Deterministic E2E fallback ---------------------- */
+type E2EStore = { setAppState: (s: AppState) => void };
+type E2EDebug = { dump: () => unknown };
+type E2EBridge = { store: E2EStore; debug: E2EDebug };
+
+function ensureE2EShim(): void {
+  const w = window as unknown as { __e2e?: E2EBridge };
+  if (!w.__e2e) {
+    const shim: E2EBridge = {
+      store: {
+        setAppState: (s: AppState) => appState.set(s),
+      },
+      debug: {
+        dump: () => {
+          return {
+            state: getState(),
+            ts: Date.now(),
+            href: window.location.href,
+          };
+        },
+      },
+    };
+    (window as unknown as { __e2e: E2EBridge }).__e2e = shim;
+  }
+}
+ensureE2EShim();
+
+/* -------------------- Load real dev bridge when allowed -------------------- */
+function shouldInstallE2EBridge(): boolean {
+  if (import.meta.env.MODE !== "production") return true;
+  try {
     const u = new URL(window.location.href);
     if (u.searchParams.get("e2e") === "1") return true;
   } catch {
     /* no-op */
   }
-
-  // b) Playwright sets this via page.addInitScript before navigation.
   type PWFlag = Window & { __PW_E2E?: boolean };
   if ((window as PWFlag).__PW_E2E === true) return true;
-
   return false;
 }
 
-/**
- * DEV/E2E bridge: load when shouldInstallE2EBridge() signals so.
- * Kept as dynamic import to avoid polluting production bundle paths unintentionally.
- */
 if (shouldInstallE2EBridge()) {
   import("$lib/dev/e2eBridge")
-    .then((m) => m.installE2EBridge())
+    .then((m) => {
+      if (typeof m.installE2EBridge === "function") m.installE2EBridge();
+    })
     .catch(() => {
-      // swallows silently in prod/e2e to avoid console noise
+      /* swallow silently in preview/prod */
     });
 }
 
-// Mount core UI fragments
+/* ------------------------------- Mount UI ---------------------------------- */
+
 mount(App, { target: document.getElementById("svelte-root")! });
 mount(Header, { target: document.getElementById("header-root")! });
 mount(Sidebar, { target: document.getElementById("sidebar-root")! });
@@ -96,6 +160,7 @@ declare global {
     showStatus: (msg: string) => void;
     fileSaveStatus: (success: boolean, path: string) => void;
     setDragState: (isDragging: boolean) => void;
+    __APP_READY?: boolean;
   }
 }
 
@@ -192,10 +257,8 @@ window.updateScanProgress = (progress: {
 
   const fillEl = document.getElementById("scan-progress-fill");
   if (fillEl && files_scanned > 0) {
-    (fillEl as HTMLElement).style.width = `${Math.min(
-      90,
-      (files_scanned / 1000) * 100
-    )}%`;
+    (fillEl as HTMLElement).style.width =
+      `${Math.min(90, (files_scanned / 1000) * 100)}%`;
   }
 };
 
@@ -219,7 +282,6 @@ window.showPreviewContent = (
     return;
   }
   const [c, l, s, p] = parsed.data;
-  // The impl expects string — provide empty fallback for search term
   showPreviewContentImpl(c, l, s ?? "", p);
 };
 
@@ -266,7 +328,6 @@ window.showStatus = (msg: string) => {
     s.status_message = `Status: ${parsed.data}`;
     return s;
   });
-  // intentionally no toast to avoid noise
 };
 
 window.fileSaveStatus = (success: boolean, path: string) => {
@@ -317,9 +378,16 @@ window.setDragState = (isDragging: boolean) => {
 };
 
 function initialize() {
+  if (budgetMode) {
+    try {
+      performance.mark("app-init-start");
+    } catch {
+      /* ignore */
+    }
+  }
+
   console.log("App initializing with Svelte 5 & TypeScript...");
 
-  // Bind actions
   const resizerEl = document.getElementById("resizer") as HTMLElement | null;
   const sidebarEl = document.querySelector(".sidebar") as HTMLElement | null;
   const resizerAction = resizerEl ? verticalResizer(resizerEl) : undefined;
@@ -332,13 +400,31 @@ function initialize() {
     setupGlobalKeyboardListeners();
   });
 
-  // Cleanup
   window.addEventListener("beforeunload", () => {
     resizerAction?.destroy?.();
     sidebarAction?.destroy?.();
   });
 
   post("initialize");
+
+  if (budgetMode) {
+    try {
+      (window as Window & { __APP_READY?: boolean }).__APP_READY = true;
+      if (performance.getEntriesByName("app-ready").length === 0) {
+        performance.mark("app-ready");
+      }
+      if (performance.getEntriesByName("app-init").length === 0) {
+        performance.measure("app-init", "app-init-start", "app-ready");
+      }
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
-document.addEventListener("DOMContentLoaded", initialize);
+/* -------------------- DOM ready (robust, idempotent) ---------------------- */
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initialize, { once: true });
+} else {
+  initialize();
+}

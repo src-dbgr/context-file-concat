@@ -72,6 +72,17 @@ jobs:
         run: npm run build
         working-directory: ./src/ui
 
+      # 📦 Bundle budgets (no extra deps)
+      - name: Check bundle budgets (Brotli, split by app/workers)
+        run: npm run budget:bundle
+        working-directory: ./src/ui
+        env:
+          ENTRY_BROTLI: "800000" # 0.8 MB
+          APP_TOTAL_BROTLI: "1000000" # 1.0 MB
+          WORKER_TOTAL_BROTLI: "1500000" # 1.5 MB
+          # Optional legacy guard for total:
+          # BUDGET_TOTAL_BROTLI: "2000000"
+
       # ▶️ Playwright E2E
       - name: Install Playwright browsers (chromium only)
         run: npx -y playwright install --with-deps chromium
@@ -80,6 +91,14 @@ jobs:
       - name: Run Playwright E2E tests
         run: npm run test:e2e -- --reporter=dot
         working-directory: ./src/ui
+
+      # ⏱️ Runtime/smoothness budgets (deterministic conditions, no sleeps)
+      - name: Run E2E budget tests
+        run: npm run test:e2e:budgets -- --reporter=dot
+        working-directory: ./src/ui
+        env:
+          BUDGET_INIT_MS: "1500"
+          BUDGET_VTREE_MS: "3000"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
