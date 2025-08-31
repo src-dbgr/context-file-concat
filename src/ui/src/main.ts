@@ -36,6 +36,39 @@ import { toast } from "$lib/stores/toast";
 import { t as tStore } from "$lib/i18n";
 import { get } from "svelte/store";
 
+/** Decide if the E2E bridge should be installed in this runtime. */
+function shouldInstallE2EBridge(): boolean {
+  // 1) Always in non-production modes.
+  if (import.meta.env.MODE !== "production") return true;
+
+  // 2) In production builds, only when explicitly requested by tests:
+  try {
+    // a) URL flag
+    const u = new URL(window.location.href);
+    if (u.searchParams.get("e2e") === "1") return true;
+  } catch {
+    /* no-op */
+  }
+
+  // b) Playwright sets this via page.addInitScript before navigation.
+  type PWFlag = Window & { __PW_E2E?: boolean };
+  if ((window as PWFlag).__PW_E2E === true) return true;
+
+  return false;
+}
+
+/**
+ * DEV/E2E bridge: load when shouldInstallE2EBridge() signals so.
+ * Kept as dynamic import to avoid polluting production bundle paths unintentionally.
+ */
+if (shouldInstallE2EBridge()) {
+  import("$lib/dev/e2eBridge")
+    .then((m) => m.installE2EBridge())
+    .catch(() => {
+      // swallows silently in prod/e2e to avoid console noise
+    });
+}
+
 // Mount core UI fragments
 mount(App, { target: document.getElementById("svelte-root")! });
 mount(Header, { target: document.getElementById("header-root")! });
@@ -186,7 +219,7 @@ window.showPreviewContent = (
     return;
   }
   const [c, l, s, p] = parsed.data;
-  // Die Impl erwartet vermutlich einen string – ggf. leeren Fallback geben
+  // The impl expects string — provide empty fallback for search term
   showPreviewContentImpl(c, l, s ?? "", p);
 };
 
@@ -233,7 +266,7 @@ window.showStatus = (msg: string) => {
     s.status_message = `Status: ${parsed.data}`;
     return s;
   });
-  // Intentionally NOT toasting generic status updates to avoid noise.
+  // intentionally no toast to avoid noise
 };
 
 window.fileSaveStatus = (success: boolean, path: string) => {

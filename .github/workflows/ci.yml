@@ -72,6 +72,15 @@ jobs:
         run: npm run build
         working-directory: ./src/ui
 
+      # ▶️ Playwright E2E
+      - name: Install Playwright browsers (chromium only)
+        run: npx -y playwright install --with-deps chromium
+        working-directory: ./src/ui
+
+      - name: Run Playwright E2E tests
+        run: npm run test:e2e -- --reporter=dot
+        working-directory: ./src/ui
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

@@ -80,3 +80,11 @@ $RECYCLE.BIN/
 scripts/*-test.sh
 .github/workflows/test-*.yml
 tarpaulin-report.html
+
+# #################################
+# ## Playwright
+# #################################
+.last-run.json
+playwright-report/
+test-results/
+blob-report/
