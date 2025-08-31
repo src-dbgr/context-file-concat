@@ -52,3 +52,75 @@ npm run budget:bundle
 npx playwright install --with-deps chromium
 npm run test:e2e:budgets
 ````
+
+## Boot-Sequenz (Mermaid)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor Tester as Playwright/E2E
+  participant Browser
+  participant HTML as index.html
+  participant Main as src/ui/src/main.ts
+  participant Budget as $lib/dev/budget.ts
+  participant Shim as $lib/dev/e2eShim.ts
+  participant Bridge as $lib/dev/e2eBridge (opt.)
+  participant IPC as Window IPC handlers
+  participant Svelte as Svelte mounts
+  participant Editor as $lib/modules/editor
+  participant Keys as $lib/modules/keyboard
+  participant Backend as post("initialize")
+
+  Browser->>HTML: Lade HTML + early theme bootstrap
+  HTML->>Main: Lade ES Module (main.ts)
+
+  rect rgb(245,245,245)
+    Main->>Budget: isBudgetMode()?
+    alt budget=1
+      Main->>Budget: markScriptStart()
+      Main->>Budget: scheduleEarlyReadyFallback()<br/>(queueMicrotask → __APP_READY=true, marks)
+    else
+      note right of Budget: Budget-Pfad inaktiv
+    end
+  end
+
+  Main->>Shim: ensureE2EShim(appState.set, getState)
+  alt E2E erlaubt (dev | ?e2e=1 | __PW_E2E)
+    Main->>Shim: installE2EBridgeIfAllowed()
+    Shim-->>Bridge: dynamic import + install()
+  else
+    note over Shim,Bridge: Kein Bridge-Import in normaler Prod-Nutzung
+  end
+
+  Main->>Svelte: mount(App, Header, Sidebar, FileTree, PreviewPanel, Footer)
+  Main->>IPC: attachWindowIPCHandlers(window)
+
+  par DOM ready
+    HTML-->>Main: DOMContentLoaded (oder readyState != "loading")
+    Main->>Main: initialize()
+  and E2E
+    Tester-->>Shim: __e2e.store.setAppState(...)
+  end
+
+  rect rgb(245,245,245)
+    alt budget=1
+      Main->>Budget: markInitStart()
+    end
+    Main->>Editor: initEditor(cb)
+    Editor-->>Main: Monaco ready
+    Main->>Keys: setupGlobalKeyboardListeners()
+    Main->>Backend: post("initialize")
+    Main->>Main: beforeunload cleanup
+    alt budget=1
+      Main->>Budget: markReadyAndMeasureOnce()
+    end
+  end
+
+  note over Tester,Main: E2E wartet deterministisch auf __APP_READY bzw. __e2e.store
+
+  rect rgb(235,245,255)
+    participant Rust as Rust/WebView Backend
+    Rust-->>IPC: window.render(...) / updateScanProgress(...) / showPreviewContent(...)
+    IPC->>Svelte: appState.set()/update → reaktives UI
+  end
+```

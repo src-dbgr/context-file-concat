@@ -1,14 +1,16 @@
 /**
- * Lightweight performance/budget instrumentation, extracted from main.ts.
- * No external deps; TS strict; no "any".
+ * Tiny helpers for budget/e2e measurement.
+ * - No deps, TS strict.
+ * - Safe in browsers without PerformanceObserver fancy APIs.
  */
 
-type W = Window & { __APP_READY?: boolean };
+declare global {
+  interface Window {
+    __APP_READY?: boolean;
+  }
+}
 
-const hasMark = (name: string): boolean =>
-  performance.getEntriesByName(name).length > 0;
-
-/** Returns true when URL contains ?budget=1 */
+/** Read once from URL (?budget=1). */
 export function isBudgetMode(): boolean {
   try {
     const u = new URL(window.location.href);
@@ -18,61 +20,76 @@ export function isBudgetMode(): boolean {
   }
 }
 
-/** Mark script start as early as possible (used as a fallback start). */
 export function markScriptStart(): void {
   try {
     performance.mark("app-script-start");
   } catch {
-    /* no-op */
+    /* ignore */
   }
 }
 
 /**
- * Schedules a microtask that sets __APP_READY and records a one-time "app-init" measure
- * if the regular init path doesn't do it first. Safe & idempotent.
+ * As early as possible, set a microtask that marks the app as "ready".
+ * This is only a fallback so tests have a deterministic barrier even if
+ * initialization is extremely fast or fails before init() runs.
  */
 export function scheduleEarlyReadyFallback(): void {
   queueMicrotask(() => {
-    const w = window as W;
+    const w = window as Window & { __APP_READY?: boolean };
     if (!w.__APP_READY) {
       try {
         w.__APP_READY = true;
-        if (!hasMark("app-ready")) performance.mark("app-ready");
 
-        if (!hasMark("app-init")) {
-          const start = hasMark("app-init-start")
-            ? "app-init-start"
-            : "app-script-start";
-          performance.measure("app-init", start, "app-ready");
+        if (performance.getEntriesByName("app-ready").length === 0) {
+          performance.mark("app-ready");
+        }
+        // Only create the measure once. Prefer init-start if it exists,
+        // otherwise fall back to script-start.
+        if (performance.getEntriesByName("app-init").length === 0) {
+          const hasInitStart =
+            performance.getEntriesByName("app-init-start").length > 0;
+          performance.measure(
+            "app-init",
+            hasInitStart ? "app-init-start" : "app-script-start",
+            "app-ready"
+          );
         }
       } catch {
-        /* no-op */
+        /* ignore */
       }
     }
   });
 }
 
-/** Marks the beginning of app initialization (closer to DOM-ready). */
 export function markInitStart(): void {
   try {
     performance.mark("app-init-start");
   } catch {
-    /* no-op */
+    /* ignore */
   }
 }
 
 /**
- * Marks app ready and measures app-init if not measured yet.
- * Intended to be called at the end of initialize().
+ * Mark the app as ready and create the app-init measure exactly once.
+ * Call this at the end of initialize().
  */
 export function markReadyAndMeasureOnce(): void {
   try {
-    (window as W).__APP_READY = true;
-    if (!hasMark("app-ready")) performance.mark("app-ready");
-    if (!hasMark("app-init")) {
-      performance.measure("app-init", "app-init-start", "app-ready");
+    (window as Window & { __APP_READY?: boolean }).__APP_READY = true;
+
+    if (performance.getEntriesByName("app-ready").length === 0) {
+      performance.mark("app-ready");
+    }
+    if (performance.getEntriesByName("app-init").length === 0) {
+      const hasInitStart =
+        performance.getEntriesByName("app-init-start").length > 0;
+      performance.measure(
+        "app-init",
+        hasInitStart ? "app-init-start" : "app-script-start",
+        "app-ready"
+      );
     }
   } catch {
-    /* no-op */
+    /* ignore */
   }
 }

@@ -21,7 +21,7 @@ type E2EDebugAPI = {
   };
 };
 
-type E2EApi = {
+export type E2EApi = {
   store: E2EStoreAPI;
   debug: E2EDebugAPI;
 };
