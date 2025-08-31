@@ -15,11 +15,14 @@
     "lint": "eslint . --ext .ts,.svelte --max-warnings 0",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "test": "vitest run --reporter=dot",
+    "test:cov:core": "vitest run -c vitest.config.ts --coverage",
+    "test:cov:full": "vitest run -c vitest.full.config.ts --coverage",
+    "test:cov:full:verbose": "vitest run -c vitest.full.config.ts --coverage --reporter=verbose",
     "test:watch": "vitest",
     "test:e2e": "playwright test -c ./playwright.config.ts",
     "test:e2e:headed": "playwright test -c ./playwright.config.ts --headed",
     "test:contracts": "vitest run src/tests/contracts --reporter=dot",
-    "check": "npm run lint && npm run typecheck && npm run test && npm run test:contracts && npm run test:e2e",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run test:contracts && npm run test:cov:core && npm run test:e2e",
     "check:clean": "npm run clean && npm run build && npm run check"
   },
   "keywords": [
@@ -52,6 +55,7 @@
     "concurrently": "8.2.2",
     "eslint": "^9.34.0",
     "eslint-plugin-svelte": "^3.11.0",
+    "fast-check": "4.3.0",
     "globals": "^16.3.0",
     "jsdom": "^26.1.0",
     "monaco-editor": "^0.52.2",
