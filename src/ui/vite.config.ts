@@ -25,7 +25,11 @@ export default defineConfig({
   build: {
     outDir: "dist",
     rollupOptions: {
+      // Name important dynamic chunks for stable caching
       output: {
+        manualChunks: {
+          monaco: ["monaco-editor"],
+        },
         entryFileNames: `assets/[name].js`,
         chunkFileNames: `assets/[name].js`,
         assetFileNames: `assets/[name].[ext]`,

@@ -1,3 +1,10 @@
+/**
+ * Monaco Editor integration – lazily code-split & loaded on first use.
+ * - No top-level Monaco imports → smaller initial bundle & faster TTI.
+ * - Workers are prepared before editor.create so getWorker is synchronous.
+ * - Public API kept, but preview/generate functions are async for first-load safety.
+ */
+
 import { elements } from "../dom.js";
 import {
   editorInstance,
@@ -10,40 +17,144 @@ import { get } from "svelte/store";
 import { previewMode, generatedTokenCount } from "../stores/preview.js";
 import { theme } from "../stores/theme.js";
 
-// --- Monaco Setup (workers) ---
-import * as monaco from "monaco-editor";
-import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
-import cssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
-import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
-import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
+// Types only – no runtime cost
+import type * as MonacoTypes from "monaco-editor";
 
-self.MonacoEnvironment = {
-  getWorker(_, label) {
-    if (label === "json") return new jsonWorker();
-    if (label === "css" || label === "scss" || label === "less")
-      return new cssWorker();
-    if (label === "html" || label === "handlebars" || label === "razor")
-      return new htmlWorker();
-    if (label === "typescript" || label === "javascript") return new tsWorker();
-    return new editorWorker();
-  },
-};
+type MonacoNS = typeof import("monaco-editor");
 
-let contentChangeListener: monaco.IDisposable | null = null;
+// Lazy-loaded module singleton
+let monaco: MonacoNS | null = null;
+
+// Worker constructors captured before editor.create()
+type WorkerCtor = new () => Worker;
+let workers: {
+  editorWorker: WorkerCtor;
+  jsonWorker: WorkerCtor;
+  cssWorker: WorkerCtor;
+  htmlWorker: WorkerCtor;
+  tsWorker: WorkerCtor;
+} | null = null;
+
+let contentChangeListener: MonacoTypes.IDisposable | null = null;
 let themeUnsub: (() => void) | null = null;
 
-/** Map file path / hint -> a Monaco language id.
- *  NOTE: For Svelte we fall back to 'html' to get solid base highlighting
- *  (markup + <script>/<style> blocks) without extra deps. */
+/** Load Monaco and wire workers exactly once. */
+async function loadMonacoAndWorkers(): Promise<MonacoNS> {
+  if (monaco) return monaco;
+
+  // Parallelize all imports
+  const [monacoMod, editorW, jsonW, cssW, htmlW, tsW] = await Promise.all([
+    import("monaco-editor"),
+    import("monaco-editor/esm/vs/editor/editor.worker?worker"),
+    import("monaco-editor/esm/vs/language/json/json.worker?worker"),
+    import("monaco-editor/esm/vs/language/css/css.worker?worker"),
+    import("monaco-editor/esm/vs/language/html/html.worker?worker"),
+    import("monaco-editor/esm/vs/language/typescript/ts.worker?worker"),
+  ]);
+
+  workers = {
+    editorWorker: editorW.default as unknown as WorkerCtor,
+    jsonWorker: jsonW.default as unknown as WorkerCtor,
+    cssWorker: cssW.default as unknown as WorkerCtor,
+    htmlWorker: htmlW.default as unknown as WorkerCtor,
+    tsWorker: tsW.default as unknown as WorkerCtor,
+  };
+
+  // Install synchronous getWorker hook before editor.create()
+  (self as unknown as Window).MonacoEnvironment = {
+    getWorker(_moduleId: string, label: string): Worker {
+      const w = workers!;
+      if (label === "json") return new w.jsonWorker();
+      if (label === "css" || label === "scss" || label === "less")
+        return new w.cssWorker();
+      if (label === "html" || label === "handlebars" || label === "razor")
+        return new w.htmlWorker();
+      if (label === "typescript" || label === "javascript")
+        return new w.tsWorker();
+      return new w.editorWorker();
+    },
+  };
+
+  monaco = monacoMod as unknown as MonacoNS;
+  return monaco;
+}
+
+function applyMonacoThemeFromAppTheme() {
+  if (!monaco) return;
+  const t = get(theme);
+  monaco.editor.setTheme(t === "light" ? "vs" : "vs-dark");
+}
+
+export function layoutEditorSoon() {
+  const editor = get(editorInstance);
+  if (!editor) return;
+  requestAnimationFrame(() => {
+    try {
+      editor.layout();
+    } catch {
+      /* noop */
+    }
+    setTimeout(() => {
+      try {
+        editor.layout();
+      } catch {
+        /* noop */
+      }
+    }, 0);
+  });
+}
+
+/** Ensure there is an editor instance; lazily create if missing. */
+async function ensureEditor(): Promise<void> {
+  if (get(editorInstance)) return;
+
+  await loadMonacoAndWorkers();
+  applyMonacoThemeFromAppTheme();
+
+  const ed = monaco!.editor.create(elements.editorContainer, {
+    value: "// Select a directory to begin.",
+    language: "plaintext",
+    theme: get(theme) === "light" ? "vs" : "vs-dark",
+    readOnly: true,
+    automaticLayout: true,
+    wordWrap: "on",
+    stickyScroll: { enabled: true },
+    minimap: { enabled: true },
+    renderLineHighlight: "line",
+    padding: { top: 10 },
+    bracketPairColorization: { enabled: true },
+    formatOnPaste: true,
+    smoothScrolling: true,
+  });
+  editorInstance.set(ed);
+
+  // Live switch Monaco when app theme toggles.
+  if (!themeUnsub) {
+    themeUnsub = theme.subscribe((t) => {
+      try {
+        monaco!.editor.setTheme(t === "light" ? "vs" : "vs-dark");
+      } catch {
+        /* noop */
+      }
+    });
+  }
+
+  layoutEditorSoon();
+}
+
+/** Public init hook kept for compatibility (now just ensures the editor). */
+export async function initEditor(onFinished?: () => void) {
+  await ensureEditor();
+  if (onFinished) onFinished();
+}
+
+/** Map a file path / hint to a Monaco language id. */
 function resolveMonacoLanguage(hint: string | null | undefined, path: string) {
   const h = (hint ?? "").toLowerCase();
   const p = path.toLowerCase();
 
-  // ---- Svelte quick win: use HTML tokenizer (no extra packages needed)
   if (h === "svelte" || p.endsWith(".svelte")) return "html";
 
-  // Reasonable normalizations (helps if backend sends mime-ish values)
   if (
     h === "js" ||
     h === "javascript" ||
@@ -69,73 +180,16 @@ function resolveMonacoLanguage(hint: string | null | undefined, path: string) {
   if (h === "shell" || h === "bash" || p.endsWith(".sh")) return "shell";
   if (h) return h;
 
-  // Fallback
   return "plaintext";
 }
 
-function applyMonacoThemeFromAppTheme() {
-  const t = get(theme);
-  monaco.editor.setTheme(t === "light" ? "vs" : "vs-dark");
-}
-
-export function layoutEditorSoon() {
-  const editor = get(editorInstance);
-  if (!editor) return;
-  requestAnimationFrame(() => {
-    try {
-      editor.layout();
-    } catch {
-      /* noop */
-    }
-    setTimeout(() => {
-      try {
-        editor.layout();
-      } catch {
-        /* noop */
-      }
-    }, 0);
-  });
-}
-
-export function initEditor(onFinished?: () => void) {
-  // Ensure Monaco theme matches the current app theme at creation time.
-  applyMonacoThemeFromAppTheme();
-
-  const editor = monaco.editor.create(elements.editorContainer, {
-    value: "// Select a directory to begin.",
-    language: "plaintext",
-    // Theme is also set globally via setTheme; keep here for HMR safety.
-    theme: get(theme) === "light" ? "vs" : "vs-dark",
-    readOnly: true,
-    automaticLayout: true,
-    wordWrap: "on",
-    stickyScroll: { enabled: true },
-    minimap: { enabled: true },
-    renderLineHighlight: "line",
-    padding: { top: 10 },
-    bracketPairColorization: { enabled: true },
-    formatOnPaste: true,
-    smoothScrolling: true,
-  });
-  editorInstance.set(editor);
-
-  // Live switch Monaco when app theme toggles.
-  if (!themeUnsub) {
-    themeUnsub = theme.subscribe((t) => {
-      monaco.editor.setTheme(t === "light" ? "vs" : "vs-dark");
-    });
-  }
-
-  layoutEditorSoon();
-  if (onFinished) onFinished();
-}
-
-export function showPreviewContent(
+export async function showPreviewContent(
   content: string,
   language: string,
   searchTerm: string,
   path: string
-) {
+): Promise<void> {
+  await ensureEditor();
   const editor = get(editorInstance);
   if (!editor) return;
 
@@ -149,12 +203,12 @@ export function showPreviewContent(
   editor.setValue(content);
   const model = editor.getModel();
 
-  if (model) {
+  if (model && monaco) {
     // Normalize language (enables .svelte → html highlighting)
     const lang = resolveMonacoLanguage(language, path);
     monaco.editor.setModelLanguage(model, lang);
 
-    let newDecorations: monaco.editor.IModelDeltaDecoration[] = [];
+    let newDecorations: MonacoTypes.editor.IModelDeltaDecoration[] = [];
     if (searchTerm && searchTerm.trim() !== "") {
       const matchCase = getState().config.case_sensitive_search;
       const matches = model.findMatches(
@@ -165,7 +219,7 @@ export function showPreviewContent(
         null,
         true
       );
-      newDecorations = matches.map((match: monaco.editor.FindMatch) => ({
+      newDecorations = matches.map((match) => ({
         range: match.range,
         options: {
           inlineClassName: "search-highlight",
@@ -191,7 +245,11 @@ export function showPreviewContent(
   layoutEditorSoon();
 }
 
-export function showGeneratedContent(content: string, tokenCount: number) {
+export async function showGeneratedContent(
+  content: string,
+  tokenCount: number
+): Promise<void> {
+  await ensureEditor();
   const editor = get(editorInstance);
   if (!editor) return;
 
@@ -204,7 +262,7 @@ export function showGeneratedContent(content: string, tokenCount: number) {
   editor.setValue(content);
   editorDecorations.set(editor.deltaDecorations(get(editorDecorations), []));
   const model = editor.getModel();
-  if (model) monaco.editor.setModelLanguage(model, "plaintext");
+  if (model && monaco) monaco.editor.setModelLanguage(model, "plaintext");
   editor.updateOptions({ readOnly: false });
 
   // State for UI
@@ -225,7 +283,7 @@ export function clearPreview() {
   editorDecorations.set(editor.deltaDecorations(get(editorDecorations), []));
   editor.updateOptions({ readOnly: true });
   const model = editor.getModel();
-  if (model) monaco.editor.setModelLanguage(model, "plaintext");
+  if (model && monaco) monaco.editor.setModelLanguage(model, "plaintext");
 
   previewMode.set("idle");
   generatedTokenCount.set(null);

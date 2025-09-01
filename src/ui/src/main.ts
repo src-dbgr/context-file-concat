@@ -20,7 +20,6 @@ import {
   markReadyAndMeasureOnce,
 } from "$lib/dev/budget";
 import { ensureE2EShim, installE2EBridgeIfAllowed } from "$lib/dev/e2eShim";
-import { initEditor } from "$lib/modules/editor";
 import { installWindowIPCHandlers } from "$lib/ipc/handlers";
 
 /* ----------------------------- Budget switches ----------------------------- */
@@ -66,11 +65,7 @@ function initialize() {
   const sidebarAction = sidebarEl ? sidebarResizer(sidebarEl) : undefined;
 
   setupEventListeners();
-
-  initEditor(() => {
-    console.log("Monaco Editor is ready.");
-    setupGlobalKeyboardListeners();
-  });
+  setupGlobalKeyboardListeners();
 
   window.addEventListener("beforeunload", () => {
     resizerAction?.destroy?.();
