@@ -36,7 +36,7 @@ async fn main() {
 
     // macOS: ensure a (minimal) NSMenu exists before building the WebView.
     #[cfg(target_os = "macos")]
-    platform::macos::ensure_main_menu();
+    platform::macos::menu::install_standard_menus("CFC");
 
     // Create the shared application state and the event loop proxy
     let proxy = event_loop.create_proxy();

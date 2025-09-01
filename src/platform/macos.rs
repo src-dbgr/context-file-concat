@@ -1,24 +1,14 @@
 //! macOS-specific helpers.
+//!
+//! Cocoa is marked deprecated in favor of objc2 in newer ecosystems, but
+//! wry/tao still integrate via Cocoa under the hood. We keep this usage
 
-use cocoa::appkit::{NSApp, NSApplication, NSMenu};
-use cocoa::base::{id, nil};
+//! strictly scoped to this module to avoid leaking deprecations elsewhere.
 
-/// Ensure that a main menu exists before creating the WebView.
-///
-/// wry (0.37) installs a parent NSView that forwards `keyDown:` to
-/// `NSApp.mainMenu.performKeyEquivalent(_)`. If `mainMenu` is `nil`,
-/// WebKit gets a null deref. Installing an *empty* menu is sufficient.
-///
-/// This is intentionally minimal and side-effect free; your UI keeps
-/// handling shortcuts, but the crash path disappears.
-pub fn ensure_main_menu() {
-    unsafe {
-        let app = NSApp();
-        let current: id = app.mainMenu();
-        if current == nil {
-            let menubar: id = NSMenu::new(nil);
-            // No submenus required for safety; presence is enough.
-            app.setMainMenu_(menubar);
-        }
-    }
-}
+#![allow(deprecated)] // Silence Cocoa deprecation warnings in this isolated module.
+
+// The function `ensure_main_menu` was here, but it was unused (`dead_code` warning).
+// It has been removed as the application directly calls `install_standard_menus`.
+
+/// Public menu builder.
+pub mod menu;

@@ -585,6 +585,7 @@ dependencies = [
  "ignore",
  "insta",
  "libc",
+ "objc",
  "proptest",
  "rayon",
  "regex",

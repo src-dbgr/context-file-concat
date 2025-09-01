@@ -1,10 +1,10 @@
 [package]
 name = "context-file-concat"
-version = "0.2.0"  # Start with 0.1.0 as requested
+version = "0.2.0"
 edition = "2021"
 description = "Context File Concatenator - Intelligently select, filter, and combine project files for LLM context"
 authors = ["src dbgr"]
-license = "TODO"
+license = "MIT"
 repository = "https://github.com/src-dbgr/context-file-concat"
 homepage = "https://github.com/src-dbgr/context-file-concat"
 keywords = ["llm", "context", "files", "concatenation", "development"]
@@ -48,6 +48,7 @@ libc = "0.2"
 # macOS-only: thin, scoped integration helpers (no objc macros in our code)
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
+objc = "0.2"
 
 # For better Performance in Release-Build
 [profile.release]
