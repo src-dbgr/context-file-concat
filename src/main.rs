@@ -9,6 +9,9 @@ use tao::{
 };
 use wry::WebViewBuilder;
 
+// Keep platform quirks isolated.
+mod platform;
+
 #[tokio::main]
 async fn main() {
     // Initialize logging
@@ -30,6 +33,10 @@ async fn main() {
         .expect("Failed to build Window");
 
     let window = Arc::new(window);
+
+    // macOS: ensure a (minimal) NSMenu exists before building the WebView.
+    #[cfg(target_os = "macos")]
+    platform::macos::ensure_main_menu();
 
     // Create the shared application state and the event loop proxy
     let proxy = event_loop.create_proxy();
@@ -79,10 +86,9 @@ async fn main() {
         true
     };
 
-    // Now, build the WebView differently for debug and release builds.
+    // Build the WebView exactly like before (top-level); rendering stays identical.
     #[cfg(debug_assertions)]
     let webview_builder = {
-        // In debug builds, load from the Vite dev server.
         tracing::info!("Running in DEBUG mode, loading from Vite dev server.");
         WebViewBuilder::new(&*window)
             .with_url("http://localhost:1420")
@@ -91,12 +97,11 @@ async fn main() {
 
     #[cfg(not(debug_assertions))]
     let webview_builder = {
-        // In release builds, load the static HTML file produced by `npm run build`.
         tracing::info!("Running in RELEASE mode, loading from bundled assets.");
         let html_content = include_str!("ui/dist/index.html");
         WebViewBuilder::new(&*window)
             .with_html(html_content)
-            .with_devtools(false) // Devtools are disabled in release
+            .with_devtools(false)
     };
 
     let webview = webview_builder

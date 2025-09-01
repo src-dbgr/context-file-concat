@@ -42,8 +42,12 @@ proptest = "1.7"
 tempfile = "3.20"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-test = "0.2"
-serial_test = "3.2" 
+serial_test = "3.2"
 libc = "0.2"
+
+# macOS-only: thin, scoped integration helpers (no objc macros in our code)
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
 
 # For better Performance in Release-Build
 [profile.release]
@@ -71,7 +75,7 @@ minimum_system_version = "10.15"
 frameworks = ["WebKit"]
 info_plist_path = "assets/Info.plist"
 
-# Windows specific settings  
+# Windows specific settings
 [package.metadata.bundle.windows]
 wix_language = "en-US"
 wix_template = "assets/main.wxs"
