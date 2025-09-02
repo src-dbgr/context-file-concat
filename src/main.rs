@@ -12,6 +12,10 @@ use wry::WebViewBuilder;
 // Keep platform quirks isolated.
 mod platform;
 
+// Embedded UI-Assets – only compiled in Release
+#[cfg(not(debug_assertions))]
+mod web_assets;
+
 #[tokio::main]
 async fn main() {
     // Initialize logging
@@ -95,122 +99,61 @@ async fn main() {
             .with_devtools(true)
     };
 
-    // Build the WebView for RELEASE: kleiner eingebauter Static-HTTP-Server
+    // RELEASE: Custom-Protocol (no Port, no file://-issues)
     #[cfg(not(debug_assertions))]
     let webview_builder = {
-        use std::{
-            io::Read,
-            net::TcpListener,
-            path::{Path, PathBuf},
-        };
+        use std::borrow::Cow;
+        use wry::http::Response;
 
         tracing::info!(
-            "Running in RELEASE mode, serving UI over http://127.0.0.1:<port> from bundled assets."
+            "Running in RELEASE mode, using embedded assets via custom scheme 'cfc://'."
         );
-
-        // Pfad zum dist-Ordner im Bundle ermitteln
-        fn dist_dir() -> PathBuf {
-            let exe_dir = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
-
-            #[cfg(target_os = "macos")]
-            let p = exe_dir.join("../Resources/src/ui/dist");
-            #[cfg(not(target_os = "macos"))]
-            let p = exe_dir.join("resources").join("src/ui/dist");
-            p
-        }
-
-        let ui_root = dist_dir();
-        assert!(
-            ui_root.join("index.html").exists(),
-            "UI dist not found at {:?}",
-            ui_root
-        );
-
-        // Listener auf Port 0 (OS sucht freien Port)
-        let listener =
-            TcpListener::bind(("127.0.0.1", 0)).expect("Failed to bind 127.0.0.1:0 for UI server");
-        let port = listener.local_addr().expect("No local addr").port();
-
-        // HTTP-Server im Hintergrund-Thread starten
-        let ui_root_clone = ui_root.clone();
-        std::thread::spawn(move || {
-            let server =
-                tiny_http::Server::from_listener(listener, None).expect("http server start failed");
-            for req in server.incoming_requests() {
-                let mut path = req.url().trim_start_matches('/').to_string();
-                if path.is_empty() {
-                    path = "index.html".into();
-                }
-
-                // Verzeichnisse auf index.html mappen
-                let mut fs_path = ui_root_clone.join(Path::new(&path));
-                if fs_path.is_dir() {
-                    fs_path = fs_path.join("index.html");
-                }
-
-                match std::fs::File::open(&fs_path) {
-                    Ok(mut f) => {
-                        let mut buf = Vec::new();
-                        if f.read_to_end(&mut buf).is_ok() {
-                            let mime = mime_guess::from_path(&fs_path).first_or_octet_stream();
-                            let mut resp = tiny_http::Response::from_data(buf);
-                            let _ = resp.add_header(
-                                tiny_http::Header::from_bytes(
-                                    &b"Content-Type"[..],
-                                    mime.essence_str(),
-                                )
-                                .unwrap(),
-                            );
-                            // Einfaches Caching (optional)
-                            let _ = resp.add_header(
-                                tiny_http::Header::from_bytes(
-                                    &b"Cache-Control"[..],
-                                    "public, max-age=31536000",
-                                )
-                                .unwrap(),
-                            );
-                            let _ = req.respond(resp);
-                        } else {
-                            let _ = req.respond(tiny_http::Response::new_empty(
-                                tiny_http::StatusCode(500),
-                            ));
-                        }
-                    }
-                    Err(_) => {
-                        // SPA-Fallback auf index.html
-                        let index = ui_root_clone.join("index.html");
-                        if let Ok(mut f) = std::fs::File::open(&index) {
-                            let mut buf = Vec::new();
-                            let _ = f.read_to_end(&mut buf);
-                            let mut resp = tiny_http::Response::from_data(buf);
-                            let _ = resp.add_header(
-                                tiny_http::Header::from_bytes(
-                                    &b"Content-Type"[..],
-                                    "text/html; charset=utf-8",
-                                )
-                                .unwrap(),
-                            );
-                            let _ = req.respond(resp);
-                        } else {
-                            let _ = req.respond(tiny_http::Response::new_empty(
-                                tiny_http::StatusCode(404),
-                            ));
-                        }
-                    }
-                }
-            }
-        });
 
         let enable_devtools = std::env::var_os("CFC_DEVTOOLS").is_some();
-        let url = format!("http://127.0.0.1:{}/index.html", port);
-        tracing::info!("Serving UI at {}", url);
+
+        let scheme = "cfc".to_string();
+        let handler = move |request: wry::http::Request<Vec<u8>>| -> Response<Cow<'static, [u8]>> {
+            let path = request.uri().path().to_string();
+            match web_assets::load(&path) {
+                Some((bytes, content_type)) => Response::builder()
+                    .status(200)
+                    .header("Content-Type", content_type)
+                    .body(bytes)
+                    .expect("response build ok"),
+                None => {
+                    let not_found: &'static [u8] = b"Not Found";
+                    Response::builder()
+                        .status(404)
+                        .header("Content-Type", "text/plain; charset=utf-8")
+                        .body(Cow::Borrowed(not_found))
+                        .expect("response build ok")
+                }
+            }
+        };
 
         WebViewBuilder::new(&*window)
-            .with_url(&url)
+            .with_custom_protocol(scheme, handler)
+            .with_url("cfc://index.html")
             .with_devtools(enable_devtools)
+            // Navigation policy (RELEASE branch; append identically in DEBUG branch)
+            .with_navigation_handler(|uri: String| {
+                // Determine the scheme manually
+                let scheme = uri.split(':').next().unwrap_or("");
+
+                match scheme {
+                    // Allow internally
+                    "cfc" | "about" | "blob" | "data" => true,
+
+                    // Open external links in the system browser
+                    "http" | "https" => {
+                        let _ = open::that(&uri);
+                        false
+                    }
+
+                    // Block everything else (e.g., file://)
+                    _ => false,
+                }
+            })
     };
 
     let webview = webview_builder

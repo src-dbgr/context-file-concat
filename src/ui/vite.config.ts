@@ -5,8 +5,8 @@ import path from "path";
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [svelte()],
-  base: "./",
-  // Ensures the dev server is accessible within the WebView
+  base: "./", // relative URLs
+  worker: { format: "iife" }, // <-- important for Safari/WKWebView stability
   server: {
     port: 1420,
     strictPort: true,

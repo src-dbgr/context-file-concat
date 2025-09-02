@@ -35,8 +35,9 @@ thiserror = "2.0"
 tempfile = "3.20"
 tiktoken-rs = "0.7"
 async-trait = "0.1"
-tiny_http = "0.12"
+rust-embed = { version = "8", features = ["compression", "include-exclude"] }
 mime_guess = "2.0"
+open = "5.3"
 
 [dev-dependencies]
 insta = { version = "1.43", features = ["redactions", "filters"] }
@@ -68,7 +69,7 @@ version = "0.2.0"
 short_description = "Context File Concatenator for LLMs"
 long_description = "A desktop application to intelligently select, filter, and combine project files into a single text file optimized for Large Language Models."
 icon = ["assets/icons/icon.icns"]  # macOS
-resources = ["assets/icons/", "src/ui/dist/"]
+resources = ["assets/icons/"]
 category = "DeveloperTool"
 copyright = "Copyright © 2025 src-dbgr. All rights reserved."
 
