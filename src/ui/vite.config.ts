@@ -5,6 +5,7 @@ import path from "path";
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [svelte()],
+  base: "./",
   // Ensures the dev server is accessible within the WebView
   server: {
     port: 1420,
