@@ -115,20 +115,11 @@ sudo pacman -S webkit2gtk-4.1 gtk3
 
 ## Architecture & Design
 
-CFC uses a modern hybrid architecture that combines a powerful Rust backend with a web-based frontend. The design emphasizes **modularity, performance, and robustness**.
+CFC is built on a modern hybrid architecture, combining a high-performance **Rust** backend with a reactive **Svelte** and **TypeScript** frontend running in a WebView. This approach delivers a native feel with the flexibility of web technologies.
 
-- **Backend (Rust)**: The core logic is written in Rust, leveraging its performance and safety.
+The design emphasizes key principles like **Separation of Concerns**, **Unidirectional Data Flow**, and **Performance by Design**. Heavy I/O operations are handled asynchronously in Rust to ensure a non-blocking UI, while the frontend uses virtualization to render tens of thousands of files with ease.
 
-  - **`core`**: Contains the pure, reusable business logic (scanning, file handling). It is completely decoupled from the application layer. The scanning engine uses the **`ignore`** crate for high-performance, git-aware directory traversal.
-  - **`app`**: Acts as the orchestrator, managing the application state, handling UI events, and executing commands. It features a clean separation of concerns with dedicated modules for **filtering**, **state management**, and **asynchronous tasks**.
-  - **`main.rs` / `lib.rs`**: The project is organized as a library (`lib.rs`) that exposes all core functionality, and a thin binary (`main.rs`) that acts as the application entry point.
-
-- **Frontend (HTML/CSS/JS)**: The user interface is built with standard web technologies and rendered in a WebView.
-
-  - **Wry & Tao**: We use `wry` for the WebView and `tao` for windowing, providing a lightweight cross-platform solution.
-  - **Monaco Editor**: The same editor that powers VS Code is integrated for a high-quality code preview experience.
-  - **UI Virtualization**: The file tree is rendered using a virtual scrolling technique, ensuring that the UI remains fast and fluid even with a very large number of files.
-  - **IPC**: The frontend communicates with the Rust backend via an Inter-Process Communication (IPC) channel, sending JSON messages to trigger commands.
+For a deep dive into the system's structure, data flows, IPC contracts, and development patterns, please see our comprehensive **[Developer Documentation](./docs/README.md)**.
 
 ---
 
