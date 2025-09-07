@@ -1,0 +1,23 @@
+/*
+ * Theme mapping for Dark mode.
+ * We also set a default mapping for :root:not([data-theme]) to ensure
+ * dark is used when no explicit theme is selected (no visual regressions).
+ */
+
+:root:not([data-theme]),
+:root[data-theme="dark"] {
+  --color-bg: var(--palette-dark-bg);
+  --surface-1: var(--palette-dark-surface-1);
+  --surface-2: var(--palette-dark-surface-2);
+  --color-border: var(--palette-dark-border);
+  --color-text: var(--palette-dark-text);
+  --color-muted: var(--palette-dark-muted);
+
+  --color-accent: var(--palette-dark-accent);
+  --color-success: var(--palette-dark-success);
+  --color-warning: var(--palette-dark-warning);
+  --color-info: var(--palette-dark-info);
+  --color-error: var(--palette-dark-error);
+
+  --color-on-accent: var(--palette-dark-on-accent);
+}

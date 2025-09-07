@@ -15,6 +15,7 @@ node_modules/
 src/ui/dist/
 # Log files from package managers
 npm-debug.log*
+yarn-debug.log*
 yarn-error.log
 pnpm-debug.log
 # Yarn 2+ lockfile and cache
@@ -79,3 +80,15 @@ $RECYCLE.BIN/
 *.tmp
 scripts/*-test.sh
 .github/workflows/test-*.yml
+tarpaulin-report.html
+
+# #################################
+# ## Playwright
+# #################################
+.last-run.json
+playwright-report/
+test-results/
+blob-report/
+coverage/
+coverage-full/
+**/__snapshots__/**

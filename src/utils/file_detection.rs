@@ -125,8 +125,6 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "work",
     "pest",
     "ron",
-    "rlib",
-    "pdb",
     "map",
     "d.ts",
     "mjs",
@@ -150,13 +148,10 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "ssv",
     "tab",
     "data",
-    "dat",
     "idx",
     "org",
-    "tex",
     "cls",
     "sty",
-    "bib",
     "bst",
     "aux",
     "fdb_latexmk",
@@ -170,9 +165,7 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "pxd",
     "pxi",
     "pyi",
-    "makefile",
     "gnumakefile",
-    "dockerfile",
     "containerfile",
     "vagrantfile",
     "rakefile",
@@ -204,7 +197,6 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "wat",
     "wit",
     "component",
-    "pest",
     "lalrpop",
     "y",
     "l",
@@ -226,19 +218,16 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "dhall",
     "purescript",
     "purs",
-    "elm",
     "roc",
     "gleam",
     "grain",
     "hx",
     "hxml",
     "moon",
-    "zig",
     "just",
     "justfile",
     "task",
     "taskfile",
-    "editorconfig",
     "clang-format",
     "rustfmt",
     "modulemap",
@@ -249,7 +238,6 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "am",
     "ac",
     "m4",
-    "cmake",
     "ctest",
     "service",
     "socket",
@@ -291,11 +279,8 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "flv",
     "webm",
     "pdf",
-    "doc",
     "docx",
-    "xls",
     "xlsx",
-    "ppt",
     "pptx",
     "bin",
     "dat",
@@ -304,7 +289,6 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "sqlite3",
     "rlib",
     "rmeta",
-    "so",
     "d",
     "pdb",
     "ilk",
@@ -330,15 +314,14 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "gem",
     "whl",
     "egg",
-    "rpm",
-    "deb",
     "snap",
     "flatpak",
 ];
 
-// PERFORMANCE: Static Sets for O(1) lookups
 static TEXT_EXT_SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+
 static BINARY_EXT_SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+
 static IMAGE_EXT_SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
 
 fn get_text_ext_set() -> &'static std::collections::HashSet<&'static str> {
@@ -353,22 +336,20 @@ fn get_image_ext_set() -> &'static std::collections::HashSet<&'static str> {
     IMAGE_EXT_SET.get_or_init(|| IMAGE_EXTENSIONS.iter().copied().collect())
 }
 
-const MAX_CONTENT_CHECK_SIZE: u64 = 20 * 1024 * 1024; // 20MB
-const CONTENT_CHECK_BUFFER_SIZE: usize = 1024; // 1KB for Content-Check
+const MAX_CONTENT_CHECK_SIZE: u64 = 20 * 1024 * 1024;
+
+const CONTENT_CHECK_BUFFER_SIZE: usize = 1024;
 
 /// Determines if a file is likely to be a text file.
 pub fn is_text_file(path: &Path) -> Result<bool> {
     if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
         let ext_lower = extension.to_lowercase();
-
         if get_text_ext_set().contains(ext_lower.as_str()) {
             return Ok(true);
         }
-
         if get_binary_ext_set().contains(ext_lower.as_str()) {
             return Ok(false);
         }
-
         if get_image_ext_set().contains(ext_lower.as_str()) {
             return Ok(false);
         }
@@ -378,7 +359,6 @@ pub fn is_text_file(path: &Path) -> Result<bool> {
             if metadata.len() > MAX_CONTENT_CHECK_SIZE {
                 return Ok(false);
             }
-
             if metadata.len() == 0 {
                 return Ok(true);
             }
@@ -414,15 +394,17 @@ fn check_file_content_optimized(path: &Path) -> Result<bool> {
     match std::str::from_utf8(&buffer[..bytes_read]) {
         Ok(_) => Ok(true),
         Err(_) => {
-            // Fallback: Check for frequent non-UTF8 but text-similar encodings
-            // If > 95% of Bytes are ASCII-Symbols, treat them as text
-            let printable_count = buffer[..bytes_read]
+            // VET: Switched to a more robust heuristic. Instead of checking for printable
+            // ASCII, we check for the absence of control characters (excluding whitespace).
+            // This correctly handles legacy 8-bit encodings like Latin-1.
+            let control_char_count = buffer[..bytes_read]
                 .iter()
-                .filter(|&&b| (32..=126).contains(&b) || b == 9 || b == 10 || b == 13)
+                .filter(|&&b| b < 32 && b != 9 && b != 10 && b != 13)
                 .count();
 
-            let ratio = printable_count as f32 / bytes_read as f32;
-            Ok(ratio > 0.95)
+            // If less than 5% of the bytes are weird control characters, we assume it's text.
+            let ratio = control_char_count as f32 / bytes_read as f32;
+            Ok(ratio < 0.05)
         }
     }
 }
@@ -438,4 +420,147 @@ pub fn batch_classify_files(paths: &[&Path]) -> Vec<(bool, bool)> {
             (is_text, is_image)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Helper to create a test file with specific content in a temporary directory.
+    fn create_test_file(dir: &TempDir, name: &str, content: &[u8]) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        fs::write(&path, content).expect("Failed to write test file");
+        path
+    }
+
+    #[test]
+    fn test_is_text_by_known_text_extension() {
+        let dir = TempDir::new().unwrap();
+        let text_files = [
+            "document.txt",
+            "code.rs",
+            "script.py",
+            "config.YAML",
+            "Makefile",
+        ];
+        for name in text_files {
+            let path = create_test_file(&dir, name, b"some content");
+            assert!(
+                is_text_file(&path).unwrap(),
+                "Expected '{}' to be a text file",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_not_text_by_known_binary_extension() {
+        let dir = TempDir::new().unwrap();
+        let bin_files = ["archive.zip", "program.EXE", "library.dll", "document.pdf"];
+        for name in bin_files {
+            let path = create_test_file(&dir, name, b"\xDE\xAD\xBE\xEF");
+            assert!(
+                !is_text_file(&path).unwrap(),
+                "Expected '{}' to be a binary file",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_not_text_by_known_image_extension() {
+        let dir = TempDir::new().unwrap();
+        let img_files = ["photo.jpg", "logo.PNG", "animated.gif"];
+        for name in img_files {
+            let path = create_test_file(&dir, name, b"imagedata");
+            assert!(
+                !is_text_file(&path).unwrap(),
+                "Expected '{}' to be a binary (image) file",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_nonexistent_file_is_not_text() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.file");
+        assert!(!is_text_file(&path).unwrap());
+    }
+
+    #[test]
+    fn test_empty_file_is_text() {
+        let dir = TempDir::new().unwrap();
+        let path = create_test_file(&dir, "empty.unknown", b"");
+        assert!(is_text_file(&path).unwrap());
+    }
+
+    #[test]
+    fn test_is_text_by_utf8_content() {
+        let dir = TempDir::new().unwrap();
+        let path = create_test_file(
+            &dir,
+            "content.unknown",
+            "Hello, world! This is UTF-8. 🦀".as_bytes(),
+        );
+        assert!(is_text_file(&path).unwrap());
+    }
+
+    #[test]
+    fn test_is_not_text_due_to_null_byte() {
+        let dir = TempDir::new().unwrap();
+        let path = create_test_file(
+            &dir,
+            "binary.unknown",
+            b"Here is some text\x00with a null byte.",
+        );
+        assert!(!is_text_file(&path).unwrap());
+    }
+
+    #[test]
+    fn test_is_text_by_printable_ratio_heuristic() {
+        let dir = TempDir::new().unwrap();
+        let latin1_text = b"K\xf6nnen"; // "Können" in Latin-1
+        let path = create_test_file(&dir, "legacy_encoding.unknown", latin1_text);
+        assert!(is_text_file(&path).unwrap());
+    }
+
+    #[test]
+    fn test_is_not_text_due_to_low_printable_ratio() {
+        let dir = TempDir::new().unwrap();
+        let random_binary = b"abc\x01\x02\x03\x04\x05\x06\x07\x08\x80\x90\xA0";
+        let path = create_test_file(&dir, "random.unknown", random_binary);
+        assert!(!is_text_file(&path).unwrap());
+    }
+
+    #[test]
+    fn test_is_image_file_logic() {
+        assert!(is_image_file(&Path::new("image.jpg")));
+        assert!(is_image_file(&Path::new("image.PNG")));
+        assert!(is_image_file(&Path::new("image.svg")));
+        assert!(!is_image_file(&Path::new("document.txt")));
+        assert!(!is_image_file(&Path::new("archive.zip")));
+        assert!(!is_image_file(&Path::new("no_extension")));
+    }
+
+    #[test]
+    fn test_batch_classify_files_logic() {
+        let dir = TempDir::new().unwrap();
+        let p1 = create_test_file(&dir, "text.txt", b"text");
+        let p2 = create_test_file(&dir, "image.png", b"png");
+        let p3 = create_test_file(&dir, "binary.zip", b"zip");
+        let p4 = create_test_file(&dir, "vector.svg", b"<svg>");
+
+        let paths: Vec<&Path> = vec![&p1, &p2, &p3, &p4];
+        let results = batch_classify_files(&paths);
+
+        assert_eq!(results.len(), 4);
+        // (is_text, is_image)
+        assert_eq!(results[0], (true, false));
+        assert_eq!(results[1], (false, true));
+        assert_eq!(results[2], (false, false));
+        assert_eq!(results[3], (true, false));
+    }
 }

@@ -1,0 +1,13 @@
+---
+source: src/core/tree_generator.rs
+expression: tree_output
+---
+real-world-project/
+├── 📁 assets
+├── 📁 src
+│   ├── 📁 components
+│   │   └── 📄 Button.jsx
+│   └── 📄 index.js
+├── 📁 vendor
+├── 📄 .gitignore
+└── 📄 package.json

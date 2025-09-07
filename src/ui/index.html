@@ -1,355 +1,56 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CFC - Context File Concatenator</title>
-    <style>
-      /*INJECT_CSS*/
-    </style>
-    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+    <script>
+      /* Early theme bootstrapping to avoid FOUC:
+         Set data-theme="light|dark" before CSS loads based on user preference. */
+      (function () {
+        try {
+          var key = "cfc-theme";
+          var stored = localStorage.getItem(key);
+          var t =
+            stored === "light" || stored === "dark"
+              ? stored
+              : window.matchMedia &&
+                  window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light";
+          document.documentElement.setAttribute("data-theme", t);
+        } catch (e) {
+          // In case storage is blocked, default to dark to match existing visuals
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div class="container" style="height: calc(100% - 30px)">
-      <aside class="sidebar">
-        <div class="panel">
-          <div class="panel-header">
-            <h3>
-              <svg
-                class="icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-              </svg>
-              Search & Filter
-            </h3>
-          </div>
-          <input
-            type="text"
-            id="search-query"
-            placeholder="Search filenames..."
-          />
-          <input
-            type="text"
-            id="extension-filter"
-            placeholder="Filter by extension (e.g., rs, py)"
-          />
-          <input
-            type="text"
-            id="content-search-query"
-            placeholder="Search text inside files..."
-          />
-          <label
-            ><input type="checkbox" id="case-sensitive" /> Case Sensitive</label
-          >
-        </div>
-
-        <div class="panel ignore-patterns-panel">
-          <div class="panel-header">
-            <h3>
-              <svg
-                class="icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <circle cx="12" cy="12" r="10" />
-                <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
-              </svg>
-              Ignore Patterns
-            </h3>
-            <button
-              id="rescan-btn"
-              title="Re-scan with current ignore patterns"
-            >
-              <svg
-                class="icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-                <path d="M21 3v5h-5" />
-                <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
-                <path d="M3 21v-5h5" />
-              </svg>
-              Re-Scan
-            </button>
-          </div>
-          <div class="input-group">
-            <input
-              type="text"
-              id="new-ignore-pattern"
-              placeholder="Add pattern (*.log, build/)"
-            />
-            <button id="add-pattern-btn">Add</button>
-          </div>
-          <div class="ignore-options">
-            <div class="ignore-actions">
-              <button
-                id="delete-all-patterns-btn"
-                title="Remove all ignore patterns"
-              >
-                Delete All
-              </button>
-              <label
-                ><input type="checkbox" id="remove-empty-dirs" /> Remove empty
-                dirs</label
-              >
-            </div>
-          </div>
-          <div class="common-patterns-section">
-            <label class="common-patterns-label">Common Ignore Pattern:</label>
-            <div
-              id="common-patterns-container"
-              class="common-patterns-container"
-            ></div>
-          </div>
-          <input
-            type="text"
-            id="filter-patterns"
-            placeholder="Filter currently assigned ignore patterns..."
-          />
-          <div id="current-patterns-container" class="current-patterns"></div>
-        </div>
-      </aside>
+      <aside id="sidebar-root" class="sidebar"></aside>
 
       <main class="main-content">
-        <div class="top-bar">
-          <div class="path-selection">
-            <button id="select-dir-btn">
-              <svg
-                class="icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path
-                  d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"
-                />
-              </svg>
-              Select Directory
-            </button>
-            <button
-              id="clear-dir-btn"
-              title="Clear current directory"
-              style="display: none"
-            >
-              <svg
-                class="icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
-              Clear
-            </button>
-            <span id="current-path">No directory selected.</span>
-          </div>
-          <div class="config-buttons">
-            <span id="current-config-filename" class="config-filename"></span>
-            <button id="import-config-btn">
-              <svg
-                class="icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path
-                  d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
-                />
-                <polyline points="14,2 14,8 20,8" />
-                <line x1="16" y1="13" x2="8" y2="13" />
-                <line x1="16" y1="17" x2="8" y2="17" />
-                <polyline points="10,9 9,9 8,9" />
-              </svg>
-              Import Config
-            </button>
-            <button id="export-config-btn">
-              <svg
-                class="icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path
-                  d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"
-                />
-                <polyline points="17,21 17,13 7,13 7,21" />
-                <polyline points="7,3 7,8 15,8" />
-              </svg>
-              Export Config
-            </button>
-          </div>
-        </div>
+        <div class="sidebar-resize-handle-right" aria-hidden="true"></div>
+
+        <div id="header-root"></div>
 
         <div class="content-splitter">
           <div id="file-list-panel" class="file-list-panel">
-            <div class="panel-header files-header">
-              <div class="files-title-section">
-                <h3>Files</h3>
-                <div class="button-group">
-                  <button id="select-all-btn">Select All</button>
-                  <button id="deselect-all-btn">Deselect All</button>
-                  <button id="expand-all-btn">Expand All</button>
-                  <button id="collapse-all-btn">Collapse All</button>
-                </div>
-              </div>
-              <div class="stats" id="file-stats"></div>
-            </div>
+            <!-- Header/buttons/stats are rendered by FileTree.svelte -->
             <div id="file-tree-container" class="file-tree-container"></div>
           </div>
 
           <div id="resizer" class="resizer"></div>
 
-          <div id="preview-panel" class="preview-panel">
-            <div class="panel-header">
-              <h3 id="preview-title">Preview</h3>
-              <div class="preview-header-buttons">
-                <button id="copy-btn" style="display: none">
-                  <svg
-                    class="icon"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                  >
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                    <path
-                      d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
-                    />
-                  </svg>
-                  Copy
-                </button>
-                <button id="clear-preview-btn" style="display: none">
-                  <svg
-                    class="icon"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                  >
-                    <line x1="18" y1="6" x2="6" y2="18" />
-                    <line x1="6" y1="6" x2="18" y2="18" />
-                  </svg>
-                  Clear
-                </button>
-              </div>
-            </div>
-            <div id="editor-container"></div>
-          </div>
+          <div id="preview-panel" class="preview-panel"></div>
         </div>
 
-        <footer class="bottom-panel">
-          <div class="main-actions">
-            <button id="generate-btn" class="button-cta" disabled>
-              <svg class="icon icon-lightning-light" viewBox="0 0 24 24">
-                <path
-                  d="M 0.973 23.982 L 12.582 13.522 L 16.103 13.434 L 18.889 8.027 L 11.321 8.07 L 12.625 5.577 L 20.237 5.496 L 23.027 0.018 L 9.144 0.02 L 2.241 13.408 L 6.333 13.561 L 0.973 23.982 Z"
-                ></path>
-              </svg>
-              Generate
-            </button>
-            <button id="save-btn" class="button-secondary" disabled>
-              <svg
-                class="icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path
-                  d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"
-                />
-                <polyline points="17,21 17,13 7,13 7,21" />
-                <polyline points="7,3 7,8 15,8" />
-              </svg>
-              Save to File
-            </button>
-          </div>
-        </footer>
+        <footer id="footer-root" class="bottom-panel"></footer>
       </main>
     </div>
-    <div id="status-bar">
-      <details class="status-output-settings">
-        <summary>
-          <svg
-            class="icon icon-closed"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path
-              d="M12.52 20.924c-.87 .262 -1.93 -.152 -2.195 -1.241a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.088 .264 1.502 1.323 1.242 2.192"
-            ></path>
-            <path d="M19 16v6"></path>
-            <path d="M22 19l-3 3l-3 -3"></path>
-            <path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"></path>
-          </svg>
-          <svg
-            class="icon icon-opened"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path
-              d="M12.501 20.93c-.866 .25 -1.914 -.166 -2.176 -1.247a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.074 .26 1.49 1.296 1.252 2.158"
-            ></path>
-            <path d="M19 22v-6"></path>
-            <path d="M22 19l-3 -3l-3 3"></path>
-            <path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"></path>
-          </svg>
-          Output
-        </summary>
-        <div class="settings-content">
-          <div class="setting-row">
-            <label for="output-dir">Directory:</label>
-            <input type="text" id="output-dir" />
-            <button id="browse-output-dir">Browse</button>
-          </div>
-          <div class="setting-row">
-            <label for="output-filename">Filename:</label>
-            <input type="text" id="output-filename" />
-          </div>
-          <div class="setting-row">
-            <label
-              ><input type="checkbox" id="include-tree" /> Include directory
-              tree</label
-            >
-            <label
-              ><input type="checkbox" id="relative-paths" /> Use relative file
-              paths</label
-            >
-          </div>
-        </div>
-      </details>
-      <span class="status-text">Ready.</span>
-      <div id="indexing-status" class="indexing-status" style="display: none">
-        <div class="spinner"></div>
-        <span>Indexing...</span>
-      </div>
-    </div>
-    </div>
-    <script>
-      /*INJECT_JS*/
-    </script>
+
+    <div id="svelte-root"></div>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

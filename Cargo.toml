@@ -1,10 +1,10 @@
 [package]
 name = "context-file-concat"
-version = "0.2.0"  # Start with 0.1.0 as requested
+version = "0.2.0"
 edition = "2021"
 description = "Context File Concatenator - Intelligently select, filter, and combine project files for LLM context"
 authors = ["src dbgr"]
-license = "TODO"
+license = "MIT"
 repository = "https://github.com/src-dbgr/context-file-concat"
 homepage = "https://github.com/src-dbgr/context-file-concat"
 keywords = ["llm", "context", "files", "concatenation", "development"]
@@ -25,16 +25,33 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 rfd = "0.15"
-dirs = "5.0"
-directories = "5.0"
+dirs = "6.0"
+directories = "6.0"
 rayon = "1.10"
-tree_magic_mini = "3.0"
+tree_magic_mini = "3.2"
 camino = "1.1"
-regex = "1.0"
-thiserror = "1.0"
+regex = "1.1"
+thiserror = "2.0"
+tempfile = "3.20"
+tiktoken-rs = "0.7"
+async-trait = "0.1"
+rust-embed = { version = "8", features = ["compression", "include-exclude"] }
+mime_guess = "2.0"
+open = "5.3"
 
 [dev-dependencies]
-tempfile = "3.10"
+insta = { version = "1.43", features = ["redactions", "filters"] }
+proptest = "1.7"
+tempfile = "3.20"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-test = "0.2"
+serial_test = "3.2"
+libc = "0.2"
+
+# macOS-only: thin, scoped integration helpers (no objc macros in our code)
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
 
 # For better Performance in Release-Build
 [profile.release]
@@ -62,7 +79,7 @@ minimum_system_version = "10.15"
 frameworks = ["WebKit"]
 info_plist_path = "assets/Info.plist"
 
-# Windows specific settings  
+# Windows specific settings
 [package.metadata.bundle.windows]
 wix_language = "en-US"
 wix_template = "assets/main.wxs"

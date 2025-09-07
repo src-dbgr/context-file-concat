@@ -73,7 +73,7 @@ fi
 # Run tests to ensure everything works
 print_status "Running tests..."
 if [ "$DRY_RUN" = false ]; then
-    cargo test
+    INSTA_UPDATE=no cargo test --workspace
 else
     print_warning "Skipping tests (dry-run)"
 fi
@@ -82,7 +82,8 @@ fi
 print_status "Building frontend..."
 if [ "$DRY_RUN" = false ]; then
     cd src/ui
-    npm install
+    # Deterministic install
+    npm ci
     npm run build
     cd ../..
 else

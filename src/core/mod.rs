@@ -17,7 +17,7 @@ use std::path::PathBuf;
 pub use error::CoreError;
 
 /// Represents a single item (file or directory) found during a directory scan.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)] // VET: Added Default trait
 pub struct FileItem {
     /// The full path to the file or directory.
     pub path: PathBuf,

@@ -21,7 +21,7 @@ pub enum UserEvent {
         path: PathBuf,
     },
     /// The generated, concatenated content for the main preview.
-    ShowGeneratedContent(String),
+    ShowGeneratedContent { content: String, token_count: usize },
     /// An error message to be displayed to the user.
     ShowError(String),
     /// The result of a file save operation.

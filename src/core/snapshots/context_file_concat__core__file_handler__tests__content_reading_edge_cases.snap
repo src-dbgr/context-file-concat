@@ -1,0 +1,16 @@
+---
+source: src/core/file_handler.rs
+expression: content
+---
+# CFC Output - Generated: [DATETIME]
+# Total files: 2
+
+[PROJECT_NAME]/huge_file.log
+===FILE-START===
+[FILE TOO LARGE: 22020096 bytes - CONTENT SKIPPED]
+---FILE-END-----
+
+[PROJECT_NAME]/assets/data.bin
+===FILE-START===
+[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]
+---FILE-END-----

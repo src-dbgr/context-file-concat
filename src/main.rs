@@ -1,4 +1,5 @@
 use context_file_concat::app;
+use context_file_concat::app::file_dialog::NativeDialogService;
 use context_file_concat::config;
 use std::sync::{Arc, Mutex};
 use tao::{
@@ -7,6 +8,13 @@ use tao::{
     window::WindowBuilder,
 };
 use wry::WebViewBuilder;
+
+// Keep platform quirks isolated.
+mod platform;
+
+// Embedded UI-Assets – only compiled in Release
+#[cfg(not(debug_assertions))]
+mod web_assets;
 
 #[tokio::main]
 async fn main() {
@@ -30,53 +38,127 @@ async fn main() {
 
     let window = Arc::new(window);
 
+    // macOS: ensure a (minimal) NSMenu exists before building the WebView.
+    #[cfg(target_os = "macos")]
+    platform::macos::menu::install_standard_menus("CFC");
+
     // Create the shared application state and the event loop proxy
     let proxy = event_loop.create_proxy();
     let state = Arc::new(Mutex::new(app::state::AppState::default()));
+    let dialog_service = Arc::new(NativeDialogService {});
 
-    let html_content = include_str!("ui/index.html")
-        .replace("/*INJECT_CSS*/", include_str!("ui/style.css"))
-        .replace("/*INJECT_JS*/", include_str!("ui/dist/bundle.js"));
+    // To avoid code duplication, we define the handlers first.
+    let ipc_handler_state = state.clone();
+    let ipc_handler_proxy = proxy.clone();
+    let ipc_handler_dialog = dialog_service.clone();
+    let ipc_handler = move |message: String| {
+        app::handle_ipc_message(
+            message,
+            ipc_handler_dialog.clone(),
+            ipc_handler_proxy.clone(),
+            ipc_handler_state.clone(),
+        );
+    };
 
-    let proxy_for_ipc = proxy.clone();
-    let state_for_ipc = state.clone();
-    let proxy_for_drop = proxy.clone();
-    let state_for_drop = state.clone();
-
-    let webview = WebViewBuilder::new(&*window)
-        .with_html(html_content)
-        .with_ipc_handler(move |message: String| {
-            app::handle_ipc_message(message, proxy_for_ipc.clone(), state_for_ipc.clone());
-        })
-        .with_file_drop_handler(move |event| {
-            use wry::FileDropEvent;
-            match event {
-                FileDropEvent::Hovered { .. } => {
-                    let _ =
-                        proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(true));
-                }
-                FileDropEvent::Dropped { paths, .. } => {
-                    let _ =
-                        proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(false));
-                    if let Some(path) = paths.first() {
-                        // Dropping a new path should always reset the state.
-                        app::tasks::start_scan_on_path(
-                            path.clone(),
-                            proxy_for_drop.clone(),
-                            state_for_drop.clone(),
-                            false,
-                        );
-                    }
-                }
-                FileDropEvent::Cancelled => {
-                    let _ =
-                        proxy_for_drop.send_event(app::events::UserEvent::DragStateChanged(false));
-                }
-                _ => (),
+    let drop_handler_state = state.clone();
+    let drop_handler_proxy = proxy.clone();
+    let file_drop_handler = move |event| {
+        use wry::FileDropEvent;
+        match event {
+            FileDropEvent::Hovered { .. } => {
+                let _ =
+                    drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(true));
             }
-            true
-        })
-        .with_devtools(true)
+            FileDropEvent::Dropped { paths, .. } => {
+                let _ =
+                    drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
+                if let Some(path) = paths.first() {
+                    app::tasks::start_scan_on_path(
+                        path.clone(),
+                        drop_handler_proxy.clone(),
+                        drop_handler_state.clone(),
+                        false,
+                    );
+                }
+            }
+            FileDropEvent::Cancelled => {
+                let _ =
+                    drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
+            }
+            _ => (),
+        }
+        true
+    };
+
+    // Build the WebView for DEBUG: Vite Dev-Server
+    #[cfg(debug_assertions)]
+    let webview_builder = {
+        tracing::info!("Running in DEBUG mode, loading from Vite dev server.");
+        WebViewBuilder::new(&*window)
+            .with_url("http://localhost:1420")
+            .with_devtools(true)
+    };
+
+    // RELEASE: Custom-Protocol (no Port, no file://-issues)
+    #[cfg(not(debug_assertions))]
+    let webview_builder = {
+        use std::borrow::Cow;
+        use wry::http::Response;
+
+        tracing::info!(
+            "Running in RELEASE mode, using embedded assets via custom scheme 'cfc://'."
+        );
+
+        let enable_devtools = std::env::var_os("CFC_DEVTOOLS").is_some();
+
+        let scheme = "cfc".to_string();
+        let handler = move |request: wry::http::Request<Vec<u8>>| -> Response<Cow<'static, [u8]>> {
+            let path = request.uri().path().to_string();
+            match web_assets::load(&path) {
+                Some((bytes, content_type)) => Response::builder()
+                    .status(200)
+                    .header("Content-Type", content_type)
+                    .body(bytes)
+                    .expect("response build ok"),
+                None => {
+                    let not_found: &'static [u8] = b"Not Found";
+                    Response::builder()
+                        .status(404)
+                        .header("Content-Type", "text/plain; charset=utf-8")
+                        .body(Cow::Borrowed(not_found))
+                        .expect("response build ok")
+                }
+            }
+        };
+
+        WebViewBuilder::new(&*window)
+            .with_custom_protocol(scheme, handler)
+            .with_url("cfc://index.html")
+            .with_devtools(enable_devtools)
+            // Navigation policy (RELEASE branch; append identically in DEBUG branch)
+            .with_navigation_handler(|uri: String| {
+                // Determine the scheme manually
+                let scheme = uri.split(':').next().unwrap_or("");
+
+                match scheme {
+                    // Allow internally
+                    "cfc" | "about" | "blob" | "data" => true,
+
+                    // Open external links in the system browser
+                    "http" | "https" => {
+                        let _ = open::that(&uri);
+                        false
+                    }
+
+                    // Block everything else (e.g., file://)
+                    _ => false,
+                }
+            })
+    };
+
+    let webview = webview_builder
+        .with_ipc_handler(ipc_handler)
+        .with_file_drop_handler(file_drop_handler)
         .build()
         .expect("Failed to build WebView");
 
@@ -99,7 +181,7 @@ async fn main() {
                     state_guard.config.window_size = (size.width.into(), size.height.into());
                     state_guard.config.window_position = (position.x.into(), position.y.into());
 
-                    if let Err(e) = config::settings::save_config(&state_guard.config) {
+                    if let Err(e) = config::settings::save_config(&state_guard.config, None) {
                         tracing::error!("Failed to save config on exit: {}", e);
                     }
                     *control_flow = ControlFlow::Exit;

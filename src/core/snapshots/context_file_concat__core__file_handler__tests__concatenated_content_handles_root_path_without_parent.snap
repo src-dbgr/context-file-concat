@@ -1,0 +1,11 @@
+---
+source: src/core/file_handler.rs
+expression: content
+---
+# CFC Output - Generated: [DATETIME]
+# Total files: 1
+
+[README_PATH]
+===FILE-START===
+This is the main readme.
+---FILE-END-----

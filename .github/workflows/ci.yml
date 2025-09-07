@@ -31,23 +31,82 @@ jobs:
             librsvg2-dev \
             libwebkit2gtk-4.1-dev
 
-      - name: Setup Node.js
+      - name: Setup Node.js (24.x)
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
+          check-latest: true
+          cache: "npm"
+          cache-dependency-path: "./src/ui/package-lock.json"
 
-      - name: Install npm dependencies
-        run: npm install
+      - name: Use npm 11 (align with packageManager)
+        shell: bash
+        run: |
+          if [ "$(npm -v | cut -d. -f1)" != "11" ]; then
+            npm i -g npm@11
+          fi
+          echo "Node: $(node -v)"
+          echo "npm : $(npm -v)"
+
+      - name: Enforce npm engine strictness (Node 24)
+        run: |
+          npm config set engine-strict true
+          node -v
+          npm -v
+        working-directory: ./src/ui
+
+      - name: Install npm dependencies (clean, deterministic)
+        run: npm ci
+        working-directory: ./src/ui
+
+      # 🔒 Quality gates (fail fast)
+      - name: Run ESLint (warnings treated as errors)
+        run: npm run lint
+        working-directory: ./src/ui
+
+      - name: Run Svelte typecheck (warnings fail build)
+        run: npm run typecheck
         working-directory: ./src/ui
 
       - name: Build JavaScript bundle
         run: npm run build
         working-directory: ./src/ui
 
+      # 📦 Bundle budgets (no extra deps)
+      - name: Check bundle budgets (Brotli, split by app/workers)
+        run: npm run budget:bundle
+        working-directory: ./src/ui
+        env:
+          ENTRY_BROTLI: "800000" # 0.8 MB
+          APP_TOTAL_BROTLI: "1000000" # 1.0 MB
+          WORKER_TOTAL_BROTLI: "1500000" # 1.5 MB
+          # Optional legacy guard for total:
+          # BUDGET_TOTAL_BROTLI: "2000000"
+
+      # ▶️ Playwright E2E
+      - name: Install Playwright browsers (chromium only)
+        run: npx -y playwright install --with-deps chromium
+        working-directory: ./src/ui
+
+      - name: Run Playwright E2E tests
+        run: npm run test:e2e -- --reporter=dot
+        working-directory: ./src/ui
+
+      # ⏱️ Runtime/smoothness budgets (deterministic conditions, no sleeps)
+      - name: Run E2E budget tests
+        run: npm run test:e2e:budgets -- --reporter=dot
+        working-directory: ./src/ui
+        env:
+          BUDGET_INIT_MS: "1500"
+          BUDGET_VTREE_MS: "3000"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Build Rust (release sanity)
+        run: cargo build --release
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -55,5 +114,7 @@ jobs:
       - name: Run Clippy
         run: cargo clippy -- -D warnings
 
-      - name: Run tests
-        run: cargo test
+      - name: Run tests with snapshot verification
+        env:
+          INSTA_UPDATE: "no"
+        run: cargo test --workspace

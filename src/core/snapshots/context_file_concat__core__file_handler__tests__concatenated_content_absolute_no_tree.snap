@@ -1,0 +1,18 @@
+---
+source: src/core/file_handler.rs
+expression: content
+---
+# CFC Output - Generated: [DATETIME]
+# Total files: 2
+
+[ROOT]/src/main.rs
+===FILE-START===
+fn main() {
+    println!("Hello, world!");
+}
+---FILE-END-----
+
+[ROOT]/README.md
+===FILE-START===
+This is the main readme.
+---FILE-END-----

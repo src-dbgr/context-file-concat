@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
     pub ignore_patterns: HashSet<String>,
     pub tree_ignore_patterns: HashSet<String>,
@@ -25,7 +25,7 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        settings::load_config()
+        settings::load_config(None)
     }
 }
 
@@ -79,10 +79,8 @@ impl Default for AppConfig {
             tree_ignore_patterns: HashSet::new(),
             last_directory: None,
             output_directory: dirs::desktop_dir(),
-            output_filename: format!(
-                "cfc_output_{}.txt",
-                chrono::Local::now().format("%Y%m%d_%H%M%S")
-            ),
+            // VET: Use a deterministic, static filename for the default implementation.
+            output_filename: "cfc_output.txt".to_string(),
             case_sensitive_search: false,
             include_tree_by_default: true,
             use_relative_paths: true,
@@ -90,8 +88,8 @@ impl Default for AppConfig {
             window_size: (1200.0, 800.0),
             window_position: (100.0, 100.0),
             auto_load_last_directory: false,
-            max_file_size_mb: 20, // 20MB Standard-Limit
-            scan_chunk_size: 100, // 100 Files per chunk
+            max_file_size_mb: 20,
+            scan_chunk_size: 100,
         }
     }
 }

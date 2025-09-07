@@ -1,0 +1,6 @@
+---
+source: src/core/file_handler.rs
+expression: preview
+---
+This is a valid line.
+[ERROR READING LINE]

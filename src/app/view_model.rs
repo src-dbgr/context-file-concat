@@ -31,6 +31,7 @@ pub struct UiState {
     pub current_config_filename: Option<String>,
     pub scan_progress: crate::core::ScanProgress,
     pub active_ignore_patterns: HashSet<String>,
+    pub patterns_need_rescan: bool,
 }
 
 /// A serializable representation of a single node in the file tree for the UI.
@@ -102,6 +103,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
         current_config_filename: state.current_config_filename.clone(),
         scan_progress: state.scan_progress.clone(),
         active_ignore_patterns: state.active_ignore_patterns.clone(),
+        patterns_need_rescan: state.patterns_need_rescan,
     }
 }
 
