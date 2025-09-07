@@ -25,10 +25,14 @@
     "test:e2e": "playwright test -c ./playwright.config.ts",
     "test:e2e:headed": "playwright test -c ./playwright.config.ts --headed",
     "test:contracts": "vitest run src/tests/contracts --reporter=dot",
-    "check": "npm run lint && npm run typecheck && npm run test && npm run test:contracts && npm run test:cov:core && npm run test:e2e",
+    "test:e2e:budgets": "playwright test -c ./playwright.config.ts e2e/budgets.spec.ts",
+    "e2e:bench": "playwright test src/ui/e2e/benchmarks.spec.ts --project=chromium --reporter=line",
+    "e2e": "playwright test",
+    "bench": "playwright test -g @bench --project=chromium --reporter=line",
+    "bench:strict": "BMARK_FLATTEN_MS=1500 BMARK_FILTER_MS=500 BMARK_SCROLL_MS=200 npm run bench --silent",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run test:contracts && npm run test:cov:core && npm run test:e2e && npm run bench:strict",
     "check:clean": "npm run clean && npm run build && npm run check",
-    "budget:bundle": "node ./scripts/check-budgets.mjs",
-    "test:e2e:budgets": "playwright test -c ./playwright.config.ts e2e/budgets.spec.ts"
+    "budget:bundle": "node ./scripts/check-budgets.mjs"
   },
   "keywords": [
     "llm",
