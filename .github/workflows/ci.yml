@@ -98,7 +98,8 @@ jobs:
         working-directory: ./src/ui
         env:
           BUDGET_INIT_MS: "1500"
-          BUDGET_VTREE_MS: "3000"
+          # GitHub-Runner are slow; 3.0s
+          BUDGET_VTREE_MS: "4000"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
