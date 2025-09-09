@@ -1,6 +1,12 @@
 # Changelog
 
-## [v0.3.0] — 2025-09-07
+## [0.3.1] - 2025-09-28
+
+### Changed
+
+- Replaced Icons to match squircle shape
+
+## [0.3.0] — 2025-09-07
 
 ### Highlights
 
