@@ -12,8 +12,8 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}🎨 Generating icons for all platforms...${NC}"
 
 # Check if source SVG exists
-if [ ! -f "assets/flash_logo.svg" ]; then
-    echo "❌ Error: assets/flash_logo.svg not found!"
+if [ ! -f "assets/flash_no_bg_squircle_logo.svg" ]; then
+    echo "❌ Error: assets/flash_no_bg_squircle_logo.svg not found!"
     exit 1
 fi
 
@@ -35,18 +35,18 @@ echo -e "${GREEN}📱 Generating macOS icons (.icns)...${NC}"
 mkdir -p assets/icons/macos.iconset
 
 # Standard sizes for macOS iconset
-magick assets/flash_logo.svg -resize 16x16 assets/icons/macos.iconset/icon_16x16.png
-magick assets/flash_logo.svg -resize 32x32 assets/icons/macos.iconset/icon_32x32.png
-magick assets/flash_logo.svg -resize 128x128 assets/icons/macos.iconset/icon_128x128.png
-magick assets/flash_logo.svg -resize 256x256 assets/icons/macos.iconset/icon_256x256.png
-magick assets/flash_logo.svg -resize 512x512 assets/icons/macos.iconset/icon_512x512.png
+magick -background none assets/flash_no_bg_squircle_logo.svg -resize 16x16 assets/icons/macos.iconset/icon_16x16.png
+magick -background none assets/flash_no_bg_squircle_logo.svg -resize 32x32 assets/icons/macos.iconset/icon_32x32.png
+magick -background none assets/flash_no_bg_squircle_logo.svg -resize 128x128 assets/icons/macos.iconset/icon_128x128.png
+magick -background none assets/flash_no_bg_squircle_logo.svg -resize 256x256 assets/icons/macos.iconset/icon_256x256.png
+magick -background none assets/flash_no_bg_squircle_logo.svg -resize 512x512 assets/icons/macos.iconset/icon_512x512.png
 
 # @2x (Retina) versions for macOS iconset
-magick assets/flash_logo.svg -resize 32x32 assets/icons/macos.iconset/icon_16x16@2x.png
-magick assets/flash_logo.svg -resize 64x64 assets/icons/macos.iconset/icon_32x32@2x.png
-magick assets/flash_logo.svg -resize 256x256 assets/icons/macos.iconset/icon_128x128@2x.png
-magick assets/flash_logo.svg -resize 512x512 assets/icons/macos.iconset/icon_256x256@2x.png
-magick assets/flash_logo.svg -resize 1024x1024 assets/icons/macos.iconset/icon_512x512@2x.png
+magick -background none assets/flash_no_bg_squircle_logo.svg -resize 32x32 assets/icons/macos.iconset/icon_16x16@2x.png
+magick -background none assets/flash_no_bg_squircle_logo.svg -resize 64x64 assets/icons/macos.iconset/icon_32x32@2x.png
+magick -background none assets/flash_no_bg_squircle_logo.svg -resize 256x256 assets/icons/macos.iconset/icon_128x128@2x.png
+magick -background none assets/flash_no_bg_squircle_logo.svg -resize 512x512 assets/icons/macos.iconset/icon_256x256@2x.png
+magick -background none assets/flash_no_bg_squircle_logo.svg -resize 1024x1024 assets/icons/macos.iconset/icon_512x512@2x.png
 
 # Create .icns file (only works on macOS)
 if command -v iconutil >/dev/null 2>&1; then
@@ -68,7 +68,7 @@ mkdir -p assets/icons/temp_windows
 
 # Generate individual PNGs for Windows ICO
 for size in 16 32 48 64 128 256; do
-    magick assets/flash_logo.svg -resize ${size}x${size} assets/icons/temp_windows/icon-${size}.png
+    magick -background none assets/flash_no_bg_squircle_logo.svg -resize ${size}x${size} assets/icons/temp_windows/icon-${size}.png
 done
 
 # Combine all sizes into one ICO file
@@ -84,7 +84,7 @@ echo -e "${GREEN}🐧 Generating Linux icons (.png)...${NC}"
 # =============================================================================
 # Standard Linux icon sizes (FreeDesktop specification)
 for size in 16 24 32 48 64 128 256 512; do
-    magick assets/flash_logo.svg -resize ${size}x${size} assets/icons/linux-icon-${size}.png
+    magick -background none assets/flash_no_bg_squircle_logo.svg -resize ${size}x${size} assets/icons/linux-icon-${size}.png
 done
 echo "✅ Created PNG icons for Linux"
 
