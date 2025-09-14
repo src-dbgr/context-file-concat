@@ -43,6 +43,13 @@
     if (opts.ensureView) ensureItemVisible(clamped);
     // Focus DOM target after the next frame (virtualization might re-render)
     requestAnimationFrame(() => {
+      const activeEl = document.activeElement;
+      const isInputFocused =
+        activeEl?.tagName === "INPUT" && activeEl.closest(".sidebar");
+
+      if (isInputFocused) {
+        return;
+      }
       const node = document.querySelector<HTMLElement>(
         `.tree [data-index="${clamped}"]`
       );
