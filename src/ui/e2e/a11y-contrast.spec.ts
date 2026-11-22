@@ -43,8 +43,7 @@ async function analyzeContrast(page: Page) {
   for (const v of contrastViolations) {
     for (const n of v.nodes as NodeResult[]) {
       const firstTarget = (Array.isArray(n.target) ? n.target[0] : n.target) as
-        | string
-        | undefined;
+        string | undefined;
       if (firstTarget) {
         offenders.push({
           id: v.id,

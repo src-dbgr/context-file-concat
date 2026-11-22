@@ -11,8 +11,7 @@ export type MsgParams = Record<string, unknown>;
 
 /** A message can be a raw string or a formatter function. */
 export type MessageValue<P extends MsgParams = MsgParams> =
-  | string
-  | ((params: P) => string);
+  string | ((params: P) => string);
 
 /** Dictionary of translation messages for a single locale. */
 export type Messages = Record<string, MessageValue>;

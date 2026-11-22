@@ -174,8 +174,7 @@ test.describe("[@bench] 25k Benchmarks", () => {
       performance.mark("bm_flatten_end");
       performance.measure("bm_flatten", "bm_flatten_start", "bm_flatten_end");
       const m = performance.getEntriesByName("bm_flatten")[0] as
-        | PerformanceMeasure
-        | undefined;
+        PerformanceMeasure | undefined;
       return m ? m.duration : -1;
     });
 
@@ -247,8 +246,7 @@ test.describe("[@bench] 25k Benchmarks", () => {
       performance.mark("bm_filter_end");
       performance.measure("bm_filter", "bm_filter_start", "bm_filter_end");
       const m = performance.getEntriesByName("bm_filter")[0] as
-        | PerformanceMeasure
-        | undefined;
+        PerformanceMeasure | undefined;
       return m ? m.duration : -1;
     });
 
@@ -307,8 +305,7 @@ test.describe("[@bench] 25k Benchmarks", () => {
       performance.mark("bm_scroll_end");
       performance.measure("bm_scroll", "bm_scroll_start", "bm_scroll_end");
       const m = performance.getEntriesByName("bm_scroll")[0] as
-        | PerformanceMeasure
-        | undefined;
+        PerformanceMeasure | undefined;
       return ok && m ? m.duration : -1;
     });
 

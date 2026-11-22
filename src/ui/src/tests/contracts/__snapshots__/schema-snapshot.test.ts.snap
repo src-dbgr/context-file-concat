@@ -409,26 +409,18 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
               "type": "boolean",
             },
             "last_directory": {
-              "anyOf": [
-                {
-                  "type": "string",
-                },
-                {
-                  "type": "null",
-                },
+              "type": [
+                "string",
+                "null",
               ],
             },
             "max_file_size_mb": {
               "type": "number",
             },
             "output_directory": {
-              "anyOf": [
-                {
-                  "type": "string",
-                },
-                {
-                  "type": "null",
-                },
+              "type": [
+                "string",
+                "null",
               ],
             },
             "output_filename": {
@@ -451,6 +443,9 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
               "type": "boolean",
             },
             "window_position": {
+              "items": false,
+              "maxItems": 2,
+              "minItems": 2,
               "prefixItems": [
                 {
                   "type": "number",
@@ -462,6 +457,9 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
               "type": "array",
             },
             "window_size": {
+              "items": false,
+              "maxItems": 2,
+              "minItems": 2,
               "prefixItems": [
                 {
                   "type": "number",
@@ -576,26 +574,18 @@ exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
       "type": "boolean",
     },
     "last_directory": {
-      "anyOf": [
-        {
-          "type": "string",
-        },
-        {
-          "type": "null",
-        },
+      "type": [
+        "string",
+        "null",
       ],
     },
     "max_file_size_mb": {
       "type": "number",
     },
     "output_directory": {
-      "anyOf": [
-        {
-          "type": "string",
-        },
-        {
-          "type": "null",
-        },
+      "type": [
+        "string",
+        "null",
       ],
     },
     "output_filename": {
@@ -618,6 +608,9 @@ exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
       "type": "boolean",
     },
     "window_position": {
+      "items": false,
+      "maxItems": 2,
+      "minItems": 2,
       "prefixItems": [
         {
           "type": "number",
@@ -629,6 +622,9 @@ exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
       "type": "array",
     },
     "window_size": {
+      "items": false,
+      "maxItems": 2,
+      "minItems": 2,
       "prefixItems": [
         {
           "type": "number",
@@ -752,26 +748,18 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
           "type": "boolean",
         },
         "last_directory": {
-          "anyOf": [
-            {
-              "type": "string",
-            },
-            {
-              "type": "null",
-            },
+          "type": [
+            "string",
+            "null",
           ],
         },
         "max_file_size_mb": {
           "type": "number",
         },
         "output_directory": {
-          "anyOf": [
-            {
-              "type": "string",
-            },
-            {
-              "type": "null",
-            },
+          "type": [
+            "string",
+            "null",
           ],
         },
         "output_filename": {
@@ -794,6 +782,9 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
           "type": "boolean",
         },
         "window_position": {
+          "items": false,
+          "maxItems": 2,
+          "minItems": 2,
           "prefixItems": [
             {
               "type": "number",
@@ -805,6 +796,9 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
           "type": "array",
         },
         "window_size": {
+          "items": false,
+          "maxItems": 2,
+          "minItems": 2,
           "prefixItems": [
             {
               "type": "number",
@@ -836,13 +830,9 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
       "type": "string",
     },
     "current_config_filename": {
-      "anyOf": [
-        {
-          "type": "string",
-        },
-        {
-          "type": "null",
-        },
+      "type": [
+        "string",
+        "null",
       ],
     },
     "current_path": {
