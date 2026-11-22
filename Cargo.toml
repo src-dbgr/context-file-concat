@@ -12,7 +12,7 @@ categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 # Web-View Architecture
-wry = "0.37"
+wry = "0.57"
 tao = "0.26"
 
 # Core Logic & Utilities

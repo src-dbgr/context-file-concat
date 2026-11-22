@@ -55,9 +55,9 @@ async fn main() {
     let ipc_handler_state = state.clone();
     let ipc_handler_proxy = proxy.clone();
     let ipc_handler_dialog = dialog_service.clone();
-    let ipc_handler = move |message: String| {
+    let ipc_handler = move |request: wry::http::Request<String>| {
         app::handle_ipc_message(
-            message,
+            request.into_body(),
             ipc_handler_dialog.clone(),
             ipc_handler_proxy.clone(),
             ipc_handler_state.clone(),
@@ -66,13 +66,13 @@ async fn main() {
 
     let drop_handler_state = state.clone();
     let drop_handler_proxy = proxy.clone();
-    let file_drop_handler = move |event| {
-        use wry::FileDropEvent;
+    let drag_drop_handler = move |event| {
+        use wry::DragDropEvent;
         match event {
-            FileDropEvent::Hovered { .. } => {
+            DragDropEvent::Enter { .. } => {
                 drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(true));
             }
-            FileDropEvent::Dropped { paths, .. } => {
+            DragDropEvent::Drop { paths, .. } => {
                 drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
                 if let Some(path) = paths.first() {
                     app::tasks::start_scan_on_path(
@@ -83,9 +83,10 @@ async fn main() {
                     );
                 }
             }
-            FileDropEvent::Cancelled => {
+            DragDropEvent::Leave => {
                 drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
             }
+            // `Over` fires continuously while hovering; the highlight is already on.
             _ => (),
         }
         true
@@ -95,7 +96,7 @@ async fn main() {
     #[cfg(debug_assertions)]
     let webview_builder = {
         tracing::info!("Running in DEBUG mode, loading from Vite dev server.");
-        WebViewBuilder::new(&*window)
+        WebViewBuilder::new()
             .with_url("http://localhost:1420")
             .with_devtools(true)
     };
@@ -113,7 +114,9 @@ async fn main() {
         let enable_devtools = std::env::var_os("CFC_DEVTOOLS").is_some();
 
         let scheme = "cfc".to_string();
-        let handler = move |request: wry::http::Request<Vec<u8>>| -> Response<Cow<'static, [u8]>> {
+        let handler = move |_webview_id: wry::WebViewId,
+                            request: wry::http::Request<Vec<u8>>|
+              -> Response<Cow<'static, [u8]>> {
             let path = request.uri().path().to_string();
             match web_assets::load(&path) {
                 Some((bytes, content_type)) => Response::builder()
@@ -132,7 +135,7 @@ async fn main() {
             }
         };
 
-        WebViewBuilder::new(&*window)
+        WebViewBuilder::new()
             .with_custom_protocol(scheme, handler)
             .with_url("cfc://index.html")
             .with_devtools(enable_devtools)
@@ -159,8 +162,11 @@ async fn main() {
 
     let webview = webview_builder
         .with_ipc_handler(ipc_handler)
-        .with_file_drop_handler(file_drop_handler)
-        .build()
+        .with_drag_drop_handler(drag_drop_handler)
+        // wry >= 0.53 allows downloads by default. The app never offers any, so keep
+        // the previous behaviour and deny them.
+        .with_download_started_handler(|_url, _destination| false)
+        .build(&*window)
         .expect("Failed to build WebView");
 
     let state_for_events = state.clone();
