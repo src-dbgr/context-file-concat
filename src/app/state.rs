@@ -914,15 +914,17 @@ mod tests {
     #[tokio::test]
     async fn test_reset_directory_state_clears_all_relevant_fields() {
         // Arrange
-        let mut state = AppState::default();
-        state.current_path = "/test/project".to_string();
-        state.full_file_list = vec![create_test_file_item("/test/project/file.txt", false)];
+        let mut state = AppState {
+            current_path: "/test/project".to_string(),
+            full_file_list: vec![create_test_file_item("/test/project/file.txt", false)],
+            selected_files: HashSet::from([PathBuf::from("/test/project/file.txt")]),
+            expanded_dirs: HashSet::from([PathBuf::from("/test/project")]),
+            loaded_dirs: HashSet::from([PathBuf::from("/test/project")]),
+            search_query: "test".to_string(),
+            is_fully_scanned: true,
+            ..Default::default()
+        };
         state.set_filtered_file_list(state.full_file_list.clone());
-        state.selected_files = HashSet::from([PathBuf::from("/test/project/file.txt")]);
-        state.expanded_dirs = HashSet::from([PathBuf::from("/test/project")]);
-        state.loaded_dirs = HashSet::from([PathBuf::from("/test/project")]);
-        state.search_query = "test".to_string();
-        state.is_fully_scanned = true;
         let scan = state.begin_scan();
         state.attach_scan_task(&scan, create_dummy_task());
         let generation = state.begin_generation();

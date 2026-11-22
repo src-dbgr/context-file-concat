@@ -552,12 +552,12 @@ mod tests {
 
     #[test]
     fn test_is_image_file_logic() {
-        assert!(is_image_file(&Path::new("image.jpg")));
-        assert!(is_image_file(&Path::new("image.PNG")));
-        assert!(is_image_file(&Path::new("image.svg")));
-        assert!(!is_image_file(&Path::new("document.txt")));
-        assert!(!is_image_file(&Path::new("archive.zip")));
-        assert!(!is_image_file(&Path::new("no_extension")));
+        assert!(is_image_file(Path::new("image.jpg")));
+        assert!(is_image_file(Path::new("image.PNG")));
+        assert!(is_image_file(Path::new("image.svg")));
+        assert!(!is_image_file(Path::new("document.txt")));
+        assert!(!is_image_file(Path::new("archive.zip")));
+        assert!(!is_image_file(Path::new("no_extension")));
     }
 
     #[test]

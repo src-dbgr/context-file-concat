@@ -8,8 +8,8 @@
 //! `Scanner`, `Tokenizer`, `FileSearcher`) to allow for injecting mock implementations during testing,
 //! making the tests deterministic and robust.
 
-use async_trait::async_trait;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -33,9 +33,8 @@ use tiktoken_rs::cl100k_base;
 //================================================================================================//
 
 /// A trait abstracting the generation of concatenated file content.
-#[async_trait]
 pub trait ContentGenerator: Send + Sync {
-    async fn generate(
+    fn generate(
         &self,
         selected_files: &[PathBuf],
         root_path: &Path,
@@ -43,35 +42,35 @@ pub trait ContentGenerator: Send + Sync {
         items_for_tree: Vec<FileItem>,
         tree_ignore_patterns: HashSet<String>,
         use_relative_paths: bool,
-    ) -> Result<String, CoreError>;
+    ) -> impl Future<Output = Result<String, CoreError>> + Send;
 }
 
+/// The outcome of a directory scan: the items found and the ignore patterns that matched.
+pub type ScanOutcome = Result<(Vec<FileItem>, HashSet<String>), CoreError>;
+
 /// A trait abstracting the directory scanning functionality.
-#[async_trait]
 pub trait Scanner: Send + Sync {
-    async fn scan(
+    fn scan(
         &self,
         root_path: &Path,
         max_depth: Option<usize>,
         progress_callback: Box<dyn Fn(ScanProgress) + Send + Sync>,
-    ) -> Result<(Vec<FileItem>, HashSet<String>), CoreError>;
+    ) -> impl Future<Output = ScanOutcome> + Send;
 }
 
 /// A trait abstracting the token counting functionality.
-#[async_trait]
 pub trait Tokenizer: Send + Sync {
-    async fn count_tokens(&self, text: &str) -> usize;
+    fn count_tokens(&self, text: &str) -> impl Future<Output = usize> + Send;
 }
 
 /// A trait abstracting the file content search functionality.
-#[async_trait]
 pub trait FileSearcher: Send + Sync {
-    async fn search(
+    fn search(
         &self,
         files_to_search: Vec<FileItem>,
         query: &str,
         case_sensitive: bool,
-    ) -> HashSet<PathBuf>;
+    ) -> impl Future<Output = HashSet<PathBuf>> + Send;
 }
 
 //================================================================================================//
@@ -81,7 +80,6 @@ pub trait FileSearcher: Send + Sync {
 pub struct RealContentGenerator {
     pub cancel_flag: Arc<AtomicBool>,
 }
-#[async_trait]
 impl ContentGenerator for RealContentGenerator {
     async fn generate(
         &self,
@@ -111,14 +109,13 @@ pub struct RealScanner {
     pub ignore_patterns: HashSet<String>,
     pub cancel_flag: Arc<AtomicBool>,
 }
-#[async_trait]
 impl Scanner for RealScanner {
     async fn scan(
         &self,
         root_path: &Path,
         max_depth: Option<usize>,
         progress_callback: Box<dyn Fn(ScanProgress) + Send + Sync>,
-    ) -> Result<(Vec<FileItem>, HashSet<String>), CoreError> {
+    ) -> ScanOutcome {
         let scanner = DirectoryScanner::new(self.ignore_patterns.clone());
         scanner
             .scan_directory_with_progress(
@@ -132,7 +129,6 @@ impl Scanner for RealScanner {
 }
 
 pub struct RealTokenizer;
-#[async_trait]
 impl Tokenizer for RealTokenizer {
     async fn count_tokens(&self, text: &str) -> usize {
         let text_clone = text.to_string();
@@ -148,7 +144,6 @@ impl Tokenizer for RealTokenizer {
 
 #[derive(Copy, Clone)]
 pub struct RealFileSearcher;
-#[async_trait]
 impl FileSearcher for RealFileSearcher {
     async fn search(
         &self,
@@ -576,7 +571,7 @@ async fn lazy_load_task<P: EventProxy, S: Scanner>(
 
 /// Merges the outcome of a lazy load into the state, unless it has become outdated.
 fn apply_lazy_load_result<P: EventProxy>(
-    scan_result: Result<(Vec<FileItem>, HashSet<String>), CoreError>,
+    scan_result: ScanOutcome,
     path_to_load: PathBuf,
     proxy: &P,
     state: &Arc<Mutex<AppState>>,
@@ -772,7 +767,6 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl ContentGenerator for MockContentGenerator {
         async fn generate(
             &self,
@@ -800,7 +794,6 @@ mod tests {
         token_count: usize,
     }
 
-    #[async_trait]
     impl Tokenizer for MockTokenizer {
         async fn count_tokens(&self, _: &str) -> usize {
             self.token_count
@@ -809,8 +802,8 @@ mod tests {
 
     #[derive(Clone)]
     struct MockScanner {
-        shallow_result: Arc<Mutex<Result<(Vec<FileItem>, HashSet<String>), CoreError>>>,
-        deep_result: Arc<Mutex<Result<(Vec<FileItem>, HashSet<String>), CoreError>>>,
+        shallow_result: Arc<Mutex<ScanOutcome>>,
+        deep_result: Arc<Mutex<ScanOutcome>>,
         cancellation_trigger: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         wait_for_cancel: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     }
@@ -837,14 +830,13 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl Scanner for MockScanner {
         async fn scan(
             &self,
             _: &Path,
             depth: Option<usize>,
             _: Box<dyn Fn(ScanProgress) + Send + Sync>,
-        ) -> Result<(Vec<FileItem>, HashSet<String>), CoreError> {
+        ) -> ScanOutcome {
             if depth == Some(1) {
                 if let Some(trigger) = self.cancellation_trigger.lock().unwrap().take() {
                     trigger.send(()).ok();
@@ -869,7 +861,6 @@ mod tests {
             *self.results.lock().unwrap() = results;
         }
     }
-    #[async_trait]
     impl FileSearcher for MockFileSearcher {
         async fn search(&self, _: Vec<FileItem>, _: &str, _: bool) -> HashSet<PathBuf> {
             self.results.lock().unwrap().clone()
@@ -955,7 +946,7 @@ mod tests {
         assert!(!final_state.is_generating);
         assert!(final_state.status_message.contains("Generation cancelled"));
         let events = harness.get_n_events(1).await;
-        assert!(!matches!(events.get(0), Some(UserEvent::ShowError(_))));
+        assert!(!matches!(events.first(), Some(UserEvent::ShowError(_))));
     }
 
     #[tokio::test]
@@ -1571,7 +1562,7 @@ mod tests {
 
         // We need to wait for the scan to finish to avoid panics on drop.
         // Let's get all events to clear the channel.
-        while harness.get_n_events(1).await.len() > 0 {}
+        while !harness.get_n_events(1).await.is_empty() {}
     }
 
     /// Comprehensive test for the RealFileSearcher implementation via the search_in_files task.
@@ -1591,7 +1582,7 @@ mod tests {
         std::fs::write(&text_file_path, "find the MagicWord here").unwrap();
 
         let binary_file_path = harness.root_path.join("app.exe");
-        std::fs::write(&binary_file_path, &[0, 1, 2, 3, 255]).unwrap(); // A binary file
+        std::fs::write(&binary_file_path, [0, 1, 2, 3, 255]).unwrap(); // A binary file
 
         let no_match_path = harness.root_path.join("another.txt");
         std::fs::write(&no_match_path, "nothing to see").unwrap();

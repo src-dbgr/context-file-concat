@@ -1365,14 +1365,12 @@ mod tests {
 
         let mut saw_preview = false;
         for _ in 0..2 {
-            if let Some(event) = harness.get_next_event().await {
-                if let UserEvent::ShowFilePreview {
-                    search_term: term, ..
-                } = event
-                {
-                    assert_eq!(term, Some(search_term.to_string()));
-                    saw_preview = true;
-                }
+            if let Some(UserEvent::ShowFilePreview {
+                search_term: term, ..
+            }) = harness.get_next_event().await
+            {
+                assert_eq!(term, Some(search_term.to_string()));
+                saw_preview = true;
             }
         }
         assert!(

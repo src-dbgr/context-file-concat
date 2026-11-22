@@ -525,7 +525,6 @@ name = "context-file-concat"
 version = "0.3.1"
 dependencies = [
  "anyhow",
- "async-trait",
  "camino",
  "chrono",
  "directories",

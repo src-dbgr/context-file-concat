@@ -272,8 +272,10 @@ pub mod tests {
     #[test]
     fn test_config_roundtrip() {
         let harness = TestHarness::new();
-        let mut original_config = AppConfig::default();
-        original_config.case_sensitive_search = true;
+        let mut original_config = AppConfig {
+            case_sensitive_search: true,
+            ..Default::default()
+        };
         original_config
             .ignore_patterns
             .insert("test-pattern".to_string());
@@ -373,9 +375,10 @@ pub mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let readonly_dir = temp_dir.path().join("readonly");
         fs::create_dir(&readonly_dir).unwrap();
-        let mut perms = fs::metadata(&readonly_dir).unwrap().permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(&readonly_dir, perms.clone()).unwrap();
+        let original_perms = fs::metadata(&readonly_dir).unwrap().permissions();
+        let mut readonly_perms = original_perms.clone();
+        readonly_perms.set_readonly(true);
+        fs::set_permissions(&readonly_dir, readonly_perms).unwrap();
 
         let config_path = readonly_dir.join("config.json");
         let config = AppConfig::default();
@@ -391,7 +394,7 @@ pub mod tests {
             assert!(load_result.is_err());
         }
 
-        perms.set_readonly(false);
-        fs::set_permissions(&readonly_dir, perms).unwrap();
+        // Restore the original permissions so the temp dir can be cleaned up.
+        fs::set_permissions(&readonly_dir, original_perms).unwrap();
     }
 }
