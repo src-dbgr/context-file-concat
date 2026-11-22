@@ -382,13 +382,13 @@ pub fn toggle_directory_selection<P: EventProxy>(
             let dir_path = PathBuf::from(path_str);
             let selection_state = super::view_model::get_directory_selection_state(
                 &dir_path,
-                &s.filtered_file_list,
+                s.filtered_file_list(),
                 &s.selected_files,
             );
 
             // Important: only operate on the currently *visible* files in that directory
             let files_in_dir: Vec<PathBuf> = s
-                .filtered_file_list
+                .filtered_file_list()
                 .iter()
                 .filter(|item| !item.is_directory && item.path.starts_with(&dir_path))
                 .map(|item| item.path.clone())
@@ -447,7 +447,7 @@ pub fn expand_collapse_all<P: EventProxy>(
         with_state_and_notify(&state, &proxy, |s| {
             if expand {
                 s.expanded_dirs = s
-                    .filtered_file_list
+                    .filtered_file_list()
                     .iter()
                     .filter(|i| i.is_directory)
                     .map(|i| i.path.clone())
@@ -465,7 +465,7 @@ pub fn expand_collapse_all<P: EventProxy>(
 pub fn select_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     with_state_and_notify(&state, &proxy, |s| {
         let paths_to_select: Vec<PathBuf> = s
-            .filtered_file_list
+            .filtered_file_list()
             .iter()
             .filter(|item| !item.is_directory)
             .map(|item| item.path.clone())
@@ -490,7 +490,7 @@ pub fn expand_all_fully<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
             return;
         }
         s.expanded_dirs = s
-            .filtered_file_list
+            .filtered_file_list()
             .iter()
             .filter(|i| i.is_directory)
             .map(|i| i.path.clone())
@@ -507,7 +507,7 @@ pub fn select_all_fully<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
             return;
         }
         let paths_to_select: Vec<PathBuf> = s
-            .filtered_file_list
+            .filtered_file_list()
             .iter()
             .filter(|item| !item.is_directory)
             .map(|item| item.path.clone())
@@ -826,7 +826,7 @@ mod tests {
                 items.push(file_item(path.clone(), path.is_dir()));
             }
             state.full_file_list = items.clone();
-            state.filtered_file_list = items;
+            state.set_filtered_file_list(items);
         }
 
         async fn get_last_state_update(&mut self) -> Option<Box<UiState>> {
@@ -2117,7 +2117,7 @@ mod tests {
                     ..Default::default()
                 },
             ];
-            s.filtered_file_list = s.full_file_list.clone();
+            s.set_filtered_file_list(s.full_file_list.clone());
             Arc::new(Mutex::new(s))
         };
         let payload = {

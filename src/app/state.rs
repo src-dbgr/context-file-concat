@@ -1,5 +1,6 @@
 //! Defines the central, mutable state of the application.
 
+use crate::app::view_model::TreeIndexCache;
 use crate::config::AppConfig;
 use crate::core::{FileItem, ScanProgress};
 use std::collections::HashSet;
@@ -54,7 +55,8 @@ pub struct AppState {
     /// The complete, unfiltered list of all files and directories found in the scan.
     pub full_file_list: Vec<FileItem>,
     /// The list of files and directories visible in the UI after applying filters.
-    pub filtered_file_list: Vec<FileItem>,
+    /// Private so that every change goes through [`AppState::set_filtered_file_list`].
+    filtered_file_list: Vec<FileItem>,
     /// The set of absolute paths to files that are currently selected by the user.
     pub selected_files: HashSet<PathBuf>,
     /// The set of absolute paths to directories that are expanded in the UI tree.
@@ -100,6 +102,11 @@ pub struct AppState {
     file_list_generation: u64,
     /// The id of the scan that currently owns the scanning state, if any.
     active_scan_id: Option<u64>,
+    /// Incremented whenever `filtered_file_list` changes. Derived data (the tree index)
+    /// is keyed by this revision.
+    filtered_revision: u64,
+    /// The tree structure derived from `filtered_file_list`, owned by the view model.
+    tree_index_cache: TreeIndexCache,
 }
 
 impl Default for AppState {
@@ -135,6 +142,8 @@ impl Default for AppState {
             patterns_need_rescan: false,
             file_list_generation: 0,
             active_scan_id: None,
+            filtered_revision: 0,
+            tree_index_cache: TreeIndexCache::default(),
         }
     }
 }
@@ -251,6 +260,30 @@ impl AppState {
         self.is_generating = false;
     }
 
+    /// The files and directories visible in the UI after applying filters.
+    pub fn filtered_file_list(&self) -> &[FileItem] {
+        &self.filtered_file_list
+    }
+
+    /// Replaces the filtered file list.
+    ///
+    /// This is the only way to change the list, which guarantees that data derived from
+    /// it is never used with a different list than it was built from.
+    pub fn set_filtered_file_list(&mut self, items: Vec<FileItem>) {
+        self.filtered_file_list = items;
+        self.filtered_revision += 1;
+    }
+
+    /// Identifies the current content of the filtered file list.
+    pub(crate) fn filtered_revision(&self) -> u64 {
+        self.filtered_revision
+    }
+
+    /// The cache for the tree structure derived from the filtered file list.
+    pub(crate) fn tree_index_cache(&self) -> &TreeIndexCache {
+        &self.tree_index_cache
+    }
+
     /// Resets all state related to a loaded directory.
     pub fn reset_directory_state(&mut self) {
         self.cancel_current_scan();
@@ -260,7 +293,7 @@ impl AppState {
 
         self.current_path = String::new();
         self.full_file_list.clear();
-        self.filtered_file_list.clear();
+        self.set_filtered_file_list(Vec::new());
         self.selected_files.clear();
         self.expanded_dirs.clear();
         self.loaded_dirs.clear();
@@ -567,7 +600,7 @@ mod tests {
         let mut state = AppState::default();
         state.current_path = "/test/project".to_string();
         state.full_file_list = vec![create_test_file_item("/test/project/file.txt", false)];
-        state.filtered_file_list = state.full_file_list.clone();
+        state.set_filtered_file_list(state.full_file_list.clone());
         state.selected_files = HashSet::from([PathBuf::from("/test/project/file.txt")]);
         state.expanded_dirs = HashSet::from([PathBuf::from("/test/project")]);
         state.loaded_dirs = HashSet::from([PathBuf::from("/test/project")]);
@@ -585,7 +618,7 @@ mod tests {
         // Assert
         assert!(state.current_path.is_empty());
         assert!(state.full_file_list.is_empty());
-        assert!(state.filtered_file_list.is_empty());
+        assert!(state.filtered_file_list().is_empty());
         assert!(state.selected_files.is_empty());
         assert!(state.expanded_dirs.is_empty());
         assert!(state.loaded_dirs.is_empty());

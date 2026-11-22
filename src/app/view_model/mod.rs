@@ -5,12 +5,23 @@
 //! display-related properties. It is purely for data transformation and does not
 //! mutate the application state.
 
+mod tree_builder;
+mod tree_index;
+
+#[cfg(test)]
+mod cache_tests;
+#[cfg(test)]
+mod reference;
+
+pub use tree_index::TreeIndexCache;
+
 use crate::app::state::AppState;
 use crate::config::AppConfig;
 use crate::core::FileItem;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use tree_builder::{build_tree_nodes, TreeView};
 
 /// A serializable representation of the application state for the UI.
 #[derive(Serialize, Clone, Debug)]
@@ -60,9 +71,13 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
     {
         Vec::new()
     } else {
-        let args = BuildTreeArgs {
-            items: &state.filtered_file_list,
-            root_path: &PathBuf::from(&state.current_path),
+        let items = state.filtered_file_list();
+        let index = state.tree_index_cache().get_or_build(
+            state.filtered_revision(),
+            Path::new(&state.current_path),
+            items,
+        );
+        let view = TreeView {
             selected: &state.selected_files,
             expanded: &state.expanded_dirs,
             loaded_dirs: &state.loaded_dirs,
@@ -70,9 +85,9 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
             filename_query: &state.search_query,
             extension_filter: &state.extension_filter,
             case_sensitive: state.config.case_sensitive_search,
-            previewed_path: &state.previewed_file_path,
+            previewed_path: state.previewed_file_path.as_deref(),
         };
-        build_tree_nodes(args)
+        build_tree_nodes(items, &index, &view)
     };
 
     let status_message = if state.is_scanning {
@@ -91,7 +106,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
         current_path: state.current_path.clone(),
         tree,
         total_files_found: state.full_file_list.len(),
-        visible_files_count: state.filtered_file_list.len(),
+        visible_files_count: state.filtered_file_list().len(),
         selected_files_count: state.selected_files.len(),
         is_scanning: state.is_scanning,
         is_generating: state.is_generating,
@@ -114,8 +129,9 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
 /// ensuring that search results are visible in the file tree.
 pub fn auto_expand_for_matches(state: &mut AppState) {
     let root_path = PathBuf::from(&state.current_path);
+    let search_query_lowercase = state.search_query.to_lowercase();
     let matches: Vec<PathBuf> = state
-        .filtered_file_list
+        .filtered_file_list()
         .iter()
         .filter(|item| {
             if item.is_directory {
@@ -128,9 +144,7 @@ pub fn auto_expand_for_matches(state: &mut AppState) {
                 if state.config.case_sensitive_search {
                     file_name.contains(&state.search_query)
                 } else {
-                    file_name
-                        .to_lowercase()
-                        .contains(&state.search_query.to_lowercase())
+                    file_name.to_lowercase().contains(&search_query_lowercase)
                 }
             } else {
                 false
@@ -160,210 +174,6 @@ pub fn auto_expand_for_matches(state: &mut AppState) {
             current = parent.parent();
         }
     }
-}
-
-/// Arguments for the `build_tree_nodes` function.
-struct BuildTreeArgs<'a> {
-    items: &'a [FileItem],
-    root_path: &'a Path,
-    selected: &'a HashSet<PathBuf>,
-    expanded: &'a HashSet<PathBuf>,
-    loaded_dirs: &'a HashSet<PathBuf>,
-    content_search_matches: &'a HashSet<PathBuf>,
-    filename_query: &'a str,
-    extension_filter: &'a str,
-    case_sensitive: bool,
-    previewed_path: &'a Option<PathBuf>,
-}
-
-/// A transient struct used during tree construction for memoizing selection counts.
-#[derive(Clone, Copy)]
-struct SelectionCounts {
-    selected: usize,
-    total_files: usize,
-}
-
-/// Recursively calculates the number of selected and total files within a directory tree.
-/// It uses a cache (memoization) to avoid re-calculating for the same directory.
-fn get_recursive_selection_counts(
-    path: &Path,
-    children_map: &HashMap<PathBuf, Vec<PathBuf>>,
-    item_map: &HashMap<PathBuf, &FileItem>,
-    selected_files: &HashSet<PathBuf>,
-    cache: &mut HashMap<PathBuf, SelectionCounts>,
-) -> SelectionCounts {
-    if let Some(&counts) = cache.get(path) {
-        return counts;
-    }
-
-    let mut counts = SelectionCounts {
-        selected: 0,
-        total_files: 0,
-    };
-
-    if let Some(children) = children_map.get(path) {
-        for child_path in children {
-            if let Some(child_item) = item_map.get(child_path) {
-                if child_item.is_directory {
-                    let child_counts = get_recursive_selection_counts(
-                        child_path,
-                        children_map,
-                        item_map,
-                        selected_files,
-                        cache,
-                    );
-                    counts.selected += child_counts.selected;
-                    counts.total_files += child_counts.total_files;
-                } else {
-                    counts.total_files += 1;
-                    if selected_files.contains(child_path) {
-                        counts.selected += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    cache.insert(path.to_path_buf(), counts);
-    counts
-}
-
-/// Sorts a list of TreeNodes: directories first, then alphabetically.
-fn sort_tree_nodes(nodes: &mut [TreeNode]) {
-    nodes.sort_by(|a, b| match (a.is_directory, b.is_directory) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.cmp(&b.name),
-    });
-}
-
-/// Recursively builds the `TreeNode` structure for the UI from pre-processed maps.
-/// This avoids costly lookups in the flat list during recursion.
-fn build_node_recursive(
-    path: &Path,
-    args: &BuildTreeArgs,
-    children_map: &HashMap<PathBuf, Vec<PathBuf>>,
-    item_map: &HashMap<PathBuf, &FileItem>,
-    selection_cache: &mut HashMap<PathBuf, SelectionCounts>,
-) -> TreeNode {
-    let item = item_map[path];
-    let file_name_str = item.path.file_name().unwrap_or_default().to_string_lossy();
-
-    let selection_state = if item.is_directory {
-        let counts = get_recursive_selection_counts(
-            &item.path,
-            children_map,
-            item_map,
-            args.selected,
-            selection_cache,
-        );
-        if counts.total_files == 0 || counts.selected == 0 {
-            "none".to_string()
-        } else if counts.selected == counts.total_files {
-            "full".to_string()
-        } else {
-            "partial".to_string()
-        }
-    } else if args.selected.contains(&item.path) {
-        "full".to_string()
-    } else {
-        "none".to_string()
-    };
-
-    let name_match = if !args.filename_query.is_empty() {
-        if args.case_sensitive {
-            file_name_str.contains(args.filename_query)
-        } else {
-            file_name_str
-                .to_lowercase()
-                .contains(&args.filename_query.to_lowercase())
-        }
-    } else {
-        false
-    };
-
-    let extension_match = if !args.extension_filter.is_empty() {
-        matches_extension(&item.path, args.extension_filter)
-    } else {
-        false
-    };
-
-    let content_match = args.content_search_matches.contains(&item.path);
-    let is_previewed = args.previewed_path.as_ref() == Some(&item.path);
-
-    let mut children_nodes = Vec::new();
-    if item.is_directory {
-        if let Some(child_paths) = children_map.get(path) {
-            children_nodes = child_paths
-                .iter()
-                .map(|child_path| {
-                    build_node_recursive(child_path, args, children_map, item_map, selection_cache)
-                })
-                .collect();
-
-            sort_tree_nodes(&mut children_nodes);
-        }
-    }
-
-    TreeNode {
-        name: file_name_str.to_string(),
-        path: item.path.clone(),
-        is_directory: item.is_directory,
-        is_binary: item.is_binary,
-        size: item.size,
-        children: children_nodes,
-        selection_state,
-        is_expanded: args.expanded.contains(&item.path),
-        is_match: name_match || extension_match || content_match,
-        is_previewed,
-        children_loaded: !item.is_directory || args.loaded_dirs.contains(&item.path),
-    }
-}
-
-/// Main entry point for the optimized tree building process.
-fn build_tree_nodes(args: BuildTreeArgs) -> Vec<TreeNode> {
-    if args.items.is_empty() {
-        return Vec::new();
-    }
-
-    // Step 1: Create lookup maps in a single O(N) pass.
-    let item_map: HashMap<PathBuf, &FileItem> = args
-        .items
-        .iter()
-        .map(|item| (item.path.clone(), item))
-        .collect();
-    let mut children_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-    for item in args.items {
-        if let Some(parent) = item.path.parent() {
-            if parent != args.root_path && !item_map.contains_key(parent) {
-                continue;
-            }
-            children_map
-                .entry(parent.to_path_buf())
-                .or_default()
-                .push(item.path.clone());
-        }
-    }
-
-    // Step 2: Get root nodes.
-    let root_paths = children_map
-        .get(args.root_path)
-        .cloned()
-        .unwrap_or_default();
-    let mut selection_cache = HashMap::new();
-
-    // Step 3: Recursively build the tree from the root.
-    let mut root_nodes: Vec<TreeNode> = root_paths
-        .iter()
-        .map(|path| {
-            build_node_recursive(path, &args, &children_map, &item_map, &mut selection_cache)
-        })
-        .collect();
-
-    // Step 4: Sort the final root nodes.
-    sort_tree_nodes(&mut root_nodes);
-
-    root_nodes
 }
 
 /// Checks if a path's extension matches the extension filter.
@@ -490,11 +300,11 @@ mod tests {
     fn test_generate_ui_state_after_scan() {
         let mut state = AppState::default();
         state.current_path = "/project".to_string();
-        state.filtered_file_list = vec![
+        state.set_filtered_file_list(vec![
             create_test_file_item("/project/src", true),
             create_test_file_item("/project/src/main.rs", false),
             create_test_file_item("/project/Cargo.toml", false),
-        ];
+        ]);
         state.loaded_dirs.insert(PathBuf::from("/project/src"));
 
         let ui_state = generate_ui_state(&state);
@@ -516,10 +326,10 @@ mod tests {
         let main_rs_path = PathBuf::from("/project/src/main.rs");
         let preview_path = main_rs_path.clone();
 
-        state.filtered_file_list = vec![
+        state.set_filtered_file_list(vec![
             create_test_file_item("/project/src", true),
             create_test_file_item("/project/src/main.rs", false),
-        ];
+        ]);
         state.selected_files = HashSet::from([main_rs_path.clone()]);
         state.expanded_dirs = HashSet::from([src_path.clone()]);
         state.loaded_dirs = HashSet::from([src_path.clone()]);
