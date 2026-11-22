@@ -312,9 +312,8 @@ impl AppState {
     /// A scan counts as active from `begin_scan` on, even before its task handle has
     /// been attached, so a cancellation issued in that window is not lost.
     pub fn cancel_current_scan(&mut self) {
-        tracing::info!("LOG: AppState::cancel_current_scan called.");
         if !self.scan.cancel() {
-            tracing::warn!("LOG: cancel_current_scan called, but no active scan found.");
+            tracing::debug!("No active scan to cancel.");
             return;
         }
 
@@ -323,7 +322,7 @@ impl AppState {
             large_files_skipped: 0,
             current_scanning_path: "Scan cancelled.".to_string(),
         };
-        tracing::info!("LOG: AppState has been reset to 'cancelled' state.");
+        tracing::info!("Scan cancelled.");
     }
 
     /// Returns a token for a lazy load of a single directory level, or `None` if a full

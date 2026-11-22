@@ -21,7 +21,7 @@ pub use error::CoreError;
 pub(crate) const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024;
 
 /// Represents a single item (file or directory) found during a directory scan.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)] // VET: Added Default trait
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileItem {
     /// The full path to the file or directory.
     pub path: PathBuf,

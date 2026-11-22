@@ -10,7 +10,6 @@ use super::filtering; // SRP: Use the new filtering module
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
 use super::state::AppState;
-// VET: Import tasks and their new service structs/traits
 use super::tasks::{self, search_in_files, start_lazy_load_scan, start_scan_on_path};
 use super::view_model::{auto_expand_for_matches, generate_ui_state, get_language_from_path};
 use crate::app::file_dialog::DialogService;
@@ -37,7 +36,7 @@ pub fn select_directory<P: EventProxy, D: DialogService + ?Sized>(
         // A new directory selection should always reset the state.
         start_scan_on_path(path, proxy, state, false);
     } else {
-        tracing::info!("LOG: User cancelled directory selection.");
+        tracing::debug!("Directory selection cancelled by the user.");
         with_state_and_notify(&state, &proxy, |_| {});
     }
 }
@@ -75,7 +74,7 @@ pub fn rescan_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 /// Cancels the ongoing directory scan.
 pub fn cancel_scan<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     with_state_and_notify(&state, &proxy, |s| {
-        tracing::info!("LOG: IPC 'cancelScan' received.");
+        tracing::debug!("Scan cancellation requested.");
         s.cancel_current_scan();
     });
 }
@@ -113,7 +112,7 @@ pub async fn update_config<P: EventProxy>(
             tracing::warn!("Failed to save config on update: {}", e);
         }
 
-        // KORREKTUR: Wenn kein Verzeichnis geladen ist, wird nur gespeichert. Kein Event.
+        // Without a loaded directory the config is only saved; no state update is sent.
         if state_guard.current_path.is_empty() {
             return;
         }
@@ -122,16 +121,13 @@ pub async fn update_config<P: EventProxy>(
 
         if !patterns_removed.is_empty() {
             tracing::info!(
-                "⚠️ Ignore patterns removed: {:?}. Re-scan recommended.",
+                "Ignore patterns removed: {:?}. Re-scan recommended.",
                 patterns_removed
             );
             state_guard.patterns_need_rescan = true;
             should_send_update = true;
         } else if !patterns_added.is_empty() {
-            tracing::info!(
-                "✓ Applying new ignore patterns locally: {:?}",
-                patterns_added
-            );
+            tracing::debug!("Applying new ignore patterns locally: {:?}", patterns_added);
 
             let root_path = PathBuf::from(&state_guard.current_path);
             for pattern in &patterns_added {
@@ -155,7 +151,7 @@ pub async fn update_config<P: EventProxy>(
             filtering::apply_filters(&mut state_guard);
             should_send_update = true;
         } else if needs_refilter {
-            tracing::info!("🚀 Re-applying filters due to config change.");
+            tracing::debug!("Re-applying filters due to config change.");
             filtering::apply_filters(&mut state_guard);
             should_send_update = true;
         }
@@ -523,7 +519,6 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     let token = state_guard.begin_generation();
     state_guard.previewed_file_path = None;
 
-    // VET: CORRECTED LOGIC
     // Only generate a new timestamped filename if the current one appears to be a default.
     // This preserves any filename explicitly set by the user.
     let current_filename = &state_guard.config.output_filename;

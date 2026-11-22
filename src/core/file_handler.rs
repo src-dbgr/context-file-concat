@@ -228,15 +228,13 @@ impl FileHandler {
 
         // Use a utility to quickly check if the file is likely text-based.
         if !is_text_file(file_path)
-            // VET: Convert error to string
             .map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?
         {
             return Ok("[BINARY FILE]".to_string());
         }
 
-        let file =
-            // VET: Convert error to string
-            fs::File::open(file_path).map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
+        let file = fs::File::open(file_path)
+            .map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
         let reader = BufReader::new(file);
         let mut preview = String::new();
 

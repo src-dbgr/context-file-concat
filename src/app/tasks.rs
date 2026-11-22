@@ -192,7 +192,7 @@ pub async fn generation_task<P, G, T>(
     };
 
     let items_for_tree = if config.remove_empty_directories && is_fully_scanned {
-        tracing::info!("🌳 Pruning empty directories from the generated tree.");
+        tracing::debug!("Pruning empty directories from the generated tree.");
         SearchEngine::remove_empty_directories(
             files_for_tree.clone(),
             &files_for_tree,
@@ -236,7 +236,7 @@ fn publish_generation_outcome<P: EventProxy>(
 ) {
     let mut state_guard = state.lock().expect("Mutex poisoned");
     if !state_guard.finish_generation(token) {
-        tracing::info!("LOG: Discarding the outcome of an outdated generation task.");
+        tracing::debug!("Discarding the outcome of an outdated generation.");
         return;
     }
 
@@ -248,11 +248,11 @@ fn publish_generation_outcome<P: EventProxy>(
             });
         }
         Err(CoreError::Cancelled) => {
-            tracing::info!("LOG: Generation task gracefully cancelled.");
+            tracing::info!("Generation cancelled.");
             state_guard.scan_progress.current_scanning_path = "Generation cancelled.".to_string();
         }
         Err(e) => {
-            tracing::error!("LOG: Generation task failed: {}", e);
+            tracing::error!("Generation failed: {}", e);
             proxy.send_event(UserEvent::ShowError(e.to_string()));
         }
     }
@@ -489,7 +489,7 @@ fn handle_scan_error<P: EventProxy>(
     proxy: &P,
     token: &ScanToken,
 ) {
-    tracing::error!("LOG: TASK:: Scan finished with error: {}", error);
+    tracing::error!("Scan failed: {}", error);
     let mut state_lock = state.lock().expect("Mutex was poisoned");
     if !state_lock.finish_scan(token) {
         return;
@@ -523,7 +523,7 @@ pub fn start_lazy_load_scan<P: EventProxy>(
         let scanner = lazy_load_scanner(ignore_patterns, &token);
         let proxy_clone = proxy.clone();
         let state_clone = state.clone();
-        tracing::info!("LOG: Spawning new lazy_load_task for path: {:?}", path);
+        tracing::debug!("Starting lazy load for {:?}.", path);
         tokio::spawn(async move {
             lazy_load_task(
                 path,
@@ -579,8 +579,8 @@ fn apply_lazy_load_result<P: EventProxy>(
 ) {
     let mut state_guard = state.lock().expect("Mutex was poisoned");
     if !state_guard.is_current_lazy_load(token) {
-        tracing::info!(
-            "LOG: TASK:: Discarding outdated lazy load result for {:?}.",
+        tracing::debug!(
+            "Discarding outdated lazy load result for {:?}.",
             path_to_load
         );
         return;
@@ -588,8 +588,8 @@ fn apply_lazy_load_result<P: EventProxy>(
 
     match scan_result {
         Ok((new_items, new_active_patterns)) => {
-            tracing::info!(
-                "LOG: TASK:: Lazy load successful. {} new items found for {:?}.",
+            tracing::debug!(
+                "Lazy load found {} items in {:?}.",
                 new_items.len(),
                 path_to_load
             );
@@ -620,7 +620,7 @@ fn apply_lazy_load_result<P: EventProxy>(
             ))));
         }
         Err(e) => {
-            tracing::error!("LOG: TASK:: Lazy load failed for {:?}: {}", path_to_load, e);
+            tracing::error!("Lazy load failed for {:?}: {}", path_to_load, e);
             proxy.send_event(UserEvent::ShowError(format!(
                 "Failed to load directory {}: {}",
                 path_to_load.display(),
@@ -780,7 +780,8 @@ mod tests {
             if let Some(notifier) = self.start_notifier.lock().unwrap().take() {
                 let _ = notifier.send(());
             }
-            // VET: Release lock before await to fix !Send error
+            // Take the receiver in its own statement so the lock is released before the
+            // await; a guard held across it would make the future `!Send`.
             let receiver = self.cancellation_check.lock().unwrap().take();
             if let Some(receiver) = receiver {
                 let _ = receiver.await;
@@ -904,7 +905,7 @@ mod tests {
             assert_eq!(*token_count, 2);
         }
 
-        // VET: Fix - Assert the event we already captured, don't try to fetch a new one.
+        // The state update is the second of the two events captured above.
         assert!(matches!(events[1], UserEvent::StateUpdate(_)));
         if let UserEvent::StateUpdate(final_state_in_event) = &events[1] {
             assert!(!final_state_in_event.is_generating);
@@ -978,7 +979,7 @@ mod tests {
             assert!(msg.contains("a/b/c.txt"));
         }
 
-        // VET: Fix - Assert the event we already captured.
+        // The state update is the second of the two events captured above.
         assert!(matches!(events[1], UserEvent::StateUpdate(_)));
         if let UserEvent::StateUpdate(final_state_in_event) = &events[1] {
             assert!(!final_state_in_event.is_generating);
@@ -1028,8 +1029,8 @@ mod tests {
         .await;
 
         // Assert
-        // VET: Fix - Expect 2 events now. The success path sets the final state itself.
-        // The guard is now only for panics or cancellations.
+        // The success path publishes the final state itself; the guard only acts on
+        // panics and cancellations, so exactly two events are expected.
         let events = harness.get_n_events(2).await;
         assert_eq!(events.len(), 2, "Expected two StateUpdate events");
 
