@@ -35,7 +35,7 @@ camino = "1.1"
 regex = "1.1"
 thiserror = "2.0"
 tempfile = "3.20"
-tiktoken-rs = "0.7"
+tiktoken-rs = "0.12"
 async-trait = "0.1"
 rust-embed = { version = "8", features = ["compression", "include-exclude"] }
 mime_guess = "2.0"
