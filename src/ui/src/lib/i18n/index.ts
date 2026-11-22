@@ -200,6 +200,21 @@ register("en", {
   "status.saved_to": "Status: Saved to {path}",
   "error.save_failed": "Error: Failed to save file.",
   "error.render_failed": "Error: Failed to render state.",
+
+  // ===== Keys used by components / IPC handlers =====
+  "action.rescan": "Re-Scan",
+  "sidebar.scanning": "Scanning...",
+  "filetree.cancel": "Cancel",
+  "filetree.emptyDir": "No files found in this directory.",
+  "filetree.noMatch": "No files found matching filters.",
+  "filetree.stats.visible": "Visible",
+  "aria.scanProgress": "Scan progress",
+  "aria.generatingPreview": "Generating preview",
+  "status.indexing": "Indexing...",
+  "toast.fileSaved": "File saved",
+  "toast.saveCancelled": "Save cancelled",
+  "toast.saveFailed": "Failed to save file",
+  "toast.renderFailed": "An error occurred",
 });
 
 register("de", {
@@ -303,4 +318,19 @@ register("de", {
   "status.saved_to": "Status: Gespeichert unter {path}",
   "error.save_failed": "Fehler: Datei konnte nicht gespeichert werden.",
   "error.render_failed": "Fehler: Rendering des Zustands fehlgeschlagen.",
+
+  // ===== Keys used by components / IPC handlers =====
+  "action.rescan": "Neu scannen",
+  "sidebar.scanning": "Scanne...",
+  "filetree.cancel": "Abbrechen",
+  "filetree.emptyDir": "Keine Dateien in diesem Verzeichnis gefunden.",
+  "filetree.noMatch": "Keine Dateien für die Filter gefunden.",
+  "filetree.stats.visible": "Sichtbar",
+  "aria.scanProgress": "Scan-Fortschritt",
+  "aria.generatingPreview": "Vorschau wird erzeugt",
+  "status.indexing": "Indexiere...",
+  "toast.fileSaved": "Datei gespeichert",
+  "toast.saveCancelled": "Speichern abgebrochen",
+  "toast.saveFailed": "Datei konnte nicht gespeichert werden",
+  "toast.renderFailed": "Ein Fehler ist aufgetreten",
 });
