@@ -160,6 +160,9 @@ export function makeValidPayloadForCommand(name: CommandName): unknown {
     case "addIgnorePath":
       return VALID_PATH;
 
+    case "setExpansion":
+      return { path: VALID_PATH, expanded: true };
+
     case "expandCollapseAll":
       return true;
 

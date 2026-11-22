@@ -32,9 +32,10 @@ export const ConfigSchema = z
 /* ---------------------------------- Tree ----------------------------------- */
 /**
  * The tree is a pruned snapshot: `children` is only filled for expanded
- * directories. `has_children` and `children_loaded` are always sent by the
- * backend (guarded by the Rust fixture contract test); they stay optional here
- * so that the schema remains additive.
+ * directories, so `has_children` and `children_loaded` are the only way to
+ * tell what a collapsed directory holds. The backend always sends them
+ * (guarded by the Rust fixture contract test) and they are required here: a
+ * node without `children_loaded` would silently never be lazy-loaded.
  */
 export const TreeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>
   z
@@ -49,8 +50,8 @@ export const TreeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>
       selection_state: z.enum(["none", "partial", "full"]),
       children: z.array(TreeNodeSchema),
       size: z.number(),
-      has_children: z.boolean().optional(),
-      children_loaded: z.boolean().optional(),
+      has_children: z.boolean(),
+      children_loaded: z.boolean(),
     })
     .passthrough(),
 );
@@ -133,6 +134,13 @@ const UpdateFiltersPayload = z
   .passthrough();
 const PathPayload = PathString;
 const BoolPayload = z.boolean();
+/** Strict like the backend, which rejects unknown fields for this command. */
+const SetExpansionPayload = z
+  .object({
+    path: PathString,
+    expanded: z.boolean(),
+  })
+  .strict();
 const SaveFilePayload = z.string();
 const UpdateConfigPayload = ConfigSchema;
 
@@ -152,6 +160,7 @@ export const CommandSchemas = {
   toggleSelection: PathPayload,
   toggleDirectorySelection: PathPayload,
   toggleExpansion: PathPayload,
+  setExpansion: SetExpansionPayload,
   expandCollapseAll: BoolPayload,
   selectAll: NullPayload,
   deselectAll: NullPayload,

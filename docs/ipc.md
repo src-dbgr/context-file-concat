@@ -16,6 +16,7 @@ UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  �
 | Receiving host calls            | `src/ui/src/lib/ipc/handlers.ts` (`installWindowIPCHandlers`)     |
 | Frontend types                  | `src/ui/src/lib/types.ts`                                         |
 | Command dispatch (host)         | `src/app/mod.rs` (`handle_ipc_message`) → `src/app/commands.rs`   |
+| Command ordering (host)         | `src/app/dispatch.rs` (`CommandDispatcher`)                       |
 | Host → UI events                | `src/app/events.rs` (`UserEvent`), `src/app/mod.rs` (`handle_user_event`) |
 | State snapshot (host)           | `src/app/view_model/` (`generate_ui_state`, `UiState`, `TreeNode`) |
 | Delivery / coalescing           | `src/app/transport.rs`                                            |
@@ -23,6 +24,7 @@ UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  �
 ## Principles
 
 - **Commands are fire-and-forget.** `post()` returns `void`. The host mutates its `AppState` and answers with a state snapshot (and, where applicable, one of the other host calls).
+- **Commands take effect in the order they were posted.** The host executes them one after the other, see [Command ordering](#command-ordering).
 - **Every state update is a complete snapshot.** `window.render(uiState)` replaces the UI's `appState` store wholesale. There are no diffs and no patches; a snapshot never depends on an earlier one. This is what allows the transport to drop a pending snapshot when a newer one is already available (latest wins, see `transport.rs`).
 - **The host owns the state, the UI owns none of it.** In particular the host is the single source of truth for selection and for **expansion** (see below). The UI renders what it receives.
 - **Snapshots are pruned to what is visible.** The tree only contains the children of expanded directories; totals are sent as counters.
@@ -31,7 +33,7 @@ UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  �
 
 ## Commands (UI → Host)
 
-The single source of truth is `CommandSchemas` in `schema.ts`; names and payloads must match `handle_ipc_message` in `src/app/mod.rs`. The wire format is `{"command": <name>, "payload": <payload | null>}`.
+The single source of truth is `CommandSchemas` in `schema.ts`; names and payloads must match `run_command` / `DialogCommand` in `src/app/mod.rs`. The wire format is `{"command": <name>, "payload": <payload | null>}`.
 
 | Command                    | Payload                                                    | Effect                                                                 |
 | -------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------- |
@@ -41,7 +43,8 @@ The single source of truth is `CommandSchemas` in `schema.ts`; names and payload
 | `clearDirectory`           | `null`                                                     | Resets all directory-related state                                     |
 | `cancelScan`               | `null`                                                     | Cancels the running scan                                               |
 | `loadDirectoryLevel`       | `string` (path)                                            | Scans one directory level, marks it loaded **and expands it**          |
-| `toggleExpansion`          | `string` (path)                                            | Expands/collapses one directory                                        |
+| `setExpansion`             | `{ path: string, expanded: boolean }` (no other fields)    | Expands or collapses one directory. Idempotent; always answered with a snapshot |
+| `toggleExpansion`          | `string` (path)                                            | Flips one directory. Not idempotent and not used by the UI, see [Expansion](#expansion-one-source-of-truth) |
 | `expandCollapseAll`        | `boolean`                                                  | Expands (`true`) or collapses (`false`) every listed directory         |
 | `expandAllFully`           | `null`                                                     | Expands everything; only after the full scan                           |
 | `toggleSelection`          | `string` (path)                                            | Selects/deselects one file                                             |
@@ -63,10 +66,27 @@ The single source of truth is `CommandSchemas` in `schema.ts`; names and payload
 import { post } from "$lib/services/backend";
 
 post("selectAll"); // nullary command
-post("toggleExpansion", "/repo/src"); // payload is type-checked per command
+post("setExpansion", { path: "/repo/src", expanded: true }); // payload is type-checked per command
 ```
 
 `post` is overloaded so that the payload type follows from the command name. It does not return anything: do not `await` it.
+
+### Command ordering
+
+`handle_ipc_message` does not execute anything itself. It parses the message and queues the command on a `CommandDispatcher` (`src/app/dispatch.rs`), which has three lanes:
+
+| Lane         | Commands                                                                   | Guarantee                                                                                         |
+| ------------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Ordered      | Everything except the dialog commands                                      | Commands start in arrival order; a command runs without interleaving until it finishes or suspends |
+| Continuation | The rest of a command that suspended (`updateFilters` during a content search) | Finished one at a time, in the order the commands were posted                                     |
+| Blocking     | `selectDirectory`, `saveFile`, `pickOutputDirectory`, `importConfig`, `exportConfig` | One at a time, in arrival order, on the blocking thread pool                                      |
+
+What follows from that:
+
+- Two commands on the ordered lane never race. `setExpansion(true)` followed by `setExpansion(false)` ends collapsed, two `toggleSelection` cancel out, and of two `updateFilters` the later one determines the filters.
+- Long-running work does not occupy the ordered lane. Scans and generations are started as tasks of their own by their commands. A content search suspends `updateFilters`; the part up to the suspension (storing the new filters) has run in order, the rest (applying the search result) moves to the continuation lane. Results are applied in posting order, so an older search cannot overwrite a newer one, and commands posted meanwhile are executed immediately.
+- A native dialog blocks its thread for as long as the user takes. Dialog commands therefore run **outside** the ordered lane: a command that arrives while a dialog is open is executed right away, and what the dialog command does after the dialog has been closed (start the scan, store the output directory, import the config) happens after it. Dialog commands are ordered among themselves, so only one dialog is open at a time; a second one opens after the first has been closed.
+- A panicking command is logged and dropped; the lanes keep running.
 
 ## Host calls (Host → UI)
 
@@ -120,9 +140,9 @@ Sending the complete tree on every update costs ~14 MB of JSON at 50,000 files, 
 | `name`, `path`    | Display name and absolute path (the node's identity)                                                                 |
 | `is_directory`, `is_binary`, `size` | Kind and size                                                                                      |
 | `children`        | Child nodes, directories first, then by name. **Empty for files and for collapsed directories**                      |
-| `has_children`    | The directory has children in the filtered list, whether or not they were sent. `false` for files and for directories that are empty or not loaded yet |
+| `has_children`    | **Required.** The directory has children in the filtered list, whether or not they were sent. `false` for files and for directories that are empty or not loaded yet |
 | `is_expanded`     | The directory is expanded. Authoritative; `children` is filled exactly for expanded directories                      |
-| `children_loaded` | `false` for a directory whose content has not been scanned yet (lazy loading). Always `true` for files               |
+| `children_loaded` | **Required.** `false` for a directory whose content has not been scanned yet (lazy loading). Always `true` for files               |
 | `selection_state` | `"none" \| "partial" \| "full"`. For directories it is computed from **all** files below it, also the ones not sent |
 | `is_match`        | The node matches the filename, extension or content filter                                                           |
 | `is_previewed`    | The file is shown in the preview panel                                                                               |
@@ -147,15 +167,18 @@ Every way of changing the expansion is therefore a command, and the result is vi
 
 | Gesture                                                    | Command                                   |
 | ---------------------------------------------------------- | ----------------------------------------- |
-| Click on chevron or directory name, `Enter`                | `toggleExpansion`                         |
-| `ArrowRight` on a collapsed / `ArrowLeft` on an expanded directory | `toggleExpansion`                 |
+| Click on chevron or directory name, `Enter`                | `setExpansion` with the opposite of the rendered `is_expanded` |
+| `ArrowRight` on a collapsed directory                      | `setExpansion { expanded: true }`         |
+| `ArrowLeft` on an expanded directory                       | `setExpansion { expanded: false }`        |
 | Any of the above on a directory with `children_loaded: false` (no scan running) | `loadDirectoryLevel`; the host loads the level, marks it loaded and expands it |
 | "Expand all" / "Collapse all"                              | `expandCollapseAll`                       |
 | Typing into a filter                                       | `updateFilters`; the host expands the ancestors of all matches |
 
-The mapping from gesture to command lives in `src/ui/src/lib/modules/treeExpansion.ts`. While a scan is running the host refuses lazy loads (the scan delivers the children itself), so the UI sends `toggleExpansion` in that case.
+The mapping from gesture to command lives in `src/ui/src/lib/modules/treeExpansion.ts`. While a scan is running the host refuses lazy loads (the scan delivers the children itself), so the UI sends `setExpansion` in that case.
 
 There is no optimistic update: a row changes when the snapshot arrives. Snapshots are cheap enough for that, and it rules out the UI and the host disagreeing.
+
+**Gestures name their target state.** Because there is no optimistic update, a gesture can fire a second time before the snapshot answering the first one has been rendered: key repeat on `ArrowRight`, a double click on the chevron. The second event still sees the old row. If the UI sent "flip it" (`toggleExpansion`), the second event would undo the first and the directory would end up collapsed again. The UI therefore always sends the state the gesture should lead to, derived from the row the user acted on, and `setExpansion` is idempotent on the host. This also holds for the gestures that read as "toggle" (chevron, name, `Enter`): the user acts on what is on screen ("open this collapsed directory"), so two activations of the same rendered row ask for the same state twice. `toggleExpansion` stays in the contract for callers that have no rendered state to derive a target from; the UI does not use it.
 
 ## Contract tests
 
@@ -170,7 +193,7 @@ There is no optimistic update: a row changes when the snapshot arrives. Snapshot
 
 ## Changing the contract
 
-1. **Host:** add the command to `handle_ipc_message` and `commands.rs`, or the field to `UiState` / `TreeNode`.
+1. **Host:** add the command to `commands.rs` and to `run_command` in `src/app/mod.rs` (or, if it waits for a native dialog, to `DialogCommand`), or the field to `UiState` / `TreeNode`.
 2. **UI:** extend `CommandSchemas` / `UiStateSchema` in `schema.ts` and the types in `types.ts`. Prefer additive changes.
 3. Regenerate the fixture (see above) and update the factories in `src/ui/src/tests/contracts/`.
 4. Keep the snapshot self-contained: never send something that is only meaningful relative to an earlier update.

@@ -24,8 +24,8 @@ type TreeNode = {
   size: number;
   /** Only expanded directories carry children (pruned snapshot). */
   children: TreeNode[];
-  has_children?: boolean;
-  children_loaded?: boolean;
+  has_children: boolean;
+  children_loaded: boolean;
 };
 
 type AppConfig = {
@@ -106,6 +106,8 @@ function makeHugeTree(filesCount: number): TreeNode[] {
       is_previewed: false,
       selection_state: "none",
       size: 123,
+      has_children: false,
+      children_loaded: true,
       children: [],
     });
   }
@@ -120,6 +122,8 @@ function makeHugeTree(filesCount: number): TreeNode[] {
       is_previewed: false,
       selection_state: "none",
       size: 0,
+      has_children: true,
+      children_loaded: true,
       children,
     },
   ];

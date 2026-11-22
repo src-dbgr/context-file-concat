@@ -430,6 +430,39 @@ pub fn toggle_expansion<P: EventProxy>(
     }
 }
 
+/// Payload of [`set_expansion`].
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct SetExpansionPayload {
+    path: PathBuf,
+    expanded: bool,
+}
+
+/// Sets the expanded/collapsed state of a directory in the UI tree.
+///
+/// Unlike [`toggle_expansion`] this names the target state, which makes it idempotent:
+/// a gesture that is delivered twice (key repeat, double click) before the UI has
+/// rendered the answer to the first one still ends in the state the user asked for.
+/// The state is always sent, also when nothing changed, so every request is answered.
+pub fn set_expansion<P: EventProxy>(
+    payload: serde_json::Value,
+    proxy: P,
+    state: Arc<Mutex<AppState>>,
+) {
+    match serde_json::from_value::<SetExpansionPayload>(payload) {
+        Ok(SetExpansionPayload { path, expanded }) => {
+            with_state_and_notify(&state, &proxy, |s| {
+                if expanded {
+                    s.expanded_dirs.insert(path);
+                } else {
+                    s.expanded_dirs.remove(&path);
+                }
+            });
+        }
+        Err(e) => tracing::warn!("Failed to deserialize setExpansion payload: {e}"),
+    }
+}
+
 /// Expands or collapses all *currently visible* directories in the file tree.
 pub fn expand_collapse_all<P: EventProxy>(
     payload: serde_json::Value,
@@ -1465,6 +1498,81 @@ mod tests {
         toggle_expansion(payload, harness.proxy.clone(), harness.state.clone());
         let ui_state2 = harness.get_last_state_update().await.unwrap();
         assert!(!ui_state2.tree[0].is_expanded);
+    }
+
+    #[tokio::test]
+    async fn test_set_expansion_is_idempotent() {
+        let mut harness = TestHarness::new();
+        let dir = harness.create_dir("src");
+        harness.set_initial_files(&["src"]);
+        let set = |expanded: bool| json!({ "path": dir, "expanded": expanded });
+
+        // Expanding twice (key repeat, double click) leaves the directory expanded,
+        // and each request is answered with a snapshot.
+        for _ in 0..2 {
+            set_expansion(set(true), harness.proxy.clone(), harness.state.clone());
+            let ui_state = harness.get_last_state_update().await.unwrap();
+            assert!(ui_state.tree[0].is_expanded);
+        }
+        assert_eq!(harness.state.lock().unwrap().expanded_dirs.len(), 1);
+
+        for _ in 0..2 {
+            set_expansion(set(false), harness.proxy.clone(), harness.state.clone());
+            let ui_state = harness.get_last_state_update().await.unwrap();
+            assert!(!ui_state.tree[0].is_expanded);
+        }
+        assert!(harness.state.lock().unwrap().expanded_dirs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_set_expansion_only_affects_the_given_directory() {
+        let mut harness = TestHarness::new();
+        let src = harness.create_dir("src");
+        let docs = harness.create_dir("docs");
+        harness.set_initial_files(&["docs", "src"]);
+        harness
+            .state
+            .lock()
+            .unwrap()
+            .expanded_dirs
+            .insert(docs.clone());
+
+        set_expansion(
+            json!({ "path": src, "expanded": true }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        set_expansion(
+            json!({ "path": src, "expanded": false }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        let _ = harness.get_last_state_update().await.unwrap();
+
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.expanded_dirs.len(), 1);
+        assert!(state.expanded_dirs.contains(&docs));
+    }
+
+    #[tokio::test]
+    async fn test_set_expansion_handles_invalid_payload() {
+        let mut harness = TestHarness::new();
+        for invalid_payload in [
+            json!("/a/bare/path"),
+            json!({ "path": "/repo/src" }),
+            json!({ "expanded": true }),
+            json!({ "path": "/repo/src", "expanded": "yes" }),
+            json!({ "path": "/repo/src", "expanded": true, "extra": 1 }),
+            json!(null),
+        ] {
+            set_expansion(
+                invalid_payload,
+                harness.proxy.clone(),
+                harness.state.clone(),
+            );
+        }
+        assert!(harness.get_next_event().await.is_none());
+        assert!(harness.state.lock().unwrap().expanded_dirs.is_empty());
     }
 
     #[tokio::test]
