@@ -19,6 +19,80 @@ pub struct ScanProgress {
 
 const PROGRESS_UPDATE_THROTTLE: Duration = Duration::from_millis(100);
 
+/// Describes which part of a project a scan covers.
+///
+/// A scan always happens *in the context of a project*: ignore rules (the user's custom
+/// patterns as well as the chain of `.gitignore` files) are anchored at the project root,
+/// and [`FileItem::depth`] is counted from there. Where the walk starts is a separate
+/// matter: a full scan starts at the project root itself, a lazy load starts at one of
+/// its subdirectories. Keeping the two apart is what makes a lazily loaded level
+/// identical to the same level of a full scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanRequest {
+    project_root: PathBuf,
+    start_dir: PathBuf,
+    /// How many levels below `start_dir` are listed; `None` means all of them.
+    max_depth: Option<usize>,
+    /// The depth of `start_dir` relative to `project_root`.
+    start_depth: usize,
+}
+
+impl ScanRequest {
+    /// A scan of the whole project, optionally limited to `max_depth` levels.
+    pub fn project(project_root: impl Into<PathBuf>, max_depth: Option<usize>) -> Self {
+        let project_root = project_root.into();
+        Self {
+            start_dir: project_root.clone(),
+            project_root,
+            max_depth,
+            start_depth: 0,
+        }
+    }
+
+    /// A scan of the direct children of `directory`, which must lie inside
+    /// `project_root` (or be the project root itself).
+    pub fn directory_level(
+        project_root: impl Into<PathBuf>,
+        directory: impl Into<PathBuf>,
+    ) -> Result<Self, CoreError> {
+        let project_root = project_root.into();
+        let start_dir = directory.into();
+        let start_depth = start_dir.strip_prefix(&project_root)?.components().count();
+        Ok(Self {
+            project_root,
+            start_dir,
+            max_depth: Some(1),
+            start_depth,
+        })
+    }
+
+    /// The directory that anchors ignore rules and item depths.
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// The directory whose content is listed.
+    pub fn start_dir(&self) -> &Path {
+        &self.start_dir
+    }
+
+    /// The number of levels listed below the start directory (`None`: unlimited).
+    pub fn max_depth(&self) -> Option<usize> {
+        self.max_depth
+    }
+
+    /// The depth limit as the walker needs it: counted from the project root.
+    fn max_depth_from_project_root(&self) -> Option<usize> {
+        self.max_depth.map(|depth| self.start_depth + depth)
+    }
+
+    /// `true` for the entries the walk has to visit: the directories leading from the
+    /// project root to the start directory, and everything below the start directory.
+    fn is_on_route(&self, path: &Path) -> bool {
+        path.starts_with(&self.start_dir) || self.start_dir.starts_with(path)
+    }
+}
+
 /// Scans a directory for files and subdirectories, respecting ignore patterns.
 pub struct DirectoryScanner {
     ignore_patterns: HashSet<String>,
@@ -30,8 +104,12 @@ pub struct DirectoryScanner {
 /// Private helper function with the core walker loop.
 /// This allows the throttling logic to be tested deterministically without
 /// polluting the public API signature.
+///
+/// Entries up to and including `start_depth` (the start directory of the scan and the
+/// directories leading to it) are walked but neither counted nor reported.
 fn process_walker_results<F, H>(
     walker: ignore::Walk,
+    start_depth: usize,
     cancel_flag: Arc<AtomicBool>,
     progress_callback: F,
     progress_throttle: Duration,
@@ -64,9 +142,10 @@ where
         // This hook is a no-op in production, but can inject delays and code during tests.
         test_hook(&entry);
 
-        // Check for the root directory and skip it *before* incrementing the counter.
-        // This prevents inflating the scanned count with the root directory itself.
-        if entry.depth() == 0 {
+        // Check for the start directory (and its ancestors) and skip it *before*
+        // incrementing the counter. This prevents inflating the scanned count with
+        // directories that are not part of the result.
+        if entry.depth() <= start_depth {
             continue;
         }
 
@@ -142,23 +221,30 @@ impl DirectoryScanner {
         }
     }
 
-    /// Scans a directory asynchronously, providing progress updates via a callback.
+    /// Performs the scan described by `request` asynchronously, providing progress
+    /// updates via a callback.
     ///
     /// This function performs the scan in a blocking thread to avoid blocking the async runtime,
     /// while allowing for cancellation and progress reporting. It uses the `ignore` crate
     /// for high-performance, gitignore-aware directory traversal. It also manually checks
     /// custom ignore patterns to report which ones were actively used.
-    pub async fn scan_directory_with_progress<F>(
+    ///
+    /// The walk always begins at the project root, even when only a subdirectory is
+    /// requested: on its way down it visits nothing but the directories leading to the
+    /// start directory. That way the `.gitignore` files of all ancestors inside the
+    /// project, the anchoring of the custom patterns and the depth of the items are the
+    /// same as in a full scan by construction. A start directory that is itself ignored
+    /// consequently yields nothing.
+    pub async fn scan<F>(
         &self,
-        root_path: &Path,
-        max_depth: Option<usize>,
+        request: &ScanRequest,
         cancel_flag: Arc<AtomicBool>,
         progress_callback: F,
     ) -> Result<(Vec<FileItem>, HashSet<String>), CoreError>
     where
         F: Fn(ScanProgress) + Send + Sync + 'static,
     {
-        let root_path_buf = root_path.to_path_buf();
+        let request = request.clone();
         let ignore_patterns_clone = self.ignore_patterns.clone();
 
         #[cfg(test)]
@@ -169,7 +255,7 @@ impl DirectoryScanner {
         let throttle = PROGRESS_UPDATE_THROTTLE;
 
         let blocking_task_handle = tokio::task::spawn_blocking(move || {
-            let mut walker_builder = ignore::WalkBuilder::new(&root_path_buf);
+            let mut walker_builder = ignore::WalkBuilder::new(request.project_root());
 
             let active_patterns =
                 std::sync::Arc::new(std::sync::Mutex::new(HashSet::<String>::new()));
@@ -179,17 +265,15 @@ impl DirectoryScanner {
                 ignore_patterns_clone
                     .iter()
                     .filter_map(|pattern| {
-                        let mut builder = ignore::gitignore::GitignoreBuilder::new(&root_path_buf);
+                        let mut builder =
+                            ignore::gitignore::GitignoreBuilder::new(request.project_root());
                         builder.add_line(None, pattern).ok()?;
                         builder.build().ok().map(|m| (pattern.clone(), m))
                     })
                     .collect();
 
-            if let Some(depth) = max_depth {
-                walker_builder.max_depth(Some(depth));
-            }
-
             walker_builder
+                .max_depth(request.max_depth_from_project_root())
                 .hidden(false)
                 .parents(false)
                 .git_global(true)
@@ -200,7 +284,13 @@ impl DirectoryScanner {
 
             // Add a filter to check our custom patterns and collect the active ones.
             let active_patterns_clone = active_patterns.clone();
+            let start_depth = request.start_depth;
             walker_builder.filter_entry(move |entry| {
+                // Stay on the route to the start directory. Entries beside it are not
+                // part of this scan, so they must not activate a pattern either.
+                if !request.is_on_route(entry.path()) {
+                    return false;
+                }
                 let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
                 for (pattern, matcher) in &custom_matchers {
                     if matcher.matched(entry.path(), is_dir).is_ignore() {
@@ -217,8 +307,14 @@ impl DirectoryScanner {
             let walker = walker_builder.build();
 
             // Call the internal helper with a no-op closure for the test hook.
-            let final_files =
-                process_walker_results(walker, cancel_flag, progress_callback, throttle, |_| {});
+            let final_files = process_walker_results(
+                walker,
+                start_depth,
+                cancel_flag,
+                progress_callback,
+                throttle,
+                |_| {},
+            );
 
             let final_active_patterns = active_patterns.lock().unwrap().clone();
             (final_files, final_active_patterns)
@@ -275,7 +371,11 @@ mod tests {
         let scanner = DirectoryScanner::new(custom_ignores);
 
         let (files, _) = scanner
-            .scan_directory_with_progress(&root, None, Arc::new(AtomicBool::new(false)), |_| {})
+            .scan(
+                &ScanRequest::project(&root, None),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
             .await
             .expect("Scan should succeed");
 
@@ -300,7 +400,11 @@ mod tests {
         let scanner = DirectoryScanner::new(HashSet::new());
 
         let (files, _) = scanner
-            .scan_directory_with_progress(&root, Some(1), Arc::new(AtomicBool::new(false)), |_| {})
+            .scan(
+                &ScanRequest::project(&root, Some(1)),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
             .await
             .expect("Scan should succeed");
 
@@ -345,6 +449,7 @@ mod tests {
         let handle = tokio::task::spawn_blocking(move || {
             process_walker_results(
                 walker,
+                0,
                 task_cancel_flag,
                 move |progress| {
                     if progress.files_scanned > 20 {
@@ -397,6 +502,7 @@ mod tests {
 
         process_walker_results(
             walker,
+            0,
             Arc::new(AtomicBool::new(false)),
             move |progress| {
                 updates_clone.lock().unwrap().push(progress);
@@ -436,7 +542,11 @@ mod tests {
 
         let scanner = DirectoryScanner::new(custom_ignores);
         let (files, active_patterns) = scanner
-            .scan_directory_with_progress(&root, None, Arc::new(AtomicBool::new(false)), |_| {})
+            .scan(
+                &ScanRequest::project(&root, None),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
             .await
             .expect("Scan should succeed");
 
@@ -469,7 +579,11 @@ mod tests {
 
         let scanner = DirectoryScanner::new(HashSet::new());
         let (files, _) = scanner
-            .scan_directory_with_progress(root, None, Arc::new(AtomicBool::new(false)), |_| {})
+            .scan(
+                &ScanRequest::project(root, None),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
             .await
             .unwrap();
 
@@ -486,7 +600,11 @@ mod tests {
         let scanner = DirectoryScanner::new(HashSet::new());
 
         let result = scanner
-            .scan_directory_with_progress(&root, None, Arc::new(AtomicBool::new(false)), |_| {})
+            .scan(
+                &ScanRequest::project(&root, None),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
             .await;
 
         assert!(result.is_ok());
@@ -505,7 +623,11 @@ mod tests {
 
         let scanner = DirectoryScanner::new(custom_ignores);
         let result = scanner
-            .scan_directory_with_progress(&root, None, Arc::new(AtomicBool::new(false)), |_| {})
+            .scan(
+                &ScanRequest::project(&root, None),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
             .await;
 
         assert!(result.is_ok());
@@ -541,7 +663,11 @@ mod tests {
 
         let scanner = DirectoryScanner::new(HashSet::new());
         let (files, _) = scanner
-            .scan_directory_with_progress(root, None, Arc::new(AtomicBool::new(false)), |_| {})
+            .scan(
+                &ScanRequest::project(root, None),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
             .await
             .unwrap();
 
@@ -579,6 +705,7 @@ mod tests {
         // We test the private helper directly to use the deterministic test hook.
         let files = process_walker_results(
             walker,
+            0,
             Arc::new(AtomicBool::new(false)),
             |_| {},
             PROGRESS_UPDATE_THROTTLE,
@@ -627,6 +754,7 @@ mod tests {
 
         let files = process_walker_results(
             walker,
+            0,
             cancel_flag,
             |_| {},
             PROGRESS_UPDATE_THROTTLE,
@@ -659,9 +787,8 @@ mod tests {
         };
 
         let result = scanner
-            .scan_directory_with_progress(
-                &root,
-                None,
+            .scan(
+                &ScanRequest::project(&root, None),
                 Arc::new(AtomicBool::new(false)),
                 panicking_callback,
             )
@@ -704,6 +831,7 @@ mod tests {
 
         let files = process_walker_results(
             walker,
+            0,
             Arc::new(AtomicBool::new(false)),
             |_| {},
             PROGRESS_UPDATE_THROTTLE,
@@ -722,6 +850,178 @@ mod tests {
         assert!(
             !item.is_binary,
             "A directory should not be classified as binary."
+        );
+    }
+
+    /// A project in which ignore rules of every kind apply *inside* a subdirectory:
+    /// the root `.gitignore` (glob and root-anchored rule), a nested `.gitignore` with a
+    /// whitelist rule, and a user pattern in the form `add_ignore_path` produces.
+    fn setup_project_with_ignored_entries_in_subdirectory() -> (TempDir, PathBuf) {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+        let root = temp_dir.path().to_path_buf();
+        fs::create_dir_all(root.join("src/build_out")).unwrap();
+        fs::create_dir_all(root.join("src/generated")).unwrap();
+        fs::create_dir_all(root.join("src/core/nested")).unwrap();
+        fs::write(root.join(".gitignore"), "*.gen\n/src/build_out/\n").unwrap();
+        fs::write(root.join("src/.gitignore"), "!keep.gen\n").unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        fs::write(root.join("src/secret.gen"), "secret").unwrap();
+        fs::write(root.join("src/keep.gen"), "kept").unwrap();
+        fs::write(root.join("src/build_out/artifact.o"), "obj").unwrap();
+        fs::write(root.join("src/generated/bindings.rs"), "// generated").unwrap();
+        fs::write(root.join("src/core/lib.rs"), "// lib").unwrap();
+        fs::write(root.join("src/core/cache.gen"), "cache").unwrap();
+        fs::write(root.join("src/core/nested/deep.rs"), "// deep").unwrap();
+        fs::write(root.join("top.gen"), "top").unwrap();
+        (temp_dir, root)
+    }
+
+    /// The comparable essence of scan results: what was found, as what, and how deep.
+    fn summarize(items: impl IntoIterator<Item = FileItem>) -> Vec<(PathBuf, bool, usize)> {
+        let mut summary: Vec<_> = items
+            .into_iter()
+            .map(|item| (item.path, item.is_directory, item.depth))
+            .collect();
+        summary.sort();
+        summary
+    }
+
+    /// A lazily loaded directory level must be indistinguishable from the same level of
+    /// a full scan: same entries (ignore rules anchored at the project root, parent
+    /// `.gitignore` files honoured) and same depth values.
+    #[tokio::test]
+    async fn lazy_level_of_subdirectory_equals_same_level_of_full_scan() {
+        setup_test_logging();
+        let (_temp_dir, root) = setup_project_with_ignored_entries_in_subdirectory();
+        let scanner = DirectoryScanner::new(HashSet::from(["src/generated/".to_string()]));
+        let no_cancel = || Arc::new(AtomicBool::new(false));
+
+        let (full, _) = scanner
+            .scan(&ScanRequest::project(&root, None), no_cancel(), |_| {})
+            .await
+            .expect("Full scan should succeed");
+
+        for (directory, expected_depth) in [(root.join("src"), 2), (root.join("src/core"), 3)] {
+            let request = ScanRequest::directory_level(&root, &directory).unwrap();
+            let (lazy, _) = scanner
+                .scan(&request, no_cancel(), |_| {})
+                .await
+                .expect("Lazy scan should succeed");
+
+            let expected: Vec<FileItem> = full
+                .iter()
+                .filter(|item| item.parent.as_deref() == Some(directory.as_path()))
+                .cloned()
+                .collect();
+            assert!(
+                !expected.is_empty(),
+                "precondition: level must not be empty"
+            );
+            assert!(lazy.iter().all(|item| item.depth == expected_depth));
+            assert_eq!(
+                summarize(lazy),
+                summarize(expected),
+                "lazy level of {directory:?} differs from the full scan"
+            );
+        }
+    }
+
+    /// Spells out the user-visible part of the comparison above for the reported scenario.
+    #[tokio::test]
+    async fn lazy_level_hides_entries_ignored_relative_to_project_root() {
+        setup_test_logging();
+        let (_temp_dir, root) = setup_project_with_ignored_entries_in_subdirectory();
+        let pattern = "src/generated/".to_string();
+        let scanner = DirectoryScanner::new(HashSet::from([pattern.clone()]));
+
+        let (items, active_patterns) = scanner
+            .scan(
+                &ScanRequest::directory_level(&root, root.join("src")).unwrap(),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
+            .await
+            .expect("Lazy scan should succeed");
+
+        let names: HashSet<String> = items
+            .iter()
+            .map(|item| {
+                item.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let expected_names: HashSet<String> = [".gitignore", "main.rs", "keep.gen", "core"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(names, expected_names);
+        assert_eq!(active_patterns, HashSet::from([pattern]));
+    }
+
+    /// Entries beside the route to the start directory are not part of a lazy load, so
+    /// they neither show up nor mark a custom pattern as active.
+    #[tokio::test]
+    async fn lazy_level_ignores_everything_beside_its_route() {
+        setup_test_logging();
+        let (_temp_dir, root) = setup_project_with_ignored_entries_in_subdirectory();
+        fs::create_dir(root.join("docs")).unwrap();
+        fs::write(root.join("docs/readme.md"), "# docs").unwrap();
+        let scanner = DirectoryScanner::new(HashSet::from(["docs/".to_string()]));
+
+        let (items, active_patterns) = scanner
+            .scan(
+                &ScanRequest::directory_level(&root, root.join("src/core")).unwrap(),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
+            .await
+            .expect("Lazy scan should succeed");
+
+        assert!(items
+            .iter()
+            .all(|item| item.parent.as_deref() == Some(root.join("src/core").as_path())));
+        assert!(active_patterns.is_empty());
+    }
+
+    /// A directory that is ignored itself has no visible content, whichever way it is scanned.
+    #[tokio::test]
+    async fn lazy_level_of_ignored_directory_is_empty() {
+        setup_test_logging();
+        let (_temp_dir, root) = setup_project_with_ignored_entries_in_subdirectory();
+        let scanner = DirectoryScanner::new(HashSet::new());
+
+        let (items, _) = scanner
+            .scan(
+                &ScanRequest::directory_level(&root, root.join("src/build_out")).unwrap(),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
+            .await
+            .expect("Lazy scan should succeed");
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn directory_level_request_rejects_directory_outside_project() {
+        let result = ScanRequest::directory_level("/project", "/elsewhere/src");
+
+        assert!(matches!(result, Err(CoreError::PathStrip(_))));
+    }
+
+    #[test]
+    fn project_request_starts_at_the_project_root() {
+        let request = ScanRequest::project("/project", Some(1));
+
+        assert_eq!(request.project_root(), Path::new("/project"));
+        assert_eq!(request.start_dir(), Path::new("/project"));
+        assert_eq!(request.max_depth(), Some(1));
+        assert_eq!(
+            ScanRequest::directory_level("/project", "/project").unwrap(),
+            request
         );
     }
 }

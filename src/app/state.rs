@@ -33,7 +33,7 @@ struct ActiveRun {
     task: Option<JoinHandle<()>>,
 }
 
-/// Exclusive ownership of one kind of background work (scanning, generating).
+/// Exclusive ownership of one kind of background work (scanning, generating, searching).
 ///
 /// At most one run is active per slot. Beginning a new run supersedes the previous one,
 /// and only the ticket of the active run can attach a task to the slot or release it.
@@ -150,12 +150,21 @@ impl GenerationToken {
     }
 }
 
+/// Identifies one run of the content search.
+///
+/// Handed out by [`AppState::begin_content_search`]. Beginning a search supersedes the
+/// one before it, so of several searches running concurrently only the most recently
+/// started one may publish its matches, no matter in which order they finish.
+#[derive(Debug, Clone)]
+pub struct ContentSearchToken(RunTicket);
+
 /// Ties a lazy (single directory level) load to the file list it was started for.
 ///
 /// Handed out by [`AppState::begin_lazy_load`]. The token goes stale as soon as the file
-/// list is replaced wholesale (new scan, directory reset). From then on the lazy load is
-/// told to stop via its cancellation flag, and whatever it still produces must be
-/// discarded instead of being merged into an unrelated list.
+/// list is replaced wholesale (new scan, directory reset) or the rules deciding what
+/// belongs into it change (ignore patterns applied). From then on the lazy load is told
+/// to stop via its cancellation flag, and whatever it still produces must be discarded
+/// instead of being merged into a list it was not computed for.
 #[derive(Debug, Clone)]
 pub struct LazyLoadToken {
     file_list_generation: u64,
@@ -217,7 +226,8 @@ pub struct AppState {
     /// might be missing files that were previously filtered out.
     pub patterns_need_rescan: bool,
     /// Incremented whenever the file list is replaced wholesale (a scan begins or the
-    /// directory is reset). Lets background tasks detect that their results are outdated.
+    /// directory is reset) or pruned by new ignore patterns. Lets background tasks detect
+    /// that their results are outdated.
     file_list_generation: u64,
     /// Shared by all lazy loads started for the current file list; raised when that list
     /// is replaced, so that those loads stop instead of scanning for nothing.
@@ -226,6 +236,8 @@ pub struct AppState {
     scan: RunSlot,
     /// The content generation that is currently in progress, if any.
     generation: RunSlot,
+    /// The content search that is currently in progress, if any.
+    content_search: RunSlot,
     /// Incremented whenever `filtered_file_list` changes. Derived data (the tree index)
     /// is keyed by this revision.
     filtered_revision: u64,
@@ -262,6 +274,7 @@ impl Default for AppState {
             lazy_load_cancel_flag: Arc::new(AtomicBool::new(false)),
             scan: RunSlot::default(),
             generation: RunSlot::default(),
+            content_search: RunSlot::default(),
             filtered_revision: 0,
             tree_index_cache: TreeIndexCache::default(),
         }
@@ -343,7 +356,8 @@ impl AppState {
     }
 
     /// Declares the current file list obsolete because it is about to be replaced
-    /// wholesale: lazy loads started for it go stale and are told to stop.
+    /// wholesale, or because the rules that decide what belongs into it have changed:
+    /// lazy loads started for it go stale and are told to stop.
     fn invalidate_file_list(&mut self) {
         self.file_list_generation += 1;
         let obsolete_flag = std::mem::replace(
@@ -389,6 +403,56 @@ impl AppState {
     /// Cancels the current generation, if any, and resets the generating state.
     pub fn cancel_current_generation(&mut self) {
         self.generation.cancel();
+    }
+
+    /// Starts a new content search run and returns the token identifying it.
+    ///
+    /// A search that is still running is superseded: its token becomes stale, so its
+    /// matches (for an older query or an older file list) are never published.
+    pub fn begin_content_search(&mut self) -> ContentSearchToken {
+        ContentSearchToken(self.content_search.begin())
+    }
+
+    /// Stores the matches of the search identified by `token` and releases the slot.
+    ///
+    /// Does nothing for a stale token. Returns `true` if the matches were accepted, i.e.
+    /// if the filters need to be re-applied.
+    pub fn finish_content_search(
+        &mut self,
+        token: &ContentSearchToken,
+        matches: HashSet<PathBuf>,
+    ) -> bool {
+        if !self.content_search.finish(&token.0) {
+            return false;
+        }
+        self.content_search_results = matches;
+        true
+    }
+
+    /// Drops the matches of the content search and supersedes a search that is still
+    /// running, so it cannot bring matches back. To be used when the query is cleared.
+    pub fn clear_content_search(&mut self) {
+        self.content_search.cancel();
+        self.content_search_results.clear();
+    }
+
+    /// Makes `files` the result of the first, shallow phase of a scan of `root`.
+    ///
+    /// The list then holds a single level, so `root` is the only directory whose
+    /// children are loaded; whatever was loaded in the list before is forgotten.
+    pub fn replace_with_shallow_file_list(&mut self, root: &std::path::Path, files: Vec<FileItem>) {
+        self.full_file_list = files;
+        self.loaded_dirs = HashSet::from([root.to_path_buf()]);
+    }
+
+    /// Makes `files` the complete content of the project: every directory in it is loaded.
+    pub fn replace_with_complete_file_list(&mut self, files: Vec<FileItem>) {
+        self.loaded_dirs = files
+            .iter()
+            .filter(|item| item.is_directory)
+            .map(|item| item.path.clone())
+            .collect();
+        self.full_file_list = files;
     }
 
     /// `true` if the task of the current scan has been attached.
@@ -442,7 +506,7 @@ impl AppState {
         self.search_query.clear();
         self.extension_filter.clear();
         self.content_search_query.clear();
-        self.content_search_results.clear();
+        self.clear_content_search();
         self.previewed_file_path = None;
         self.active_ignore_patterns.clear();
         self.is_fully_scanned = false;
@@ -457,12 +521,15 @@ impl AppState {
     /// Applies the complete set of current ignore patterns to the in-memory file lists.
     /// This function re-builds the matcher from `self.config.ignore_patterns`
     /// and filters `full_file_list` and `selected_files` accordingly.
+    ///
+    /// Lazy loads that are still in flight were started with the previous patterns and
+    /// would bring back entries that are ignored now, so they are invalidated.
     pub fn apply_ignore_patterns(&mut self) {
-        // CHANGED: Use the complete, current set of patterns from the config.
-        let patterns = &self.config.ignore_patterns;
-        if patterns.is_empty() {
+        if self.config.ignore_patterns.is_empty() {
             return;
         }
+        self.invalidate_file_list();
+        let patterns = &self.config.ignore_patterns;
 
         let root_path = PathBuf::from(&self.current_path);
         let mut builder = ignore::gitignore::GitignoreBuilder::new(&root_path);
@@ -1015,5 +1082,97 @@ mod tests {
         // Assert
         assert_eq!(state.full_file_list.len(), initial_file_list.len());
         assert_eq!(state.full_file_list[0].path, initial_file_list[0].path);
+    }
+
+    #[tokio::test]
+    async fn test_newer_content_search_supersedes_older_one() {
+        let mut state = AppState::default();
+        let older = state.begin_content_search();
+        let newer = state.begin_content_search();
+        let older_matches = HashSet::from([PathBuf::from("/p/older.txt")]);
+        let newer_matches = HashSet::from([PathBuf::from("/p/newer.txt")]);
+
+        // The older search finishes last and must be ignored, whatever the order.
+        assert!(state.finish_content_search(&newer, newer_matches.clone()));
+        assert!(!state.finish_content_search(&older, older_matches));
+
+        assert_eq!(state.content_search_results, newer_matches);
+        assert!(
+            !state.finish_content_search(&newer, HashSet::new()),
+            "A search can only publish once"
+        );
+        assert_eq!(state.content_search_results, newer_matches);
+    }
+
+    #[tokio::test]
+    async fn test_clear_content_search_discards_running_search() {
+        let mut state = AppState::default();
+        state
+            .content_search_results
+            .insert(PathBuf::from("/p/old.txt"));
+        let running = state.begin_content_search();
+
+        state.clear_content_search();
+
+        assert!(state.content_search_results.is_empty());
+        assert!(!state.finish_content_search(&running, HashSet::from([PathBuf::from("/p/a")])));
+        assert!(state.content_search_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_reset_directory_state_discards_running_content_search() {
+        let mut state = AppState::default();
+        let running = state.begin_content_search();
+
+        state.reset_directory_state();
+
+        assert!(!state.finish_content_search(&running, HashSet::from([PathBuf::from("/p/a")])));
+        assert!(state.content_search_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_apply_ignore_patterns_invalidates_pending_lazy_loads() {
+        let mut state = AppState::default();
+        state.config.ignore_patterns.clear();
+        state.current_path = "/project".to_string();
+        let token = state.begin_lazy_load().expect("No scan is running");
+
+        // Without patterns nothing changes, so the lazy load stays valid.
+        state.apply_ignore_patterns();
+        assert!(state.is_current_lazy_load(&token));
+
+        state.config.ignore_patterns.insert("target/".to_string());
+        state.apply_ignore_patterns();
+
+        assert!(!state.is_current_lazy_load(&token));
+        assert!(token.is_cancelled(), "The lazy scan must be told to stop");
+        let fresh = state.begin_lazy_load().expect("No scan is running");
+        assert!(state.is_current_lazy_load(&fresh) && !fresh.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_shallow_file_list_forgets_previously_loaded_directories() {
+        let mut state = AppState::default();
+        let root = PathBuf::from("/project");
+        state.replace_with_complete_file_list(vec![
+            create_test_file_item("/project/src", true),
+            create_test_file_item("/project/src/core", true),
+            create_test_file_item("/project/src/core/lib.rs", false),
+        ]);
+        assert_eq!(
+            state.loaded_dirs,
+            HashSet::from([
+                PathBuf::from("/project/src"),
+                PathBuf::from("/project/src/core")
+            ])
+        );
+
+        state.replace_with_shallow_file_list(
+            &root,
+            vec![create_test_file_item("/project/src", true)],
+        );
+
+        assert_eq!(state.loaded_dirs, HashSet::from([root]));
+        assert_eq!(state.full_file_list.len(), 1);
     }
 }

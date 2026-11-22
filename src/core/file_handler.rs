@@ -110,18 +110,51 @@ fn try_read_file_body(file_path: &Path) -> io::Result<String> {
     Ok(decode_file_bytes(file_path, fs::read(file_path)?))
 }
 
-/// Turns raw file bytes into the text to embed (pure, no IO).
-///
-/// Valid UTF-8 is used as is. Anything else is either text in a legacy encoding,
-/// which is converted lossily, or binary, which is replaced by a marker.
+/// Turns raw file bytes into the text to embed (pure, no IO): the decoded text, or a
+/// marker for binary content.
 fn decode_file_bytes(file_path: &Path, bytes: Vec<u8>) -> String {
+    decode_text(file_path, bytes).unwrap_or_else(|| BINARY_CONTENT_MARKER.to_string())
+}
+
+/// Decodes the raw bytes of a file into text (pure, no IO). Returns `None` for binary
+/// content.
+///
+/// This is the one place that defines how the application reads text, shared by the
+/// output generation and the content search, so both always see the same characters.
+/// Valid UTF-8 is used as is. Anything else that still looks like text is taken to be
+/// in a legacy single-byte encoding and decoded as Windows-1252, the superset of
+/// ISO-8859-1 (Latin-1) that such files are overwhelmingly written in. Every byte maps
+/// to exactly one character, so no content is lost or replaced.
+pub(crate) fn decode_text(file_path: &Path, bytes: Vec<u8>) -> Option<String> {
     match String::from_utf8(bytes) {
-        Ok(text) => text,
+        Ok(text) => Some(text),
         Err(error) if is_legacy_encoded_text(file_path, error.as_bytes()) => {
-            String::from_utf8_lossy(error.as_bytes()).into_owned()
+            Some(decode_windows_1252(error.as_bytes()))
         }
-        Err(_) => BINARY_CONTENT_MARKER.to_string(),
+        Err(_) => None,
     }
+}
+
+/// The characters Windows-1252 assigns to the bytes `0x80..=0x9F`. All other bytes
+/// denote the Unicode code point of the same value, as in ISO-8859-1. The five bytes
+/// the encoding leaves undefined map to the C1 control character of the same value,
+/// following the WHATWG Encoding Standard.
+const WINDOWS_1252_HIGH_CONTROL_RANGE: [char; 32] = [
+    '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
+    '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+];
+
+/// Decodes bytes as Windows-1252. Total: every byte sequence has a decoding.
+fn decode_windows_1252(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&byte| match byte {
+            0x80..=0x9F => WINDOWS_1252_HIGH_CONTROL_RANGE[usize::from(byte - 0x80)],
+            _ => char::from(byte),
+        })
+        .collect()
 }
 
 /// Decides whether non-UTF-8 bytes are still text (e.g. Latin-1), reusing the
@@ -548,18 +581,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn latin1_text_file_is_included_lossily() {
+    async fn latin1_text_file_is_included_with_its_characters_intact() {
         let (_dir, root) = setup_test_environment();
         let latin1_path = root.join("legacy.txt");
-        // "Können wir? Ja." encoded as Latin-1: 0xF6 is not valid UTF-8.
-        fs::write(&latin1_path, b"K\xf6nnen wir? Ja.\n").unwrap();
+        // "Größe: Können wir? Ja." encoded as Latin-1: 0xF6, 0xDF are not valid UTF-8.
+        fs::write(&latin1_path, b"Gr\xf6\xdfe: K\xf6nnen wir? Ja.\n").unwrap();
 
         let content = generate_plain(&[latin1_path], &root).await.unwrap();
 
         assert_eq!(
             file_block_body(&content, "legacy.txt"),
-            "K\u{FFFD}nnen wir? Ja.\n"
+            "Größe: Können wir? Ja.\n"
         );
+    }
+
+    #[test]
+    fn windows_1252_decoding_maps_every_byte_to_one_character() {
+        let all_bytes: Vec<u8> = (0..=255).collect();
+
+        let decoded = decode_windows_1252(&all_bytes);
+
+        assert_eq!(decoded.chars().count(), 256);
+        assert!(!decoded.contains('\u{FFFD}'));
+        // ASCII and the Latin-1 range are identity mappings ...
+        assert_eq!(decode_windows_1252(b"A\xe4\xf6\xfc\xdf\xff"), "Aäöüßÿ");
+        // ... while 0x80..=0x9F holds the Windows-specific punctuation.
+        assert_eq!(
+            decode_windows_1252(b"\x80 \x93x\x94 \x85 \x99"),
+            "€ “x” … ™"
+        );
+        assert_eq!(decode_windows_1252(b"\x81"), "\u{0081}");
     }
 
     #[tokio::test]
@@ -582,7 +633,7 @@ mod tests {
         let decode = |name: &str, bytes: &[u8]| decode_file_bytes(Path::new(name), bytes.to_vec());
 
         assert_eq!(decode("a.txt", "héllo".as_bytes()), "héllo");
-        assert_eq!(decode("no_extension", b"caf\xe9"), "caf\u{FFFD}");
+        assert_eq!(decode("no_extension", b"caf\xe9"), "café");
         // Known binary extensions stay binary even without NUL bytes.
         assert_eq!(decode("a.bin", b"caf\xe9"), BINARY_CONTENT_MARKER);
         assert_eq!(decode("a.txt", b"\x00\xff"), BINARY_CONTENT_MARKER);
