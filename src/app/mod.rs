@@ -17,7 +17,7 @@ pub mod view_model;
 pub mod window_geometry;
 
 use crate::app::file_dialog::DialogService;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use wry::WebView;
 
 use crate::app::proxy::EventProxy;
@@ -25,30 +25,12 @@ use dispatch::CommandDispatcher;
 use events::{IpcMessage, UserEvent};
 use state::AppState;
 
-/// The main handler for IPC messages from the WebView.
+/// The main handler for IPC messages from the WebView: parses the message and queues
+/// its command on the matching lane of `dispatcher`, which executes commands in arrival
+/// order (see [`dispatch`]). Returns immediately, so the event loop is never blocked.
 ///
-/// Parses the message and hands the command to the process-wide [`CommandDispatcher`],
-/// which executes commands in arrival order (see [`dispatch`]). Returns immediately, so
-/// the event loop is never blocked.
-///
-/// Must be called from within the Tokio runtime.
-pub fn handle_ipc_message<P: EventProxy>(
-    message: String,
-    dialog_service: Arc<impl DialogService + 'static>,
-    proxy: P,
-    state: Arc<Mutex<AppState>>,
-) {
-    static DISPATCHER: OnceLock<CommandDispatcher> = OnceLock::new();
-    dispatch_ipc_message(
-        DISPATCHER.get_or_init(CommandDispatcher::new),
-        message,
-        dialog_service,
-        proxy,
-        state,
-    );
-}
-
-/// Parses an IPC message and queues its command on the matching lane of `dispatcher`.
+/// The dispatcher is owned by the caller (the composition root in `main.rs`), so there
+/// is no process-wide state and tests can use their own instance.
 ///
 /// - Commands that open a native dialog block for as long as the user likes. They run
 ///   on the blocking lane and therefore do not hold up, and are not ordered relative

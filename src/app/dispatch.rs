@@ -7,7 +7,7 @@
 //! guarantee that, so every command goes through a [`CommandDispatcher`] instead.
 //!
 //! This module knows nothing about individual commands. It only decides *when* a unit
-//! of work runs; *what* runs is decided by the caller (see `handle_ipc_message`).
+//! of work runs; *what* runs is decided by the caller (see `dispatch_ipc_message`).
 //!
 //! # Lanes
 //!

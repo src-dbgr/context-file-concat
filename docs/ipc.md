@@ -15,7 +15,7 @@ UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  �
 | Command and state schemas (Zod) | `src/ui/src/lib/ipc/schema.ts`                                    |
 | Receiving host calls            | `src/ui/src/lib/ipc/handlers.ts` (`installWindowIPCHandlers`)     |
 | Frontend types                  | `src/ui/src/lib/types.ts`                                         |
-| Command dispatch (host)         | `src/app/mod.rs` (`handle_ipc_message`) → `src/app/commands.rs`   |
+| Command dispatch (host)         | `src/app/mod.rs` (`dispatch_ipc_message`) → `src/app/commands.rs`   |
 | Command ordering (host)         | `src/app/dispatch.rs` (`CommandDispatcher`)                       |
 | Host → UI events                | `src/app/events.rs` (`UserEvent`), `src/app/mod.rs` (`handle_user_event`) |
 | State snapshot (host)           | `src/app/view_model/` (`generate_ui_state`, `UiState`, `TreeNode`) |
@@ -73,7 +73,7 @@ post("setExpansion", { path: "/repo/src", expanded: true }); // payload is type-
 
 ### Command ordering
 
-`handle_ipc_message` does not execute anything itself. It parses the message and queues the command on a `CommandDispatcher` (`src/app/dispatch.rs`), which has three lanes:
+`dispatch_ipc_message` does not execute anything itself. It parses the message and queues the command on a `CommandDispatcher` (`src/app/dispatch.rs`), which has three lanes:
 
 | Lane         | Commands                                                                   | Guarantee                                                                                         |
 | ------------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |

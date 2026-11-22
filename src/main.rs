@@ -62,8 +62,11 @@ async fn main() {
     let ipc_handler_state = state.clone();
     let ipc_handler_proxy = proxy.clone();
     let ipc_handler_dialog = dialog_service.clone();
+    // Executes IPC commands in arrival order; must be created inside the Tokio runtime.
+    let ipc_dispatcher = app::dispatch::CommandDispatcher::new();
     let ipc_handler = move |request: wry::http::Request<String>| {
-        app::handle_ipc_message(
+        app::dispatch_ipc_message(
+            &ipc_dispatcher,
             request.into_body(),
             ipc_handler_dialog.clone(),
             ipc_handler_proxy.clone(),
