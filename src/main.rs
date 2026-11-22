@@ -24,9 +24,10 @@ async fn main() {
     // Create the event loop and window
     let event_loop = EventLoopBuilder::<app::events::UserEvent>::with_user_event().build();
 
-    let initial_config = app::state::AppState::default().config;
-    let (width, height) = initial_config.window_size;
-    let (pos_x, pos_y) = initial_config.window_position;
+    // Load the persisted config exactly once; the window geometry is read from it.
+    let initial_state = app::state::AppState::default();
+    let (width, height) = initial_state.config.window_size;
+    let (pos_x, pos_y) = initial_state.config.window_position;
 
     let window = WindowBuilder::new()
         .with_title("CFC - Context File Concatenator")
@@ -44,7 +45,7 @@ async fn main() {
 
     // Create the shared application state and the event loop proxy
     let proxy = event_loop.create_proxy();
-    let state = Arc::new(Mutex::new(app::state::AppState::default()));
+    let state = Arc::new(Mutex::new(initial_state));
     let dialog_service = Arc::new(NativeDialogService {});
 
     // To avoid code duplication, we define the handlers first.

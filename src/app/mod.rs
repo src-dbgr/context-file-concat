@@ -79,10 +79,6 @@ pub fn handle_ipc_message<P: EventProxy>(
                 }
                 "exportConfig" => commands::export_config(dialog.as_ref(), proxy, state),
 
-                // --- Legacy Command Names ---
-                "expand_all_fully" => commands::expand_all_fully(proxy, state),
-                "select_all_fully" => commands::select_all_fully(proxy, state),
-
                 _ => tracing::warn!("Unknown IPC command: {}", msg.command),
             }
         });
