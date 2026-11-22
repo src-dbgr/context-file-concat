@@ -47,7 +47,7 @@ describe("utils.splitPathForDisplay", () => {
   it("returns filename and pathPart relative to current directory (POSIX)", () => {
     const { pathPart, filename } = splitPathForDisplay(
       "/home/user/proj/src/index.ts",
-      "/home/user/proj"
+      "/home/user/proj",
     );
     expect(pathPart).toBe("src/");
     expect(filename).toBe("index.ts");
@@ -56,7 +56,7 @@ describe("utils.splitPathForDisplay", () => {
   it("handles Windows-style separators", () => {
     const { pathPart, filename } = splitPathForDisplay(
       "C:\\work\\repo\\app\\main.rs",
-      "C:\\work\\repo"
+      "C:\\work\\repo",
     );
     expect(pathPart).toBe("app/");
     expect(filename).toBe("main.rs");
@@ -65,7 +65,7 @@ describe("utils.splitPathForDisplay", () => {
   it("falls back to absolute-like path when outside current dir", () => {
     const { pathPart, filename } = splitPathForDisplay(
       "/other/file.txt",
-      "/home"
+      "/home",
     );
     expect(pathPart).toBe("/other/");
     expect(filename).toBe("file.txt");

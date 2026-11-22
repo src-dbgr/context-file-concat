@@ -27,7 +27,7 @@ export function ensureE2EShim(setAppState: SetState, getState: GetState): void {
   const dump = () => {
     const app = getState();
     const fileNames = Array.from(
-      document.querySelectorAll(".file-item .file-name")
+      document.querySelectorAll(".file-item .file-name"),
     ).map((el) => (el.textContent || "").trim());
 
     return {

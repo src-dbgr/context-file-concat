@@ -127,7 +127,7 @@ For a deep dive into the system's structure, data flows, IPC contracts, and deve
 
 - **Unit Tests**: The `core` logic is tested with unit tests to ensure the correctness of individual components.
 - **Integration Tests**: Key application workflows are covered by integration tests that validate the interaction between the `app` and `core` layers without requiring a live UI.
-- **Continuous Integration (CI)**: A GitHub Actions workflow automatically runs `cargo fmt` (formatter), `cargo clippy` (linter), and `cargo test` on every push and pull request to maintain code quality and prevent regressions.
+- **Continuous Integration (CI)**: A GitHub Actions workflow automatically runs `cargo fmt` (formatter), `cargo clippy` (linter) and `cargo test`, plus the UI lint, type check, build, bundle budget and Playwright end-to-end tests, on every push and pull request to maintain code quality and prevent regressions.
 
 ---
 
@@ -144,24 +144,26 @@ To build and run the application locally, you need [Node.js/npm](https://nodejs.
     ```
 
 2.  **Build the Frontend Bundle:**
-    This command uses `esbuild` to bundle all JavaScript modules into a single file.
+    This command uses Vite to bundle the UI into `src/ui/dist`, which release builds embed into the binary.
 
     ```bash
     npm run build
     ```
 
-    For development, `npm run watch` will automatically rebuild on file changes.
+    For development, `npm run dev` starts the Vite dev server together with a debug build of the app, which loads the UI from it (hot reload).
 
 3.  **Run the Rust Application:**
-    Navigate back to the project root and use Cargo to build and run the app.
+    Navigate back to the project root and use Cargo to build and run the app. A release build serves the embedded bundle; a debug build (`cargo run`) expects the Vite dev server instead.
 
     ```bash
     cd ../..
-    cargo run
+    cargo run --release
     ```
 
-4.  **Run Tests:** To run the full suite of unit and integration tests, use:
+4.  **Run Tests:** To run the Rust unit and integration tests, use:
 
     ```bash
     cargo test
     ```
+
+    The UI tests live in `src/ui` (`npm test`, `npm run test:contracts`, `npm run test:e2e`).

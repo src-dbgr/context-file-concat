@@ -51,7 +51,7 @@ export function scheduleEarlyReadyFallback(): void {
           performance.measure(
             "app-init",
             hasInitStart ? "app-init-start" : "app-script-start",
-            "app-ready"
+            "app-ready",
           );
         }
       } catch {
@@ -86,7 +86,7 @@ export function markReadyAndMeasureOnce(): void {
       performance.measure(
         "app-init",
         hasInitStart ? "app-init-start" : "app-script-start",
-        "app-ready"
+        "app-ready",
       );
     }
   } catch {

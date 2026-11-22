@@ -9,7 +9,7 @@ describe("Property: expandCollapseAll accepts any boolean", () => {
       fc.property(fc.boolean(), (b) => {
         const msg = validateCommand("expandCollapseAll", b);
         expect(msg.command).toBe("expandCollapseAll");
-      })
+      }),
     );
   });
 });
@@ -31,7 +31,7 @@ describe("Property: path-based commands accept non-empty strings", () => {
         fc.property(pathArb, (p) => {
           const msg = validateCommand(cmd, p);
           expect(msg.command).toBe(cmd);
-        })
+        }),
       );
     });
   }
@@ -44,7 +44,7 @@ describe("Property: expandCollapseAll rejects non-boolean", () => {
       fc.integer(),
       fc.double(),
       fc.array(fc.anything()),
-      fc.object()
+      fc.object(),
     );
 
     fc.assert(
@@ -54,7 +54,7 @@ describe("Property: expandCollapseAll rejects non-boolean", () => {
           payload: x,
         });
         expect(res.success).toBe(false);
-      })
+      }),
     );
   });
 });

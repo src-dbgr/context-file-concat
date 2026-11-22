@@ -31,7 +31,7 @@ export type PayloadForWire<T extends CommandName> = T extends "updateConfig"
  */
 export function validateCommand<T extends CommandName>(
   name: T,
-  payload: PayloadForWire<T> | null
+  payload: PayloadForWire<T> | null,
 ): IPCCommandMessage {
   const parsed = AnyCommandMessageSchema.parse({
     command: name,
@@ -45,7 +45,7 @@ export function validateCommand<T extends CommandName>(
  * Note: This uses the *runtime* contract (ConfigSchema), not the UI's narrowed Config type.
  */
 export function makeWireConfig(
-  overrides: Partial<z.input<typeof ConfigSchema>> = {}
+  overrides: Partial<z.input<typeof ConfigSchema>> = {},
 ): z.input<typeof ConfigSchema> {
   return {
     ignore_patterns: [],

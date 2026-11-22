@@ -21,7 +21,7 @@ type FakeEditor = {
   getSelection: () => FakeSelection;
   executeEdits: (
     src: string,
-    edits: Array<{ range: FakeSelection; text: string }>
+    edits: Array<{ range: FakeSelection; text: string }>,
   ) => void;
 };
 

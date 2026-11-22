@@ -27,7 +27,7 @@ function formatNumber(num: number): string {
 export function generateStatsString(
   content: string,
   additionalInfo = "",
-  tokenCount?: number
+  tokenCount?: number,
 ): string {
   const lines = content.split("\n").length;
   const words = countWords(content);
@@ -49,7 +49,7 @@ export function generateStatsString(
 
 export function splitPathForDisplay(
   fullPath: string,
-  currentDir: string | null
+  currentDir: string | null,
 ): { pathPart: string; filename: string } {
   if (!fullPath) return { pathPart: "", filename: "Unknown File" };
   let relativePath = fullPath;

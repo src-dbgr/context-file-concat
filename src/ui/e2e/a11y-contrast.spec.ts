@@ -36,15 +36,14 @@ async function analyzeContrast(page: Page) {
       v.id === "color-contrast" &&
       (STRICT
         ? v.impact === "serious" || v.impact === "critical"
-        : v.impact === "critical")
+        : v.impact === "critical"),
   );
 
   const offenders: ContrastIssue[] = [];
   for (const v of contrastViolations) {
     for (const n of v.nodes as NodeResult[]) {
       const firstTarget = (Array.isArray(n.target) ? n.target[0] : n.target) as
-        | string
-        | undefined;
+        string | undefined;
       if (firstTarget) {
         offenders.push({
           id: v.id,
@@ -58,7 +57,7 @@ async function analyzeContrast(page: Page) {
 
   const uniqueSelectors = [...new Set(offenders.map((o) => o.selector))].slice(
     0,
-    10
+    10,
   );
 
   const styleProbe = await page.evaluate((sels) => {
@@ -99,8 +98,8 @@ test(
           nodes: v.nodes.length,
         })),
         null,
-        2
-      )
+        2,
+      ),
     );
 
     // Fail-Policy
@@ -108,7 +107,7 @@ test(
       contrastViolations.length,
       STRICT
         ? "Expected no serious/critical color-contrast violations"
-        : "Expected no critical color-contrast violations"
+        : "Expected no critical color-contrast violations",
     ).toBe(0);
-  }
+  },
 );

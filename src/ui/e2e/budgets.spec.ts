@@ -137,8 +137,7 @@ test.describe("[@budget] CI budgets", () => {
 
     const measured = await page.evaluate(() => {
       const m = performance.getEntriesByName("app-init")[0] as
-        | PerformanceMeasure
-        | undefined;
+        PerformanceMeasure | undefined;
       return m ? m.duration : -1;
     });
 

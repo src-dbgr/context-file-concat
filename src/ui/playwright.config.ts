@@ -10,27 +10,27 @@ export default defineConfig({
   reporter: [
     ["list"],
     ["html", { open: "never", outputFolder: "playwright-report" }],
-    ["blob", { outputDir: "blob-report" }]
+    ["blob", { outputDir: "blob-report" }],
   ],
 
   use: {
     baseURL: "http://localhost:4173",
     trace: "retain-on-failure",
     video: "retain-on-failure",
-    screenshot: "only-on-failure"
+    screenshot: "only-on-failure",
   },
 
   webServer: {
     command: "npm run preview:e2e",
     port: 4173,
     reuseExistingServer: true,
-    timeout: 120_000
+    timeout: 120_000,
   },
 
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] }
-    }
-  ]
+      use: { ...devices["Desktop Chrome"] },
+    },
+  ],
 });

@@ -9,7 +9,7 @@ This system is designed around several key principles:
 - **Separation of Concerns:** The Rust backend is split into two distinct layers:
   1.  **Core Services (`src/core`):** A stateless, pure logic layer responsible for computations like filesystem scanning, search, and content generation. It has no knowledge of the application's state or the UI.
   2.  **Application Layer (`src/app`):** Orchestrates core services, manages the central `AppState`, handles asynchronous tasks, and communicates with the UI.
-- **Unidirectional Data Flow:** User interactions in the UI trigger commands to the Rust host. The host mutates its state and then pushes a new, complete `UiState` view model back to the UI. The UI is a reactive reflection of the backend state, preventing inconsistencies.
+- **Unidirectional Data Flow:** User interactions in the UI trigger commands to the Rust host. The host mutates its state and then pushes a new, complete `UiState` snapshot back to the UI. The snapshot is self-contained but pruned: the tree only contains the children of expanded directories, and the host owns the expansion state (see [IPC Contracts](./ipc.md)). The UI is a reactive reflection of the backend state, preventing inconsistencies.
 - **Performance by Design:** Heavy lifting (I/O, search) is offloaded to background threads in Rust to keep the UI responsive. The frontend employs virtualization to efficiently render large file trees, with performance budgets enforced by CI.
 - **Type Safety Across Boundaries:** The IPC bridge is defined by a strict contract using Rust structs (Serde) on the backend and Zod schemas on the frontend, eliminating an entire class of runtime errors.
 
@@ -54,7 +54,7 @@ graph TD
         end
 
         B2 -- "Uses" --> CORE
-        VM -- "[4] UserEvent: StateUpdate" --> EV["Event Proxy"]
+        VM -- "[4] UserEvent: StateUpdate" --> EV["Event Proxy (coalescing transport)"]
         EV -- "[5] Pushes to WebView" --> IPC
     end
 
@@ -99,10 +99,11 @@ The backend is written in Rust and is responsible for all business logic and sys
 
   - **Responsibilities:** Acts as the central nervous system. It orchestrates Core services, manages state, and serves as the bridge to the UI.
   - **Key Modules:**
-    - `state.rs`: Defines the single source of truth, `AppState`, managed within an `Arc<Mutex<...>>` for safe concurrent access.
+    - `state.rs`: Defines the single source of truth, `AppState`, managed within an `Arc<Mutex<...>>` for safe concurrent access. It also owns the lifecycle of the running scan and generation: `begin_scan()` / `begin_generation()` hand out a `ScanToken` / `GenerationToken`, and a task may only publish results while its token is still the current one.
     - `commands.rs`: Contains all functions callable by the UI via IPC. These functions are the only ones permitted to mutate `AppState`.
     - `tasks.rs`: Encapsulates long-running, asynchronous operations (like scanning or file search) that are spawned into background threads to avoid blocking. It uses traits for dependency injection, making it highly testable.
-    - `view_model.rs`: Transforms the internal `AppState` into the serializable `UiState` that is sent to the frontend. This ensures the UI only receives the data it needs in the correct shape.
+    - `view_model/`: Transforms the internal `AppState` into the serializable `UiState` that is sent to the frontend. `tree_index.rs` caches the structure of the tree per filtered file list; `tree_builder.rs` builds the pruned tree (children only for expanded directories, plus per-node flags and total counters) on every update.
+    - `proxy.rs` & `transport.rs`: `EventProxy` is the only thing business code knows about event delivery. The production implementation in `transport.rs` queues events for the tao event loop in order and coalesces back-to-back state snapshots (latest wins), so a slow UI thread never has to serialize stale snapshots.
     - `events.rs`: Defines the `UserEvent` enum (Host → UI) and `IpcMessage` struct (UI → Host), which form the IPC contract.
 
 ---
@@ -141,12 +142,12 @@ The frontend is a Single Page Application (SPA) responsible for all rendering an
   4.  The UI's Svelte store is updated, causing the Svelte components to reactively re-render.
       This unidirectional flow makes the system predictable and easier to debug.
 
-- **Asynchronous Task Handling:** Long-running operations are defined in `app/tasks.rs` and executed via `tokio::spawn`. This prevents the main thread from blocking. Tasks are made cancellable using an `Arc<AtomicBool>`, allowing the user to interrupt operations like a directory scan.
+- **Asynchronous Task Handling:** Long-running operations are defined in `app/tasks.rs` and executed via `tokio::spawn` (blocking work via `spawn_blocking`). This prevents the main thread from blocking. Each run is identified by a token (`ScanToken`, `GenerationToken`, see `state.rs`) that carries its cancellation flag; cancelling or starting a new run invalidates the old token, so a superseded task can neither be mistaken for the current one nor overwrite newer state.
 
 - **Testing and Quality Gates:**
 
-  - **Unit Tests:** Vitest is used for both Rust (`#[cfg(test)]`) and TypeScript (`*.test.ts`) unit tests. The backend's use of traits (`Scanner`, `FileSearcher`, etc.) allows for mocking dependencies and deterministic testing of task logic.
-  - **Contract Tests (`src/ui/src/tests/contracts`):** These tests specifically validate the Zod schemas against expected valid and invalid payloads, ensuring the IPC contract remains stable.
+  - **Unit Tests:** `cargo test` runs the Rust tests (`#[cfg(test)]`), Vitest the TypeScript tests (`*.test.ts`). The backend's use of traits (`Scanner`, `FileSearcher`, etc.) allows for mocking dependencies and deterministic testing of task logic.
+  - **Contract Tests (`src/ui/src/tests/contracts`):** These tests validate the Zod schemas against expected valid and invalid payloads, pin their JSON-schema form with committed snapshots, and parse a `UiState` fixture written by the Rust contract test (`src/app/view_model/contract_tests.rs`), ensuring both sides of the IPC contract stay in sync.
   - **E2E Tests (`src/ui/e2e`):** Playwright tests cover critical user flows, accessibility (`a11y`), and performance.
   - **Performance Budgets:** The project enforces strict budgets for both bundle size (Brotli-compressed assets) and interaction performance (e.g., rendering a 25k-node tree), which are checked in CI.
 

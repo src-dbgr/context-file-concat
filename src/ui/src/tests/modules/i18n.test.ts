@@ -37,7 +37,7 @@ describe("i18n registry and fallbacks", () => {
     expect(translate("_t.msg")).toBe("Hallo");
     setLocale("en");
     expect(["en", "de"].every((c) => availableLocales().includes(c))).toBe(
-      true
+      true,
     );
     expect(getLocale()).toBe("en");
   });

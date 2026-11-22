@@ -96,9 +96,9 @@ describe("[IPC Contracts] UiState serialized by the Rust backend", () => {
       has_children: true,
       selection_state: "partial",
     });
-    expect(find(state.tree, "/project/src").children.map((n) => n.name)).toEqual(
-      ["core", "lib.rs", "main.rs"],
-    );
+    expect(
+      find(state.tree, "/project/src").children.map((n) => n.name),
+    ).toEqual(["core", "lib.rs", "main.rs"]);
     // Collapsed inside an expanded directory: all hidden files are selected.
     expect(find(state.tree, "/project/src/core")).toMatchObject({
       is_expanded: false,

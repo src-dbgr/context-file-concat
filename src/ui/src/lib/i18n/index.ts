@@ -11,8 +11,7 @@ export type MsgParams = Record<string, unknown>;
 
 /** A message can be a raw string or a formatter function. */
 export type MessageValue<P extends MsgParams = MsgParams> =
-  | string
-  | ((params: P) => string);
+  string | ((params: P) => string);
 
 /** Dictionary of translation messages for a single locale. */
 export type Messages = Record<string, MessageValue>;
@@ -72,7 +71,7 @@ function interpolate(template: string, params?: MsgParams): string {
 export function translate(
   key: string,
   params?: MsgParams,
-  locale?: string
+  locale?: string,
 ): string {
   const loc = locale ?? getLocale();
   const dict = registry[loc] ?? registry["en"];
@@ -92,7 +91,7 @@ export const locale: Readable<Locale> = {
 /** Svelte-friendly translator store */
 export const t: Readable<(key: string, params?: MsgParams) => string> = derived(
   localeStore,
-  ($loc) => (key: string, params?: MsgParams) => translate(key, params, $loc)
+  ($loc) => (key: string, params?: MsgParams) => translate(key, params, $loc),
 );
 
 /* ----------------------------------------------------------------------------
@@ -200,6 +199,21 @@ register("en", {
   "status.saved_to": "Status: Saved to {path}",
   "error.save_failed": "Error: Failed to save file.",
   "error.render_failed": "Error: Failed to render state.",
+
+  // ===== Keys used by components / IPC handlers =====
+  "action.rescan": "Re-Scan",
+  "sidebar.scanning": "Scanning...",
+  "filetree.cancel": "Cancel",
+  "filetree.emptyDir": "No files found in this directory.",
+  "filetree.noMatch": "No files found matching filters.",
+  "filetree.stats.visible": "Visible",
+  "aria.scanProgress": "Scan progress",
+  "aria.generatingPreview": "Generating preview",
+  "status.indexing": "Indexing...",
+  "toast.fileSaved": "File saved",
+  "toast.saveCancelled": "Save cancelled",
+  "toast.saveFailed": "Failed to save file",
+  "toast.renderFailed": "An error occurred",
 });
 
 register("de", {
@@ -303,4 +317,19 @@ register("de", {
   "status.saved_to": "Status: Gespeichert unter {path}",
   "error.save_failed": "Fehler: Datei konnte nicht gespeichert werden.",
   "error.render_failed": "Fehler: Rendering des Zustands fehlgeschlagen.",
+
+  // ===== Keys used by components / IPC handlers =====
+  "action.rescan": "Neu scannen",
+  "sidebar.scanning": "Scanne...",
+  "filetree.cancel": "Abbrechen",
+  "filetree.emptyDir": "Keine Dateien in diesem Verzeichnis gefunden.",
+  "filetree.noMatch": "Keine Dateien für die Filter gefunden.",
+  "filetree.stats.visible": "Sichtbar",
+  "aria.scanProgress": "Scan-Fortschritt",
+  "aria.generatingPreview": "Vorschau wird erzeugt",
+  "status.indexing": "Indexiere...",
+  "toast.fileSaved": "Datei gespeichert",
+  "toast.saveCancelled": "Speichern abgebrochen",
+  "toast.saveFailed": "Datei konnte nicht gespeichert werden",
+  "toast.renderFailed": "Ein Fehler ist aufgetreten",
 });

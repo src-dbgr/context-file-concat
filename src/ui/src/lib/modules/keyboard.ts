@@ -61,7 +61,7 @@ function globalKeydownHandler(e: KeyboardEvent) {
     e.key !== "Shift"
   ) {
     console.warn(
-      `Blocked unhandled key: "${e.key}" to prevent potential crash.`
+      `Blocked unhandled key: "${e.key}" to prevent potential crash.`,
     );
     e.preventDefault();
   }

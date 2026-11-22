@@ -18,7 +18,7 @@ import {
 export function post(command: NullaryCommandName): void;
 export function post<T extends NonNullCommandName>(
   command: T,
-  payload: PayloadFor<T>
+  payload: PayloadFor<T>,
 ): void;
 export function post(command: CommandName, payload?: unknown): void {
   // Dev: validate {command, payload} against the union (adds defaults where defined).
@@ -33,7 +33,7 @@ export function post(command: CommandName, payload?: unknown): void {
       console.warn(
         "[IPC] Blocked invalid command:",
         candidate,
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -46,6 +46,6 @@ export function post(command: CommandName, payload?: unknown): void {
     JSON.stringify({
       command,
       payload: payload ?? null,
-    })
+    }),
   );
 }

@@ -41,7 +41,7 @@ export const commands: Command[] = [
     execute: (_e, context) => {
       if (context.activeEl)
         getUndoManagerForElement(
-          context.activeEl as HTMLInputElement | HTMLTextAreaElement
+          context.activeEl as HTMLInputElement | HTMLTextAreaElement,
         ).undo();
     },
     isUndoable: false,
@@ -53,7 +53,7 @@ export const commands: Command[] = [
     execute: (_e, context) => {
       if (context.activeEl)
         getUndoManagerForElement(
-          context.activeEl as HTMLInputElement | HTMLTextAreaElement
+          context.activeEl as HTMLInputElement | HTMLTextAreaElement,
         ).redo();
     },
     isUndoable: false,
@@ -64,7 +64,7 @@ export const commands: Command[] = [
     execute: (_e, context) => {
       if (context.activeEl)
         getUndoManagerForElement(
-          context.activeEl as HTMLInputElement | HTMLTextAreaElement
+          context.activeEl as HTMLInputElement | HTMLTextAreaElement,
         ).redo();
     },
     isUndoable: false,

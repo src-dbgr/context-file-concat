@@ -86,7 +86,7 @@ class UndoManager {
 const elementUndoManagers = new Map<HTMLElement, UndoManager>();
 
 export function getUndoManagerForElement(
-  element: HTMLInputElement | HTMLTextAreaElement
+  element: HTMLInputElement | HTMLTextAreaElement,
 ): UndoManager {
   if (!elementUndoManagers.has(element)) {
     elementUndoManagers.set(element, new UndoManager(element));

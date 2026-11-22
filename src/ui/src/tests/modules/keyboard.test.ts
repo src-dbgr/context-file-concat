@@ -45,7 +45,7 @@ afterEach(() => {
 function replaceCommandsWithSingle(
   matcher: (e: KeyboardEvent) => boolean,
   executor: TestCommand,
-  worksInEditor: boolean
+  worksInEditor: boolean,
 ) {
   commands.length = 0;
   commands.push({
@@ -66,7 +66,7 @@ describe("keyboard.ts – global handler integration", () => {
       (_e, _ctx) => {
         called = true;
       },
-      true
+      true,
     );
 
     const ev = new KeyboardEvent("keydown", { key: "K", cancelable: true });
@@ -84,7 +84,7 @@ describe("keyboard.ts – global handler integration", () => {
       () => {
         called = true;
       },
-      false // not allowed in editor
+      false, // not allowed in editor
     );
 
     const ev = new KeyboardEvent("keydown", { key: "X", cancelable: true });
