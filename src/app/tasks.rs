@@ -389,7 +389,7 @@ fn apply_deep_scan_result<P: EventProxy>(
     s.finish_scan(token);
     s.scan_progress.current_scanning_path = format!(
         "Indexing complete. Found {} visible items.",
-        s.filtered_file_list.len()
+        s.filtered_file_list().len()
     );
 
     proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&s))));
@@ -1703,7 +1703,8 @@ mod tests {
                 is_directory: true,
                 ..Default::default()
             });
-            state.filtered_file_list = state.full_file_list.clone();
+            let all_items = state.full_file_list.clone();
+            state.set_filtered_file_list(all_items);
         }
 
         // Create a signaling channel for synchronization

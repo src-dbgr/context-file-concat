@@ -30,7 +30,7 @@ pub fn apply_filters(state: &mut AppState) {
         dirs_to_preserve.extend(state.expanded_dirs.clone());
     }
 
-    state.filtered_file_list = apply_filters_on_data(
+    let filtered = apply_filters_on_data(
         &state.full_file_list,
         &PathBuf::from(&state.current_path),
         &state.config,
@@ -41,6 +41,7 @@ pub fn apply_filters(state: &mut AppState) {
         &dirs_to_preserve,
         state.is_fully_scanned,
     );
+    state.set_filtered_file_list(filtered);
 }
 
 /// Collects all parent directories for a given set of file paths.
@@ -196,7 +197,7 @@ mod tests {
         apply_filters(&mut state);
 
         let visible_paths: HashSet<_> = state
-            .filtered_file_list
+            .filtered_file_list()
             .iter()
             .map(|i| i.path.clone())
             .collect();
@@ -218,7 +219,7 @@ mod tests {
         state.content_search_results = HashSet::new(); // No matches
         apply_filters(&mut state);
 
-        assert_eq!(state.filtered_file_list.len(), 0);
+        assert_eq!(state.filtered_file_list().len(), 0);
     }
 
     #[test]
@@ -243,7 +244,7 @@ mod tests {
         apply_filters(&mut state); // This should now remove the empty_dir
 
         let visible_paths: HashSet<_> = state
-            .filtered_file_list
+            .filtered_file_list()
             .iter()
             .map(|item| item.path.clone())
             .collect();
