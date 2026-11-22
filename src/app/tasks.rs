@@ -23,6 +23,7 @@ use super::view_model::{
     auto_expand_for_matches, generate_ui_state, get_selected_files_in_tree_order,
 };
 
+use crate::core::scanner::ScanRequest;
 use crate::core::{
     ContentSearch, CoreError, DirectoryScanner, FileHandler, FileItem, ScanProgress, SearchEngine,
 };
@@ -52,8 +53,7 @@ pub type ScanOutcome = Result<(Vec<FileItem>, HashSet<String>), CoreError>;
 pub trait Scanner: Send + Sync {
     fn scan(
         &self,
-        root_path: &Path,
-        max_depth: Option<usize>,
+        request: &ScanRequest,
         progress_callback: Box<dyn Fn(ScanProgress) + Send + Sync>,
     ) -> impl Future<Output = ScanOutcome> + Send;
 }
@@ -112,18 +112,12 @@ pub struct RealScanner {
 impl Scanner for RealScanner {
     async fn scan(
         &self,
-        root_path: &Path,
-        max_depth: Option<usize>,
+        request: &ScanRequest,
         progress_callback: Box<dyn Fn(ScanProgress) + Send + Sync>,
     ) -> ScanOutcome {
         let scanner = DirectoryScanner::new(self.ignore_patterns.clone());
         scanner
-            .scan_directory_with_progress(
-                root_path,
-                max_depth,
-                self.cancel_flag.clone(),
-                progress_callback,
-            )
+            .scan(request, self.cancel_flag.clone(), progress_callback)
             .await
     }
 }
@@ -323,11 +317,16 @@ impl<P: EventProxy> Drop for ScanGuard<'_, P> {
 /// `token` identifies this scan run. Every state mutation is conditional on the token
 /// still being current, so a cancelled or superseded task cannot interfere with the
 /// scan that replaced it.
-pub async fn proactive_scan_task<P: EventProxy, S: Scanner>(
+///
+/// A content search whose query is active sees only the files known at the time it ran.
+/// Once the scan has delivered the complete file list, the search is therefore repeated
+/// with `searcher`.
+pub async fn proactive_scan_task<P: EventProxy, S: Scanner, F: FileSearcher>(
     proxy: P,
     state: Arc<Mutex<AppState>>,
     path: PathBuf,
     scanner: S,
+    searcher: F,
     token: ScanToken,
 ) {
     let _scan_guard = ScanGuard {
@@ -340,8 +339,7 @@ pub async fn proactive_scan_task<P: EventProxy, S: Scanner>(
     let progress_proxy_shallow = proxy.clone();
     let scan_result_shallow = scanner
         .scan(
-            &path,
-            Some(1),
+            &ScanRequest::project(&path, Some(1)),
             Box::new(move |p| progress_proxy_shallow.send_event(UserEvent::ScanProgress(p))),
         )
         .await;
@@ -367,8 +365,7 @@ pub async fn proactive_scan_task<P: EventProxy, S: Scanner>(
     let progress_proxy_deep = proxy.clone();
     let scan_result_deep = scanner
         .scan(
-            &path,
-            None,
+            &ScanRequest::project(&path, None),
             Box::new(move |p| progress_proxy_deep.send_event(UserEvent::ScanProgress(p))),
         )
         .await;
@@ -379,7 +376,11 @@ pub async fn proactive_scan_task<P: EventProxy, S: Scanner>(
     }
 
     match scan_result_deep {
-        Ok((files, patterns)) => apply_deep_scan_result(&state, &proxy, &token, files, patterns),
+        Ok((files, patterns)) => {
+            if apply_deep_scan_result(&state, &proxy, &token, files, patterns) {
+                refresh_content_search(&proxy, &state, searcher).await;
+            }
+        }
         Err(e) => handle_scan_error(e, &state, &proxy, &token),
     }
 }
@@ -399,9 +400,8 @@ fn apply_shallow_scan_result<P: EventProxy>(
     if !s.is_current_scan(token) {
         return false;
     }
-    s.full_file_list = files;
+    s.replace_with_shallow_file_list(root, files);
     s.active_ignore_patterns = patterns;
-    s.loaded_dirs.insert(root.to_path_buf());
     filtering::apply_filters(&mut s);
     proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&s))));
     true
@@ -409,29 +409,23 @@ fn apply_shallow_scan_result<P: EventProxy>(
 
 /// Publishes the result of the deep scan phase and marks the scan as finished.
 ///
-/// Does nothing if the scan is no longer the current one.
+/// Returns `false` without touching the state if the scan is no longer the current one.
 fn apply_deep_scan_result<P: EventProxy>(
     state: &Arc<Mutex<AppState>>,
     proxy: &P,
     token: &ScanToken,
     files: Vec<FileItem>,
     patterns: HashSet<String>,
-) {
+) -> bool {
     let mut s = state.lock().expect("Mutex was poisoned");
     if !s.is_current_scan(token) {
-        return;
+        return false;
     }
     let new_file_paths: HashSet<_> = files.iter().map(|f| f.path.clone()).collect();
     s.selected_files.retain(|p| new_file_paths.contains(p));
-    s.full_file_list = files;
+    s.replace_with_complete_file_list(files);
     s.active_ignore_patterns = patterns;
     s.is_fully_scanned = true;
-    s.loaded_dirs = s
-        .full_file_list
-        .iter()
-        .filter(|i| i.is_directory)
-        .map(|i| i.path.clone())
-        .collect();
     filtering::apply_filters(&mut s);
 
     // The final state is set here; the guard only cleans up on panics/cancellations.
@@ -442,6 +436,7 @@ fn apply_deep_scan_result<P: EventProxy>(
     );
 
     proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&s))));
+    true
 }
 
 /// Initiates a proactive, two-phase directory scan.
@@ -501,6 +496,7 @@ pub fn start_scan_on_path<P: EventProxy>(
                 state_clone,
                 directory_path,
                 scanner,
+                RealFileSearcher,
                 task_token,
             )
             .await;
@@ -532,6 +528,11 @@ fn handle_scan_error<P: EventProxy>(
 }
 
 /// Initiates a scan for a specific subdirectory level (lazy loading).
+///
+/// Asking for the content of a directory is a request to see it, so the directory is
+/// marked as expanded right here, when the request is made. The result of the load does
+/// not touch the expansion state anymore: if the user collapses the directory while the
+/// load is in flight, it stays collapsed.
 pub fn start_lazy_load_scan<P: EventProxy>(
     path: PathBuf,
     proxy: P,
@@ -539,34 +540,39 @@ pub fn start_lazy_load_scan<P: EventProxy>(
     completion_signal: Option<oneshot::Sender<()>>,
 ) {
     tokio::spawn(async move {
-        let (ignore_patterns, token) = {
-            let state_guard = state
+        let (ignore_patterns, token, request) = {
+            let mut state_guard = state
                 .lock()
                 .expect("Mutex was poisoned. This should not happen.");
-            (
-                state_guard.config.ignore_patterns.clone(),
-                state_guard.begin_lazy_load(),
-            )
-        };
-        let Some(token) = token else {
-            tracing::warn!("Attempted to lazy load while a full scan was in progress. Ignoring.");
-            return;
+            let Some(token) = state_guard.begin_lazy_load() else {
+                tracing::warn!(
+                    "Attempted to lazy load while a full scan was in progress. Ignoring."
+                );
+                return;
+            };
+            // The project root anchors the ignore rules and the depth of the new items.
+            let request = match ScanRequest::directory_level(&state_guard.current_path, &path) {
+                Ok(request) if !state_guard.current_path.is_empty() => request,
+                _ => {
+                    tracing::warn!("Ignoring lazy load outside the project: {:?}", path);
+                    return;
+                }
+            };
+            state_guard.expanded_dirs.insert(path);
+            (state_guard.config.ignore_patterns.clone(), token, request)
         };
         let scanner = lazy_load_scanner(ignore_patterns, &token);
-        let proxy_clone = proxy.clone();
-        let state_clone = state.clone();
-        tracing::debug!("Starting lazy load for {:?}.", path);
-        tokio::spawn(async move {
-            lazy_load_task(
-                path,
-                proxy_clone,
-                state_clone,
-                scanner,
-                token,
-                completion_signal,
-            )
-            .await;
-        });
+        tracing::debug!("Starting lazy load for {:?}.", request.start_dir());
+        lazy_load_task(
+            request,
+            proxy,
+            state,
+            scanner,
+            RealFileSearcher,
+            token,
+            completion_signal,
+        )
+        .await;
     });
 }
 
@@ -583,17 +589,21 @@ fn lazy_load_scanner(ignore_patterns: HashSet<String>, token: &LazyLoadToken) ->
 ///
 /// `token` ties the load to the file list it was started for. If that list has been
 /// replaced in the meantime (new scan, directory reset), the outcome is discarded.
-async fn lazy_load_task<P: EventProxy, S: Scanner>(
-    path_to_load: PathBuf,
+/// Otherwise the new files are also run through an active content search.
+async fn lazy_load_task<P: EventProxy, S: Scanner, F: FileSearcher>(
+    request: ScanRequest,
     proxy: P,
     state: Arc<Mutex<AppState>>,
     scanner: S,
+    searcher: F,
     token: LazyLoadToken,
     completion_signal: Option<oneshot::Sender<()>>,
 ) {
-    let scan_result = scanner.scan(&path_to_load, Some(1), Box::new(|_| {})).await;
+    let scan_result = scanner.scan(&request, Box::new(|_| {})).await;
 
-    apply_lazy_load_result(scan_result, path_to_load, &proxy, &state, &token);
+    if apply_lazy_load_result(scan_result, request.start_dir(), &proxy, &state, &token) {
+        refresh_content_search(&proxy, &state, searcher).await;
+    }
 
     // After all work is done, send the completion signal if one was provided.
     if let Some(signal) = completion_signal {
@@ -602,20 +612,19 @@ async fn lazy_load_task<P: EventProxy, S: Scanner>(
 }
 
 /// Merges the outcome of a lazy load into the state, unless it has become outdated.
+///
+/// Returns `true` if new items were merged into the file list.
 fn apply_lazy_load_result<P: EventProxy>(
     scan_result: ScanOutcome,
-    path_to_load: PathBuf,
+    loaded_dir: &Path,
     proxy: &P,
     state: &Arc<Mutex<AppState>>,
     token: &LazyLoadToken,
-) {
+) -> bool {
     let mut state_guard = state.lock().expect("Mutex was poisoned");
     if !state_guard.is_current_lazy_load(token) {
-        tracing::debug!(
-            "Discarding outdated lazy load result for {:?}.",
-            path_to_load
-        );
-        return;
+        tracing::debug!("Discarding outdated lazy load result for {:?}.", loaded_dir);
+        return false;
     }
 
     match scan_result {
@@ -623,11 +632,10 @@ fn apply_lazy_load_result<P: EventProxy>(
             tracing::debug!(
                 "Lazy load found {} items in {:?}.",
                 new_items.len(),
-                path_to_load
+                loaded_dir
             );
 
-            state_guard.loaded_dirs.insert(path_to_load.clone());
-            state_guard.expanded_dirs.insert(path_to_load);
+            state_guard.loaded_dirs.insert(loaded_dir.to_path_buf());
             state_guard
                 .active_ignore_patterns
                 .extend(new_active_patterns);
@@ -650,36 +658,64 @@ fn apply_lazy_load_result<P: EventProxy>(
             proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
                 &state_guard,
             ))));
+            true
         }
         Err(e) => {
-            tracing::error!("Lazy load failed for {:?}: {}", path_to_load, e);
+            tracing::error!("Lazy load failed for {:?}: {}", loaded_dir, e);
             proxy.send_event(UserEvent::ShowError(format!(
                 "Failed to load directory {}: {}",
-                path_to_load.display(),
+                loaded_dir.display(),
                 e
             )));
+            false
         }
     }
 }
 
+/// Repeats the content search after the file list has changed, so that files which
+/// were not known when the query was entered are searched as well.
+///
+/// Does nothing (and sends nothing) if no content query is active.
+async fn refresh_content_search<P: EventProxy, S: FileSearcher>(
+    proxy: &P,
+    state: &Arc<Mutex<AppState>>,
+    searcher: S,
+) {
+    let has_content_query = !state
+        .lock()
+        .expect("Mutex was poisoned")
+        .content_search_query
+        .is_empty();
+    if has_content_query {
+        search_in_files(proxy.clone(), state.clone(), searcher).await;
+    }
+}
+
 /// Performs a content search across all non-binary files.
+///
+/// Every search is a run of its own (see [`ContentSearchToken`]): of several searches
+/// in flight only the one started last publishes its matches, so a slow search for an
+/// outdated query can never overwrite the matches of the current one.
+///
+/// [`ContentSearchToken`]: super::state::ContentSearchToken
 pub async fn search_in_files<P: EventProxy, S: FileSearcher>(
     proxy: P,
     state: Arc<Mutex<AppState>>,
     searcher: S,
 ) {
-    let (files_to_search, query, case_sensitive) = {
+    let (token, files_to_search, query, case_sensitive) = {
         let mut state_guard = state
             .lock()
             .expect("Mutex was poisoned. This should not happen.");
         if state_guard.content_search_query.is_empty() {
-            state_guard.content_search_results.clear();
+            state_guard.clear_content_search();
             filtering::apply_filters(&mut state_guard);
             let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
             proxy.send_event(event);
             return;
         }
         (
+            state_guard.begin_content_search(),
             state_guard.full_file_list.clone(),
             state_guard.content_search_query.clone(),
             state_guard.config.case_sensitive_search,
@@ -691,7 +727,10 @@ pub async fn search_in_files<P: EventProxy, S: FileSearcher>(
     let mut state_guard = state
         .lock()
         .expect("Mutex was poisoned. This should not happen.");
-    state_guard.content_search_results = matching_paths;
+    if !state_guard.finish_content_search(&token, matching_paths) {
+        tracing::debug!("Discarding outdated content search result for {:?}.", query);
+        return;
+    }
     filtering::apply_filters(&mut state_guard);
     auto_expand_for_matches(&mut state_guard);
     let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
@@ -883,11 +922,10 @@ mod tests {
     impl Scanner for MockScanner {
         async fn scan(
             &self,
-            _: &Path,
-            depth: Option<usize>,
+            request: &ScanRequest,
             _: Box<dyn Fn(ScanProgress) + Send + Sync>,
         ) -> ScanOutcome {
-            if depth == Some(1) {
+            if request.max_depth() == Some(1) {
                 if let Some(trigger) = self.cancellation_trigger.lock().unwrap().take() {
                     trigger.send(()).ok();
                 }
@@ -914,6 +952,74 @@ mod tests {
     impl FileSearcher for MockFileSearcher {
         async fn search(&self, _: Vec<FileItem>, _: &str, _: bool) -> HashSet<PathBuf> {
             self.results.lock().unwrap().clone()
+        }
+    }
+
+    /// A searcher that behaves like the real one as far as the file list is concerned:
+    /// it can only find what it was given. Reports the configured paths that are part
+    /// of the searched files.
+    #[derive(Clone, Default)]
+    struct ListBoundFileSearcher {
+        matching: HashSet<PathBuf>,
+    }
+    impl FileSearcher for ListBoundFileSearcher {
+        async fn search(&self, files: Vec<FileItem>, _: &str, _: bool) -> HashSet<PathBuf> {
+            files
+                .into_iter()
+                .map(|item| item.path)
+                .filter(|path| self.matching.contains(path))
+                .collect()
+        }
+    }
+
+    /// A searcher that signals when it has started and then holds its result back until
+    /// the test releases it, to stage searches that overlap.
+    struct GatedFileSearcher {
+        results: HashSet<PathBuf>,
+        started: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+    impl GatedFileSearcher {
+        fn new(results: HashSet<PathBuf>) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let searcher = Self {
+                results,
+                started: Mutex::new(Some(started_tx)),
+                release: Mutex::new(Some(release_rx)),
+            };
+            (searcher, started_rx, release_tx)
+        }
+    }
+    impl FileSearcher for GatedFileSearcher {
+        async fn search(&self, _: Vec<FileItem>, _: &str, _: bool) -> HashSet<PathBuf> {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            let release = self.release.lock().unwrap().take();
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+            self.results.clone()
+        }
+    }
+
+    fn dir_item(path: &Path, depth: usize) -> FileItem {
+        FileItem {
+            path: path.to_path_buf(),
+            is_directory: true,
+            depth,
+            parent: path.parent().map(PathBuf::from),
+            ..Default::default()
+        }
+    }
+
+    fn file_item(path: &Path, depth: usize) -> FileItem {
+        FileItem {
+            path: path.to_path_buf(),
+            depth,
+            parent: path.parent().map(PathBuf::from),
+            ..Default::default()
         }
     }
 
@@ -1119,6 +1225,7 @@ mod tests {
             harness.state.clone(),
             harness.root_path.clone(),
             scanner,
+            MockFileSearcher::default(),
             token,
         )
         .await;
@@ -1172,7 +1279,15 @@ mod tests {
         let task_path = harness.root_path.clone();
 
         let task_handle = tokio::spawn(async move {
-            proactive_scan_task(proxy_clone, task_state, task_path, scanner, token).await;
+            proactive_scan_task(
+                proxy_clone,
+                task_state,
+                task_path,
+                scanner,
+                MockFileSearcher::default(),
+                token,
+            )
+            .await;
         });
         has_started_deep_scan.await.unwrap();
         cancel_flag.store(true, Ordering::SeqCst);
@@ -1275,6 +1390,7 @@ mod tests {
             harness.state.clone(),
             harness.root_path.clone(),
             scanner,
+            MockFileSearcher::default(),
             token,
         )
         .await;
@@ -1324,6 +1440,7 @@ mod tests {
             harness.state.clone(),
             harness.root_path.clone(),
             scanner,
+            MockFileSearcher::default(),
             token,
         )
         .await;
@@ -1433,10 +1550,11 @@ mod tests {
 
         // Act
         lazy_load_task(
-            path_to_load.clone(),
+            ScanRequest::directory_level(&harness.root_path, &path_to_load).unwrap(),
             harness.proxy.clone(),
             harness.state.clone(),
             scanner,
+            MockFileSearcher::default(),
             token,
             None,
         )
@@ -1499,7 +1617,15 @@ mod tests {
 
         // Act
         let task_handle = tokio::spawn(async move {
-            proactive_scan_task(proxy_clone, state_clone, path_clone, scanner, token).await
+            proactive_scan_task(
+                proxy_clone,
+                state_clone,
+                path_clone,
+                scanner,
+                MockFileSearcher::default(),
+                token,
+            )
+            .await
         });
 
         // 1. Wait for the signal from the mock that the shallow scan is complete.
@@ -2050,6 +2176,7 @@ mod tests {
             harness.state.clone(),
             harness.root_path.clone(),
             scanner,
+            MockFileSearcher::default(),
             token.clone(),
         ));
         shallow_scan_started.await.unwrap();
@@ -2339,10 +2466,11 @@ mod tests {
         // Act: the user switches directories while the lazy load is in flight.
         harness.state.lock().unwrap().reset_directory_state();
         lazy_load_task(
-            old_dir.clone(),
+            ScanRequest::directory_level(&harness.root_path, &old_dir).unwrap(),
             harness.proxy.clone(),
             harness.state.clone(),
             scanner,
+            MockFileSearcher::default(),
             token,
             Some(completion_tx),
         )
@@ -2357,5 +2485,422 @@ mod tests {
         assert!(state.full_file_list.is_empty());
         assert!(!state.loaded_dirs.contains(&old_dir));
         assert!(!state.expanded_dirs.contains(&old_dir));
+    }
+
+    /// The result of a lazy load only delivers content. Whether the directory is shown
+    /// expanded was decided when the load was requested; a directory the user has
+    /// collapsed in the meantime must not pop open again.
+    #[tokio::test]
+    async fn lazy_load_result_does_not_expand_directory_collapsed_meanwhile() {
+        // Arrange: the load of `src` is in flight, and `src` is (no longer) expanded.
+        let mut harness = TestHarness::new();
+        let dir = harness.root_path.join("src");
+        let mut scanner = MockScanner::new();
+        scanner.set_results(vec![file_item(&dir.join("main.rs"), 2)], vec![]);
+        let token = {
+            let mut state = harness.state.lock().unwrap();
+            state.full_file_list.push(dir_item(&dir, 1));
+            state.begin_lazy_load().expect("No scan is running")
+        };
+
+        // Act
+        lazy_load_task(
+            ScanRequest::directory_level(&harness.root_path, &dir).unwrap(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            scanner,
+            MockFileSearcher::default(),
+            token,
+            None,
+        )
+        .await;
+
+        // Assert
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
+        assert!(src_node.children_loaded && src_node.has_children);
+        assert!(!src_node.is_expanded, "Directory must stay collapsed");
+        let state = harness.state.lock().unwrap();
+        assert!(state.loaded_dirs.contains(&dir));
+        assert!(!state.expanded_dirs.contains(&dir));
+    }
+
+    /// End to end with the real scanner: a lazily loaded level of a subdirectory honours
+    /// the ignore rules of the project (parent `.gitignore`, user patterns relative to the
+    /// project root) and its items carry their depth within the project.
+    #[tokio::test]
+    async fn lazy_load_of_subdirectory_applies_project_ignore_rules() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let root = harness.root_path.clone();
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join("build_out")).unwrap();
+        std::fs::create_dir_all(src.join("generated")).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.gen\n/src/build_out/\n").unwrap();
+        std::fs::write(src.join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(src.join("secret.gen"), "secret").unwrap();
+        std::fs::write(src.join("build_out/artifact.o"), "obj").unwrap();
+        std::fs::write(src.join("generated/bindings.rs"), "// generated").unwrap();
+        {
+            // The state after a scan that was cancelled in its deep phase.
+            let mut state = harness.state.lock().unwrap();
+            state.config.ignore_patterns = HashSet::from(["src/generated/".to_string()]);
+            state.replace_with_shallow_file_list(&root, vec![dir_item(&src, 1)]);
+            filtering::apply_filters(&mut state);
+        }
+        let (tx, rx) = oneshot::channel();
+
+        // Act
+        start_lazy_load_scan(
+            src.clone(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            Some(tx),
+        );
+        rx.await.expect("Lazy load must signal its completion");
+
+        // Assert
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
+        let child_names: Vec<&str> = src_node.children.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(child_names, vec!["main.rs"]);
+
+        let state = harness.state.lock().unwrap();
+        let loaded: Vec<&FileItem> = state
+            .full_file_list
+            .iter()
+            .filter(|item| item.path != src)
+            .collect();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].path, src.join("main.rs"));
+        assert_eq!(
+            loaded[0].depth, 2,
+            "Depth must be relative to the project root"
+        );
+        assert!(state.active_ignore_patterns.contains("src/generated/"));
+    }
+
+    /// A lazy load for a path that is not part of the loaded project is refused.
+    #[tokio::test]
+    async fn lazy_load_outside_project_is_ignored() {
+        let mut harness = TestHarness::new();
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("file.txt"), "content").unwrap();
+        let (tx, rx) = oneshot::channel();
+
+        start_lazy_load_scan(
+            outside.path().to_path_buf(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            Some(tx),
+        );
+
+        assert!(rx.await.is_err(), "No load must have been performed");
+        assert!(harness.get_last_state_update().await.is_none());
+        let state = harness.state.lock().unwrap();
+        assert!(state.full_file_list.is_empty());
+        assert!(state.expanded_dirs.is_empty());
+    }
+
+    /// Rescan of a fully scanned project, cancelled in the deep phase: the list holds a
+    /// single level again, so the subdirectories must be offered for lazy loading instead
+    /// of counting as loaded (and empty).
+    #[tokio::test]
+    async fn rescan_cancelled_in_deep_phase_leaves_subdirectories_unloaded() {
+        // Arrange: the state a completed scan leaves behind.
+        let mut harness = TestHarness::new();
+        let root = harness.root_path.clone();
+        let src = root.join("src");
+        let core = src.join("core");
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.replace_with_complete_file_list(vec![
+                dir_item(&src, 1),
+                dir_item(&core, 2),
+                file_item(&core.join("lib.rs"), 3),
+            ]);
+            state.loaded_dirs.insert(root.clone());
+            state.is_fully_scanned = true;
+        }
+        let mut scanner = MockScanner::new();
+        scanner.set_results(vec![dir_item(&src, 1)], vec![]);
+        let (_shallow_started, unblock_deep_scan) = scanner.prepare_for_cancellation();
+        let token = {
+            let mut state = harness.state.lock().unwrap();
+            state.is_fully_scanned = false;
+            state.begin_scan()
+        };
+
+        // Act: rescan, and cancel once the shallow result has been published.
+        let task = tokio::spawn(proactive_scan_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            root.clone(),
+            scanner,
+            MockFileSearcher::default(),
+            token,
+        ));
+        let shallow_events = harness.get_n_events(1).await;
+        assert!(matches!(shallow_events[0], UserEvent::StateUpdate(_)));
+        harness.state.lock().unwrap().cancel_current_scan();
+        unblock_deep_scan.send(()).ok();
+        let _ = task.await;
+
+        // Assert
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.loaded_dirs, HashSet::from([root]));
+        let ui_state = generate_ui_state(&state);
+        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
+        assert!(
+            !src_node.children_loaded,
+            "`src` must be lazily loadable after the cancelled rescan"
+        );
+        assert!(state.begin_lazy_load().is_some());
+    }
+
+    /// Two overlapping searches: the one for the older query finishes last. Its matches
+    /// must not replace those of the current query.
+    #[tokio::test]
+    async fn outdated_content_search_does_not_overwrite_newer_results() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let fo_match = harness.root_path.join("fo.txt");
+        let foo_match = harness.root_path.join("foo.txt");
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.full_file_list = vec![file_item(&fo_match, 1), file_item(&foo_match, 1)];
+            state.content_search_query = "fo".to_string();
+        }
+        let (slow_searcher, slow_started, release_slow) =
+            GatedFileSearcher::new(HashSet::from([fo_match.clone(), foo_match.clone()]));
+        let slow_search = tokio::spawn(search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            slow_searcher,
+        ));
+        slow_started.await.expect("Slow search must start");
+
+        // Act: the user types on; the search for "foo" completes first.
+        harness.state.lock().unwrap().content_search_query = "foo".to_string();
+        let fast_searcher = MockFileSearcher::default();
+        fast_searcher.set_results(HashSet::from([foo_match.clone()]));
+        search_in_files(harness.proxy.clone(), harness.state.clone(), fast_searcher).await;
+        let state_after_current_search = harness.get_last_state_update().await.unwrap();
+        release_slow.send(()).unwrap();
+        slow_search.await.unwrap();
+
+        // Assert
+        assert_eq!(state_after_current_search.visible_files_count, 1);
+        assert!(
+            harness.get_last_state_update().await.is_none(),
+            "The outdated search must not publish anything"
+        );
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.content_search_results, HashSet::from([foo_match]));
+        assert_eq!(state.filtered_file_list().len(), 1);
+    }
+
+    /// Clearing the query while a search is running must not let that search bring its
+    /// matches back afterwards.
+    #[tokio::test]
+    async fn content_search_finishing_after_query_was_cleared_is_discarded() {
+        let harness = TestHarness::new();
+        let file = harness.root_path.join("a.txt");
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.full_file_list = vec![file_item(&file, 1)];
+            state.content_search_query = "a".to_string();
+        }
+        let (slow_searcher, slow_started, release_slow) =
+            GatedFileSearcher::new(HashSet::from([file.clone()]));
+        let slow_search = tokio::spawn(search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            slow_searcher,
+        ));
+        slow_started.await.expect("Slow search must start");
+
+        harness.state.lock().unwrap().content_search_query.clear();
+        search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            MockFileSearcher::default(),
+        )
+        .await;
+        release_slow.send(()).unwrap();
+        slow_search.await.unwrap();
+
+        assert!(harness
+            .state
+            .lock()
+            .unwrap()
+            .content_search_results
+            .is_empty());
+    }
+
+    /// A content query entered while the scan is still running has only been applied to
+    /// the files of the shallow list. Once the deep scan delivers the complete list, the
+    /// search must be repeated so that deeper files are found as well.
+    #[tokio::test]
+    async fn content_search_is_repeated_on_complete_list_after_deep_scan() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let root = harness.root_path.clone();
+        let src = root.join("src");
+        let top_match = root.join("top.txt");
+        let deep_match = src.join("deep.txt");
+        let shallow = vec![dir_item(&src, 1), file_item(&top_match, 1)];
+        let mut deep = shallow.clone();
+        deep.push(file_item(&deep_match, 2));
+        deep.push(file_item(&src.join("other.txt"), 2));
+        let mut scanner = MockScanner::new();
+        scanner.set_results(shallow.clone(), deep);
+        let searcher = ListBoundFileSearcher {
+            matching: HashSet::from([top_match.clone(), deep_match.clone()]),
+        };
+        let token = {
+            // The query was entered during the scan and searched on the shallow list.
+            let mut state = harness.state.lock().unwrap();
+            state.content_search_query = "needle".to_string();
+            state.content_search_results = HashSet::from([top_match.clone()]);
+            state.begin_scan()
+        };
+
+        // Act
+        proactive_scan_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            root,
+            scanner,
+            searcher,
+            token,
+        )
+        .await;
+
+        // Assert
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        assert!(!ui_state.is_scanning);
+        let state = harness.state.lock().unwrap();
+        assert_eq!(
+            state.content_search_results,
+            HashSet::from([top_match.clone(), deep_match.clone()])
+        );
+        let visible: HashSet<PathBuf> = state
+            .filtered_file_list()
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        assert_eq!(visible, HashSet::from([src, top_match, deep_match]));
+    }
+
+    /// Without a content query a finished scan must not trigger a search (nor an
+    /// additional state update).
+    #[tokio::test]
+    async fn deep_scan_without_content_query_does_not_search() {
+        struct UnexpectedSearch;
+        impl FileSearcher for UnexpectedSearch {
+            async fn search(&self, _: Vec<FileItem>, _: &str, _: bool) -> HashSet<PathBuf> {
+                panic!("No search expected without a content query");
+            }
+        }
+        let mut harness = TestHarness::new();
+        let token = harness.state.lock().unwrap().begin_scan();
+
+        proactive_scan_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            harness.root_path.clone(),
+            MockScanner::new(),
+            UnexpectedSearch,
+            token,
+        )
+        .await;
+
+        let events = harness.get_n_events(3).await;
+        assert_eq!(events.len(), 2, "Only the shallow and the deep update");
+    }
+
+    /// Files that arrive through a lazy load are subject to an active content query too.
+    #[tokio::test]
+    async fn content_search_is_repeated_after_lazy_load() {
+        let harness = TestHarness::new();
+        let dir = harness.root_path.join("src");
+        let new_match = dir.join("match.txt");
+        let mut scanner = MockScanner::new();
+        scanner.set_results(
+            vec![
+                file_item(&new_match, 2),
+                file_item(&dir.join("other.txt"), 2),
+            ],
+            vec![],
+        );
+        let token = {
+            let mut state = harness.state.lock().unwrap();
+            state.full_file_list.push(dir_item(&dir, 1));
+            state.content_search_query = "needle".to_string();
+            state.begin_lazy_load().expect("No scan is running")
+        };
+
+        lazy_load_task(
+            ScanRequest::directory_level(&harness.root_path, &dir).unwrap(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            scanner,
+            ListBoundFileSearcher {
+                matching: HashSet::from([new_match.clone()]),
+            },
+            token,
+            None,
+        )
+        .await;
+
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.content_search_results, HashSet::from([new_match]));
+    }
+
+    /// A lazy load started with the previous ignore patterns must not re-insert entries
+    /// that the patterns added in the meantime have just removed from the list.
+    #[tokio::test]
+    async fn lazy_load_result_is_discarded_after_ignore_patterns_were_applied() {
+        // Arrange: a lazy load of `src` is in flight and will report `src/generated`.
+        let mut harness = TestHarness::new();
+        let dir = harness.root_path.join("src");
+        let generated = dir.join("generated");
+        let mut scanner = MockScanner::new();
+        scanner.set_results(vec![dir_item(&generated, 2)], vec![]);
+        let token = {
+            let mut state = harness.state.lock().unwrap();
+            state.full_file_list.push(dir_item(&dir, 1));
+            state.begin_lazy_load().expect("No scan is running")
+        };
+
+        // Act: meanwhile the user adds an ignore pattern, which is applied locally.
+        {
+            let mut state = harness.state.lock().unwrap();
+            state
+                .config
+                .ignore_patterns
+                .insert("src/generated/".to_string());
+            state.apply_ignore_patterns();
+        }
+        lazy_load_task(
+            ScanRequest::directory_level(&harness.root_path, &dir).unwrap(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            scanner,
+            MockFileSearcher::default(),
+            token,
+            None,
+        )
+        .await;
+
+        // Assert
+        assert!(harness.get_last_state_update().await.is_none());
+        let state = harness.state.lock().unwrap();
+        assert!(!state.full_file_list.iter().any(|i| i.path == generated));
+        assert!(
+            !state.loaded_dirs.contains(&dir),
+            "The directory stays loadable with the new patterns"
+        );
     }
 }

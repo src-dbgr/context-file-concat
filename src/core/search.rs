@@ -1,5 +1,6 @@
 //! Provides logic for filtering and searching lists of `FileItem`s.
 
+use super::file_handler::decode_text;
 use super::{FileItem, SearchFilter, MAX_FILE_SIZE};
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -164,7 +165,8 @@ impl ContentSearch {
     /// Returns the paths of all `files` whose content contains the query.
     ///
     /// Directories, binary files, files above the size limit and files that cannot be
-    /// read as UTF-8 text are skipped silently.
+    /// read are skipped silently. Text is decoded exactly as for the generated output,
+    /// so files in a legacy encoding (e.g. Latin-1) are searched as well.
     pub fn matching_paths(&self, files: &[FileItem]) -> HashSet<PathBuf> {
         files
             .par_iter()
@@ -177,9 +179,10 @@ impl ContentSearch {
         if item.is_directory || item.is_binary || !self.is_within_size_limit(&item.path) {
             return false;
         }
-        std::fs::read_to_string(&item.path)
-            .map(|content| self.matches_content(&content))
-            .unwrap_or(false)
+        std::fs::read(&item.path)
+            .ok()
+            .and_then(|bytes| decode_text(&item.path, bytes))
+            .is_some_and(|content| self.matches_content(&content))
     }
 
     /// Checks the size on disk rather than `FileItem::size`, which may be outdated.
@@ -301,16 +304,46 @@ mod tests {
             path: dir.path().join("deleted_since_scan.txt"),
             ..Default::default()
         };
-        let invalid_utf8_path = dir.path().join("latin1.txt");
-        std::fs::write(&invalid_utf8_path, [b'n', 0xE9, 0xFF]).unwrap();
-        let invalid_utf8 = FileItem {
-            path: invalid_utf8_path,
+        // Not marked as binary by the scanner (e.g. changed since), but not text either.
+        let undecodable_path = dir.path().join("utf16.txt");
+        std::fs::write(&undecodable_path, b"\xff\xfen\x00").unwrap();
+        let undecodable = FileItem {
+            path: undecodable_path,
             ..Default::default()
         };
 
-        let result = ContentSearch::new("n", false).matching_paths(&[missing, invalid_utf8]);
+        let result = ContentSearch::new("n", false).matching_paths(&[missing, undecodable]);
 
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_content_search_finds_text_in_latin1_file() {
+        let dir = tempdir().unwrap();
+        let latin1_path = dir.path().join("legacy.txt");
+        // "Die Größe zählt." encoded as Latin-1, which is not valid UTF-8.
+        std::fs::write(&latin1_path, b"Die Gr\xf6\xdfe z\xe4hlt.\n").unwrap();
+        let utf8_path = dir.path().join("modern.txt");
+        std::fs::write(&utf8_path, "Die Größe zählt.\n").unwrap();
+        let other_path = dir.path().join("other.txt");
+        std::fs::write(&other_path, b"Gr\xfc\xdfe\n").unwrap();
+        let files: Vec<FileItem> = [&latin1_path, &utf8_path, &other_path]
+            .into_iter()
+            .map(|path| FileItem {
+                path: path.clone(),
+                ..Default::default()
+            })
+            .collect();
+
+        let expected = HashSet::from([latin1_path, utf8_path]);
+        assert_eq!(
+            ContentSearch::new("Größe", true).matching_paths(&files),
+            expected
+        );
+        assert_eq!(
+            ContentSearch::new("GRöße", false).matching_paths(&files),
+            expected
+        );
     }
 
     fn file(path: &str) -> FileItem {
