@@ -177,23 +177,32 @@ async fn main() {
                 WindowEvent::CloseRequested => {
                     tracing::info!("Close requested. Saving final window state...");
                     let mut state_guard = state_for_events.lock().unwrap();
-                    let size = window_for_events.inner_size();
-                    let position = window_for_events.outer_position().unwrap_or_default();
-                    state_guard.config.window_size = (size.width.into(), size.height.into());
-                    state_guard.config.window_position = (position.x.into(), position.y.into());
+                    let scale = window_for_events.scale_factor();
+                    let size = window_for_events.inner_size().to_logical::<f64>(scale);
+                    let position = window_for_events
+                        .outer_position()
+                        .unwrap_or_default()
+                        .to_logical::<f64>(scale);
+                    state_guard.config.window_size = (size.width, size.height);
+                    state_guard.config.window_position = (position.x, position.y);
 
                     if let Err(e) = config::settings::save_config(&state_guard.config, None) {
                         tracing::error!("Failed to save config on exit: {}", e);
                     }
                     *control_flow = ControlFlow::Exit;
                 }
+                // tao reports physical pixels; the config stores logical units because the
+                // window is restored with Logical{Size,Position}. Mixing both makes the
+                // window grow on every restart on HiDPI displays.
                 WindowEvent::Resized(size) => {
+                    let size = size.to_logical::<f64>(window_for_events.scale_factor());
                     let mut state_guard = state_for_events.lock().unwrap();
-                    state_guard.config.window_size = (size.width.into(), size.height.into());
+                    state_guard.config.window_size = (size.width, size.height);
                 }
                 WindowEvent::Moved(position) => {
+                    let position = position.to_logical::<f64>(window_for_events.scale_factor());
                     let mut state_guard = state_for_events.lock().unwrap();
-                    state_guard.config.window_position = (position.x.into(), position.y.into());
+                    state_guard.config.window_position = (position.x, position.y);
                 }
                 _ => (),
             },
