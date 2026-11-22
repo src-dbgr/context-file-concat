@@ -411,9 +411,9 @@ pub fn is_text_content(bytes: &[u8]) -> bool {
     if std::str::from_utf8(sample).is_ok() {
         return true;
     }
-    // VET: Switched to a more robust heuristic. Instead of checking for printable
-    // ASCII, we check for the absence of control characters (excluding whitespace).
-    // This correctly handles legacy 8-bit encodings like Latin-1.
+    // Not valid UTF-8: rather than requiring printable ASCII, check for the absence of
+    // control characters (excluding whitespace). This correctly handles legacy 8-bit
+    // encodings like Latin-1.
     let control_char_count = sample
         .iter()
         .filter(|&&b| b < 32 && b != 9 && b != 10 && b != 13)
@@ -552,12 +552,12 @@ mod tests {
 
     #[test]
     fn test_is_image_file_logic() {
-        assert!(is_image_file(&Path::new("image.jpg")));
-        assert!(is_image_file(&Path::new("image.PNG")));
-        assert!(is_image_file(&Path::new("image.svg")));
-        assert!(!is_image_file(&Path::new("document.txt")));
-        assert!(!is_image_file(&Path::new("archive.zip")));
-        assert!(!is_image_file(&Path::new("no_extension")));
+        assert!(is_image_file(Path::new("image.jpg")));
+        assert!(is_image_file(Path::new("image.PNG")));
+        assert!(is_image_file(Path::new("image.svg")));
+        assert!(!is_image_file(Path::new("document.txt")));
+        assert!(!is_image_file(Path::new("archive.zip")));
+        assert!(!is_image_file(Path::new("no_extension")));
     }
 
     #[test]

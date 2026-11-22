@@ -286,7 +286,7 @@ mod tests {
         // Check custom ignore rule
         assert!(!paths.contains(&root.join("src/core/scanner.rs")));
         // Check .gitignore rules
-        assert!(!paths.iter().any(|p| p.starts_with(&root.join("target"))));
+        assert!(!paths.iter().any(|p| p.starts_with(root.join("target"))));
         assert!(!paths.contains(&root.join("debug.log")));
         // Check large file skip
         assert!(!paths.contains(&root.join("large_file.bin")));
@@ -389,7 +389,7 @@ mod tests {
         fs::write(root.join("file1.txt"), "data1").unwrap();
         fs::write(root.join("file2.txt"), "data2").unwrap();
 
-        let walker = ignore::WalkBuilder::new(&root).build();
+        let walker = ignore::WalkBuilder::new(root).build();
         let progress_updates = Arc::new(Mutex::new(Vec::new()));
         let updates_clone = progress_updates.clone();
 
@@ -566,7 +566,7 @@ mod tests {
         fs::write(&file_ok, "good data").unwrap();
         fs::write(&file_to_delete, "bad data").unwrap();
 
-        let walker = ignore::WalkBuilder::new(&root).build();
+        let walker = ignore::WalkBuilder::new(root).build();
 
         let hook_file_to_delete = file_to_delete.clone();
         let test_hook = move |entry: &ignore::DirEntry| {
@@ -608,7 +608,7 @@ mod tests {
             fs::write(root.join(format!("file_{}.txt", i)), "data").unwrap();
         }
 
-        let walker = ignore::WalkBuilder::new(&root).build();
+        let walker = ignore::WalkBuilder::new(root).build();
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let files_processed_count = Arc::new(AtomicUsize::new(0));
 
@@ -690,7 +690,7 @@ mod tests {
         let path_to_replace = root.join("race_condition.data");
         fs::write(&path_to_replace, "i will be replaced").unwrap();
 
-        let walker = ignore::WalkBuilder::new(&root).build();
+        let walker = ignore::WalkBuilder::new(root).build();
 
         let hook_path_to_replace = path_to_replace.clone();
         let test_hook = move |entry: &ignore::DirEntry| {

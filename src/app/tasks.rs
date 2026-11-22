@@ -8,8 +8,8 @@
 //! `Scanner`, `Tokenizer`, `FileSearcher`) to allow for injecting mock implementations during testing,
 //! making the tests deterministic and robust.
 
-use async_trait::async_trait;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -33,9 +33,8 @@ use tiktoken_rs::cl100k_base;
 //================================================================================================//
 
 /// A trait abstracting the generation of concatenated file content.
-#[async_trait]
 pub trait ContentGenerator: Send + Sync {
-    async fn generate(
+    fn generate(
         &self,
         selected_files: &[PathBuf],
         root_path: &Path,
@@ -43,35 +42,35 @@ pub trait ContentGenerator: Send + Sync {
         items_for_tree: Vec<FileItem>,
         tree_ignore_patterns: HashSet<String>,
         use_relative_paths: bool,
-    ) -> Result<String, CoreError>;
+    ) -> impl Future<Output = Result<String, CoreError>> + Send;
 }
 
+/// The outcome of a directory scan: the items found and the ignore patterns that matched.
+pub type ScanOutcome = Result<(Vec<FileItem>, HashSet<String>), CoreError>;
+
 /// A trait abstracting the directory scanning functionality.
-#[async_trait]
 pub trait Scanner: Send + Sync {
-    async fn scan(
+    fn scan(
         &self,
         root_path: &Path,
         max_depth: Option<usize>,
         progress_callback: Box<dyn Fn(ScanProgress) + Send + Sync>,
-    ) -> Result<(Vec<FileItem>, HashSet<String>), CoreError>;
+    ) -> impl Future<Output = ScanOutcome> + Send;
 }
 
 /// A trait abstracting the token counting functionality.
-#[async_trait]
 pub trait Tokenizer: Send + Sync {
-    async fn count_tokens(&self, text: &str) -> usize;
+    fn count_tokens(&self, text: &str) -> impl Future<Output = usize> + Send;
 }
 
 /// A trait abstracting the file content search functionality.
-#[async_trait]
 pub trait FileSearcher: Send + Sync {
-    async fn search(
+    fn search(
         &self,
         files_to_search: Vec<FileItem>,
         query: &str,
         case_sensitive: bool,
-    ) -> HashSet<PathBuf>;
+    ) -> impl Future<Output = HashSet<PathBuf>> + Send;
 }
 
 //================================================================================================//
@@ -81,7 +80,6 @@ pub trait FileSearcher: Send + Sync {
 pub struct RealContentGenerator {
     pub cancel_flag: Arc<AtomicBool>,
 }
-#[async_trait]
 impl ContentGenerator for RealContentGenerator {
     async fn generate(
         &self,
@@ -111,14 +109,13 @@ pub struct RealScanner {
     pub ignore_patterns: HashSet<String>,
     pub cancel_flag: Arc<AtomicBool>,
 }
-#[async_trait]
 impl Scanner for RealScanner {
     async fn scan(
         &self,
         root_path: &Path,
         max_depth: Option<usize>,
         progress_callback: Box<dyn Fn(ScanProgress) + Send + Sync>,
-    ) -> Result<(Vec<FileItem>, HashSet<String>), CoreError> {
+    ) -> ScanOutcome {
         let scanner = DirectoryScanner::new(self.ignore_patterns.clone());
         scanner
             .scan_directory_with_progress(
@@ -132,7 +129,6 @@ impl Scanner for RealScanner {
 }
 
 pub struct RealTokenizer;
-#[async_trait]
 impl Tokenizer for RealTokenizer {
     async fn count_tokens(&self, text: &str) -> usize {
         let text_clone = text.to_string();
@@ -148,7 +144,6 @@ impl Tokenizer for RealTokenizer {
 
 #[derive(Copy, Clone)]
 pub struct RealFileSearcher;
-#[async_trait]
 impl FileSearcher for RealFileSearcher {
     async fn search(
         &self,
@@ -183,6 +178,12 @@ pub async fn generation_task<P, G, T>(
     G: ContentGenerator + 'static,
     T: Tokenizer + 'static,
 {
+    let _generation_guard = GenerationGuard {
+        state: &state,
+        proxy: &proxy,
+        token: &token,
+    };
+
     let (selected, root, config, files_for_tree, is_fully_scanned) = {
         let state_guard = state
             .lock()
@@ -197,7 +198,7 @@ pub async fn generation_task<P, G, T>(
     };
 
     let items_for_tree = if config.remove_empty_directories && is_fully_scanned {
-        tracing::info!("🌳 Pruning empty directories from the generated tree.");
+        tracing::debug!("Pruning empty directories from the generated tree.");
         SearchEngine::remove_empty_directories(
             files_for_tree.clone(),
             &files_for_tree,
@@ -241,7 +242,7 @@ fn publish_generation_outcome<P: EventProxy>(
 ) {
     let mut state_guard = state.lock().expect("Mutex poisoned");
     if !state_guard.finish_generation(token) {
-        tracing::info!("LOG: Discarding the outcome of an outdated generation task.");
+        tracing::debug!("Discarding the outcome of an outdated generation.");
         return;
     }
 
@@ -253,17 +254,43 @@ fn publish_generation_outcome<P: EventProxy>(
             });
         }
         Err(CoreError::Cancelled) => {
-            tracing::info!("LOG: Generation task gracefully cancelled.");
+            tracing::info!("Generation cancelled.");
             state_guard.scan_progress.current_scanning_path = "Generation cancelled.".to_string();
         }
         Err(e) => {
-            tracing::error!("LOG: Generation task failed: {}", e);
+            tracing::error!("Generation failed: {}", e);
             proxy.send_event(UserEvent::ShowError(e.to_string()));
         }
     }
     proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
         &state_guard,
     ))));
+}
+
+/// Releases the generating state when a generation task ends without having published
+/// an outcome (e.g. a panicking generator) and tells the UI about it.
+///
+/// The guard is bound to the generation's own [`GenerationToken`]: once the outcome has
+/// been published, or a newer generation has taken over, dropping it changes nothing.
+struct GenerationGuard<'a, P: EventProxy> {
+    state: &'a Arc<Mutex<AppState>>,
+    proxy: &'a P,
+    token: &'a GenerationToken,
+}
+
+impl<P: EventProxy> Drop for GenerationGuard<'_, P> {
+    fn drop(&mut self) {
+        // Never panic in drop: this may run while the task is already unwinding.
+        let Ok(mut state) = self.state.lock() else {
+            tracing::error!("AppState mutex poisoned; cannot release generating state.");
+            return;
+        };
+        if state.finish_generation(self.token) {
+            tracing::error!("Generation task ended without publishing an outcome.");
+            self.proxy
+                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&state))));
+        }
+    }
 }
 
 /// Releases the scanning state when a scan task ends without having done so itself
@@ -494,7 +521,7 @@ fn handle_scan_error<P: EventProxy>(
     proxy: &P,
     token: &ScanToken,
 ) {
-    tracing::error!("LOG: TASK:: Scan finished with error: {}", error);
+    tracing::error!("Scan failed: {}", error);
     let mut state_lock = state.lock().expect("Mutex was poisoned");
     if !state_lock.finish_scan(token) {
         return;
@@ -528,7 +555,7 @@ pub fn start_lazy_load_scan<P: EventProxy>(
         let scanner = lazy_load_scanner(ignore_patterns, &token);
         let proxy_clone = proxy.clone();
         let state_clone = state.clone();
-        tracing::info!("LOG: Spawning new lazy_load_task for path: {:?}", path);
+        tracing::debug!("Starting lazy load for {:?}.", path);
         tokio::spawn(async move {
             lazy_load_task(
                 path,
@@ -576,7 +603,7 @@ async fn lazy_load_task<P: EventProxy, S: Scanner>(
 
 /// Merges the outcome of a lazy load into the state, unless it has become outdated.
 fn apply_lazy_load_result<P: EventProxy>(
-    scan_result: Result<(Vec<FileItem>, HashSet<String>), CoreError>,
+    scan_result: ScanOutcome,
     path_to_load: PathBuf,
     proxy: &P,
     state: &Arc<Mutex<AppState>>,
@@ -584,8 +611,8 @@ fn apply_lazy_load_result<P: EventProxy>(
 ) {
     let mut state_guard = state.lock().expect("Mutex was poisoned");
     if !state_guard.is_current_lazy_load(token) {
-        tracing::info!(
-            "LOG: TASK:: Discarding outdated lazy load result for {:?}.",
+        tracing::debug!(
+            "Discarding outdated lazy load result for {:?}.",
             path_to_load
         );
         return;
@@ -593,8 +620,8 @@ fn apply_lazy_load_result<P: EventProxy>(
 
     match scan_result {
         Ok((new_items, new_active_patterns)) => {
-            tracing::info!(
-                "LOG: TASK:: Lazy load successful. {} new items found for {:?}.",
+            tracing::debug!(
+                "Lazy load found {} items in {:?}.",
                 new_items.len(),
                 path_to_load
             );
@@ -625,7 +652,7 @@ fn apply_lazy_load_result<P: EventProxy>(
             ))));
         }
         Err(e) => {
-            tracing::error!("LOG: TASK:: Lazy load failed for {:?}: {}", path_to_load, e);
+            tracing::error!("Lazy load failed for {:?}: {}", path_to_load, e);
             proxy.send_event(UserEvent::ShowError(format!(
                 "Failed to load directory {}: {}",
                 path_to_load.display(),
@@ -772,7 +799,6 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl ContentGenerator for MockContentGenerator {
         async fn generate(
             &self,
@@ -786,7 +812,8 @@ mod tests {
             if let Some(notifier) = self.start_notifier.lock().unwrap().take() {
                 let _ = notifier.send(());
             }
-            // VET: Release lock before await to fix !Send error
+            // Take the receiver in its own statement so the lock is released before the
+            // await; a guard held across it would make the future `!Send`.
             let receiver = self.cancellation_check.lock().unwrap().take();
             if let Some(receiver) = receiver {
                 let _ = receiver.await;
@@ -795,12 +822,28 @@ mod tests {
         }
     }
 
+    /// A generator that panics instead of producing content.
+    struct PanickingContentGenerator;
+
+    impl ContentGenerator for PanickingContentGenerator {
+        async fn generate(
+            &self,
+            _: &[PathBuf],
+            _: &Path,
+            _: bool,
+            _: Vec<FileItem>,
+            _: HashSet<String>,
+            _: bool,
+        ) -> Result<String, CoreError> {
+            panic!("generator failure injected by the test");
+        }
+    }
+
     #[derive(Clone)]
     struct MockTokenizer {
         token_count: usize,
     }
 
-    #[async_trait]
     impl Tokenizer for MockTokenizer {
         async fn count_tokens(&self, _: &str) -> usize {
             self.token_count
@@ -809,8 +852,8 @@ mod tests {
 
     #[derive(Clone)]
     struct MockScanner {
-        shallow_result: Arc<Mutex<Result<(Vec<FileItem>, HashSet<String>), CoreError>>>,
-        deep_result: Arc<Mutex<Result<(Vec<FileItem>, HashSet<String>), CoreError>>>,
+        shallow_result: Arc<Mutex<ScanOutcome>>,
+        deep_result: Arc<Mutex<ScanOutcome>>,
         cancellation_trigger: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         wait_for_cancel: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     }
@@ -837,14 +880,13 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl Scanner for MockScanner {
         async fn scan(
             &self,
             _: &Path,
             depth: Option<usize>,
             _: Box<dyn Fn(ScanProgress) + Send + Sync>,
-        ) -> Result<(Vec<FileItem>, HashSet<String>), CoreError> {
+        ) -> ScanOutcome {
             if depth == Some(1) {
                 if let Some(trigger) = self.cancellation_trigger.lock().unwrap().take() {
                     trigger.send(()).ok();
@@ -869,7 +911,6 @@ mod tests {
             *self.results.lock().unwrap() = results;
         }
     }
-    #[async_trait]
     impl FileSearcher for MockFileSearcher {
         async fn search(&self, _: Vec<FileItem>, _: &str, _: bool) -> HashSet<PathBuf> {
             self.results.lock().unwrap().clone()
@@ -913,7 +954,7 @@ mod tests {
             assert_eq!(*token_count, 2);
         }
 
-        // VET: Fix - Assert the event we already captured, don't try to fetch a new one.
+        // The state update is the second of the two events captured above.
         assert!(matches!(events[1], UserEvent::StateUpdate(_)));
         if let UserEvent::StateUpdate(final_state_in_event) = &events[1] {
             assert!(!final_state_in_event.is_generating);
@@ -955,7 +996,7 @@ mod tests {
         assert!(!final_state.is_generating);
         assert!(final_state.status_message.contains("Generation cancelled"));
         let events = harness.get_n_events(1).await;
-        assert!(!matches!(events.get(0), Some(UserEvent::ShowError(_))));
+        assert!(!matches!(events.first(), Some(UserEvent::ShowError(_))));
     }
 
     #[tokio::test]
@@ -987,7 +1028,7 @@ mod tests {
             assert!(msg.contains("a/b/c.txt"));
         }
 
-        // VET: Fix - Assert the event we already captured.
+        // The state update is the second of the two events captured above.
         assert!(matches!(events[1], UserEvent::StateUpdate(_)));
         if let UserEvent::StateUpdate(final_state_in_event) = &events[1] {
             assert!(!final_state_in_event.is_generating);
@@ -996,6 +1037,52 @@ mod tests {
         assert!(
             !harness.state.lock().unwrap().is_generating(),
             "is_generating should be reset in AppState"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_task_panic_resets_state_and_notifies_ui() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let token = harness.state.lock().unwrap().begin_generation();
+        assert!(
+            harness.state.lock().unwrap().is_generating(),
+            "precondition"
+        );
+
+        // Act
+        let task_handle = tokio::spawn(generation_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            PanickingContentGenerator,
+            MockTokenizer { token_count: 0 },
+            token.clone(),
+        ));
+        let join_error = task_handle.await.expect_err("The task must panic");
+        assert!(join_error.is_panic());
+
+        // Assert
+        {
+            let state = harness
+                .state
+                .lock()
+                .expect("The panic must not poison the state");
+            assert!(
+                !state.is_generating(),
+                "is_generating should be reset after a panic"
+            );
+            assert!(!state.is_current_generation(&token));
+        }
+
+        let events = harness.get_n_events(1).await;
+        assert_eq!(events.len(), 1, "Expected exactly one event");
+        match &events[0] {
+            UserEvent::StateUpdate(ui_state) => assert!(!ui_state.is_generating),
+            _ => panic!("Expected a StateUpdate event."),
+        }
+        assert!(
+            harness.event_rx.try_recv().is_err(),
+            "No further events expected"
         );
     }
 
@@ -1037,8 +1124,8 @@ mod tests {
         .await;
 
         // Assert
-        // VET: Fix - Expect 2 events now. The success path sets the final state itself.
-        // The guard is now only for panics or cancellations.
+        // The success path publishes the final state itself; the guard only acts on
+        // panics and cancellations, so exactly two events are expected.
         let events = harness.get_n_events(2).await;
         assert_eq!(events.len(), 2, "Expected two StateUpdate events");
 
@@ -1571,7 +1658,7 @@ mod tests {
 
         // We need to wait for the scan to finish to avoid panics on drop.
         // Let's get all events to clear the channel.
-        while harness.get_n_events(1).await.len() > 0 {}
+        while !harness.get_n_events(1).await.is_empty() {}
     }
 
     /// Comprehensive test for the RealFileSearcher implementation via the search_in_files task.
@@ -1591,7 +1678,7 @@ mod tests {
         std::fs::write(&text_file_path, "find the MagicWord here").unwrap();
 
         let binary_file_path = harness.root_path.join("app.exe");
-        std::fs::write(&binary_file_path, &[0, 1, 2, 3, 255]).unwrap(); // A binary file
+        std::fs::write(&binary_file_path, [0, 1, 2, 3, 255]).unwrap(); // A binary file
 
         let no_match_path = harness.root_path.join("another.txt");
         std::fs::write(&no_match_path, "nothing to see").unwrap();

@@ -165,6 +165,9 @@ impl FileHandler {
     /// files. File IO runs on the blocking thread pool, not on the async runtime.
     ///
     /// Files that cannot be read get an inline marker instead of aborting the generation.
+    // The production signature has seven parameters; only the test-only notifier below
+    // pushes test builds over clippy's limit.
+    #[cfg_attr(test, allow(clippy::too_many_arguments))]
     pub async fn generate_concatenated_content_simple(
         selected_files: &[PathBuf],
         root_path: &Path,
@@ -225,15 +228,13 @@ impl FileHandler {
 
         // Use a utility to quickly check if the file is likely text-based.
         if !is_text_file(file_path)
-            // VET: Convert error to string
             .map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?
         {
             return Ok("[BINARY FILE]".to_string());
         }
 
-        let file =
-            // VET: Convert error to string
-            fs::File::open(file_path).map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
+        let file = fs::File::open(file_path)
+            .map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
         let reader = BufReader::new(file);
         let mut preview = String::new();
 
@@ -296,10 +297,10 @@ mod tests {
         fs::write(root.join("docs/large_file.txt"), long_file_content).unwrap();
         fs::write(
             root.join("assets/logo.png"),
-            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+            [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
         )
         .unwrap();
-        fs::write(root.join("assets/data.bin"), &[0xFF, 0xFE, 0xFD]).unwrap();
+        fs::write(root.join("assets/data.bin"), [0xFF, 0xFE, 0xFD]).unwrap();
         let large_file_path = root.join("huge_file.log");
         let mut large_file = File::create(&large_file_path).unwrap();
         let chunk = vec![0u8; 1024];

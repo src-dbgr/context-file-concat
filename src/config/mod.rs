@@ -79,7 +79,8 @@ impl Default for AppConfig {
             tree_ignore_patterns: HashSet::new(),
             last_directory: None,
             output_directory: dirs::desktop_dir(),
-            // VET: Use a deterministic, static filename for the default implementation.
+            // A static name keeps `Default` deterministic; timestamped names are assigned
+            // when a generation starts.
             output_filename: "cfc_output.txt".to_string(),
             case_sensitive_search: false,
             include_tree_by_default: true,
