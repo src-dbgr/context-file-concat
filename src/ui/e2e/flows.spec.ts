@@ -20,8 +20,8 @@ type TreeNode = {
   size: number;
   /** Only expanded directories carry children (pruned snapshot). */
   children: TreeNode[];
-  has_children?: boolean;
-  children_loaded?: boolean;
+  has_children: boolean;
+  children_loaded: boolean;
 };
 
 type AppConfig = {
@@ -72,6 +72,8 @@ function seedTree(): TreeNode[] {
       is_previewed: false,
       selection_state: "none",
       size: 0,
+      has_children: true,
+      children_loaded: true,
       children: [
         {
           path: "/repo/src",
@@ -83,6 +85,8 @@ function seedTree(): TreeNode[] {
           is_previewed: false,
           selection_state: "none",
           size: 0,
+          has_children: true,
+          children_loaded: true,
           children: [
             {
               path: "/repo/src/index.ts",
@@ -94,6 +98,8 @@ function seedTree(): TreeNode[] {
               is_previewed: false,
               selection_state: "none",
               size: 512,
+              has_children: false,
+              children_loaded: true,
               children: [],
             },
             {
@@ -106,6 +112,8 @@ function seedTree(): TreeNode[] {
               is_previewed: false,
               selection_state: "none",
               size: 420,
+              has_children: false,
+              children_loaded: true,
               children: [],
             },
           ],
@@ -120,6 +128,8 @@ function seedTree(): TreeNode[] {
           is_previewed: false,
           selection_state: "none",
           size: 256,
+          has_children: false,
+          children_loaded: true,
           children: [],
         },
       ],

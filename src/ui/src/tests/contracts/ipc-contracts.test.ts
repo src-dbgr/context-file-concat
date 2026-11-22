@@ -15,6 +15,7 @@ import {
   type PayloadForWire,
 } from "./helpers";
 import { makeCollapsedDirNode } from "./factories";
+import type { TreeNode } from "$lib/types";
 
 /**
  * Positive cases: commands that accept `null` payloads.
@@ -63,6 +64,39 @@ describe("IPC contracts – outgoing commands (positive)", () => {
     for (const [name, payload] of cases) {
       const parsed = validateCommand(name, payload);
       expect(parsed.command).toBe(name);
+    }
+  });
+
+  it("accepts a target state for setExpansion", () => {
+    for (const expanded of [true, false]) {
+      const parsed = validateCommand("setExpansion", {
+        path: "/repo/src",
+        expanded,
+      });
+      expect(parsed).toEqual({
+        command: "setExpansion",
+        payload: { path: "/repo/src", expanded },
+      });
+    }
+  });
+
+  it("rejects setExpansion payloads the backend would not accept", () => {
+    const invalid: unknown[] = [
+      "/repo/src",
+      null,
+      true,
+      { path: "/repo/src" },
+      { expanded: true },
+      { path: "", expanded: true },
+      { path: "/repo/src", expanded: "true" },
+      { path: "/repo/src", expanded: true, extra: 1 },
+    ];
+    for (const payload of invalid) {
+      const result = AnyCommandMessageSchema.safeParse({
+        command: "setExpansion",
+        payload,
+      });
+      expect(result.success, JSON.stringify(payload)).toBe(false);
     }
   });
 
@@ -154,6 +188,33 @@ describe("IPC contracts – inbound events/state", () => {
       children_loaded: true,
       selection_state: "partial",
     });
+  });
+
+  it("rejects a tree node without the pruning flags", () => {
+    for (const flag of ["has_children", "children_loaded"] as const) {
+      const node: Partial<TreeNode> = makeCollapsedDirNode();
+      delete node[flag];
+      const result = UiStateSchema.safeParse({
+        ...makeWireUiState(),
+        tree: [node],
+      });
+      expect(result.success, flag).toBe(false);
+    }
+  });
+
+  it("rejects a nested tree node without the pruning flags", () => {
+    const child: Partial<TreeNode> = makeCollapsedDirNode("/repo/src/app");
+    delete child.children_loaded;
+    const parent = {
+      ...makeCollapsedDirNode("/repo/src"),
+      is_expanded: true,
+      children: [child],
+    };
+    const result = UiStateSchema.safeParse({
+      ...makeWireUiState(),
+      tree: [parent],
+    });
+    expect(result.success).toBe(false);
   });
 
   it("rejects non-boolean pruning flags on a tree node", () => {

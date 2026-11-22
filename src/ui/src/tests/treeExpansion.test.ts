@@ -56,12 +56,6 @@ describe("treeExpansion – expansion intents go to the backend", () => {
       expect(needsLazyLoad(dir({ children_loaded: true }), false)).toBe(false);
     });
 
-    it("treats a node without the flag as loaded", () => {
-      expect(needsLazyLoad({ path: "/x", is_expanded: false }, false)).toBe(
-        false,
-      );
-    });
-
     it("reads the scan state from the store by default", () => {
       const unloaded = dir({ children_loaded: false });
       expect(needsLazyLoad(unloaded)).toBe(true);
@@ -71,13 +65,25 @@ describe("treeExpansion – expansion intents go to the backend", () => {
   });
 
   describe("toggleDirectory", () => {
-    it("toggles a loaded directory, whatever its current state", () => {
+    it("asks for the opposite of the rendered state", () => {
       toggleDirectory(dir({ is_expanded: false }));
       toggleDirectory(dir({ is_expanded: true }));
 
       expect(vi.mocked(post).mock.calls).toEqual([
-        ["toggleExpansion", "/repo/src"],
-        ["toggleExpansion", "/repo/src"],
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+      ]);
+    });
+
+    it("is idempotent while the snapshot is pending (double click)", () => {
+      // Both events see the same, not yet re-rendered node.
+      const rendered = dir({ is_expanded: false });
+      toggleDirectory(rendered);
+      toggleDirectory(rendered);
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+        ["setExpansion", { path: "/repo/src", expanded: true }],
       ]);
     });
 
@@ -98,12 +104,12 @@ describe("treeExpansion – expansion intents go to the backend", () => {
       ]);
     });
 
-    it("only toggles while a scan is running (the scan delivers the children)", () => {
+    it("only sets the expansion while a scan is running (the scan delivers the children)", () => {
       setScanning(true);
       toggleDirectory(dir({ children_loaded: false }));
 
       expect(vi.mocked(post).mock.calls).toEqual([
-        ["toggleExpansion", "/repo/src"],
+        ["setExpansion", { path: "/repo/src", expanded: true }],
       ]);
     });
   });
@@ -111,10 +117,33 @@ describe("treeExpansion – expansion intents go to the backend", () => {
   describe("expandDirectory / collapseDirectory", () => {
     it("expands a collapsed directory", () => {
       expandDirectory(dir({ is_expanded: false }));
-      expect(post).toHaveBeenCalledExactlyOnceWith(
-        "toggleExpansion",
-        "/repo/src",
-      );
+      expect(post).toHaveBeenCalledExactlyOnceWith("setExpansion", {
+        path: "/repo/src",
+        expanded: true,
+      });
+    });
+
+    it("never collapses on a repeated expand (ArrowRight key repeat)", () => {
+      // The repeated key event still sees the collapsed node.
+      const rendered = dir({ is_expanded: false });
+      expandDirectory(rendered);
+      expandDirectory(rendered);
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+      ]);
+    });
+
+    it("never expands on a repeated collapse (ArrowLeft key repeat)", () => {
+      const rendered = dir({ is_expanded: true });
+      collapseDirectory(rendered);
+      collapseDirectory(rendered);
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+      ]);
     });
 
     it("does not collapse a directory that is already expanded", () => {
@@ -134,8 +163,8 @@ describe("treeExpansion – expansion intents go to the backend", () => {
       collapseDirectory(dir({ is_expanded: true }));
       collapseDirectory(dir({ is_expanded: true, children_loaded: false }));
       expect(vi.mocked(post).mock.calls).toEqual([
-        ["toggleExpansion", "/repo/src"],
-        ["toggleExpansion", "/repo/src"],
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+        ["setExpansion", { path: "/repo/src", expanded: false }],
       ]);
     });
 
@@ -143,6 +172,22 @@ describe("treeExpansion – expansion intents go to the backend", () => {
       collapseDirectory(dir({ is_expanded: false }));
       expect(post).not.toHaveBeenCalled();
     });
+  });
+
+  it("never sends the non-idempotent toggle command", () => {
+    for (const is_expanded of [true, false]) {
+      for (const children_loaded of [true, false]) {
+        for (const scanning of [true, false]) {
+          setScanning(scanning);
+          const node = dir({ is_expanded, children_loaded });
+          toggleDirectory(node);
+          expandDirectory(node);
+          collapseDirectory(node);
+        }
+      }
+    }
+    const sent = vi.mocked(post).mock.calls.map(([command]) => command);
+    expect(sent).not.toContain("toggleExpansion");
   });
 
   it("setAllExpanded sends one bulk command", () => {

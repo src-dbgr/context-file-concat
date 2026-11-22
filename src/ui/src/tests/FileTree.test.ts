@@ -86,9 +86,12 @@ function expansionCommands(): unknown[][] {
   return vi
     .mocked(post)
     .mock.calls.filter(([command]) =>
-      ["toggleExpansion", "loadDirectoryLevel", "expandCollapseAll"].includes(
-        command,
-      ),
+      [
+        "toggleExpansion",
+        "setExpansion",
+        "loadDirectoryLevel",
+        "expandCollapseAll",
+      ].includes(command),
     );
 }
 
@@ -204,6 +207,7 @@ describe("FileTree", () => {
     // No per-directory toggles: each one would trigger a full tree render.
     const commands = vi.mocked(post).mock.calls.map(([command]) => command);
     expect(commands).not.toContain("toggleExpansion");
+    expect(commands).not.toContain("setExpansion");
   });
 
   // ---- Pruned snapshot: collapsed directories arrive without children -------
@@ -258,7 +262,9 @@ describe("FileTree", () => {
 
     await fireEvent.click(row(container, "/repo/src").querySelector(".arrow")!);
 
-    expect(expansionCommands()).toEqual([["toggleExpansion", "/repo/src"]]);
+    expect(expansionCommands()).toEqual([
+      ["setExpansion", { path: "/repo/src", expanded: true }],
+    ]);
     // No optimistic expansion: the row stays collapsed until the backend answers.
     expect(row(container, "/repo/src")).toHaveAttribute(
       "aria-expanded",
@@ -277,7 +283,40 @@ describe("FileTree", () => {
       row(container, "/repo/src").querySelector(".file-name")!,
     );
 
-    expect(expansionCommands()).toEqual([["toggleExpansion", "/repo/src"]]);
+    expect(expansionCommands()).toEqual([
+      ["setExpansion", { path: "/repo/src", expanded: true }],
+    ]);
+  });
+
+  it("a double click on a collapsed directory expands it, it does not toggle twice", async () => {
+    seedState([collapsedDir("/repo/src")]);
+
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    // The snapshot answering the first click has not arrived yet, so the second
+    // click hits the same collapsed row.
+    const arrow = row(container, "/repo/src").querySelector(".arrow")!;
+    await fireEvent.click(arrow);
+    await fireEvent.click(arrow);
+
+    expect(expansionCommands()).toEqual([
+      ["setExpansion", { path: "/repo/src", expanded: true }],
+      ["setExpansion", { path: "/repo/src", expanded: true }],
+    ]);
+  });
+
+  it("a click on an expanded directory collapses it", async () => {
+    seedState([dir("/repo/src", true, [file("/repo/src/a.ts")])]);
+
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    await fireEvent.click(row(container, "/repo/src").querySelector(".arrow")!);
+
+    expect(expansionCommands()).toEqual([
+      ["setExpansion", { path: "/repo/src", expanded: false }],
+    ]);
   });
 
   it("expanding a directory whose children are not loaded requests them", async () => {
@@ -322,7 +361,9 @@ describe("FileTree", () => {
       row(container, "/repo/vendor").querySelector(".arrow")!,
     );
 
-    expect(expansionCommands()).toEqual([["toggleExpansion", "/repo/vendor"]]);
+    expect(expansionCommands()).toEqual([
+      ["setExpansion", { path: "/repo/vendor", expanded: true }],
+    ]);
   });
 
   it("follows the backend's expansion state in both directions", async () => {
@@ -414,7 +455,24 @@ describe("FileTree", () => {
 
       await fireEvent.keyDown(treeEl, { key: "ArrowRight" });
 
-      expect(expansionCommands()).toEqual([["toggleExpansion", "/repo/src"]]);
+      expect(expansionCommands()).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+      ]);
+    });
+
+    it("ArrowRight key repeat keeps asking to expand, it never collapses", async () => {
+      const { treeEl } = await mountFocusedOn([collapsedDir("/repo/src")]);
+
+      // Key repeat: the snapshot answering the first event is still pending.
+      await fireEvent.keyDown(treeEl, { key: "ArrowRight" });
+      await fireEvent.keyDown(treeEl, { key: "ArrowRight", repeat: true });
+      await fireEvent.keyDown(treeEl, { key: "ArrowRight", repeat: true });
+
+      expect(expansionCommands()).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+      ]);
     });
 
     it("ArrowRight loads a directory whose children are not loaded", async () => {
@@ -453,7 +511,23 @@ describe("FileTree", () => {
 
       await fireEvent.keyDown(treeEl, { key: "ArrowLeft" });
 
-      expect(expansionCommands()).toEqual([["toggleExpansion", "/repo/src"]]);
+      expect(expansionCommands()).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+      ]);
+    });
+
+    it("ArrowLeft key repeat keeps asking to collapse, it never expands", async () => {
+      const { treeEl } = await mountFocusedOn([
+        dir("/repo/src", true, [file("/repo/src/a.ts")]),
+      ]);
+
+      await fireEvent.keyDown(treeEl, { key: "ArrowLeft" });
+      await fireEvent.keyDown(treeEl, { key: "ArrowLeft", repeat: true });
+
+      expect(expansionCommands()).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+      ]);
     });
 
     it("ArrowLeft on a collapsed directory sends nothing", async () => {
@@ -471,7 +545,7 @@ describe("FileTree", () => {
       await fireEvent.keyDown(treeEl, { key: " " });
 
       expect(vi.mocked(post).mock.calls).toEqual([
-        ["toggleExpansion", "/repo/src"],
+        ["setExpansion", { path: "/repo/src", expanded: true }],
         ["toggleDirectorySelection", "/repo/src"],
       ]);
     });

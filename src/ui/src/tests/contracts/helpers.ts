@@ -85,7 +85,8 @@ export function makeWireUiState(): z.input<typeof UiStateSchema> {
         selection_state: "none",
         size: 0,
         children: [],
-        // has_children / children_loaded are optional on the UI side; omitted here.
+        has_children: false,
+        children_loaded: true,
       },
     ],
     total_files_found: 1,

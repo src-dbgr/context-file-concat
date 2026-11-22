@@ -200,6 +200,37 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
       "additionalProperties": false,
       "properties": {
         "command": {
+          "const": "setExpansion",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "expanded": {
+              "type": "boolean",
+            },
+            "path": {
+              "minLength": 1,
+              "type": "string",
+            },
+          },
+          "required": [
+            "path",
+            "expanded",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
           "const": "expandCollapseAll",
           "type": "string",
         },
@@ -716,6 +747,8 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
         "selection_state",
         "children",
         "size",
+        "has_children",
+        "children_loaded",
       ],
       "type": "object",
     },

@@ -13,7 +13,7 @@ import {
  *
  * Overloads enforce correct payloads at compile-time:
  * - Nullary commands: `post("selectAll")`
- * - Commands with payload: `post("toggleExpansion", "/path/to/dir")`
+ * - Commands with payload: `post("loadFilePreview", "/path/to/file")`
  */
 export function post(command: NullaryCommandName): void;
 export function post<T extends NonNullCommandName>(

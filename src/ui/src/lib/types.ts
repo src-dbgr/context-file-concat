@@ -21,15 +21,14 @@ export interface TreeNode {
   size: number;
   /**
    * Whether the directory has children in the filtered list, even when they
-   * are not part of `children` because it is collapsed. Always sent by the
-   * backend.
+   * are not part of `children` because it is collapsed.
    */
-  has_children?: boolean;
+  has_children: boolean;
   /**
    * `false` for a directory whose children have not been scanned yet; they
-   * are fetched with `loadDirectoryLevel`. Always sent by the backend.
+   * are fetched with `loadDirectoryLevel`. Always `true` for files.
    */
-  children_loaded?: boolean;
+  children_loaded: boolean;
 }
 
 /**
