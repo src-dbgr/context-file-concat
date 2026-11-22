@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
 use serde::Serialize;
 use serde_json::Value;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,21 +11,43 @@ use super::AppConfig;
 const APP_NAME: &str = "ContextFileConcat";
 const CONFIG_FILE: &str = "config.json";
 
-/// Production implementation for getting the platform-specific config directory.
-#[cfg(not(test))]
-fn get_platform_config_dir() -> Option<PathBuf> {
+/// Environment variable that overrides the directory holding `config.json`.
+///
+/// Meant for integration tests (which must never touch the user's real configuration)
+/// and for users who want to keep the configuration somewhere else.
+pub const CONFIG_DIR_ENV: &str = "CFC_CONFIG_DIR";
+
+/// The platform's standard per-user config directory for this application.
+fn platform_config_dir() -> Option<PathBuf> {
     ProjectDirs::from("com", "contextfileconcat", APP_NAME)
         .map(|dirs| dirs.config_dir().to_path_buf())
 }
 
-/// Test implementation that can be mocked.
-#[cfg(test)]
-fn get_platform_config_dir() -> Option<PathBuf> {
-    if tests::MOCK_PROJECT_DIRS_FAILS.load(std::sync::atomic::Ordering::SeqCst) {
-        None
-    } else {
-        ProjectDirs::from("com", "contextfileconcat", APP_NAME)
-            .map(|dirs| dirs.config_dir().to_path_buf())
+/// Picks the config directory: a non-empty override wins over the platform default.
+fn resolve_config_dir(
+    override_dir: Option<OsString>,
+    platform_dir: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    match override_dir {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => platform_dir(),
+    }
+}
+
+/// The directory the configuration lives in. This is the only place deciding that.
+///
+/// * Unit tests always get a per-process temporary directory, whatever the environment
+///   says, so no test can read or write the developer's real configuration.
+/// * Otherwise [`CONFIG_DIR_ENV`] is honoured if set.
+/// * Otherwise the platform's standard location is used.
+pub fn config_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        tests::test_config_dir()
+    }
+    #[cfg(not(test))]
+    {
+        resolve_config_dir(std::env::var_os(CONFIG_DIR_ENV), platform_config_dir)
     }
 }
 
@@ -32,7 +55,7 @@ fn get_platform_config_dir() -> Option<PathBuf> {
 fn get_path(path_override: Option<&Path>) -> Result<PathBuf> {
     match path_override {
         Some(path) => Ok(path.to_path_buf()),
-        None => get_platform_config_dir()
+        None => config_dir()
             .map(|dir| dir.join(CONFIG_FILE))
             .ok_or_else(|| anyhow!("Could not determine config directory")),
     }
@@ -183,10 +206,50 @@ pub mod tests {
     use serde::Serialize;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
     use tempfile::TempDir;
 
-    // A flag to control the mock's behavior for get_platform_config_dir
+    // A flag to simulate a platform without a resolvable config directory.
     pub static MOCK_PROJECT_DIRS_FAILS: AtomicBool = AtomicBool::new(false);
+
+    /// The config directory of this test process: a temporary directory created on
+    /// first use. It is removed when the process exits (statics are never dropped, so
+    /// on Unix this is done by an `atexit` hook; elsewhere the OS temp cleanup has to).
+    static TEST_CONFIG_DIR: OnceLock<TempDir> = OnceLock::new();
+
+    #[cfg(unix)]
+    extern "C" fn remove_test_config_dir() {
+        if let Some(dir) = TEST_CONFIG_DIR.get() {
+            let _ = fs::remove_dir_all(dir.path());
+        }
+    }
+
+    /// The config directory every unit test of this process shares.
+    fn process_config_dir() -> PathBuf {
+        let dir = TEST_CONFIG_DIR.get_or_init(|| {
+            let dir = tempfile::Builder::new()
+                .prefix("cfc-test-config-")
+                .tempdir()
+                .expect("Failed to create the test config dir");
+            // SAFETY: the hook is a plain `extern "C" fn()` that only reads a
+            // process-lifetime static.
+            #[cfg(unix)]
+            unsafe {
+                libc::atexit(remove_test_config_dir);
+            }
+            dir
+        });
+        dir.path().to_path_buf()
+    }
+
+    /// What `config_dir()` resolves to under test.
+    pub fn test_config_dir() -> Option<PathBuf> {
+        if MOCK_PROJECT_DIRS_FAILS.load(Ordering::SeqCst) {
+            None
+        } else {
+            Some(process_config_dir())
+        }
+    }
 
     /// Test harness for creating isolated temporary directories and config files.
     struct TestHarness {
@@ -226,6 +289,45 @@ pub mod tests {
             .unwrap_err()
             .to_string()
             .contains("Could not determine config directory"));
+    }
+
+    #[test]
+    fn test_default_path_is_isolated_from_the_real_config() {
+        // Resolve first so a concurrently toggled failure mock cannot interfere twice.
+        let dir = process_config_dir();
+        let path = dir.join(CONFIG_FILE);
+
+        let real_dir = platform_config_dir().expect("platform config dir");
+        assert!(
+            !path.starts_with(&real_dir),
+            "tests must not resolve into the real config dir {real_dir:?}, got {path:?}"
+        );
+        assert!(!real_dir.starts_with(&dir));
+        // Stable for the whole process, so state saved by one call is seen by the next.
+        assert_eq!(dir, process_config_dir());
+    }
+
+    #[test]
+    fn test_resolve_config_dir_prefers_a_non_empty_override() {
+        let platform = || Some(PathBuf::from("/platform"));
+        assert_eq!(
+            resolve_config_dir(Some("/custom/dir".into()), platform),
+            Some(PathBuf::from("/custom/dir"))
+        );
+        assert_eq!(
+            resolve_config_dir(Some(OsString::new()), platform),
+            Some(PathBuf::from("/platform"))
+        );
+        assert_eq!(
+            resolve_config_dir(None, platform),
+            Some(PathBuf::from("/platform"))
+        );
+        assert_eq!(resolve_config_dir(None, || None), None);
+        // The platform lookup is not consulted when the override is used.
+        assert_eq!(
+            resolve_config_dir(Some("/custom".into()), || unreachable!()),
+            Some(PathBuf::from("/custom"))
+        );
     }
 
     // =========================================================================

@@ -13,6 +13,7 @@ pub mod state;
 pub mod tasks;
 pub mod transport;
 pub mod view_model;
+pub mod window_geometry;
 
 use crate::app::file_dialog::DialogService;
 use std::sync::{Arc, Mutex};

@@ -15,7 +15,26 @@ use tokio::sync::mpsc;
 /// Contains the test infrastructure.
 mod helpers {
     use super::*;
+    use context_file_concat::config::settings::CONFIG_DIR_ENV;
     use std::fs;
+    use std::sync::OnceLock;
+
+    /// Redirects the application's config directory into cargo's per-target temp dir.
+    ///
+    /// Integration tests link the library without `cfg(test)`, so without this the app
+    /// would load and save the developer's real configuration. Must run before anything
+    /// touches the config; `TestHarness::new` takes care of that.
+    pub fn isolated_config_dir() -> &'static PathBuf {
+        static DIR: OnceLock<PathBuf> = OnceLock::new();
+        DIR.get_or_init(|| {
+            let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cfc-integration-config");
+            // Start from a clean slate so earlier runs cannot influence this one.
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("Failed to create the test config dir");
+            std::env::set_var(CONFIG_DIR_ENV, &dir);
+            dir
+        })
+    }
 
     /// A test double for the `EventLoopProxy` using a tokio MPSC channel.
     #[derive(Clone)]
@@ -44,6 +63,7 @@ mod helpers {
     impl TestHarness {
         /// Creates a new test harness with a clean configuration.
         pub fn new() -> Self {
+            isolated_config_dir();
             let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
             let root_path = temp_dir.path().to_path_buf();
             let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -123,6 +143,28 @@ mod helpers {
             }
         }
     }
+}
+
+/// No test may ever read or write the developer's real configuration.
+#[test]
+fn test_config_is_isolated_from_the_real_user_config() {
+    use context_file_concat::config::settings;
+
+    let isolated = helpers::isolated_config_dir();
+    assert_eq!(settings::config_dir().as_ref(), Some(isolated));
+
+    let real_dir = directories::ProjectDirs::from("com", "contextfileconcat", "ContextFileConcat")
+        .expect("platform config dir")
+        .config_dir()
+        .to_path_buf();
+    assert!(
+        !isolated.starts_with(&real_dir),
+        "isolated config dir {isolated:?} is inside the real one {real_dir:?}"
+    );
+
+    // The default path (no explicit override) really ends up in the isolated dir.
+    settings::save_config(&AppConfig::default(), None).expect("save to the isolated dir");
+    assert!(isolated.join("config.json").is_file());
 }
 
 #[tokio::test]
