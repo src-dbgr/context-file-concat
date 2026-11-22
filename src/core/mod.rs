@@ -49,5 +49,5 @@ pub use scanner::ScanProgress;
 
 pub use file_handler::FileHandler;
 pub use scanner::DirectoryScanner;
-pub use search::SearchEngine;
+pub use search::{ContentSearch, SearchEngine};
 pub use tree_generator::TreeGenerator;

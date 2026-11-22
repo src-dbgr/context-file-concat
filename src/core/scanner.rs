@@ -17,7 +17,8 @@ pub struct ScanProgress {
     pub current_scanning_path: String,
 }
 
-const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024;
+/// Files larger than this are neither listed by the scanner nor read by the content search.
+pub(crate) const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024;
 const PROGRESS_UPDATE_THROTTLE: Duration = Duration::from_millis(100);
 
 /// Scans a directory for files and subdirectories, respecting ignore patterns.

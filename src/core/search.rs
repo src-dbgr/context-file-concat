@@ -1,5 +1,6 @@
 //! Provides logic for filtering and searching lists of `FileItem`s.
 
+use super::scanner::MAX_FILE_SIZE;
 use super::{FileItem, SearchFilter};
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -127,10 +128,191 @@ impl SearchEngine {
     }
 }
 
+/// Searches the *contents* of files for a query string.
+///
+/// The query is normalised once on construction, so the same instance can be applied
+/// to any number of files. All methods perform blocking file I/O; async callers must
+/// run them on a blocking thread.
+pub struct ContentSearch {
+    /// The query, already lowercased if the search is case-insensitive.
+    needle: String,
+    case_sensitive: bool,
+    max_file_size: u64,
+}
+
+impl ContentSearch {
+    /// Creates a search for `query`, skipping files larger than the scanner's size limit.
+    pub fn new(query: &str, case_sensitive: bool) -> Self {
+        let needle = if case_sensitive {
+            query.to_string()
+        } else {
+            query.to_lowercase()
+        };
+        Self {
+            needle,
+            case_sensitive,
+            max_file_size: MAX_FILE_SIZE,
+        }
+    }
+
+    /// Overrides the size limit, so tests do not need to create huge files.
+    #[cfg(test)]
+    fn with_max_file_size(mut self, max_file_size: u64) -> Self {
+        self.max_file_size = max_file_size;
+        self
+    }
+
+    /// Returns the paths of all `files` whose content contains the query.
+    ///
+    /// Directories, binary files, files above the size limit and files that cannot be
+    /// read as UTF-8 text are skipped silently.
+    pub fn matching_paths(&self, files: &[FileItem]) -> HashSet<PathBuf> {
+        files
+            .par_iter()
+            .filter(|item| self.matches_file(item))
+            .map(|item| item.path.clone())
+            .collect()
+    }
+
+    fn matches_file(&self, item: &FileItem) -> bool {
+        if item.is_directory || item.is_binary || !self.is_within_size_limit(&item.path) {
+            return false;
+        }
+        std::fs::read_to_string(&item.path)
+            .map(|content| self.matches_content(&content))
+            .unwrap_or(false)
+    }
+
+    /// Checks the size on disk rather than `FileItem::size`, which may be outdated.
+    fn is_within_size_limit(&self, path: &Path) -> bool {
+        std::fs::metadata(path)
+            .map(|metadata| metadata.len() <= self.max_file_size)
+            .unwrap_or(false)
+    }
+
+    fn matches_content(&self, content: &str) -> bool {
+        if self.case_sensitive {
+            content.contains(&self.needle)
+        } else {
+            content.to_lowercase().contains(&self.needle)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    /// Writes `content` to `name` inside `dir` and returns a matching text `FileItem`.
+    fn write_text_file(dir: &Path, name: &str, content: &str) -> FileItem {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        FileItem {
+            path,
+            size: content.len() as u64,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_content_search_case_sensitive_requires_exact_case() {
+        let dir = tempdir().unwrap();
+        let exact = write_text_file(dir.path(), "exact.txt", "find the MagicWord here");
+        let other_case = write_text_file(dir.path(), "other.txt", "find the magicword here");
+        let files = vec![exact.clone(), other_case];
+
+        let result = ContentSearch::new("MagicWord", true).matching_paths(&files);
+
+        assert_eq!(result, HashSet::from([exact.path]));
+    }
+
+    #[test]
+    fn test_content_search_case_insensitive_ignores_case_of_query_and_content() {
+        let dir = tempdir().unwrap();
+        let upper = write_text_file(dir.path(), "upper.txt", "find the MAGICWORD here");
+        let mixed = write_text_file(dir.path(), "mixed.txt", "find the MagicWord here");
+        let miss = write_text_file(dir.path(), "miss.txt", "nothing to see");
+        let files = vec![upper.clone(), mixed.clone(), miss];
+
+        let result = ContentSearch::new("mAgIcWoRd", false).matching_paths(&files);
+
+        assert_eq!(result, HashSet::from([upper.path, mixed.path]));
+    }
+
+    #[test]
+    fn test_content_search_skips_files_above_size_limit() {
+        let dir = tempdir().unwrap();
+        let at_limit = write_text_file(dir.path(), "at_limit.txt", "needle 890");
+        let too_large = write_text_file(dir.path(), "too_large.txt", "needle 8901");
+        let files = vec![at_limit.clone(), too_large];
+
+        let result = ContentSearch::new("needle", true)
+            .with_max_file_size(10)
+            .matching_paths(&files);
+
+        assert_eq!(result, HashSet::from([at_limit.path]));
+    }
+
+    #[test]
+    fn test_content_search_uses_scanner_size_limit_by_default() {
+        let dir = tempdir().unwrap();
+        let mut large = write_text_file(dir.path(), "large.txt", "needle");
+        // Extend the file sparsely beyond the limit; it still starts with the query.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&large.path)
+            .unwrap();
+        file.set_len(MAX_FILE_SIZE + 1).unwrap();
+        // A stale size from an earlier scan must not bypass the limit.
+        large.size = 6;
+
+        let result = ContentSearch::new("needle", true).matching_paths(&[large]);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_content_search_skips_binaries_and_directories() {
+        let dir = tempdir().unwrap();
+        let text = write_text_file(dir.path(), "text.txt", "needle");
+        let binary = FileItem {
+            is_binary: true,
+            ..write_text_file(dir.path(), "data.bin", "needle")
+        };
+        let directory_path = dir.path().join("needle_dir");
+        std::fs::create_dir(&directory_path).unwrap();
+        let directory = FileItem {
+            path: directory_path,
+            is_directory: true,
+            ..Default::default()
+        };
+        let files = vec![text.clone(), binary, directory];
+
+        let result = ContentSearch::new("needle", false).matching_paths(&files);
+
+        assert_eq!(result, HashSet::from([text.path]));
+    }
+
+    #[test]
+    fn test_content_search_ignores_unreadable_files() {
+        let dir = tempdir().unwrap();
+        let missing = FileItem {
+            path: dir.path().join("deleted_since_scan.txt"),
+            ..Default::default()
+        };
+        let invalid_utf8_path = dir.path().join("latin1.txt");
+        std::fs::write(&invalid_utf8_path, [b'n', 0xE9, 0xFF]).unwrap();
+        let invalid_utf8 = FileItem {
+            path: invalid_utf8_path,
+            ..Default::default()
+        };
+
+        let result = ContentSearch::new("n", false).matching_paths(&[missing, invalid_utf8]);
+
+        assert!(result.is_empty());
+    }
 
     fn file(path: &str) -> FileItem {
         FileItem {
