@@ -104,6 +104,7 @@ async fn main() {
     // RELEASE: Custom-Protocol (no Port, no file://-issues)
     #[cfg(not(debug_assertions))]
     let webview_builder = {
+        use platform::navigation::{AppOrigin, NavigationDecision, OriginForm};
         use std::borrow::Cow;
         use wry::http::Response;
 
@@ -113,7 +114,7 @@ async fn main() {
 
         let enable_devtools = std::env::var_os("CFC_DEVTOOLS").is_some();
 
-        let scheme = "cfc".to_string();
+        let origin = AppOrigin::new("cfc", "index.html", OriginForm::for_current_platform());
         let handler = move |_webview_id: wry::WebViewId,
                             request: wry::http::Request<Vec<u8>>|
               -> Response<Cow<'static, [u8]>> {
@@ -136,27 +137,17 @@ async fn main() {
         };
 
         WebViewBuilder::new()
-            .with_custom_protocol(scheme, handler)
-            .with_url("cfc://index.html")
+            .with_custom_protocol(origin.scheme().to_string(), handler)
+            .with_url(origin.start_url())
             .with_devtools(enable_devtools)
-            // Navigation policy (RELEASE branch; append identically in DEBUG branch)
-            .with_navigation_handler(|uri: String| {
-                // Determine the scheme manually
-                let scheme = uri.split(':').next().unwrap_or("");
-
-                match scheme {
-                    // Allow internally
-                    "cfc" | "about" | "blob" | "data" => true,
-
-                    // Open external links in the system browser
-                    "http" | "https" => {
-                        let _ = open::that(&uri);
-                        false
-                    }
-
-                    // Block everything else (e.g., file://)
-                    _ => false,
+            // Navigation policy (RELEASE branch only; see `platform::navigation`)
+            .with_navigation_handler(move |uri: String| match origin.classify(&uri) {
+                NavigationDecision::Allow => true,
+                NavigationDecision::OpenExternally => {
+                    let _ = open::that(&uri);
+                    false
                 }
+                NavigationDecision::Block => false,
             })
     };
 
