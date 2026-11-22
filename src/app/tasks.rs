@@ -18,7 +18,7 @@ use tokio::sync::oneshot;
 use super::events::UserEvent;
 use super::filtering;
 use super::proxy::EventProxy;
-use super::state::{AppState, LazyLoadToken, ScanToken};
+use super::state::{AppState, GenerationToken, LazyLoadToken, ScanToken};
 use super::view_model::{
     auto_expand_for_matches, generate_ui_state, get_selected_files_in_tree_order,
 };
@@ -168,11 +168,16 @@ impl FileSearcher for RealFileSearcher {
 //================================================================================================//
 
 /// The main asynchronous task for generating the concatenated file content.
+///
+/// `token` identifies this generation run. The outcome is only published while the
+/// token is still current, so a cancelled or superseded task can neither show outdated
+/// content nor reset the generating state of the generation that replaced it.
 pub async fn generation_task<P, G, T>(
     proxy: P,
     state: Arc<Mutex<AppState>>,
     content_generator: G,
     tokenizer: T,
+    token: GenerationToken,
 ) where
     P: EventProxy,
     G: ContentGenerator + 'static,
@@ -214,34 +219,51 @@ pub async fn generation_task<P, G, T>(
         )
         .await;
 
-    let finalize_state = |s: &mut AppState| {
-        s.is_generating = false;
-        proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(s))));
-    };
-
-    match result {
+    let outcome = match result {
         Ok(content) => {
             let token_count = tokenizer.count_tokens(&content).await;
+            Ok((content, token_count))
+        }
+        Err(e) => Err(e),
+    };
+
+    publish_generation_outcome(outcome, &proxy, &state, &token);
+}
+
+/// Ends the generation identified by `token` and reports its outcome to the UI.
+///
+/// The outcome of a generation that is no longer the current one is only logged.
+fn publish_generation_outcome<P: EventProxy>(
+    outcome: Result<(String, usize), CoreError>,
+    proxy: &P,
+    state: &Arc<Mutex<AppState>>,
+    token: &GenerationToken,
+) {
+    let mut state_guard = state.lock().expect("Mutex poisoned");
+    if !state_guard.finish_generation(token) {
+        tracing::info!("LOG: Discarding the outcome of an outdated generation task.");
+        return;
+    }
+
+    match outcome {
+        Ok((content, token_count)) => {
             proxy.send_event(UserEvent::ShowGeneratedContent {
                 content,
                 token_count,
             });
-            let mut state_guard = state.lock().expect("Mutex poisoned");
-            finalize_state(&mut state_guard);
         }
         Err(CoreError::Cancelled) => {
             tracing::info!("LOG: Generation task gracefully cancelled.");
-            let mut state_guard = state.lock().expect("Mutex poisoned");
             state_guard.scan_progress.current_scanning_path = "Generation cancelled.".to_string();
-            finalize_state(&mut state_guard);
         }
         Err(e) => {
             tracing::error!("LOG: Generation task failed: {}", e);
             proxy.send_event(UserEvent::ShowError(e.to_string()));
-            let mut state_guard = state.lock().expect("Mutex poisoned");
-            finalize_state(&mut state_guard);
         }
     }
+    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
+        &state_guard,
+    ))));
 }
 
 /// Releases the scanning state when a scan task ends without having done so itself
@@ -503,11 +525,7 @@ pub fn start_lazy_load_scan<P: EventProxy>(
             tracing::warn!("Attempted to lazy load while a full scan was in progress. Ignoring.");
             return;
         };
-        let new_cancel_flag = Arc::new(AtomicBool::new(false));
-        let scanner = RealScanner {
-            ignore_patterns,
-            cancel_flag: new_cancel_flag.clone(),
-        };
+        let scanner = lazy_load_scanner(ignore_patterns, &token);
         let proxy_clone = proxy.clone();
         let state_clone = state.clone();
         tracing::info!("LOG: Spawning new lazy_load_task for path: {:?}", path);
@@ -523,6 +541,15 @@ pub fn start_lazy_load_scan<P: EventProxy>(
             .await;
         });
     });
+}
+
+/// Creates the scanner for a lazy load. It shares the cancellation flag of `token`, so
+/// the scan stops as soon as the file list it was started for is replaced.
+fn lazy_load_scanner(ignore_patterns: HashSet<String>, token: &LazyLoadToken) -> RealScanner {
+    RealScanner {
+        ignore_patterns,
+        cancel_flag: token.cancel_flag(),
+    }
 }
 
 /// The asynchronous task for scanning a single directory level and appending the results.
@@ -860,7 +887,7 @@ mod tests {
         let generator = MockContentGenerator::new();
         generator.set_result(Ok("Generated Content".to_string()));
         let tokenizer = MockTokenizer { token_count: 2 };
-        harness.state.lock().unwrap().is_generating = true;
+        let token = harness.state.lock().unwrap().begin_generation();
 
         // Act
         generation_task(
@@ -868,6 +895,7 @@ mod tests {
             harness.state.clone(),
             generator,
             tokenizer,
+            token,
         )
         .await;
 
@@ -892,7 +920,7 @@ mod tests {
         }
 
         assert!(
-            !harness.state.lock().unwrap().is_generating,
+            !harness.state.lock().unwrap().is_generating(),
             "is_generating should be reset in AppState"
         );
     }
@@ -903,7 +931,7 @@ mod tests {
         let mut generator = MockContentGenerator::new();
         let (has_started_receiver, unblock_sender) = generator.expect_cancellation();
         generator.set_result(Err(CoreError::Cancelled));
-        harness.state.lock().unwrap().is_generating = true;
+        let token = harness.state.lock().unwrap().begin_generation();
 
         let proxy_clone = harness.proxy.clone();
         let task_state = harness.state.clone();
@@ -914,6 +942,7 @@ mod tests {
                 task_state,
                 generator,
                 MockTokenizer { token_count: 0 },
+                token,
             )
             .await;
         });
@@ -936,7 +965,7 @@ mod tests {
         let generator = MockContentGenerator::new();
         let io_error = CoreError::Io("File not found".to_string(), PathBuf::from("a/b/c.txt"));
         generator.set_result(Err(io_error));
-        harness.state.lock().unwrap().is_generating = true;
+        let token = harness.state.lock().unwrap().begin_generation();
 
         // Act
         generation_task(
@@ -944,6 +973,7 @@ mod tests {
             harness.state.clone(),
             generator,
             MockTokenizer { token_count: 0 },
+            token,
         )
         .await;
 
@@ -964,7 +994,7 @@ mod tests {
         }
 
         assert!(
-            !harness.state.lock().unwrap().is_generating,
+            !harness.state.lock().unwrap().is_generating(),
             "is_generating should be reset in AppState"
         );
     }
@@ -1048,7 +1078,7 @@ mod tests {
         scanner.set_results(vec![FileItem::default()], vec![]);
         let (has_started_deep_scan, unblock_deep_scan) = scanner.prepare_for_cancellation();
         let token = harness.state.lock().unwrap().begin_scan();
-        let cancel_flag = harness.state.lock().unwrap().scan_cancellation_flag.clone();
+        let cancel_flag = token.cancel_flag();
 
         let proxy_clone = harness.proxy.clone();
         let task_state = harness.state.clone();
@@ -1065,7 +1095,10 @@ mod tests {
         // The task now cleans up after itself via the RAII guard.
         // We can now confidently check the final state.
         let final_app_state = harness.state.lock().unwrap();
-        assert!(!final_app_state.is_scanning, "is_scanning should be false");
+        assert!(
+            !final_app_state.is_scanning(),
+            "is_scanning should be false"
+        );
         assert!(
             !final_app_state.is_fully_scanned,
             "is_fully_scanned should be false"
@@ -1250,7 +1283,7 @@ mod tests {
         let gen_error = CoreError::Io("Failed to read file".to_string(), PathBuf::from("test.txt"));
         generator.set_result(Err(gen_error.clone()));
         let tokenizer = MockTokenizer { token_count: 0 };
-        harness.state.lock().unwrap().is_generating = true;
+        let token = harness.state.lock().unwrap().begin_generation();
 
         // Act
         generation_task(
@@ -1258,6 +1291,7 @@ mod tests {
             harness.state.clone(),
             generator,
             tokenizer,
+            token,
         )
         .await;
 
@@ -1287,7 +1321,7 @@ mod tests {
 
         // Double-check the final state directly
         assert!(
-            !harness.state.lock().unwrap().is_generating,
+            !harness.state.lock().unwrap().is_generating(),
             "is_generating should be false in final AppState."
         );
     }
@@ -1371,7 +1405,7 @@ mod tests {
         *scanner.deep_result.lock().unwrap() = Ok((vec![], HashSet::new()));
 
         let token = harness.state.lock().unwrap().begin_scan();
-        let cancel_flag = harness.state.lock().unwrap().scan_cancellation_flag.clone();
+        let cancel_flag = token.cancel_flag();
         let proxy_clone = harness.proxy.clone();
         let state_clone = harness.state.clone();
         let path_clone = harness.root_path.clone();
@@ -1415,8 +1449,8 @@ mod tests {
 
         // The final AppState should be consistent
         let final_app_state = harness.state.lock().unwrap();
-        assert!(!final_app_state.is_scanning);
-        assert!(final_app_state.scan_task.is_none());
+        assert!(!final_app_state.is_scanning());
+        assert!(!final_app_state.has_scan_task());
     }
 
     #[tokio::test]
@@ -1450,7 +1484,7 @@ mod tests {
         }
 
         let state = harness.state.lock().unwrap();
-        assert!(!state.is_scanning, "is_scanning should remain false.");
+        assert!(!state.is_scanning(), "is_scanning should remain false.");
     }
 
     #[tokio::test]
@@ -1484,7 +1518,7 @@ mod tests {
 
         // Lock the state mutably to check and then cancel.
         let mut state = harness.state.lock().unwrap();
-        assert!(state.is_scanning, "is_scanning should be true.");
+        assert!(state.is_scanning(), "is_scanning should be true.");
         assert_eq!(state.current_path, harness.root_path.to_string_lossy());
 
         // Cancel the scan to clean up the task and prevent test runner warnings.
@@ -1527,7 +1561,7 @@ mod tests {
         // Now it's safe to check the state.
         {
             let state = harness.state.lock().unwrap();
-            assert!(state.is_scanning, "Scanning should have started.");
+            assert!(state.is_scanning(), "Scanning should have started.");
             assert_eq!(state.current_path, new_scan_path.to_string_lossy());
             assert!(
                 state.expanded_dirs.contains(&dir_to_expand),
@@ -1668,12 +1702,15 @@ mod tests {
             ];
         }
 
+        let token = harness.state.lock().unwrap().begin_generation();
+
         // Act
         generation_task(
             harness.proxy.clone(),
             harness.state.clone(),
             generator,
             tokenizer,
+            token,
         )
         .await;
 
@@ -1754,7 +1791,7 @@ mod tests {
 
         {
             let mut state = harness.state.lock().unwrap();
-            state.is_scanning = true; // Simulate an ongoing scan
+            let _token = state.begin_scan(); // Simulate an ongoing scan
         }
 
         // Act
@@ -1828,7 +1865,8 @@ mod tests {
         // Arrange
         let mut harness = TestHarness::new();
         // Use the REAL generator, not a mock.
-        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let token = harness.state.lock().unwrap().begin_generation();
+        let cancel_flag = token.cancel_flag();
         let generator = RealContentGenerator {
             cancel_flag: cancel_flag.clone(),
         };
@@ -1852,6 +1890,7 @@ mod tests {
             harness.state.clone(),
             generator,
             tokenizer,
+            token,
         ));
 
         // Immediately signal cancellation. The task should pick this up.
@@ -1944,11 +1983,11 @@ mod tests {
     fn assert_replacement_scan_is_intact(harness: &TestHarness, token: &ScanToken) {
         let mut state = harness.state.lock().unwrap();
         assert!(
-            state.is_scanning,
+            state.is_scanning(),
             "The new scan must still be shown as running"
         );
         assert!(
-            state.scan_task.is_some(),
+            state.has_scan_task(),
             "The new scan must still be cancellable"
         );
         assert!(state.is_current_scan(token));
@@ -2080,6 +2119,111 @@ mod tests {
             .current_scanning_path
             .contains("Scan failed"));
         assert_replacement_scan_is_intact(&harness, &new_token);
+    }
+
+    /// A generation that was superseded but could not be aborted in time must not show
+    /// its content or end the generating state of the generation that replaced it.
+    #[tokio::test]
+    async fn superseded_generation_task_does_not_publish_into_newer_generation() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let mut generator = MockContentGenerator::new();
+        let (has_started, unblock) = generator.expect_cancellation();
+        generator.set_result(Ok("Outdated content".to_string()));
+        let old_token = harness.state.lock().unwrap().begin_generation();
+        let old_task = tokio::spawn(generation_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            generator,
+            MockTokenizer { token_count: 1 },
+            old_token.clone(),
+        ));
+        has_started.await.expect("Mock did not signal start");
+
+        // Act: the user starts a new generation while the old one is still producing.
+        let new_token = harness.state.lock().unwrap().begin_generation();
+        unblock.send(()).unwrap();
+        old_task.await.unwrap();
+
+        // Assert
+        assert!(old_token.is_cancelled());
+        let events = harness.get_n_events(1).await;
+        assert!(
+            events.is_empty(),
+            "Outdated generation must stay silent, got {events:?}"
+        );
+        let state = harness.state.lock().unwrap();
+        assert!(
+            state.is_generating(),
+            "New generation must still be running"
+        );
+        assert!(state.is_current_generation(&new_token));
+    }
+
+    /// A cancelled generation that only notices the cancellation after a new generation
+    /// has started must not report "cancelled" on behalf of the new one.
+    #[tokio::test]
+    async fn cancelled_generation_task_does_not_reset_state_of_newer_generation() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let mut generator = MockContentGenerator::new();
+        let (has_started, unblock) = generator.expect_cancellation();
+        generator.set_result(Err(CoreError::Cancelled));
+        let old_token = harness.state.lock().unwrap().begin_generation();
+        let old_task = tokio::spawn(generation_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            generator,
+            MockTokenizer { token_count: 0 },
+            old_token,
+        ));
+        has_started.await.expect("Mock did not signal start");
+
+        // Act
+        let new_token = {
+            let mut state = harness.state.lock().unwrap();
+            state.cancel_current_generation();
+            state.begin_generation()
+        };
+        unblock.send(()).unwrap();
+        old_task.await.unwrap();
+
+        // Assert
+        assert!(harness.get_n_events(1).await.is_empty());
+        let state = harness.state.lock().unwrap();
+        assert!(state.is_generating());
+        assert!(state.is_current_generation(&new_token));
+        assert_ne!(
+            state.scan_progress.current_scanning_path,
+            "Generation cancelled."
+        );
+    }
+
+    /// The scanner of a lazy load must stop working once the file list it loads into is
+    /// replaced by a new scan or dropped by a directory reset.
+    #[tokio::test]
+    async fn lazy_load_scanner_is_cancelled_when_file_list_is_replaced() {
+        let harness = TestHarness::new();
+        let mut state = harness.state.lock().unwrap();
+
+        let token = state.begin_lazy_load().expect("No scan is running");
+        let scanner = lazy_load_scanner(HashSet::new(), &token);
+        assert!(!scanner.cancel_flag.load(Ordering::SeqCst));
+        let scan = state.begin_scan();
+        assert!(
+            scanner.cancel_flag.load(Ordering::SeqCst),
+            "A new scan must stop the lazy load"
+        );
+        state.finish_scan(&scan);
+
+        let token = state.begin_lazy_load().expect("Scan has finished");
+        let scanner = lazy_load_scanner(HashSet::new(), &token);
+        assert!(!scanner.cancel_flag.load(Ordering::SeqCst));
+        state.reset_directory_state();
+        assert!(
+            scanner.cancel_flag.load(Ordering::SeqCst),
+            "A directory reset must stop the lazy load"
+        );
     }
 
     /// A lazy load that finishes after the directory was replaced must not merge its

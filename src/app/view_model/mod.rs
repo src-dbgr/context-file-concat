@@ -65,7 +65,7 @@ pub struct TreeNode {
 
 /// Creates the complete `UiState` from the current `AppState`.
 pub fn generate_ui_state(state: &AppState) -> UiState {
-    let tree = if (state.is_scanning && state.full_file_list.is_empty())
+    let tree = if (state.is_scanning() && state.full_file_list.is_empty())
         // If content search is active but has no results, the tree should be empty
         || (!state.content_search_query.is_empty() && state.content_search_results.is_empty())
     {
@@ -90,7 +90,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
         build_tree_nodes(items, &index, &view)
     };
 
-    let status_message = if state.is_scanning {
+    let status_message = if state.is_scanning() {
         format!(
             "Scanning... {} files processed. {} large files skipped ({})",
             state.scan_progress.files_scanned,
@@ -108,8 +108,8 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
         total_files_found: state.full_file_list.len(),
         visible_files_count: state.filtered_file_list().len(),
         selected_files_count: state.selected_files.len(),
-        is_scanning: state.is_scanning,
-        is_generating: state.is_generating,
+        is_scanning: state.is_scanning(),
+        is_generating: state.is_generating(),
         is_fully_scanned: state.is_fully_scanned,
         status_message,
         search_query: state.search_query.clone(),
