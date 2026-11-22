@@ -1,13 +1,159 @@
 //! Handles file content operations like reading, previewing, and concatenation.
+//!
+//! Content generation is split into three concerns:
+//! - [`OutputDocument`] formats the output document (pure, no IO),
+//! - `load_selected_entry` and its helpers read and decode files (blocking IO),
+//! - [`FileHandler::generate_concatenated_content_simple`] orchestrates both, keeping
+//!   the blocking work off the async runtime and honouring cancellation.
 
 use super::{CoreError, FileItem, TreeGenerator};
-use crate::utils::file_detection::is_text_file;
+use crate::utils::file_detection::{classify_by_extension, is_text_content, is_text_file};
 use std::collections::HashSet;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+/// Files larger than this are not inlined into the generated output.
+const MAX_CONTENT_FILE_SIZE: u64 = 20 * 1024 * 1024;
+
+/// Placeholder emitted instead of the content of binary / undecodable files.
+const BINARY_CONTENT_MARKER: &str = "[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]";
+
+/// Builds the concatenated output document.
+///
+/// This type is concerned with formatting only; it performs no IO.
+struct OutputDocument {
+    buffer: String,
+}
+
+impl OutputDocument {
+    /// Starts a document with the metadata header.
+    fn new(generated_at: impl std::fmt::Display, total_files: usize) -> Self {
+        Self {
+            buffer: format!(
+                "# CFC Output - Generated: {generated_at}\n# Total files: {total_files}\n\n"
+            ),
+        }
+    }
+
+    /// Appends the directory tree section.
+    fn push_tree(&mut self, tree: &str) {
+        self.buffer.push_str("# DIRECTORY TREE\n");
+        self.buffer.push_str("=====================\n");
+        self.buffer.push_str(tree);
+        self.buffer.push_str("=====================\n\n");
+    }
+
+    /// Appends one file block consisting of its display path and body.
+    fn push_file(&mut self, display_path: &str, body: &str) {
+        self.buffer.push_str(display_path);
+        self.buffer.push_str("\n===FILE-START===\n");
+        self.buffer.push_str(body);
+        // Ensure the content block ends with a newline for consistent formatting.
+        if !body.ends_with('\n') {
+            self.buffer.push('\n');
+        }
+        self.buffer.push_str("---FILE-END-----\n\n");
+    }
+
+    fn finish(self) -> String {
+        self.buffer
+    }
+}
+
+/// Returns the path under which a file is listed in the output document.
+fn display_path(
+    file_path: &Path,
+    root_path: &Path,
+    use_relative_paths: bool,
+) -> Result<String, CoreError> {
+    let shown = match root_path.parent() {
+        Some(parent) if use_relative_paths => file_path.strip_prefix(parent)?,
+        // Absolute paths were requested, or the root has no parent (e.g., "/").
+        _ => file_path,
+    };
+    Ok(shown.display().to_string())
+}
+
+/// Loads the body for a selected path. Returns `None` for directories, which are
+/// silently skipped by the generation.
+///
+/// Performs blocking IO; must not be called directly on the async runtime.
+fn load_selected_entry(file_path: &Path) -> Option<String> {
+    if file_path.is_dir() {
+        return None;
+    }
+    Some(read_file_body(file_path))
+}
+
+/// Reads the body of a file for the output document.
+///
+/// Never fails: a file that cannot be read (e.g. deleted since the scan) yields an
+/// inline marker, so that a single bad file does not abort the whole generation.
+fn read_file_body(file_path: &Path) -> String {
+    try_read_file_body(file_path).unwrap_or_else(|error| {
+        tracing::warn!(
+            "Skipping unreadable file {}: {}",
+            file_path.display(),
+            error
+        );
+        format!("[FILE UNREADABLE: {error} - CONTENT SKIPPED]")
+    })
+}
+
+/// Reads a file once, with safeguards for large or binary files.
+fn try_read_file_body(file_path: &Path) -> io::Result<String> {
+    // Skip files that exceed the size limit to prevent excessive memory usage.
+    let size = fs::metadata(file_path)?.len();
+    if size > MAX_CONTENT_FILE_SIZE {
+        return Ok(format!("[FILE TOO LARGE: {size} bytes - CONTENT SKIPPED]"));
+    }
+    Ok(decode_file_bytes(file_path, fs::read(file_path)?))
+}
+
+/// Turns raw file bytes into the text to embed (pure, no IO).
+///
+/// Valid UTF-8 is used as is. Anything else is either text in a legacy encoding,
+/// which is converted lossily, or binary, which is replaced by a marker.
+fn decode_file_bytes(file_path: &Path, bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) if is_legacy_encoded_text(file_path, error.as_bytes()) => {
+            String::from_utf8_lossy(error.as_bytes()).into_owned()
+        }
+        Err(_) => BINARY_CONTENT_MARKER.to_string(),
+    }
+}
+
+/// Decides whether non-UTF-8 bytes are still text (e.g. Latin-1), reusing the
+/// application-wide detection: a known binary extension or binary-looking content
+/// (NUL bytes, many control characters) disqualifies the file.
+fn is_legacy_encoded_text(file_path: &Path, bytes: &[u8]) -> bool {
+    classify_by_extension(file_path) != Some(false) && is_text_content(bytes)
+}
+
+/// Runs [`load_selected_entry`] on the blocking thread pool.
+async fn load_selected_entry_off_runtime(file_path: PathBuf) -> Result<Option<String>, CoreError> {
+    Ok(tokio::task::spawn_blocking(move || load_selected_entry(&file_path)).await?)
+}
+
+/// Test-only synchronisation point between two files.
+///
+/// Signals the test that a file has been fully processed, then holds the generation
+/// until the test has requested cancellation. This makes the cancellation test
+/// deterministic without relying on timing.
+#[cfg(test)]
+async fn pause_until_cancel_requested(
+    notifier: tokio::sync::oneshot::Sender<()>,
+    cancel_flag: &AtomicBool,
+) {
+    let _ = notifier.send(());
+    while !cancel_flag.load(Ordering::SeqCst) {
+        tokio::task::yield_now().await;
+    }
+}
 
 /// A utility struct for handling file-related operations.
 ///
@@ -18,7 +164,10 @@ impl FileHandler {
     /// Generates a single string by concatenating the content of selected files.
     ///
     /// It includes a header with metadata, an optional directory tree, and formatted
-    /// content blocks for each selected file. This operation is cancellable.
+    /// content blocks for each selected file. This operation is cancellable between
+    /// files. File IO runs on the blocking thread pool, not on the async runtime.
+    ///
+    /// Files that cannot be read get an inline marker instead of aborting the generation.
     pub async fn generate_concatenated_content_simple(
         selected_files: &[PathBuf],
         root_path: &Path,
@@ -28,38 +177,23 @@ impl FileHandler {
         use_relative_paths: bool,
         cancel_flag: Arc<AtomicBool>,
         // This parameter only exists during `cargo test` runs. It allows deterministic
-        // testing of the cancellation logic without affecting the production build.
+        // testing of the cancellation logic without affecting the production build:
+        // after the first file, the generation signals the test and waits for the
+        // cancel flag (see `pause_until_cancel_requested`).
         #[cfg(test)] mut test_notifier: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<String, CoreError> {
-        let mut content = String::new();
-        content.push_str(&format!(
-            "# CFC Output - Generated: {}\n",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        ));
-        content.push_str(&format!("# Total files: {}\n\n", selected_files.len()));
+        let mut document = OutputDocument::new(
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            selected_files.len(),
+        );
 
         if include_tree {
             let tree =
                 TreeGenerator::generate_tree(&items_for_tree, root_path, &tree_ignore_patterns);
-            content.push_str("# DIRECTORY TREE\n");
-            content.push_str("=====================\n");
-            content.push_str(&tree);
-            content.push_str("=====================\n\n");
+            document.push_tree(&tree);
         }
 
         for file_path in selected_files {
-            // In test builds, this block allows a test to synchronize with the function,
-            // proving that cancellation works deterministically. It is completely removed
-            // from release builds, incurring zero overhead.
-            #[cfg(test)]
-            if let Some(notifier) = test_notifier.take() {
-                let _ = notifier.send(());
-                // This pause is crucial for the test environment. It yields control back
-                // to the Tokio scheduler, allowing the test runner to set the cancel flag
-                // before this task continues.
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-
             // Check for cancellation at the start of each file processing step.
             // `SeqCst` provides the strongest memory ordering guarantee, ensuring that
             // changes to the flag from other threads are immediately visible.
@@ -68,70 +202,20 @@ impl FileHandler {
             }
 
             // Directories in the selection list are silently skipped.
-            if file_path.is_dir() {
+            let Some(body) = load_selected_entry_off_runtime(file_path.clone()).await? else {
                 continue;
-            }
-
-            let display_path = if use_relative_paths {
-                if let Some(parent) = root_path.parent() {
-                    file_path.strip_prefix(parent)?.display().to_string()
-                } else {
-                    // Fallback for root paths that have no parent (e.g., "/")
-                    file_path.display().to_string()
-                }
-            } else {
-                file_path.display().to_string()
             };
 
-            content.push_str(&format!("{display_path}\n"));
-            content.push_str("===FILE-START===\n");
+            let display_path = display_path(file_path, root_path, use_relative_paths)?;
+            document.push_file(&display_path, &body);
 
-            let file_content = Self::read_file_content(file_path)?;
-            content.push_str(&file_content);
-
-            // Ensure the content block ends with a newline for consistent formatting.
-            if !file_content.ends_with('\n') {
-                content.push('\n');
-            }
-            content.push_str("---FILE-END-----\n\n");
-        }
-        Ok(content)
-    }
-
-    /// Reads the content of a file, with safeguards for large or binary files.
-    fn read_file_content(file_path: &Path) -> Result<String, CoreError> {
-        let metadata =
-            // VET: Convert error to string
-            fs::metadata(file_path).map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
-
-        // Skip files that exceed the size limit to prevent excessive memory usage.
-        if metadata.len() > 20 * 1024 * 1024 {
-            return Ok(format!(
-                "[FILE TOO LARGE: {} bytes - CONTENT SKIPPED]",
-                metadata.len()
-            ));
-        }
-
-        // Attempt to read the file as a UTF-8 string.
-        match fs::read_to_string(file_path) {
-            Ok(content) => Ok(content),
-            // If reading as a string fails, it's likely binary or has an incompatible encoding.
-            Err(_) => {
-                let bytes =
-                    // VET: Convert error to string
-                    fs::read(file_path).map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
-
-                // Use a lossy conversion to create a string preview. If the conversion
-                // introduces Unicode replacement characters, we classify it as binary.
-                match String::from_utf8_lossy(&bytes) {
-                    content if content.contains('\u{FFFD}') => {
-                        Ok("[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]".to_string())
-                    }
-                    // Otherwise, the content might be valid in a different encoding but still mostly readable.
-                    content => Ok(content.to_string()),
-                }
+            // Removed from release builds entirely, incurring zero overhead.
+            #[cfg(test)]
+            if let Some(notifier) = test_notifier.take() {
+                pause_until_cancel_requested(notifier, &cancel_flag).await;
             }
         }
+        Ok(document.finish())
     }
 
     /// Retrieves a truncated preview of a text file's content.
@@ -409,20 +493,11 @@ mod tests {
         assert_eq!(preview, expected_content);
     }
 
-    #[tokio::test]
-    async fn generate_content_should_fail_on_nonexistent_file() {
-        // --- Setup ---
-        let (_dir, root) = setup_test_environment();
-
-        let selected_files = vec![
-            root.join("README.md"),                    // This one is valid
-            root.join("path/to/nonexistent/file.txt"), // This one is not
-        ];
-
-        // --- Execute ---
-        let result = FileHandler::generate_concatenated_content_simple(
-            &selected_files,
-            &root,
+    /// Runs a generation without tree and with relative paths for the given selection.
+    async fn generate_plain(selected_files: &[PathBuf], root: &Path) -> Result<String, CoreError> {
+        FileHandler::generate_concatenated_content_simple(
+            selected_files,
+            root,
             false,
             vec![],
             HashSet::new(),
@@ -431,25 +506,104 @@ mod tests {
             #[cfg(test)]
             None,
         )
-        .await;
+        .await
+    }
 
-        // --- Assert ---
-        // We expect the function to fail gracefully.
-        assert!(
-            result.is_err(),
-            "Function should return an Err for non-existent files"
+    /// Extracts the body of the file block whose display path ends with `name`.
+    fn file_block_body<'a>(content: &'a str, name: &str) -> &'a str {
+        let header = format!("{name}\n===FILE-START===\n");
+        let start = content.find(&header).expect("file block not found") + header.len();
+        let end = content[start..]
+            .find("---FILE-END-----\n")
+            .expect("file block not terminated");
+        &content[start..start + end]
+    }
+
+    #[tokio::test]
+    async fn generate_content_marks_unreadable_file_and_continues() {
+        let (_dir, root) = setup_test_environment();
+
+        let selected_files = vec![
+            root.join("README.md"),                    // valid
+            root.join("path/to/nonexistent/file.txt"), // vanished since the scan
+            root.join("src/main.rs"),                  // must still be processed
+        ];
+
+        let content = generate_plain(&selected_files, &root)
+            .await
+            .expect("an unreadable file must not abort the generation");
+
+        assert_eq!(
+            file_block_body(&content, "README.md"),
+            "This is the main readme.\n"
         );
+        let marker = file_block_body(&content, "path/to/nonexistent/file.txt");
+        assert!(
+            marker.starts_with("[FILE UNREADABLE: ") && marker.ends_with(" - CONTENT SKIPPED]\n"),
+            "unexpected marker: {marker:?}"
+        );
+        assert!(
+            marker.len() > "[FILE UNREADABLE:  - CONTENT SKIPPED]\n".len(),
+            "marker should state a reason: {marker:?}"
+        );
+        assert!(file_block_body(&content, "src/main.rs").starts_with("fn main() {"));
+    }
 
-        // Bonus: We can even check for the specific error type to make the test more precise.
-        // The error should be an I/O error from trying to read the non-existent file.
-        if let Err(e) = result {
-            match e {
-                CoreError::Io(_, path) => {
-                    assert!(path.ends_with("file.txt"));
-                }
-                _ => panic!("Expected CoreError::Io, but got a different error type."),
-            }
-        }
+    #[tokio::test]
+    async fn latin1_text_file_is_included_lossily() {
+        let (_dir, root) = setup_test_environment();
+        let latin1_path = root.join("legacy.txt");
+        // "Können wir? Ja." encoded as Latin-1: 0xF6 is not valid UTF-8.
+        fs::write(&latin1_path, b"K\xf6nnen wir? Ja.\n").unwrap();
+
+        let content = generate_plain(&[latin1_path], &root).await.unwrap();
+
+        assert_eq!(
+            file_block_body(&content, "legacy.txt"),
+            "K\u{FFFD}nnen wir? Ja.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_utf8_file_with_nul_bytes_is_skipped_as_binary() {
+        let (_dir, root) = setup_test_environment();
+        // A text extension must not override binary-looking content (e.g. UTF-16).
+        let binary_path = root.join("utf16.txt");
+        fs::write(&binary_path, b"\xff\xfeh\x00i\x00").unwrap();
+
+        let content = generate_plain(&[binary_path], &root).await.unwrap();
+
+        assert_eq!(
+            file_block_body(&content, "utf16.txt"),
+            "[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]\n"
+        );
+    }
+
+    #[test]
+    fn decode_file_bytes_classifies_content() {
+        let decode = |name: &str, bytes: &[u8]| decode_file_bytes(Path::new(name), bytes.to_vec());
+
+        assert_eq!(decode("a.txt", "héllo".as_bytes()), "héllo");
+        assert_eq!(decode("no_extension", b"caf\xe9"), "caf\u{FFFD}");
+        // Known binary extensions stay binary even without NUL bytes.
+        assert_eq!(decode("a.bin", b"caf\xe9"), BINARY_CONTENT_MARKER);
+        assert_eq!(decode("a.txt", b"\x00\xff"), BINARY_CONTENT_MARKER);
+    }
+
+    #[test]
+    fn output_document_formats_blocks_without_io() {
+        let mut document = OutputDocument::new("NOW", 2);
+        document.push_tree("tree\n");
+        document.push_file("a.txt", "no newline");
+        document.push_file("b.txt", "");
+
+        assert_eq!(
+            document.finish(),
+            "# CFC Output - Generated: NOW\n# Total files: 2\n\n\
+             # DIRECTORY TREE\n=====================\ntree\n=====================\n\n\
+             a.txt\n===FILE-START===\nno newline\n---FILE-END-----\n\n\
+             b.txt\n===FILE-START===\n\n---FILE-END-----\n\n"
+        );
     }
 
     #[tokio::test]
@@ -719,7 +873,8 @@ mod tests {
             .await
         });
 
-        // Wait for signal
+        // Wait until the first file has been fully processed. The task now holds
+        // before the second file until it observes the cancel flag.
         rx.await.expect("Task did not send start signal");
 
         // Set the flag over the original reference
@@ -728,10 +883,31 @@ mod tests {
         let result = generation_task.await.unwrap();
 
         assert!(
-            result.is_err(),
-            "The task should have returned an error upon cancellation"
+            matches!(result, Err(CoreError::Cancelled)),
+            "The task should have been cancelled between the two files, got {result:?}"
         );
-        matches!(result.unwrap_err(), CoreError::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn generate_content_cancelled_before_start_returns_cancelled() {
+        let (_dir, root) = setup_test_environment();
+        // Even an unreadable file must not mask a cancellation.
+        let selected_files = vec![root.join("does_not_exist.txt")];
+
+        let result = FileHandler::generate_concatenated_content_simple(
+            &selected_files,
+            &root,
+            false,
+            vec![],
+            HashSet::new(),
+            true,
+            Arc::new(AtomicBool::new(true)),
+            #[cfg(test)]
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Err(CoreError::Cancelled)));
     }
 
     #[test]
