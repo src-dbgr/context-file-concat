@@ -340,19 +340,27 @@ const MAX_CONTENT_CHECK_SIZE: u64 = 20 * 1024 * 1024;
 
 const CONTENT_CHECK_BUFFER_SIZE: usize = 1024;
 
+/// Classifies a path by its extension alone, without touching the file system.
+///
+/// Returns `Some(true)` for known text extensions, `Some(false)` for known binary
+/// or image extensions, and `None` if the extension is missing or unknown.
+pub fn classify_by_extension(path: &Path) -> Option<bool> {
+    let ext_lower = path.extension()?.to_str()?.to_lowercase();
+    if get_text_ext_set().contains(ext_lower.as_str()) {
+        return Some(true);
+    }
+    if get_binary_ext_set().contains(ext_lower.as_str())
+        || get_image_ext_set().contains(ext_lower.as_str())
+    {
+        return Some(false);
+    }
+    None
+}
+
 /// Determines if a file is likely to be a text file.
 pub fn is_text_file(path: &Path) -> Result<bool> {
-    if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
-        let ext_lower = extension.to_lowercase();
-        if get_text_ext_set().contains(ext_lower.as_str()) {
-            return Ok(true);
-        }
-        if get_binary_ext_set().contains(ext_lower.as_str()) {
-            return Ok(false);
-        }
-        if get_image_ext_set().contains(ext_lower.as_str()) {
-            return Ok(false);
-        }
+    if let Some(is_text) = classify_by_extension(path) {
+        return Ok(is_text);
     }
     match std::fs::metadata(path) {
         Ok(metadata) => {
@@ -385,28 +393,35 @@ fn check_file_content_optimized(path: &Path) -> Result<bool> {
     let file = File::open(path)?;
     let mut reader = BufReader::with_capacity(CONTENT_CHECK_BUFFER_SIZE, file);
     let bytes_read = reader.read(&mut buffer)?;
-    if bytes_read == 0 {
-        return Ok(true);
-    }
-    if buffer[..bytes_read].contains(&0) {
-        return Ok(false);
-    }
-    match std::str::from_utf8(&buffer[..bytes_read]) {
-        Ok(_) => Ok(true),
-        Err(_) => {
-            // VET: Switched to a more robust heuristic. Instead of checking for printable
-            // ASCII, we check for the absence of control characters (excluding whitespace).
-            // This correctly handles legacy 8-bit encodings like Latin-1.
-            let control_char_count = buffer[..bytes_read]
-                .iter()
-                .filter(|&&b| b < 32 && b != 9 && b != 10 && b != 13)
-                .count();
+    Ok(is_text_content(&buffer[..bytes_read]))
+}
 
-            // If less than 5% of the bytes are weird control characters, we assume it's text.
-            let ratio = control_char_count as f32 / bytes_read as f32;
-            Ok(ratio < 0.05)
-        }
+/// Guesses whether raw bytes are text, based on their leading sample.
+///
+/// Only the first `CONTENT_CHECK_BUFFER_SIZE` bytes are inspected, so callers that
+/// already hold a file's content get the same verdict as [`is_text_file`]'s content check.
+pub fn is_text_content(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(CONTENT_CHECK_BUFFER_SIZE)];
+    if sample.is_empty() {
+        return true;
     }
+    if sample.contains(&0) {
+        return false;
+    }
+    if std::str::from_utf8(sample).is_ok() {
+        return true;
+    }
+    // VET: Switched to a more robust heuristic. Instead of checking for printable
+    // ASCII, we check for the absence of control characters (excluding whitespace).
+    // This correctly handles legacy 8-bit encodings like Latin-1.
+    let control_char_count = sample
+        .iter()
+        .filter(|&&b| b < 32 && b != 9 && b != 10 && b != 13)
+        .count();
+
+    // If less than 5% of the bytes are weird control characters, we assume it's text.
+    let ratio = control_char_count as f32 / sample.len() as f32;
+    ratio < 0.05
 }
 
 /// Classifies a batch of files as text or image.
