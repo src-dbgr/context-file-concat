@@ -147,7 +147,7 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
     {
         let state = harness.state.lock().unwrap();
         assert!(
-            state.is_scanning,
+            state.is_scanning(),
             "Scanning should still be active in the background"
         );
         assert!(
@@ -189,7 +189,7 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
     // --- ASSERT (Phase 2: Deep Scan) ---
     {
         let state = harness.state.lock().unwrap();
-        assert!(!state.is_scanning, "Scanning should be finished");
+        assert!(!state.is_scanning(), "Scanning should be finished");
         assert!(
             state.is_fully_scanned,
             "is_fully_scanned should be true after deep scan"

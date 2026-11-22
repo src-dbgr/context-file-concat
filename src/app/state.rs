@@ -9,6 +9,106 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
+/// Proof of identity of one background run, plus the means to tell it to stop.
+#[derive(Debug, Clone)]
+struct RunTicket {
+    id: u64,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+impl RunTicket {
+    fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.cancel_flag.clone()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::SeqCst)
+    }
+}
+
+/// The run that currently occupies a [`RunSlot`].
+struct ActiveRun {
+    ticket: RunTicket,
+    /// The task executing the run. `None` until it has been attached.
+    task: Option<JoinHandle<()>>,
+}
+
+/// Exclusive ownership of one kind of background work (scanning, generating).
+///
+/// At most one run is active per slot. Beginning a new run supersedes the previous one,
+/// and only the ticket of the active run can attach a task to the slot or release it.
+/// This is what keeps a task that is still winding down from touching the state of its
+/// successor.
+#[derive(Default)]
+struct RunSlot {
+    last_id: u64,
+    active: Option<ActiveRun>,
+}
+
+impl RunSlot {
+    /// Starts a new run, cancelling the one that is still active (if any).
+    fn begin(&mut self) -> RunTicket {
+        self.cancel();
+        self.last_id += 1;
+        let ticket = RunTicket {
+            id: self.last_id,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+        };
+        self.active = Some(ActiveRun {
+            ticket: ticket.clone(),
+            task: None,
+        });
+        ticket
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    fn is_current(&self, ticket: &RunTicket) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|run| run.ticket.id == ticket.id)
+    }
+
+    /// Registers the task executing the run identified by `ticket`. The task of a run
+    /// that is no longer current is aborted instead.
+    fn attach_task(&mut self, ticket: &RunTicket, handle: JoinHandle<()>) {
+        match self.active.as_mut() {
+            Some(run) if run.ticket.id == ticket.id => run.task = Some(handle),
+            _ => handle.abort(),
+        }
+    }
+
+    /// Releases the slot on behalf of the run identified by `ticket`, which has come to
+    /// its end by itself. Returns `false` (and does nothing) for a run that is not current.
+    fn finish(&mut self, ticket: &RunTicket) -> bool {
+        if !self.is_current(ticket) {
+            return false;
+        }
+        self.active = None;
+        true
+    }
+
+    /// Stops the active run: raises its cancellation flag and aborts its task.
+    /// Returns `false` if there was no active run.
+    fn cancel(&mut self) -> bool {
+        let Some(run) = self.active.take() else {
+            return false;
+        };
+        run.ticket.cancel_flag.store(true, Ordering::SeqCst);
+        if let Some(task) = run.task {
+            task.abort();
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn has_task(&self) -> bool {
+        self.active.as_ref().is_some_and(|run| run.task.is_some())
+    }
+}
+
 /// Identifies one run of a full directory scan.
 ///
 /// A token is handed out by [`AppState::begin_scan`] and must accompany every state
@@ -16,31 +116,62 @@ use tokio::task::JoinHandle;
 /// or was superseded by a newer scan, the token is stale and `AppState` ignores it, so a
 /// task that is still winding down can never corrupt the state of its successor.
 #[derive(Debug, Clone)]
-pub struct ScanToken {
-    id: u64,
-    cancel_flag: Arc<AtomicBool>,
-}
+pub struct ScanToken(RunTicket);
 
 impl ScanToken {
     /// The cancellation flag owned by this scan, to be handed to the scanner.
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
-        self.cancel_flag.clone()
+        self.0.cancel_flag()
     }
 
     /// `true` once this scan has been cancelled or superseded by a newer scan.
     pub fn is_cancelled(&self) -> bool {
-        self.cancel_flag.load(Ordering::SeqCst)
+        self.0.is_cancelled()
+    }
+}
+
+/// Identifies one run of the content generation.
+///
+/// The counterpart of [`ScanToken`], handed out by [`AppState::begin_generation`]. A
+/// generation that was cancelled or superseded holds a stale token and can neither
+/// publish its result nor reset the generating state of its successor.
+#[derive(Debug, Clone)]
+pub struct GenerationToken(RunTicket);
+
+impl GenerationToken {
+    /// The cancellation flag owned by this generation, to be handed to the generator.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.0.cancel_flag()
+    }
+
+    /// `true` once this generation has been cancelled or superseded by a newer one.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
     }
 }
 
 /// Ties a lazy (single directory level) load to the file list it was started for.
 ///
 /// Handed out by [`AppState::begin_lazy_load`]. The token goes stale as soon as the file
-/// list is replaced wholesale (new scan, directory reset), in which case the results of
-/// the lazy load must be discarded instead of being merged into an unrelated list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// list is replaced wholesale (new scan, directory reset). From then on the lazy load is
+/// told to stop via its cancellation flag, and whatever it still produces must be
+/// discarded instead of being merged into an unrelated list.
+#[derive(Debug, Clone)]
 pub struct LazyLoadToken {
     file_list_generation: u64,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+impl LazyLoadToken {
+    /// The cancellation flag of this lazy load, to be handed to the scanner.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.cancel_flag.clone()
+    }
+
+    /// `true` once the file list this lazy load was started for has been replaced.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::SeqCst)
+    }
 }
 
 /// Holds the complete, mutable state of the application.
@@ -63,10 +194,6 @@ pub struct AppState {
     pub expanded_dirs: HashSet<PathBuf>,
     /// The set of absolute paths to directories whose children have been loaded.
     pub loaded_dirs: HashSet<PathBuf>,
-    /// `true` if a directory scan is currently in progress.
-    pub is_scanning: bool,
-    /// `true` if the concatenation process is currently running.
-    pub is_generating: bool,
     /// The current search query for filenames.
     pub search_query: String,
     /// The current filter for file extensions.
@@ -81,14 +208,6 @@ pub struct AppState {
     pub scan_progress: ScanProgress,
     /// The path of the file currently being previewed in the editor.
     pub previewed_file_path: Option<PathBuf>,
-    /// A handle to the currently running scan task, allowing it to be aborted.
-    pub scan_task: Option<JoinHandle<()>>,
-    /// A flag used to signal cancellation to the scan task.
-    pub scan_cancellation_flag: Arc<AtomicBool>,
-    /// A handle to the currently running generation task, allowing it to be aborted.
-    pub generation_task: Option<JoinHandle<()>>,
-    /// A flag used to signal cancellation to the generation task.
-    pub generation_cancellation_flag: Arc<AtomicBool>,
     /// The set of ignore patterns that were actually matched during the last scan.
     pub active_ignore_patterns: HashSet<String>,
     /// `true` if a full, non-lazy scan has been completed successfully.
@@ -100,8 +219,13 @@ pub struct AppState {
     /// Incremented whenever the file list is replaced wholesale (a scan begins or the
     /// directory is reset). Lets background tasks detect that their results are outdated.
     file_list_generation: u64,
-    /// The id of the scan that currently owns the scanning state, if any.
-    active_scan_id: Option<u64>,
+    /// Shared by all lazy loads started for the current file list; raised when that list
+    /// is replaced, so that those loads stop instead of scanning for nothing.
+    lazy_load_cancel_flag: Arc<AtomicBool>,
+    /// The directory scan that is currently in progress, if any.
+    scan: RunSlot,
+    /// The content generation that is currently in progress, if any.
+    generation: RunSlot,
     /// Incremented whenever `filtered_file_list` changes. Derived data (the tree index)
     /// is keyed by this revision.
     filtered_revision: u64,
@@ -120,8 +244,6 @@ impl Default for AppState {
             selected_files: HashSet::new(),
             expanded_dirs: HashSet::new(),
             loaded_dirs: HashSet::new(),
-            is_scanning: false,
-            is_generating: false,
             search_query: String::new(),
             extension_filter: String::new(),
             content_search_query: String::new(),
@@ -133,15 +255,13 @@ impl Default for AppState {
                 current_scanning_path: "Ready.".to_string(),
             },
             previewed_file_path: None,
-            scan_task: None,
-            scan_cancellation_flag: Arc::new(AtomicBool::new(false)),
-            generation_task: None,
-            generation_cancellation_flag: Arc::new(AtomicBool::new(false)),
             active_ignore_patterns: HashSet::new(),
             is_fully_scanned: false,
             patterns_need_rescan: false,
             file_list_generation: 0,
-            active_scan_id: None,
+            lazy_load_cancel_flag: Arc::new(AtomicBool::new(false)),
+            scan: RunSlot::default(),
+            generation: RunSlot::default(),
             filtered_revision: 0,
             tree_index_cache: TreeIndexCache::default(),
         }
@@ -149,29 +269,25 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// `true` if a directory scan is currently in progress.
+    pub fn is_scanning(&self) -> bool {
+        self.scan.is_active()
+    }
+
     /// Starts a new scan run and returns the token identifying it.
     ///
     /// Any scan that is still active is superseded: its task is aborted, its cancellation
     /// flag is raised and its token becomes stale. The returned token is the only key
-    /// that allows a scan task to modify the scanning state from now on.
+    /// that allows a scan task to modify the scanning state from now on. Because the scan
+    /// is going to replace the file list, pending lazy loads are cancelled as well.
     pub fn begin_scan(&mut self) -> ScanToken {
-        self.abort_scan_task();
-        self.scan_cancellation_flag.store(true, Ordering::SeqCst);
-
-        self.file_list_generation += 1;
-        let token = ScanToken {
-            id: self.file_list_generation,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
-        };
-        self.scan_cancellation_flag = token.cancel_flag();
-        self.active_scan_id = Some(token.id);
-        self.is_scanning = true;
-        token
+        self.invalidate_file_list();
+        ScanToken(self.scan.begin())
     }
 
     /// `true` if `token` belongs to the scan that currently owns the scanning state.
     pub fn is_current_scan(&self, token: &ScanToken) -> bool {
-        self.active_scan_id == Some(token.id)
+        self.scan.is_current(&token.0)
     }
 
     /// Stores the handle of the task that runs the scan identified by `token`.
@@ -180,40 +296,15 @@ impl AppState {
     /// superseded before the handle could be registered), the task is aborted instead,
     /// so a stale handle never replaces the one of a newer scan.
     pub fn attach_scan_task(&mut self, token: &ScanToken, handle: JoinHandle<()>) {
-        if self.is_current_scan(token) {
-            self.scan_task = Some(handle);
-        } else {
-            handle.abort();
-        }
+        self.scan.attach_task(&token.0, handle);
     }
 
     /// Marks the scan identified by `token` as finished and releases the scanning state.
     ///
-    /// Does nothing for a stale token. Returns `true` if this call ended a scan that was
-    /// still flagged as running, i.e. if the UI needs to be told about the change.
+    /// Does nothing for a stale token. Returns `true` if this call ended the running
+    /// scan, i.e. if the UI needs to be told about the change.
     pub fn finish_scan(&mut self, token: &ScanToken) -> bool {
-        if !self.is_current_scan(token) {
-            return false;
-        }
-        self.active_scan_id = None;
-        self.scan_task = None;
-        std::mem::replace(&mut self.is_scanning, false)
-    }
-
-    /// Returns a token for a lazy load of a single directory level, or `None` if a full
-    /// scan is in progress (which will load that level anyway).
-    pub fn begin_lazy_load(&self) -> Option<LazyLoadToken> {
-        if self.is_scanning {
-            return None;
-        }
-        Some(LazyLoadToken {
-            file_list_generation: self.file_list_generation,
-        })
-    }
-
-    /// `true` if the file list the lazy load was started for is still the current one.
-    pub fn is_current_lazy_load(&self, token: &LazyLoadToken) -> bool {
-        self.file_list_generation == token.file_list_generation
+        self.scan.finish(&token.0)
     }
 
     /// Cancels the current scan, if any, and resets the scanning state.
@@ -222,15 +313,11 @@ impl AppState {
     /// been attached, so a cancellation issued in that window is not lost.
     pub fn cancel_current_scan(&mut self) {
         tracing::info!("LOG: AppState::cancel_current_scan called.");
-        let had_task = self.abort_scan_task();
-        if !had_task && self.active_scan_id.is_none() {
+        if !self.scan.cancel() {
             tracing::warn!("LOG: cancel_current_scan called, but no active scan found.");
             return;
         }
 
-        self.scan_cancellation_flag.store(true, Ordering::SeqCst);
-        self.active_scan_id = None;
-        self.is_scanning = false;
         self.scan_progress = ScanProgress {
             files_scanned: 0,
             large_files_skipped: 0,
@@ -239,25 +326,82 @@ impl AppState {
         tracing::info!("LOG: AppState has been reset to 'cancelled' state.");
     }
 
-    /// Aborts the registered scan task, if any. Returns `true` if there was one.
-    fn abort_scan_task(&mut self) -> bool {
-        match self.scan_task.take() {
-            Some(handle) => {
-                handle.abort();
-                true
-            }
-            None => false,
+    /// Returns a token for a lazy load of a single directory level, or `None` if a full
+    /// scan is in progress (which will load that level anyway).
+    pub fn begin_lazy_load(&self) -> Option<LazyLoadToken> {
+        if self.is_scanning() {
+            return None;
         }
+        Some(LazyLoadToken {
+            file_list_generation: self.file_list_generation,
+            cancel_flag: self.lazy_load_cancel_flag.clone(),
+        })
     }
 
-    /// Cancels the current generation task, if any.
+    /// `true` if the file list the lazy load was started for is still the current one.
+    pub fn is_current_lazy_load(&self, token: &LazyLoadToken) -> bool {
+        self.file_list_generation == token.file_list_generation
+    }
+
+    /// Declares the current file list obsolete because it is about to be replaced
+    /// wholesale: lazy loads started for it go stale and are told to stop.
+    fn invalidate_file_list(&mut self) {
+        self.file_list_generation += 1;
+        let obsolete_flag = std::mem::replace(
+            &mut self.lazy_load_cancel_flag,
+            Arc::new(AtomicBool::new(false)),
+        );
+        obsolete_flag.store(true, Ordering::SeqCst);
+    }
+
+    /// `true` if the concatenated output is currently being generated.
+    pub fn is_generating(&self) -> bool {
+        self.generation.is_active()
+    }
+
+    /// Starts a new generation run and returns the token identifying it.
+    ///
+    /// A generation that is still active is superseded: its task is aborted, its
+    /// cancellation flag is raised and its token becomes stale.
+    pub fn begin_generation(&mut self) -> GenerationToken {
+        GenerationToken(self.generation.begin())
+    }
+
+    /// `true` if `token` belongs to the generation that currently owns the generating state.
+    pub fn is_current_generation(&self, token: &GenerationToken) -> bool {
+        self.generation.is_current(&token.0)
+    }
+
+    /// Stores the handle of the task that runs the generation identified by `token`.
+    /// The task of a generation that is no longer current is aborted instead.
+    pub fn attach_generation_task(&mut self, token: &GenerationToken, handle: JoinHandle<()>) {
+        self.generation.attach_task(&token.0, handle);
+    }
+
+    /// Marks the generation identified by `token` as finished and releases the generating
+    /// state.
+    ///
+    /// Does nothing for a stale token. Returns `true` if this call ended the running
+    /// generation, i.e. if its outcome may be published to the UI.
+    pub fn finish_generation(&mut self, token: &GenerationToken) -> bool {
+        self.generation.finish(&token.0)
+    }
+
+    /// Cancels the current generation, if any, and resets the generating state.
     pub fn cancel_current_generation(&mut self) {
-        if let Some(handle) = self.generation_task.take() {
-            handle.abort();
-        }
-        self.generation_cancellation_flag
-            .store(true, Ordering::SeqCst);
-        self.is_generating = false;
+        self.generation.cancel();
+    }
+
+    /// `true` if the task of the current scan has been attached.
+    #[cfg(test)]
+    pub(crate) fn has_scan_task(&self) -> bool {
+        self.scan.has_task()
+    }
+
+    /// `true` if the task of the current generation has been attached.
+    #[cfg(test)]
+    pub(crate) fn has_generation_task(&self) -> bool {
+        self.generation.has_task()
     }
 
     /// The files and directories visible in the UI after applying filters.
@@ -288,8 +432,7 @@ impl AppState {
     pub fn reset_directory_state(&mut self) {
         self.cancel_current_scan();
         self.cancel_current_generation();
-        // The file list is about to be thrown away: outdate pending lazy loads.
-        self.file_list_generation += 1;
+        self.invalidate_file_list();
 
         self.current_path = String::new();
         self.full_file_list.clear();
@@ -303,7 +446,6 @@ impl AppState {
         self.content_search_results.clear();
         self.previewed_file_path = None;
         self.active_ignore_patterns.clear();
-        self.is_generating = false;
         self.is_fully_scanned = false;
         self.patterns_need_rescan = false;
         self.scan_progress = ScanProgress {
@@ -386,10 +528,9 @@ mod tests {
     async fn test_cancel_scan_with_active_task() {
         // Arrange
         let mut state = AppState::default();
-        state.is_scanning = true;
-        state.scan_task = Some(create_dummy_task());
+        let token = state.begin_scan();
+        state.attach_scan_task(&token, create_dummy_task());
         state.scan_progress.current_scanning_path = "In progress...".to_string();
-        state.scan_cancellation_flag.store(false, Ordering::SeqCst);
 
         // Act
         state.cancel_current_scan();
@@ -398,16 +539,16 @@ mod tests {
 
         // Assert
         assert!(
-            state.scan_task.is_none(),
+            !state.has_scan_task(),
             "Scan task should be taken from the state"
         );
-        assert!(!state.is_scanning, "is_scanning should be false");
+        assert!(!state.is_scanning(), "is_scanning should be false");
         assert_eq!(
             state.scan_progress.current_scanning_path, "Scan cancelled.",
             "Progress message should be updated"
         );
         assert!(
-            state.scan_cancellation_flag.load(Ordering::SeqCst),
+            token.is_cancelled(),
             "Cancellation flag should be set to true"
         );
     }
@@ -416,13 +557,13 @@ mod tests {
     async fn test_cancel_scan_with_no_task_does_not_panic() {
         // Arrange
         let mut state = AppState::default();
-        state.is_scanning = false; // precondition
-        state.scan_task = None; // precondition
+        assert!(!state.is_scanning(), "precondition");
+        assert!(!state.has_scan_task(), "precondition");
 
         // Act & Assert
         // The test passes if this call does not panic.
         state.cancel_current_scan();
-        assert!(!state.is_scanning);
+        assert!(!state.is_scanning());
     }
 
     #[tokio::test]
@@ -431,12 +572,13 @@ mod tests {
 
         let token = state.begin_scan();
 
-        assert!(state.is_scanning);
+        assert!(state.is_scanning());
         assert!(state.is_current_scan(&token));
         assert!(!token.is_cancelled());
+        state.cancel_current_scan();
         assert!(
-            Arc::ptr_eq(&state.scan_cancellation_flag, &token.cancel_flag()),
-            "State must expose the cancellation flag of the current scan"
+            token.is_cancelled(),
+            "State must control the cancellation flag of the current scan"
         );
     }
 
@@ -456,7 +598,7 @@ mod tests {
         assert!(!state.is_current_scan(&old_token));
         assert!(state.is_current_scan(&new_token));
         assert!(!new_token.is_cancelled());
-        assert!(state.is_scanning);
+        assert!(state.is_scanning());
     }
 
     #[tokio::test]
@@ -469,8 +611,8 @@ mod tests {
         let changed = state.finish_scan(&old_token);
 
         assert!(!changed);
-        assert!(state.is_scanning, "New scan must still be running");
-        assert!(state.scan_task.is_some(), "New scan must stay cancellable");
+        assert!(state.is_scanning(), "New scan must still be running");
+        assert!(state.has_scan_task(), "New scan must stay cancellable");
         assert!(state.is_current_scan(&new_token));
         state.cancel_current_scan();
     }
@@ -483,8 +625,8 @@ mod tests {
 
         assert!(state.finish_scan(&token));
 
-        assert!(!state.is_scanning);
-        assert!(state.scan_task.is_none());
+        assert!(!state.is_scanning());
+        assert!(!state.has_scan_task());
         assert!(!state.is_current_scan(&token));
         assert!(!state.finish_scan(&token), "Finishing twice is a no-op");
     }
@@ -505,7 +647,7 @@ mod tests {
 
         assert!(stale_abort.is_finished(), "Stale task must be aborted");
         assert!(!new_abort.is_finished(), "Current task must keep running");
-        assert!(state.scan_task.is_some());
+        assert!(state.has_scan_task());
         state.cancel_current_scan();
     }
 
@@ -516,7 +658,7 @@ mod tests {
 
         state.cancel_current_scan();
 
-        assert!(!state.is_scanning);
+        assert!(!state.is_scanning());
         assert!(token.is_cancelled());
         assert!(!state.is_current_scan(&token));
         assert_eq!(state.scan_progress.current_scanning_path, "Scan cancelled.");
@@ -526,7 +668,7 @@ mod tests {
         let late_abort = late_handle.abort_handle();
         state.attach_scan_task(&token, late_handle);
         tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(state.scan_task.is_none());
+        assert!(!state.has_scan_task());
         assert!(late_abort.is_finished());
     }
 
@@ -556,14 +698,189 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_lazy_load_is_cancelled_when_a_new_scan_begins() {
+        let mut state = AppState::default();
+        let lazy = state.begin_lazy_load().expect("not scanning");
+        let scanner_flag = lazy.cancel_flag();
+        assert!(!lazy.is_cancelled());
+
+        let scan = state.begin_scan();
+
+        assert!(lazy.is_cancelled(), "Superseded lazy load must stop");
+        assert!(scanner_flag.load(Ordering::SeqCst));
+        assert!(
+            !scan.is_cancelled(),
+            "The new scan itself must keep running"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lazy_load_is_cancelled_when_directory_is_reset() {
+        let mut state = AppState::default();
+        let lazy = state.begin_lazy_load().expect("not scanning");
+
+        state.reset_directory_state();
+
+        assert!(
+            lazy.is_cancelled(),
+            "Lazy load of a dropped directory must stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lazy_load_started_for_the_new_file_list_is_not_cancelled() {
+        let mut state = AppState::default();
+        let outdated = state.begin_lazy_load().expect("not scanning");
+        let scan = state.begin_scan();
+        state.finish_scan(&scan);
+
+        let current = state.begin_lazy_load().expect("scan has finished");
+        let sibling = state.begin_lazy_load().expect("scan has finished");
+
+        assert!(outdated.is_cancelled());
+        assert!(!current.is_cancelled());
+        assert!(state.is_current_lazy_load(&current));
+
+        // Loads of the same file list are replaced together.
+        state.reset_directory_state();
+        assert!(current.is_cancelled());
+        assert!(sibling.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_cancelling_a_scan_leaves_the_file_list_and_its_lazy_loads_alone() {
+        let mut state = AppState::default();
+        let scan = state.begin_scan();
+        state.finish_scan(&scan);
+        let lazy = state.begin_lazy_load().expect("scan has finished");
+
+        state.cancel_current_scan();
+        state.cancel_current_generation();
+
+        assert!(!lazy.is_cancelled());
+        assert!(state.is_current_lazy_load(&lazy));
+    }
+
+    #[tokio::test]
+    async fn test_begin_generation_marks_state_as_generating() {
+        let mut state = AppState::default();
+        assert!(!state.is_generating());
+
+        let token = state.begin_generation();
+
+        assert!(state.is_generating());
+        assert!(state.is_current_generation(&token));
+        assert!(!token.is_cancelled());
+        assert!(
+            !state.is_scanning(),
+            "Generating is independent of scanning"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_begin_generation_supersedes_previous_generation() {
+        let mut state = AppState::default();
+        let old_token = state.begin_generation();
+        let old_handle = create_dummy_task();
+        let old_abort = old_handle.abort_handle();
+        state.attach_generation_task(&old_token, old_handle);
+
+        let new_token = state.begin_generation();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(
+            old_token.is_cancelled(),
+            "Old generation must be told to stop"
+        );
+        assert!(
+            old_abort.is_finished(),
+            "Old generation task must be aborted"
+        );
+        assert!(!state.is_current_generation(&old_token));
+        assert!(state.is_current_generation(&new_token));
+        assert!(!new_token.is_cancelled());
+        assert!(state.is_generating());
+    }
+
+    #[tokio::test]
+    async fn test_finish_generation_with_stale_token_leaves_new_generation_untouched() {
+        let mut state = AppState::default();
+        let old_token = state.begin_generation();
+        let new_token = state.begin_generation();
+        state.attach_generation_task(&new_token, create_dummy_task());
+
+        let finished = state.finish_generation(&old_token);
+
+        assert!(!finished);
+        assert!(
+            state.is_generating(),
+            "New generation must still be running"
+        );
+        assert!(
+            state.has_generation_task(),
+            "New generation must stay cancellable"
+        );
+        assert!(state.is_current_generation(&new_token));
+        state.cancel_current_generation();
+    }
+
+    #[tokio::test]
+    async fn test_finish_generation_with_current_token_releases_generating_state() {
+        let mut state = AppState::default();
+        let token = state.begin_generation();
+        state.attach_generation_task(&token, create_dummy_task());
+
+        assert!(state.finish_generation(&token));
+
+        assert!(!state.is_generating());
+        assert!(!state.has_generation_task());
+        assert!(!token.is_cancelled(), "Finishing is not cancelling");
+        assert!(
+            !state.finish_generation(&token),
+            "Finishing twice is a no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_generation_cannot_be_finished_or_resurrected() {
+        let mut state = AppState::default();
+        let token = state.begin_generation();
+
+        state.cancel_current_generation();
+
+        assert!(!state.is_generating());
+        assert!(token.is_cancelled());
+        assert!(!state.finish_generation(&token));
+
+        // The task handle arriving late must not resurrect the cancelled generation.
+        let late_handle = create_dummy_task();
+        let late_abort = late_handle.abort_handle();
+        state.attach_generation_task(&token, late_handle);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!state.has_generation_task());
+        assert!(late_abort.is_finished());
+    }
+
+    #[tokio::test]
+    async fn test_reset_directory_state_cancels_scan_and_generation() {
+        let mut state = AppState::default();
+        let scan = state.begin_scan();
+        let generation = state.begin_generation();
+
+        state.reset_directory_state();
+
+        assert!(scan.is_cancelled());
+        assert!(generation.is_cancelled());
+        assert!(!state.is_scanning());
+        assert!(!state.is_generating());
+    }
+
+    #[tokio::test]
     async fn test_cancel_generation_with_active_task() {
         // Arrange
         let mut state = AppState::default();
-        state.is_generating = true;
-        state.generation_task = Some(create_dummy_task());
-        state
-            .generation_cancellation_flag
-            .store(false, Ordering::SeqCst);
+        let token = state.begin_generation();
+        state.attach_generation_task(&token, create_dummy_task());
 
         // Act
         state.cancel_current_generation();
@@ -571,12 +888,12 @@ mod tests {
 
         // Assert
         assert!(
-            state.generation_task.is_none(),
+            !state.has_generation_task(),
             "Generation task should be cleared"
         );
-        assert!(!state.is_generating, "is_generating should be false");
+        assert!(!state.is_generating(), "is_generating should be false");
         assert!(
-            state.generation_cancellation_flag.load(Ordering::SeqCst),
+            token.is_cancelled(),
             "Generation cancellation flag should be set"
         );
     }
@@ -585,13 +902,13 @@ mod tests {
     async fn test_cancel_generation_with_no_task_does_not_panic() {
         // Arrange
         let mut state = AppState::default();
-        state.is_generating = false;
-        state.generation_task = None;
+        assert!(!state.is_generating(), "precondition");
+        assert!(!state.has_generation_task(), "precondition");
 
         // Act & Assert
         // The test passes if this call does not panic.
         state.cancel_current_generation();
-        assert!(!state.is_generating);
+        assert!(!state.is_generating());
     }
 
     #[tokio::test]
@@ -606,10 +923,10 @@ mod tests {
         state.loaded_dirs = HashSet::from([PathBuf::from("/test/project")]);
         state.search_query = "test".to_string();
         state.is_fully_scanned = true;
-        state.scan_task = Some(create_dummy_task());
-        state.generation_task = Some(create_dummy_task());
-        state.is_scanning = true;
-        state.is_generating = true;
+        let scan = state.begin_scan();
+        state.attach_scan_task(&scan, create_dummy_task());
+        let generation = state.begin_generation();
+        state.attach_generation_task(&generation, create_dummy_task());
         state.patterns_need_rescan = true;
 
         // Act
@@ -625,12 +942,12 @@ mod tests {
         assert!(state.search_query.is_empty());
         assert!(!state.is_fully_scanned);
         assert!(state.previewed_file_path.is_none());
-        assert!(!state.is_generating);
+        assert!(!state.is_generating());
         assert_eq!(state.scan_progress.current_scanning_path, "Ready.");
 
         // Assert that the tasks were cancelled and removed
-        assert!(state.scan_task.is_none());
-        assert!(state.generation_task.is_none());
+        assert!(!state.has_scan_task());
+        assert!(!state.has_generation_task());
         assert!(!state.patterns_need_rescan);
     }
 

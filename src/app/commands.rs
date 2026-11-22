@@ -18,13 +18,16 @@ use crate::config::{self, AppConfig}; // Import AppConfig for explicit deseriali
 use crate::core::FileHandler;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 /// Opens a file dialog for the user to select a directory to scan.
 ///
 /// Triggers a new proactive, two-phase scan on the selected path.
 /// This always performs a hard reset of the application state.
+///
+/// Dismissing the dialog changes nothing: in particular, a scan that is running in the
+/// background keeps running and keeps owning the scanning state. The UI is still sent
+/// the (unchanged) state, so it can rely on getting an answer to its request.
 pub fn select_directory<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
     proxy: P,
@@ -35,13 +38,7 @@ pub fn select_directory<P: EventProxy, D: DialogService + ?Sized>(
         start_scan_on_path(path, proxy, state, false);
     } else {
         tracing::info!("LOG: User cancelled directory selection.");
-        // Manually notify on cancellation as no state mutation happens that would trigger the helper
-        let mut state_guard = state
-            .lock()
-            .expect("Mutex was poisoned. This should not happen.");
-        state_guard.is_scanning = false;
-        let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
-        proxy.send_event(event);
+        with_state_and_notify(&state, &proxy, |_| {});
     }
 }
 
@@ -522,8 +519,8 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
         .lock()
         .expect("Mutex was poisoned. This should not happen.");
 
-    state_guard.cancel_current_generation();
-    state_guard.is_generating = true;
+    // Supersedes a generation that is still running; only the new one may publish.
+    let token = state_guard.begin_generation();
     state_guard.previewed_file_path = None;
 
     // VET: CORRECTED LOGIC
@@ -538,27 +535,25 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
         state_guard.config.output_filename = new_filename;
     }
 
-    let new_cancel_flag = Arc::new(AtomicBool::new(false));
-    state_guard.generation_cancellation_flag = new_cancel_flag.clone();
-
     // Send an immediate state update to the UI to show the 'generating' state.
     proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
         &state_guard,
     ))));
 
     let real_generator = tasks::RealContentGenerator {
-        cancel_flag: new_cancel_flag,
+        cancel_flag: token.cancel_flag(),
     };
     let real_tokenizer = tasks::RealTokenizer;
 
-    let proxy_clone = proxy.clone();
-    let state_clone = state.clone();
-
     // Spawn the actual generation logic as a separate, managed task.
-    let handle = tokio::spawn(async move {
-        tasks::generation_task(proxy_clone, state_clone, real_generator, real_tokenizer).await;
-    });
-    state_guard.generation_task = Some(handle);
+    let handle = tokio::spawn(tasks::generation_task(
+        proxy.clone(),
+        state.clone(),
+        real_generator,
+        real_tokenizer,
+        token.clone(),
+    ));
+    state_guard.attach_generation_task(&token, handle);
 }
 
 /// Cancels the ongoing file content generation task.
@@ -914,6 +909,61 @@ mod tests {
 
         let final_state = harness.get_last_state_update().await.unwrap();
         assert!(!final_state.is_scanning);
+    }
+
+    /// Dismissing the dialog is not a request to stop anything: a scan that is running in
+    /// the background must keep running and keep owning the scanning state.
+    #[tokio::test]
+    async fn test_select_directory_cancel_leaves_running_scan_untouched() {
+        let mut harness = TestHarness::new();
+        harness.dialog.set_pick_folder(None);
+        let token = {
+            let mut state = harness.state.lock().unwrap();
+            let token = state.begin_scan();
+            state.attach_scan_task(&token, tokio::spawn(std::future::pending()));
+            token
+        };
+
+        select_directory(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        assert!(ui_state.is_scanning, "UI must still show the running scan");
+        let mut state = harness.state.lock().unwrap();
+        assert!(state.is_scanning());
+        assert!(state.is_current_scan(&token));
+        assert!(state.has_scan_task(), "Scan must stay cancellable");
+        assert!(!token.is_cancelled());
+        assert!(
+            state.begin_lazy_load().is_none(),
+            "Lazy loads must stay locked out while the scan is running"
+        );
+        state.cancel_current_scan();
+    }
+
+    /// A generation started via the command owns the generating state and can be cancelled.
+    #[tokio::test]
+    async fn test_generate_preview_registers_cancellable_generation() {
+        let mut harness = TestHarness::new();
+        harness.create_file("file.txt", "content");
+        harness.set_initial_files(&["file.txt"]);
+
+        generate_preview(harness.proxy.clone(), harness.state.clone());
+
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(state.is_generating());
+            assert!(state.has_generation_task());
+        }
+        cancel_generation(harness.proxy.clone(), harness.state.clone());
+        let ui_state = harness.get_last_state_update().await.unwrap();
+        assert!(!ui_state.is_generating);
+        let state = harness.state.lock().unwrap();
+        assert!(!state.is_generating());
+        assert!(!state.has_generation_task());
     }
 
     #[tokio::test]
@@ -1280,9 +1330,9 @@ mod tests {
         let mut harness = TestHarness::new();
         {
             let mut state = harness.state.lock().unwrap();
-            state.is_scanning = true;
+            let token = state.begin_scan();
             let handle = tokio::spawn(async {});
-            state.scan_task = Some(handle);
+            state.attach_scan_task(&token, handle);
         }
 
         cancel_scan(harness.proxy.clone(), harness.state.clone());
