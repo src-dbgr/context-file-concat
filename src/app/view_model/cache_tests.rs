@@ -1,4 +1,8 @@
 //! Tests for the cached tree: equivalence with the original algorithm and invalidation.
+//!
+//! The original algorithm builds the complete tree. The snapshot sent to the UI is that
+//! tree with the subtrees of collapsed directories cut off, so the oracle is the
+//! reference output pruned by exactly this rule.
 
 use super::reference::{self, BuildTreeArgs};
 use super::{generate_ui_state, TreeNode};
@@ -44,6 +48,45 @@ fn reference_tree(state: &AppState) -> Vec<TreeNode> {
         case_sensitive: state.config.case_sensitive_search,
         previewed_path: &state.previewed_file_path,
     })
+}
+
+/// Cuts off everything below nodes that are not expanded.
+fn prune_collapsed(nodes: Vec<TreeNode>) -> Vec<TreeNode> {
+    nodes
+        .into_iter()
+        .map(|mut node| {
+            node.children = if node.is_expanded {
+                prune_collapsed(std::mem::take(&mut node.children))
+            } else {
+                Vec::new()
+            };
+            node
+        })
+        .collect()
+}
+
+/// What the UI is expected to receive: the reference tree, pruned to the visible part.
+fn expected_tree(state: &AppState) -> Vec<TreeNode> {
+    prune_collapsed(reference_tree(state))
+}
+
+/// The number of (files, directories) in a complete tree.
+fn count_nodes(nodes: &[TreeNode]) -> (usize, usize) {
+    nodes.iter().fold((0, 0), |(files, dirs), node| {
+        let (child_files, child_dirs) = count_nodes(&node.children);
+        if node.is_directory {
+            (files + child_files, dirs + 1 + child_dirs)
+        } else {
+            (files + child_files + 1, dirs + child_dirs)
+        }
+    })
+}
+
+/// `true` if no node below a collapsed node is part of the tree.
+fn is_pruned(nodes: &[TreeNode]) -> bool {
+    nodes
+        .iter()
+        .all(|node| (node.is_expanded || node.children.is_empty()) && is_pruned(&node.children))
 }
 
 fn builds(state: &AppState) -> usize {
@@ -237,10 +280,11 @@ fn apply(state: &mut AppState, op: Op) {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Across arbitrary sequences of state changes, the cached tree is identical to the
-    /// one the original algorithm builds from scratch, down to the serialized payload.
+    /// Across arbitrary sequences of state changes, the snapshot is identical to the
+    /// pruned tree of the original algorithm, down to the serialized payload, and its
+    /// counters describe the complete tree.
     #[test]
-    fn cached_tree_equals_reference_tree(
+    fn cached_tree_equals_pruned_reference_tree(
         initial in list_strategy(),
         ops in prop::collection::vec(op_strategy(), 1..25),
     ) {
@@ -250,15 +294,73 @@ proptest! {
         for op in ops {
             apply(&mut state, op.clone());
 
-            let expected = reference_tree(&state);
-            let actual = generate_ui_state(&state).tree;
+            let complete = reference_tree(&state);
+            let (files, dirs) = count_nodes(&complete);
+            let expected = prune_collapsed(complete);
+            let ui_state = generate_ui_state(&state);
+            let actual = &ui_state.tree;
 
-            prop_assert_eq!(&actual, &expected, "after {:?}", op);
+            prop_assert_eq!(actual, &expected, "after {:?}", op);
             prop_assert_eq!(
-                serde_json::to_string(&actual).unwrap(),
+                serde_json::to_string(actual).unwrap(),
                 serde_json::to_string(&expected).unwrap()
             );
+            prop_assert!(is_pruned(actual));
+            prop_assert_eq!(
+                (ui_state.tree_files_count, ui_state.tree_dirs_count),
+                (files, dirs),
+                "after {:?}", op
+            );
         }
+
+        // With everything expanded nothing is pruned: the snapshot is the complete
+        // tree of the original algorithm.
+        state.expanded_dirs = state
+            .filtered_file_list()
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        prop_assert_eq!(generate_ui_state(&state).tree, reference_tree(&state));
+    }
+
+    /// Pruning never changes what is reported about a node that is part of the
+    /// snapshot: apart from the cut-off children it equals the node of the full tree.
+    #[test]
+    fn expansion_only_decides_which_nodes_are_sent(
+        list in list_strategy(),
+        selected in prop::collection::vec(target_strategy(), 0..8),
+        expanded in prop::collection::vec(target_strategy(), 0..8),
+    ) {
+        let mut state = test_state();
+        state.set_filtered_file_list(list);
+        for target in selected {
+            let path = target.resolve(&state);
+            state.selected_files.insert(path);
+        }
+        for target in expanded {
+            let path = target.resolve(&state);
+            state.expanded_dirs.insert(path);
+        }
+
+        let complete = reference_tree(&state);
+        let snapshot = generate_ui_state(&state).tree;
+
+        fn check(snapshot: &[TreeNode], complete: &[TreeNode]) -> Result<(), TestCaseError> {
+            prop_assert_eq!(snapshot.len(), complete.len());
+            for (sent, full) in snapshot.iter().zip(complete) {
+                prop_assert_eq!(&sent.path, &full.path);
+                prop_assert_eq!(&sent.selection_state, &full.selection_state);
+                prop_assert_eq!(sent.has_children, !full.children.is_empty());
+                prop_assert_eq!(sent.children_loaded, full.children_loaded);
+                if sent.is_expanded {
+                    check(&sent.children, &full.children)?;
+                } else {
+                    prop_assert!(sent.children.is_empty());
+                }
+            }
+            Ok(())
+        }
+        check(&snapshot, &complete)?;
     }
 }
 
@@ -302,7 +404,7 @@ fn index_is_reused_while_only_dynamic_state_changes() {
     assert_eq!(src.selection_state, "full");
     assert!(src.is_expanded && src.children_loaded);
     assert!(ui_state.tree[1].is_previewed);
-    assert_eq!(ui_state.tree, reference_tree(&state));
+    assert_eq!(ui_state.tree, expected_tree(&state));
 }
 
 #[test]
@@ -339,6 +441,7 @@ fn index_is_rebuilt_after_lazy_load_merge() {
     // A lazy load appends the children of one directory and re-applies the filters.
     state.full_file_list.push(item("/root/src/lib.rs", false));
     state.loaded_dirs.insert(PathBuf::from("/root/src"));
+    state.expanded_dirs.insert(PathBuf::from("/root/src"));
     filtering::apply_filters(&mut state);
     let ui_state = generate_ui_state(&state);
 

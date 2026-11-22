@@ -14,6 +14,7 @@ import {
   makeWireUiState,
   type PayloadForWire,
 } from "./helpers";
+import { makeCollapsedDirNode } from "./factories";
 
 /**
  * Positive cases: commands that accept `null` payloads.
@@ -122,6 +123,48 @@ describe("IPC contracts – inbound events/state", () => {
     const ui = makeWireUiState();
     const parsed = UiStateSchema.parse(ui);
     expect(parsed.visible_files_count).toBe(1);
+  });
+
+  it("requires the tree totals the pruned tree cannot provide", () => {
+    for (const counter of ["tree_files_count", "tree_dirs_count"] as const) {
+      const missing: Record<string, unknown> = { ...makeWireUiState() };
+      delete missing[counter];
+      expect(UiStateSchema.safeParse(missing).success).toBe(false);
+
+      const negative = { ...makeWireUiState(), [counter]: -1 };
+      expect(UiStateSchema.safeParse(negative).success).toBe(false);
+    }
+    const parsed = UiStateSchema.parse(makeWireUiState());
+    expect(parsed.tree_files_count).toBe(0);
+    expect(parsed.tree_dirs_count).toBe(1);
+  });
+
+  it("accepts a collapsed directory without children (pruned snapshot)", () => {
+    const collapsed = makeCollapsedDirNode("/repo/docs", {
+      selection_state: "partial",
+    });
+    const parsed = UiStateSchema.parse({
+      ...makeWireUiState(),
+      tree: [collapsed],
+    });
+    expect(parsed.tree[0]).toMatchObject({
+      is_expanded: false,
+      children: [],
+      has_children: true,
+      children_loaded: true,
+      selection_state: "partial",
+    });
+  });
+
+  it("rejects non-boolean pruning flags on a tree node", () => {
+    for (const flag of ["has_children", "children_loaded"] as const) {
+      const node = { ...makeCollapsedDirNode(), [flag]: "yes" };
+      const result = UiStateSchema.safeParse({
+        ...makeWireUiState(),
+        tree: [node],
+      });
+      expect(result.success).toBe(false);
+    }
   });
 
   it("rejects UiState missing required fields", () => {

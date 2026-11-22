@@ -1,14 +1,10 @@
 /* @vitest-environment jsdom */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/svelte";
+import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import FileTree from "$lib/components/FileTree.svelte";
 import { appState } from "$lib/stores/app";
 import type { TreeNode } from "$lib/types";
-import {
-  applyExpansionMemory,
-  clearExpansionMemory,
-} from "$lib/modules/treeExpansion";
 
 // Mock backend IPC post() to assert commands fired by UI
 vi.mock("$lib/services/backend", () => ({
@@ -30,6 +26,8 @@ function file(path: string, size = 123): TreeNode {
     selection_state: "none",
     children: [],
     size,
+    has_children: false,
+    children_loaded: true,
   };
 }
 
@@ -50,7 +48,45 @@ function dir(
     selection_state: "none",
     children,
     size: 0,
+    has_children: children.length > 0,
+    children_loaded: true,
   };
+}
+
+/**
+ * A collapsed directory as the backend sends it: its children are not part
+ * of the snapshot, only the flags describing them.
+ */
+function collapsedDir(path: string, overrides: Partial<TreeNode> = {}): TreeNode {
+  return {
+    ...dir(path, false, []),
+    has_children: true,
+    ...overrides,
+  };
+}
+
+function row(container: HTMLElement, path: string): HTMLElement {
+  const el = container.querySelector<HTMLElement>(
+    `.tree-item-container[data-path="${path}"]`,
+  );
+  if (!el) throw new Error(`no row for ${path}`);
+  return el;
+}
+
+function rowPaths(container: HTMLElement): string[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(".tree-item-container"),
+  ).map((el) => el.getAttribute("data-path") ?? "");
+}
+
+function expansionCommands(): unknown[][] {
+  return vi
+    .mocked(post)
+    .mock.calls.filter(([command]) =>
+      ["toggleExpansion", "loadDirectoryLevel", "expandCollapseAll"].includes(
+        command,
+      ),
+    );
 }
 
 function seedState(
@@ -67,6 +103,8 @@ function seedState(
     current_config_filename: null,
     status_message: "Status: Ready.",
     selected_files_count: 0,
+    tree_files_count: 0,
+    tree_dirs_count: 0,
     search_query: "",
     extension_filter: "",
     content_search_query: "",
@@ -165,29 +203,368 @@ describe("FileTree", () => {
     expect(commands).not.toContain("toggleExpansion");
   });
 
-  it("bulk expand/collapse keeps the local expansion memory in sync", async () => {
-    const collapsed = () => [
-      dir("/repo/a", false, [file("/repo/a/1.txt")]),
-      dir("/repo/b", false, [file("/repo/b/2.txt")]),
+  // ---- Pruned snapshot: collapsed directories arrive without children -------
+
+  it("renders a collapsed directory without children as an expandable row", async () => {
+    seedState([
+      collapsedDir("/repo/src", { selection_state: "partial" }),
+      file("/repo/README.md"),
+    ]);
+
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    expect(rowPaths(container)).toEqual(["/repo/src", "/repo/README.md"]);
+    const src = row(container, "/repo/src");
+    expect(src).toHaveAttribute("aria-expanded", "false");
+    // The chevron is there although no child was sent...
+    const chevron = src.querySelector(".arrow");
+    expect(chevron).not.toBeNull();
+    expect(chevron).not.toHaveClass("expanded");
+    // ...and the selection of the hidden descendants is shown.
+    expect(src.querySelector("input[type=checkbox]")).toHaveAttribute(
+      "aria-checked",
+      "mixed",
+    );
+  });
+
+  it("shows the selection state the backend computed for collapsed directories", async () => {
+    seedState([
+      collapsedDir("/repo/all", { selection_state: "full" }),
+      collapsedDir("/repo/some", { selection_state: "partial" }),
+      collapsedDir("/repo/none", { selection_state: "none" }),
+    ]);
+
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    const checked = (path: string) =>
+      row(container, path)
+        .querySelector("input[type=checkbox]")
+        ?.getAttribute("aria-checked");
+    expect(checked("/repo/all")).toBe("true");
+    expect(checked("/repo/some")).toBe("mixed");
+    expect(checked("/repo/none")).toBe("false");
+  });
+
+  it("expanding a collapsed directory asks the backend and changes nothing locally", async () => {
+    seedState([collapsedDir("/repo/src")]);
+
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    await fireEvent.click(row(container, "/repo/src").querySelector(".arrow")!);
+
+    expect(expansionCommands()).toEqual([["toggleExpansion", "/repo/src"]]);
+    // No optimistic expansion: the row stays collapsed until the backend answers.
+    expect(row(container, "/repo/src")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(rowPaths(container)).toEqual(["/repo/src"]);
+  });
+
+  it("clicking the directory name toggles it as well", async () => {
+    seedState([collapsedDir("/repo/src")]);
+
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    await fireEvent.click(
+      row(container, "/repo/src").querySelector(".file-name")!,
+    );
+
+    expect(expansionCommands()).toEqual([["toggleExpansion", "/repo/src"]]);
+  });
+
+  it("expanding a directory whose children are not loaded requests them", async () => {
+    seedState(
+      [collapsedDir("/repo/vendor", { has_children: false, children_loaded: false })],
+      { is_fully_scanned: false },
+    );
+
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    await fireEvent.click(
+      row(container, "/repo/vendor").querySelector(".arrow")!,
+    );
+
+    // The backend expands the directory as part of the load.
+    expect(expansionCommands()).toEqual([
+      ["loadDirectoryLevel", "/repo/vendor"],
+    ]);
+  });
+
+  it("does not request a lazy load while a scan is running", async () => {
+    seedState(
+      [collapsedDir("/repo/vendor", { has_children: false, children_loaded: false })],
+      { is_scanning: true, is_fully_scanned: false },
+    );
+
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    await fireEvent.click(
+      row(container, "/repo/vendor").querySelector(".arrow")!,
+    );
+
+    expect(expansionCommands()).toEqual([["toggleExpansion", "/repo/vendor"]]);
+  });
+
+  it("follows the backend's expansion state in both directions", async () => {
+    const collapsed = () => [collapsedDir("/repo/src"), file("/repo/z.txt")];
+    const expanded = () => [
+      dir("/repo/src", true, [
+        collapsedDir("/repo/src/core"),
+        file("/repo/src/main.rs"),
+      ]),
+      file("/repo/z.txt"),
     ];
     seedState(collapsed());
-    clearExpansionMemory();
 
-    render(FileTree);
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+    await fireEvent.click(row(container, "/repo/src").querySelector(".arrow")!);
 
-    await fireEvent.click(
-      await screen.findByRole("button", { name: /expand all/i }),
+    // The backend answers with the children.
+    seedState(expanded());
+    await waitFor(() =>
+      expect(rowPaths(container)).toEqual([
+        "/repo/src",
+        "/repo/src/core",
+        "/repo/src/main.rs",
+        "/repo/z.txt",
+      ]),
     );
-    expect(applyExpansionMemory(collapsed()).map((n) => n.is_expanded)).toEqual(
-      [true, true],
+    expect(row(container, "/repo/src")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(row(container, "/repo/src/core")).toHaveAttribute("aria-level", "2");
+
+    // A later snapshot collapses it again (e.g. "collapse all"): although the
+    // user expanded it here, nothing in the UI keeps it open.
+    seedState(collapsed());
+    await waitFor(() =>
+      expect(rowPaths(container)).toEqual(["/repo/src", "/repo/z.txt"]),
+    );
+    expect(row(container, "/repo/src")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("shows directories the backend expanded on its own (search auto-expand)", async () => {
+    seedState([collapsedDir("/repo/src")]);
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    const hit = { ...file("/repo/src/deep/hit.rs"), is_match: true };
+    seedState(
+      [dir("/repo/src", true, [dir("/repo/src/deep", true, [hit])])],
+      { search_query: "hit", tree_files_count: 1, tree_dirs_count: 2 },
     );
 
-    await fireEvent.click(
-      await screen.findByRole("button", { name: /collapse all/i }),
+    await waitFor(() =>
+      expect(rowPaths(container)).toEqual([
+        "/repo/src",
+        "/repo/src/deep",
+        "/repo/src/deep/hit.rs",
+      ]),
     );
-    expect(applyExpansionMemory(collapsed()).map((n) => n.is_expanded)).toEqual(
-      [false, false],
-    );
+    expect(
+      row(container, "/repo/src/deep/hit.rs").querySelector(".file-name"),
+    ).toHaveClass("is-match");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  // ---- Keyboard ------------------------------------------------------------
+
+  describe("keyboard expansion", () => {
+    async function mountFocusedOn(tree: TreeNode[], overrides = {}) {
+      seedState(tree, overrides);
+      const view = render(FileTree);
+      const treeEl = await screen.findByRole("tree");
+      // The first row gets the roving focus once the tree is mounted.
+      await waitFor(() =>
+        expect(
+          view.container.querySelector('.tree-item-container[tabindex="0"]'),
+        ).not.toBeNull(),
+      );
+      return { ...view, treeEl };
+    }
+
+    it("ArrowRight expands a collapsed directory via the backend", async () => {
+      const { treeEl } = await mountFocusedOn([collapsedDir("/repo/src")]);
+
+      await fireEvent.keyDown(treeEl, { key: "ArrowRight" });
+
+      expect(expansionCommands()).toEqual([["toggleExpansion", "/repo/src"]]);
+    });
+
+    it("ArrowRight loads a directory whose children are not loaded", async () => {
+      const { treeEl } = await mountFocusedOn(
+        [collapsedDir("/repo/vendor", { children_loaded: false })],
+        { is_fully_scanned: false },
+      );
+
+      await fireEvent.keyDown(treeEl, { key: "ArrowRight" });
+
+      expect(expansionCommands()).toEqual([
+        ["loadDirectoryLevel", "/repo/vendor"],
+      ]);
+    });
+
+    it("ArrowRight on an expanded directory moves to its first child", async () => {
+      const { treeEl, container } = await mountFocusedOn([
+        dir("/repo/src", true, [file("/repo/src/a.ts")]),
+      ]);
+
+      await fireEvent.keyDown(treeEl, { key: "ArrowRight" });
+
+      expect(expansionCommands()).toEqual([]);
+      await waitFor(() =>
+        expect(row(container, "/repo/src/a.ts")).toHaveAttribute(
+          "tabindex",
+          "0",
+        ),
+      );
+    });
+
+    it("ArrowLeft collapses an expanded directory via the backend", async () => {
+      const { treeEl } = await mountFocusedOn([
+        dir("/repo/src", true, [file("/repo/src/a.ts")]),
+      ]);
+
+      await fireEvent.keyDown(treeEl, { key: "ArrowLeft" });
+
+      expect(expansionCommands()).toEqual([["toggleExpansion", "/repo/src"]]);
+    });
+
+    it("ArrowLeft on a collapsed directory sends nothing", async () => {
+      const { treeEl } = await mountFocusedOn([collapsedDir("/repo/src")]);
+
+      await fireEvent.keyDown(treeEl, { key: "ArrowLeft" });
+
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("Enter toggles a directory and Space selects it", async () => {
+      const { treeEl } = await mountFocusedOn([collapsedDir("/repo/src")]);
+
+      await fireEvent.keyDown(treeEl, { key: "Enter" });
+      await fireEvent.keyDown(treeEl, { key: " " });
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["toggleExpansion", "/repo/src"],
+        ["toggleDirectorySelection", "/repo/src"],
+      ]);
+    });
+
+    it("navigates only over the rows that were sent", async () => {
+      const { treeEl, container } = await mountFocusedOn([
+        collapsedDir("/repo/a"),
+        collapsedDir("/repo/b"),
+        file("/repo/c.txt"),
+      ]);
+
+      await fireEvent.keyDown(treeEl, { key: "End" });
+      await waitFor(() =>
+        expect(row(container, "/repo/c.txt")).toHaveAttribute("tabindex", "0"),
+      );
+      await fireEvent.keyDown(treeEl, { key: "ArrowUp" });
+      await waitFor(() =>
+        expect(row(container, "/repo/b")).toHaveAttribute("tabindex", "0"),
+      );
+    });
+  });
+
+  // ---- Stats ---------------------------------------------------------------
+
+  describe("stats", () => {
+    const stats = (container: HTMLElement) =>
+      (container.querySelector(".stats")?.textContent ?? "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    it("come from the backend counters, not from the nodes that were sent", async () => {
+      // One collapsed row on screen, 1,234 files in 56 folders behind it.
+      seedState([collapsedDir("/repo/src")], {
+        selected_files_count: 7,
+        tree_files_count: 1234,
+        tree_dirs_count: 56,
+      });
+
+      const { container } = render(FileTree);
+      await screen.findByRole("tree");
+
+      await waitFor(() =>
+        expect(stats(container)).toBe(
+          "Files selected: 7 of total files 1234 • Folders: 56",
+        ),
+      );
+    });
+
+    it("do not change when a directory is expanded", async () => {
+      const counters = { tree_files_count: 3, tree_dirs_count: 1 };
+      seedState([collapsedDir("/repo/src")], counters);
+      const { container } = render(FileTree);
+      await screen.findByRole("tree");
+      await waitFor(() => expect(stats(container)).toContain("of total files 3"));
+
+      seedState(
+        [
+          dir("/repo/src", true, [
+            file("/repo/src/a.ts"),
+            file("/repo/src/b.ts"),
+            file("/repo/src/c.ts"),
+          ]),
+        ],
+        counters,
+      );
+
+      await waitFor(() => expect(rowPaths(container)).toHaveLength(4));
+      expect(stats(container)).toBe(
+        "Files selected: 0 of total files 3 • Folders: 1",
+      );
+    });
+
+    it("keep the unfiltered totals as baseline while a filter is active", async () => {
+      seedState([collapsedDir("/repo/src")], {
+        tree_files_count: 100,
+        tree_dirs_count: 10,
+      });
+      const { container } = render(FileTree);
+      await screen.findByRole("tree");
+      await waitFor(() =>
+        expect(stats(container)).toContain("of total files 100"),
+      );
+
+      // The backend narrows the tree: the counters now describe the filtered tree.
+      seedState([collapsedDir("/repo/src")], {
+        search_query: "main",
+        tree_files_count: 4,
+        tree_dirs_count: 2,
+      });
+
+      await waitFor(() =>
+        expect(stats(container)).toMatch(
+          /^Files selected: 0 of total files 100 • Folders: 10 • \S+: 4$/,
+        ),
+      );
+
+      // Filter cleared: the baseline follows the counters again.
+      seedState([collapsedDir("/repo/src")], {
+        tree_files_count: 101,
+        tree_dirs_count: 10,
+      });
+      await waitFor(() =>
+        expect(stats(container)).toBe(
+          "Files selected: 0 of total files 101 • Folders: 10",
+        ),
+      );
+    });
   });
 
   it("shows placeholder without current_path and supports keyboard activation", async () => {

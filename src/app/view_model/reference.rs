@@ -1,7 +1,8 @@
 //! The original, uncached tree building algorithm.
 //!
-//! Kept verbatim as a test-only oracle: the index-based builder must produce exactly the
-//! same tree for every input.
+//! Kept verbatim as a test-only oracle (apart from filling in `has_children`). It always
+//! builds the *complete* tree; the index-based builder must produce exactly this tree
+//! with the subtrees of collapsed directories cut off.
 
 use super::{matches_extension, TreeNode};
 use crate::core::FileItem;
@@ -157,6 +158,7 @@ fn build_node_recursive(
         is_directory: item.is_directory,
         is_binary: item.is_binary,
         size: item.size,
+        has_children: !children_nodes.is_empty(),
         children: children_nodes,
         selection_state,
         is_expanded: args.expanded.contains(&item.path),

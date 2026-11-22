@@ -1387,6 +1387,14 @@ mod tests {
         let sub_dir = harness.create_dir("src/components");
         harness.create_file("src/components/button.js", "");
         harness.set_initial_files(&["src", "src/components"]);
+        // The snapshot only contains children of expanded directories, and a user can
+        // only reach `src/components` with `src` open.
+        harness
+            .state
+            .lock()
+            .unwrap()
+            .expanded_dirs
+            .insert(harness.root_path.join("src"));
 
         let payload = json!(sub_dir);
         load_directory_level(payload, harness.proxy.clone(), harness.state.clone());
