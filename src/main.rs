@@ -1,5 +1,6 @@
 use context_file_concat::app;
 use context_file_concat::app::file_dialog::NativeDialogService;
+use context_file_concat::app::proxy::EventProxy;
 use context_file_concat::config;
 use std::sync::{Arc, Mutex};
 use tao::{
@@ -22,7 +23,9 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     // Create the event loop and window
-    let event_loop = EventLoopBuilder::<app::events::UserEvent>::with_user_event().build();
+    // The loop itself only carries payload-free wake tokens; the actual UI events wait
+    // in the transport's outbox (see `app::transport`).
+    let event_loop = EventLoopBuilder::<app::transport::Wake>::with_user_event().build();
 
     // Load the persisted config exactly once; the window geometry is read from it.
     let initial_state = app::state::AppState::default();
@@ -43,8 +46,8 @@ async fn main() {
     #[cfg(target_os = "macos")]
     platform::macos::menu::install_standard_menus("CFC");
 
-    // Create the shared application state and the event loop proxy
-    let proxy = event_loop.create_proxy();
+    // Create the shared application state and the coalescing transport to the UI thread
+    let (proxy, ui_events) = app::transport::channel(event_loop.create_proxy());
     let state = Arc::new(Mutex::new(initial_state));
     let dialog_service = Arc::new(NativeDialogService {});
 
@@ -67,12 +70,10 @@ async fn main() {
         use wry::FileDropEvent;
         match event {
             FileDropEvent::Hovered { .. } => {
-                let _ =
-                    drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(true));
+                drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(true));
             }
             FileDropEvent::Dropped { paths, .. } => {
-                let _ =
-                    drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
+                drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
                 if let Some(path) = paths.first() {
                     app::tasks::start_scan_on_path(
                         path.clone(),
@@ -83,8 +84,7 @@ async fn main() {
                 }
             }
             FileDropEvent::Cancelled => {
-                let _ =
-                    drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
+                drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
             }
             _ => (),
         }
@@ -206,8 +206,11 @@ async fn main() {
                 }
                 _ => (),
             },
-            Event::UserEvent(user_event) => {
-                app::handle_user_event(user_event, &webview);
+            Event::UserEvent(app::transport::Wake) => {
+                // One wake announces exactly one queued event.
+                if let Some(user_event) = ui_events.next_event() {
+                    app::handle_user_event(user_event, &webview);
+                }
             }
             _ => (),
         }
