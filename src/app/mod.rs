@@ -11,6 +11,7 @@ mod helpers;
 pub mod proxy;
 pub mod state;
 pub mod tasks;
+pub mod transport;
 pub mod view_model;
 
 use crate::app::file_dialog::DialogService;
@@ -90,6 +91,8 @@ pub fn handle_ipc_message<P: EventProxy>(
 /// Processes events sent from the backend to the UI thread.
 ///
 /// It translates each `UserEvent` into a JavaScript call in the WebView to update the UI.
+/// Events reach this function via [`transport::EventOutbox::next_event`], which has
+/// already dropped superseded `StateUpdate`s, so no stale snapshot is serialized here.
 pub fn handle_user_event(event: UserEvent, webview: &WebView) {
     let script = match event {
         UserEvent::StateUpdate(state) => {
