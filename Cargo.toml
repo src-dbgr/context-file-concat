@@ -2,6 +2,8 @@
 name = "context-file-concat"
 version = "0.3.1"
 edition = "2021"
+# MSRV of the dependency tree (wry 0.57 / tao 0.37 require 1.85).
+rust-version = "1.85"
 description = "Context File Concatenator - Intelligently select, filter, and combine project files for LLM context"
 authors = ["src dbgr"]
 license = "MIT"
@@ -12,8 +14,8 @@ categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 # Web-View Architecture
-wry = "0.37"
-tao = "0.26"
+wry = "0.57"
+tao = "0.37"
 
 # Core Logic & Utilities
 tokio = { version = "1.0", features = ["full"] }
@@ -33,7 +35,7 @@ camino = "1.1"
 regex = "1.1"
 thiserror = "2.0"
 tempfile = "3.20"
-tiktoken-rs = "0.7"
+tiktoken-rs = "0.12"
 async-trait = "0.1"
 rust-embed = { version = "8", features = ["compression", "include-exclude"] }
 mime_guess = "2.0"
@@ -48,10 +50,18 @@ tracing-test = "0.2"
 serial_test = "3.2"
 libc = "0.2"
 
-# macOS-only: thin, scoped integration helpers (no objc macros in our code)
+# macOS-only: native menu (src/platform/macos). Same objc2 generation as tao/wry.
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.26"
-objc = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSEvent",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+] }
 
 # For better Performance in Release-Build
 [profile.release]

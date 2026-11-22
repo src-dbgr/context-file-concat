@@ -55,9 +55,9 @@ async fn main() {
     let ipc_handler_state = state.clone();
     let ipc_handler_proxy = proxy.clone();
     let ipc_handler_dialog = dialog_service.clone();
-    let ipc_handler = move |message: String| {
+    let ipc_handler = move |request: wry::http::Request<String>| {
         app::handle_ipc_message(
-            message,
+            request.into_body(),
             ipc_handler_dialog.clone(),
             ipc_handler_proxy.clone(),
             ipc_handler_state.clone(),
@@ -66,13 +66,13 @@ async fn main() {
 
     let drop_handler_state = state.clone();
     let drop_handler_proxy = proxy.clone();
-    let file_drop_handler = move |event| {
-        use wry::FileDropEvent;
+    let drag_drop_handler = move |event| {
+        use wry::DragDropEvent;
         match event {
-            FileDropEvent::Hovered { .. } => {
+            DragDropEvent::Enter { .. } => {
                 drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(true));
             }
-            FileDropEvent::Dropped { paths, .. } => {
+            DragDropEvent::Drop { paths, .. } => {
                 drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
                 if let Some(path) = paths.first() {
                     app::tasks::start_scan_on_path(
@@ -83,9 +83,10 @@ async fn main() {
                     );
                 }
             }
-            FileDropEvent::Cancelled => {
+            DragDropEvent::Leave => {
                 drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
             }
+            // `Over` fires continuously while hovering; the highlight is already on.
             _ => (),
         }
         true
@@ -95,7 +96,7 @@ async fn main() {
     #[cfg(debug_assertions)]
     let webview_builder = {
         tracing::info!("Running in DEBUG mode, loading from Vite dev server.");
-        WebViewBuilder::new(&*window)
+        WebViewBuilder::new()
             .with_url("http://localhost:1420")
             .with_devtools(true)
     };
@@ -103,6 +104,7 @@ async fn main() {
     // RELEASE: Custom-Protocol (no Port, no file://-issues)
     #[cfg(not(debug_assertions))]
     let webview_builder = {
+        use platform::navigation::{AppOrigin, NavigationDecision, OriginForm};
         use std::borrow::Cow;
         use wry::http::Response;
 
@@ -112,8 +114,10 @@ async fn main() {
 
         let enable_devtools = std::env::var_os("CFC_DEVTOOLS").is_some();
 
-        let scheme = "cfc".to_string();
-        let handler = move |request: wry::http::Request<Vec<u8>>| -> Response<Cow<'static, [u8]>> {
+        let origin = AppOrigin::new("cfc", "index.html", OriginForm::for_current_platform());
+        let handler = move |_webview_id: wry::WebViewId,
+                            request: wry::http::Request<Vec<u8>>|
+              -> Response<Cow<'static, [u8]>> {
             let path = request.uri().path().to_string();
             match web_assets::load(&path) {
                 Some((bytes, content_type)) => Response::builder()
@@ -132,35 +136,28 @@ async fn main() {
             }
         };
 
-        WebViewBuilder::new(&*window)
-            .with_custom_protocol(scheme, handler)
-            .with_url("cfc://index.html")
+        WebViewBuilder::new()
+            .with_custom_protocol(origin.scheme().to_string(), handler)
+            .with_url(origin.start_url())
             .with_devtools(enable_devtools)
-            // Navigation policy (RELEASE branch; append identically in DEBUG branch)
-            .with_navigation_handler(|uri: String| {
-                // Determine the scheme manually
-                let scheme = uri.split(':').next().unwrap_or("");
-
-                match scheme {
-                    // Allow internally
-                    "cfc" | "about" | "blob" | "data" => true,
-
-                    // Open external links in the system browser
-                    "http" | "https" => {
-                        let _ = open::that(&uri);
-                        false
-                    }
-
-                    // Block everything else (e.g., file://)
-                    _ => false,
+            // Navigation policy (RELEASE branch only; see `platform::navigation`)
+            .with_navigation_handler(move |uri: String| match origin.classify(&uri) {
+                NavigationDecision::Allow => true,
+                NavigationDecision::OpenExternally => {
+                    let _ = open::that(&uri);
+                    false
                 }
+                NavigationDecision::Block => false,
             })
     };
 
     let webview = webview_builder
         .with_ipc_handler(ipc_handler)
-        .with_file_drop_handler(file_drop_handler)
-        .build()
+        .with_drag_drop_handler(drag_drop_handler)
+        // wry >= 0.53 allows downloads by default. The app never offers any, so keep
+        // the previous behaviour and deny them.
+        .with_download_started_handler(|_url, _destination| false)
+        .build(&*window)
         .expect("Failed to build WebView");
 
     let state_for_events = state.clone();
