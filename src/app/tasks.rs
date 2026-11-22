@@ -178,6 +178,12 @@ pub async fn generation_task<P, G, T>(
     G: ContentGenerator + 'static,
     T: Tokenizer + 'static,
 {
+    let _generation_guard = GenerationGuard {
+        state: &state,
+        proxy: &proxy,
+        token: &token,
+    };
+
     let (selected, root, config, files_for_tree, is_fully_scanned) = {
         let state_guard = state
             .lock()
@@ -259,6 +265,32 @@ fn publish_generation_outcome<P: EventProxy>(
     proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
         &state_guard,
     ))));
+}
+
+/// Releases the generating state when a generation task ends without having published
+/// an outcome (e.g. a panicking generator) and tells the UI about it.
+///
+/// The guard is bound to the generation's own [`GenerationToken`]: once the outcome has
+/// been published, or a newer generation has taken over, dropping it changes nothing.
+struct GenerationGuard<'a, P: EventProxy> {
+    state: &'a Arc<Mutex<AppState>>,
+    proxy: &'a P,
+    token: &'a GenerationToken,
+}
+
+impl<P: EventProxy> Drop for GenerationGuard<'_, P> {
+    fn drop(&mut self) {
+        // Never panic in drop: this may run while the task is already unwinding.
+        let Ok(mut state) = self.state.lock() else {
+            tracing::error!("AppState mutex poisoned; cannot release generating state.");
+            return;
+        };
+        if state.finish_generation(self.token) {
+            tracing::error!("Generation task ended without publishing an outcome.");
+            self.proxy
+                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&state))));
+        }
+    }
 }
 
 /// Releases the scanning state when a scan task ends without having done so itself
@@ -790,6 +822,23 @@ mod tests {
         }
     }
 
+    /// A generator that panics instead of producing content.
+    struct PanickingContentGenerator;
+
+    impl ContentGenerator for PanickingContentGenerator {
+        async fn generate(
+            &self,
+            _: &[PathBuf],
+            _: &Path,
+            _: bool,
+            _: Vec<FileItem>,
+            _: HashSet<String>,
+            _: bool,
+        ) -> Result<String, CoreError> {
+            panic!("generator failure injected by the test");
+        }
+    }
+
     #[derive(Clone)]
     struct MockTokenizer {
         token_count: usize,
@@ -988,6 +1037,52 @@ mod tests {
         assert!(
             !harness.state.lock().unwrap().is_generating(),
             "is_generating should be reset in AppState"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_task_panic_resets_state_and_notifies_ui() {
+        // Arrange
+        let mut harness = TestHarness::new();
+        let token = harness.state.lock().unwrap().begin_generation();
+        assert!(
+            harness.state.lock().unwrap().is_generating(),
+            "precondition"
+        );
+
+        // Act
+        let task_handle = tokio::spawn(generation_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            PanickingContentGenerator,
+            MockTokenizer { token_count: 0 },
+            token.clone(),
+        ));
+        let join_error = task_handle.await.expect_err("The task must panic");
+        assert!(join_error.is_panic());
+
+        // Assert
+        {
+            let state = harness
+                .state
+                .lock()
+                .expect("The panic must not poison the state");
+            assert!(
+                !state.is_generating(),
+                "is_generating should be reset after a panic"
+            );
+            assert!(!state.is_current_generation(&token));
+        }
+
+        let events = harness.get_n_events(1).await;
+        assert_eq!(events.len(), 1, "Expected exactly one event");
+        match &events[0] {
+            UserEvent::StateUpdate(ui_state) => assert!(!ui_state.is_generating),
+            _ => panic!("Expected a StateUpdate event."),
+        }
+        assert!(
+            harness.event_rx.try_recv().is_err(),
+            "No further events expected"
         );
     }
 
