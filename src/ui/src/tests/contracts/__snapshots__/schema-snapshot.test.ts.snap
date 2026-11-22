@@ -1,0 +1,944 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapshot 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "selectDirectory",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "rescanDirectory",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "loadDirectoryLevel",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "generatePreview",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "clearDirectory",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "cancelScan",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "initialize",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "loadFilePreview",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "toggleSelection",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "toggleDirectorySelection",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "toggleExpansion",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "expandCollapseAll",
+          "type": "string",
+        },
+        "payload": {
+          "type": "boolean",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "selectAll",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "deselectAll",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "expandAllFully",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "selectAllFully",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "cancelGeneration",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "clearPreviewState",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "saveFile",
+          "type": "string",
+        },
+        "payload": {
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "pickOutputDirectory",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "exportConfig",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "importConfig",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "updateConfig",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": {},
+          "properties": {
+            "auto_load_last_directory": {
+              "type": "boolean",
+            },
+            "case_sensitive_search": {
+              "type": "boolean",
+            },
+            "ignore_patterns": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "include_tree_by_default": {
+              "type": "boolean",
+            },
+            "last_directory": {
+              "anyOf": [
+                {
+                  "type": "string",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+            "max_file_size_mb": {
+              "type": "number",
+            },
+            "output_directory": {
+              "anyOf": [
+                {
+                  "type": "string",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+            "output_filename": {
+              "type": "string",
+            },
+            "remove_empty_directories": {
+              "type": "boolean",
+            },
+            "scan_chunk_size": {
+              "type": "number",
+            },
+            "tree_ignore_patterns": {
+              "default": [],
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "use_relative_paths": {
+              "type": "boolean",
+            },
+            "window_position": {
+              "prefixItems": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "number",
+                },
+              ],
+              "type": "array",
+            },
+            "window_size": {
+              "prefixItems": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "number",
+                },
+              ],
+              "type": "array",
+            },
+          },
+          "required": [
+            "ignore_patterns",
+            "tree_ignore_patterns",
+            "output_filename",
+            "case_sensitive_search",
+            "include_tree_by_default",
+            "use_relative_paths",
+            "remove_empty_directories",
+            "window_size",
+            "window_position",
+            "auto_load_last_directory",
+            "max_file_size_mb",
+            "scan_chunk_size",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "updateFilters",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": {},
+          "properties": {
+            "contentSearchQuery": {
+              "default": "",
+              "type": "string",
+            },
+            "extensionFilter": {
+              "default": "",
+              "type": "string",
+            },
+            "searchQuery": {
+              "default": "",
+              "type": "string",
+            },
+          },
+          "required": [
+            "searchQuery",
+            "extensionFilter",
+            "contentSearchQuery",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "addIgnorePath",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+  ],
+}
+`;
+
+exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": {},
+  "properties": {
+    "auto_load_last_directory": {
+      "type": "boolean",
+    },
+    "case_sensitive_search": {
+      "type": "boolean",
+    },
+    "ignore_patterns": {
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+    "include_tree_by_default": {
+      "type": "boolean",
+    },
+    "last_directory": {
+      "anyOf": [
+        {
+          "type": "string",
+        },
+        {
+          "type": "null",
+        },
+      ],
+    },
+    "max_file_size_mb": {
+      "type": "number",
+    },
+    "output_directory": {
+      "anyOf": [
+        {
+          "type": "string",
+        },
+        {
+          "type": "null",
+        },
+      ],
+    },
+    "output_filename": {
+      "type": "string",
+    },
+    "remove_empty_directories": {
+      "type": "boolean",
+    },
+    "scan_chunk_size": {
+      "type": "number",
+    },
+    "tree_ignore_patterns": {
+      "default": [],
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+    "use_relative_paths": {
+      "type": "boolean",
+    },
+    "window_position": {
+      "prefixItems": [
+        {
+          "type": "number",
+        },
+        {
+          "type": "number",
+        },
+      ],
+      "type": "array",
+    },
+    "window_size": {
+      "prefixItems": [
+        {
+          "type": "number",
+        },
+        {
+          "type": "number",
+        },
+      ],
+      "type": "array",
+    },
+  },
+  "required": [
+    "ignore_patterns",
+    "tree_ignore_patterns",
+    "output_filename",
+    "case_sensitive_search",
+    "include_tree_by_default",
+    "use_relative_paths",
+    "remove_empty_directories",
+    "window_size",
+    "window_position",
+    "auto_load_last_directory",
+    "max_file_size_mb",
+    "scan_chunk_size",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
+{
+  "$defs": {
+    "__schema0": {
+      "additionalProperties": {},
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/$defs/__schema0",
+          },
+          "type": "array",
+        },
+        "children_loaded": {
+          "type": "boolean",
+        },
+        "has_children": {
+          "type": "boolean",
+        },
+        "is_binary": {
+          "type": "boolean",
+        },
+        "is_directory": {
+          "type": "boolean",
+        },
+        "is_expanded": {
+          "type": "boolean",
+        },
+        "is_match": {
+          "type": "boolean",
+        },
+        "is_previewed": {
+          "type": "boolean",
+        },
+        "name": {
+          "type": "string",
+        },
+        "path": {
+          "type": "string",
+        },
+        "selection_state": {
+          "enum": [
+            "none",
+            "partial",
+            "full",
+          ],
+          "type": "string",
+        },
+        "size": {
+          "type": "number",
+        },
+      },
+      "required": [
+        "path",
+        "name",
+        "is_directory",
+        "is_expanded",
+        "is_binary",
+        "is_match",
+        "is_previewed",
+        "selection_state",
+        "children",
+        "size",
+      ],
+      "type": "object",
+    },
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": {},
+  "properties": {
+    "active_ignore_patterns": {
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+    "config": {
+      "additionalProperties": {},
+      "properties": {
+        "auto_load_last_directory": {
+          "type": "boolean",
+        },
+        "case_sensitive_search": {
+          "type": "boolean",
+        },
+        "ignore_patterns": {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "include_tree_by_default": {
+          "type": "boolean",
+        },
+        "last_directory": {
+          "anyOf": [
+            {
+              "type": "string",
+            },
+            {
+              "type": "null",
+            },
+          ],
+        },
+        "max_file_size_mb": {
+          "type": "number",
+        },
+        "output_directory": {
+          "anyOf": [
+            {
+              "type": "string",
+            },
+            {
+              "type": "null",
+            },
+          ],
+        },
+        "output_filename": {
+          "type": "string",
+        },
+        "remove_empty_directories": {
+          "type": "boolean",
+        },
+        "scan_chunk_size": {
+          "type": "number",
+        },
+        "tree_ignore_patterns": {
+          "default": [],
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "use_relative_paths": {
+          "type": "boolean",
+        },
+        "window_position": {
+          "prefixItems": [
+            {
+              "type": "number",
+            },
+            {
+              "type": "number",
+            },
+          ],
+          "type": "array",
+        },
+        "window_size": {
+          "prefixItems": [
+            {
+              "type": "number",
+            },
+            {
+              "type": "number",
+            },
+          ],
+          "type": "array",
+        },
+      },
+      "required": [
+        "ignore_patterns",
+        "tree_ignore_patterns",
+        "output_filename",
+        "case_sensitive_search",
+        "include_tree_by_default",
+        "use_relative_paths",
+        "remove_empty_directories",
+        "window_size",
+        "window_position",
+        "auto_load_last_directory",
+        "max_file_size_mb",
+        "scan_chunk_size",
+      ],
+      "type": "object",
+    },
+    "content_search_query": {
+      "type": "string",
+    },
+    "current_config_filename": {
+      "anyOf": [
+        {
+          "type": "string",
+        },
+        {
+          "type": "null",
+        },
+      ],
+    },
+    "current_path": {
+      "type": "string",
+    },
+    "extension_filter": {
+      "type": "string",
+    },
+    "is_fully_scanned": {
+      "type": "boolean",
+    },
+    "is_generating": {
+      "type": "boolean",
+    },
+    "is_scanning": {
+      "type": "boolean",
+    },
+    "patterns_need_rescan": {
+      "type": "boolean",
+    },
+    "scan_progress": {
+      "additionalProperties": {},
+      "properties": {
+        "current_scanning_path": {
+          "type": "string",
+        },
+        "files_scanned": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer",
+        },
+        "large_files_skipped": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer",
+        },
+      },
+      "required": [
+        "files_scanned",
+        "large_files_skipped",
+        "current_scanning_path",
+      ],
+      "type": "object",
+    },
+    "search_query": {
+      "type": "string",
+    },
+    "selected_files_count": {
+      "type": "number",
+    },
+    "status_message": {
+      "type": "string",
+    },
+    "total_files_found": {
+      "type": "number",
+    },
+    "tree": {
+      "items": {
+        "$ref": "#/$defs/__schema0",
+      },
+      "type": "array",
+    },
+    "tree_dirs_count": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "tree_files_count": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "visible_files_count": {
+      "type": "number",
+    },
+  },
+  "required": [
+    "config",
+    "current_path",
+    "tree",
+    "total_files_found",
+    "visible_files_count",
+    "tree_files_count",
+    "tree_dirs_count",
+    "selected_files_count",
+    "is_scanning",
+    "is_generating",
+    "is_fully_scanned",
+    "status_message",
+    "search_query",
+    "extension_filter",
+    "content_search_query",
+    "scan_progress",
+    "active_ignore_patterns",
+    "patterns_need_rescan",
+  ],
+  "type": "object",
+}
+`;
