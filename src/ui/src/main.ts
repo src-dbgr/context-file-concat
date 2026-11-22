@@ -35,7 +35,7 @@ if (budgetMode) {
 
 ensureE2EShim(
   (s) => appState.set(s),
-  () => getState()
+  () => getState(),
 );
 void installE2EBridgeIfAllowed();
 

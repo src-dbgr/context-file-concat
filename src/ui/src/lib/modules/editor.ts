@@ -187,7 +187,7 @@ export async function showPreviewContent(
   content: string,
   language: string,
   searchTerm: string,
-  path: string
+  path: string,
 ): Promise<void> {
   await ensureEditor();
   const editor = get(editorInstance);
@@ -217,7 +217,7 @@ export async function showPreviewContent(
         false,
         matchCase,
         null,
-        true
+        true,
       );
       newDecorations = matches.map((match) => ({
         range: match.range,
@@ -230,7 +230,7 @@ export async function showPreviewContent(
     const currentDecorations = get(editorDecorations);
     const newCurrentDecorations = editor.deltaDecorations(
       currentDecorations,
-      newDecorations
+      newDecorations,
     );
     editorDecorations.set(newCurrentDecorations);
   }
@@ -247,7 +247,7 @@ export async function showPreviewContent(
 
 export async function showGeneratedContent(
   content: string,
-  tokenCount: number
+  tokenCount: number,
 ): Promise<void> {
   await ensureEditor();
   const editor = get(editorInstance);

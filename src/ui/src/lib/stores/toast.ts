@@ -142,25 +142,25 @@ function resume(id: number) {
 
 function info(
   message: string,
-  opts: Partial<Omit<ToastInput, "message">> = {}
+  opts: Partial<Omit<ToastInput, "message">> = {},
 ) {
   return push({ message, variant: "info", ...opts });
 }
 function success(
   message: string,
-  opts: Partial<Omit<ToastInput, "message">> = {}
+  opts: Partial<Omit<ToastInput, "message">> = {},
 ) {
   return push({ message, variant: "success", ...opts });
 }
 function warning(
   message: string,
-  opts: Partial<Omit<ToastInput, "message">> = {}
+  opts: Partial<Omit<ToastInput, "message">> = {},
 ) {
   return push({ message, variant: "warning", ...opts });
 }
 function error(
   message: string,
-  opts: Partial<Omit<ToastInput, "message">> = {}
+  opts: Partial<Omit<ToastInput, "message">> = {},
 ) {
   return push({ message, variant: "error", ...opts });
 }

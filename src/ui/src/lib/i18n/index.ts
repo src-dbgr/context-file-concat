@@ -72,7 +72,7 @@ function interpolate(template: string, params?: MsgParams): string {
 export function translate(
   key: string,
   params?: MsgParams,
-  locale?: string
+  locale?: string,
 ): string {
   const loc = locale ?? getLocale();
   const dict = registry[loc] ?? registry["en"];
@@ -92,7 +92,7 @@ export const locale: Readable<Locale> = {
 /** Svelte-friendly translator store */
 export const t: Readable<(key: string, params?: MsgParams) => string> = derived(
   localeStore,
-  ($loc) => (key: string, params?: MsgParams) => translate(key, params, $loc)
+  ($loc) => (key: string, params?: MsgParams) => translate(key, params, $loc),
 );
 
 /* ----------------------------------------------------------------------------

@@ -15,7 +15,7 @@ type FakeEditor = {
   getSelection: () => FakeSelection | null;
   executeEdits: (
     source: string,
-    edits: Array<{ range: FakeSelection; text: string }>
+    edits: Array<{ range: FakeSelection; text: string }>,
   ) => void;
 };
 
@@ -37,7 +37,7 @@ function ctx(
     activeEl: HTMLElement;
     isEditorFocused: boolean;
     isInNormalInputField: boolean;
-  }> = {}
+  }> = {},
 ) {
   return {
     activeEl: o.activeEl ?? document.body,
@@ -237,7 +237,7 @@ describe("clipboard – other branches", () => {
   it("handleCopy with neither input nor editor → fails gracefully", async () => {
     mockNavigatorClipboard(); // not used because content is empty
     await handleCopy(
-      ctx({ isEditorFocused: false, isInNormalInputField: false })
+      ctx({ isEditorFocused: false, isInNormalInputField: false }),
     );
 
     const status = document.querySelector(".status-text") as HTMLElement;
@@ -248,7 +248,7 @@ describe("clipboard – other branches", () => {
   it("handlePaste when unsupported context → error toast + status", async () => {
     const errSpy = vi.spyOn(toast, "error").mockReturnValue(1);
     await handlePaste(
-      ctx({ isEditorFocused: false, isInNormalInputField: false })
+      ctx({ isEditorFocused: false, isInNormalInputField: false }),
     );
 
     const status = document.querySelector(".status-text") as HTMLElement;

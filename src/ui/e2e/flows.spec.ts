@@ -169,7 +169,7 @@ function withRepo(): AppState {
 /** Recursively clone & prune a tree to only nodes matching `pred` (or having matching descendants). */
 function pruneTree(
   nodes: TreeNode[],
-  pred: (n: TreeNode) => boolean
+  pred: (n: TreeNode) => boolean,
 ): TreeNode[] {
   const result: TreeNode[] = [];
   for (const n of nodes) {
@@ -200,7 +200,7 @@ function markSelected(nodes: TreeNode[], selected: Set<string>): TreeNode[] {
       const hasFull = children.some(
         (c) =>
           c.selection_state === "full" ||
-          (c.is_directory && c.selection_state === "partial")
+          (c.is_directory && c.selection_state === "partial"),
       );
       const hasAny = children.some((c) => c.selection_state !== "none");
       const selection_state: TreeNode["selection_state"] =
@@ -322,14 +322,14 @@ test("Happy path: Select → Filter → Preview → Generate → Save", async ({
           c: string,
           l: string,
           s: string | null,
-          p: string
+          p: string,
         ) => void;
       }
     ).showPreviewContent(
       "export const x = 1;\n",
       "typescript",
       "",
-      "/repo/src/index.ts"
+      "/repo/src/index.ts",
     );
   });
 

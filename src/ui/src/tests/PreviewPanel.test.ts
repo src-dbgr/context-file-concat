@@ -15,7 +15,7 @@ import { clearPreview } from "$lib/modules/editor";
 
 // Minimal fake Monaco editor
 function makeFakeEditor(
-  content = "Hello world"
+  content = "Hello world",
 ): monaco.editor.IStandaloneCodeEditor {
   const disposable: monaco.IDisposable = { dispose: () => {} };
   const model = {
@@ -74,12 +74,12 @@ describe("PreviewPanel", () => {
     render(PreviewPanel);
 
     expect(
-      screen.getByText(/^Preview$/i, { selector: ".preview-filename" })
+      screen.getByText(/^Preview$/i, { selector: ".preview-filename" }),
     ).toBeInTheDocument();
 
     const copyBtn = document.getElementById("copy-btn") as HTMLButtonElement;
     const clearBtn = document.getElementById(
-      "clear-preview-btn"
+      "clear-preview-btn",
     ) as HTMLButtonElement;
 
     expect(copyBtn).toBeInTheDocument();

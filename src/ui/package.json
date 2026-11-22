@@ -16,6 +16,7 @@
     "preview": "vite preview",
     "preview:e2e": "vite build && vite preview --port 4173",
     "lint": "eslint . --ext .ts,.svelte --max-warnings 0",
+    "format:check": "prettier --check .",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "test": "vitest run --reporter=dot",
     "test:cov:core": "vitest run -c vitest.config.ts --coverage",

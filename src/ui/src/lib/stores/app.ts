@@ -60,17 +60,17 @@ export const appState = createAppStateStore({
 
 export const isIdle = derived(
   appState,
-  ($appState) => !$appState.is_scanning && !$appState.is_generating
+  ($appState) => !$appState.is_scanning && !$appState.is_generating,
 );
 
 export const hasSelection = derived(
   appState,
-  ($appState) => $appState.selected_files_count > 0
+  ($appState) => $appState.selected_files_count > 0,
 );
 
 export const hasVisibleItems = derived(
   appState,
-  ($appState) => $appState.tree.length > 0
+  ($appState) => $appState.tree.length > 0,
 );
 
 // --- Global State for UI elements not part of the backend state ---

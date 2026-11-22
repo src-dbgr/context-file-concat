@@ -67,7 +67,7 @@ declare global {
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
-  opts?: { id?: string; className?: string }
+  opts?: { id?: string; className?: string },
 ): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (opts?.id) node.id = opts.id;
@@ -90,7 +90,7 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
       "code",
       "javascript",
       "",
-      "/path/file.ts"
+      "/path/file.ts",
     );
   });
 
@@ -159,7 +159,7 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     const files = document.getElementById("scan-files-count") as HTMLElement;
     const current = document.getElementById("scan-current-path") as HTMLElement;
     const skipped = document.getElementById(
-      "scan-skipped-count"
+      "scan-skipped-count",
     ) as HTMLElement;
     const fill = document.getElementById("scan-progress-fill") as HTMLElement;
 

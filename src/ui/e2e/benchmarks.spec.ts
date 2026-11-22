@@ -237,7 +237,7 @@ test.describe("[@bench] 25k Benchmarks", () => {
     await waitForVirtualListReady(page);
     const allVisibleMatch = await page.evaluate(() => {
       const nodes = Array.from(
-        document.querySelectorAll(".tree .file-item .file-name")
+        document.querySelectorAll(".tree .file-item .file-name"),
       );
       return nodes.every((n) => (n.textContent || "").includes("file-24"));
     });
@@ -295,7 +295,7 @@ test.describe("[@bench] 25k Benchmarks", () => {
         const tick = () => {
           tries++;
           const match = Array.from(
-            document.querySelectorAll(".tree .file-item .file-name")
+            document.querySelectorAll(".tree .file-item .file-name"),
           ).some((n) => (n.textContent || "").includes(target));
           if (match) return resolve(true);
           if (tries > 60) return resolve(false); // ~1 Sekunde Worst-Case

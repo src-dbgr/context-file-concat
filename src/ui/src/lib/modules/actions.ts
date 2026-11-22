@@ -6,7 +6,7 @@ import * as monaco from "monaco-editor";
 function findWordBoundary(
   value: string,
   position: number,
-  direction: "forward" | "backward"
+  direction: "forward" | "backward",
 ): number {
   let i = position;
 
@@ -31,39 +31,39 @@ function findWordBoundary(
 
 export function moveWord(
   element: HTMLInputElement | HTMLTextAreaElement,
-  direction: "forward" | "backward"
+  direction: "forward" | "backward",
 ) {
   const newPos = findWordBoundary(
     element.value,
     element.selectionStart ?? 0,
-    direction
+    direction,
   );
   element.setSelectionRange(newPos, newPos);
 }
 
 export function selectWord(
   element: HTMLInputElement | HTMLTextAreaElement,
-  direction: "forward" | "backward"
+  direction: "forward" | "backward",
 ) {
   if (direction === "forward") {
     const newPos = findWordBoundary(
       element.value,
       element.selectionEnd ?? 0,
-      "forward"
+      "forward",
     );
     element.setSelectionRange(element.selectionStart, newPos);
   } else {
     const newPos = findWordBoundary(
       element.value,
       element.selectionStart ?? 0,
-      "backward"
+      "backward",
     );
     element.setSelectionRange(newPos, element.selectionEnd);
   }
 }
 
 export function deleteWordBackward(
-  element: HTMLInputElement | HTMLTextAreaElement
+  element: HTMLInputElement | HTMLTextAreaElement,
 ) {
   const start = element.selectionStart ?? 0;
   const end = element.selectionEnd ?? 0;
@@ -102,7 +102,7 @@ export function deleteWordLeft(el: HTMLInputElement | HTMLTextAreaElement) {
 }
 
 export function deleteLineBackward(
-  element: HTMLInputElement | HTMLTextAreaElement
+  element: HTMLInputElement | HTMLTextAreaElement,
 ) {
   const end = element.selectionEnd ?? 0;
   element.value = element.value.slice(end);
@@ -128,8 +128,8 @@ export function selectAll(context: FocusContext) {
           1,
           1,
           model.getLineCount(),
-          model.getLineMaxColumn(model.getLineCount())
-        )
+          model.getLineMaxColumn(model.getLineCount()),
+        ),
       );
     }
   }

@@ -35,7 +35,7 @@ declare global {
 function listVisibleFileNames(): string[] {
   // Collect all rendered file rows (not directories)
   const nodes = Array.from(
-    document.querySelectorAll<HTMLElement>(".tree .file-item .file-name")
+    document.querySelectorAll<HTMLElement>(".tree .file-item .file-name"),
   );
   return nodes
     .map((el) => (el.textContent || "").trim())

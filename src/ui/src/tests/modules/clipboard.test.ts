@@ -53,7 +53,7 @@ function mockNavigatorClipboard({
 }
 
 function setExecCommand(
-  fn: (cmd: string, arg2?: boolean, arg3?: string) => boolean
+  fn: (cmd: string, arg2?: boolean, arg3?: string) => boolean,
 ) {
   // Assign without altering global DOM typings
   (
@@ -63,7 +63,7 @@ function setExecCommand(
   ).execCommand = fn as unknown as (
     cmd: string,
     arg2?: boolean,
-    arg3?: string
+    arg3?: string,
   ) => boolean;
 }
 

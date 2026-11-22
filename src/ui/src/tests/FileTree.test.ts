@@ -57,7 +57,10 @@ function dir(
  * A collapsed directory as the backend sends it: its children are not part
  * of the snapshot, only the flags describing them.
  */
-function collapsedDir(path: string, overrides: Partial<TreeNode> = {}): TreeNode {
+function collapsedDir(
+  path: string,
+  overrides: Partial<TreeNode> = {},
+): TreeNode {
   return {
     ...dir(path, false, []),
     has_children: true,
@@ -279,7 +282,12 @@ describe("FileTree", () => {
 
   it("expanding a directory whose children are not loaded requests them", async () => {
     seedState(
-      [collapsedDir("/repo/vendor", { has_children: false, children_loaded: false })],
+      [
+        collapsedDir("/repo/vendor", {
+          has_children: false,
+          children_loaded: false,
+        }),
+      ],
       { is_fully_scanned: false },
     );
 
@@ -298,7 +306,12 @@ describe("FileTree", () => {
 
   it("does not request a lazy load while a scan is running", async () => {
     seedState(
-      [collapsedDir("/repo/vendor", { has_children: false, children_loaded: false })],
+      [
+        collapsedDir("/repo/vendor", {
+          has_children: false,
+          children_loaded: false,
+        }),
+      ],
       { is_scanning: true, is_fully_scanned: false },
     );
 
@@ -361,10 +374,11 @@ describe("FileTree", () => {
     await screen.findByRole("tree");
 
     const hit = { ...file("/repo/src/deep/hit.rs"), is_match: true };
-    seedState(
-      [dir("/repo/src", true, [dir("/repo/src/deep", true, [hit])])],
-      { search_query: "hit", tree_files_count: 1, tree_dirs_count: 2 },
-    );
+    seedState([dir("/repo/src", true, [dir("/repo/src/deep", true, [hit])])], {
+      search_query: "hit",
+      tree_files_count: 1,
+      tree_dirs_count: 2,
+    });
 
     await waitFor(() =>
       expect(rowPaths(container)).toEqual([
@@ -511,7 +525,9 @@ describe("FileTree", () => {
       seedState([collapsedDir("/repo/src")], counters);
       const { container } = render(FileTree);
       await screen.findByRole("tree");
-      await waitFor(() => expect(stats(container)).toContain("of total files 3"));
+      await waitFor(() =>
+        expect(stats(container)).toContain("of total files 3"),
+      );
 
       seedState(
         [

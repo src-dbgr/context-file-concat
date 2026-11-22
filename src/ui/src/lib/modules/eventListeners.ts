@@ -8,7 +8,7 @@ export function setupEventListeners() {
       target instanceof HTMLTextAreaElement
     ) {
       import("./undo.js").then(({ getUndoManagerForElement }) =>
-        getUndoManagerForElement(target)
+        getUndoManagerForElement(target),
       );
     }
   });
@@ -20,7 +20,7 @@ export function setupEventListeners() {
       target instanceof HTMLTextAreaElement
     ) {
       import("./undo.js").then(({ getUndoManagerForElement }) =>
-        getUndoManagerForElement(target).recordState()
+        getUndoManagerForElement(target).recordState(),
       );
     }
   });

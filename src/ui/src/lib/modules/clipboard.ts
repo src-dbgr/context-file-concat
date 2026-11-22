@@ -51,7 +51,7 @@ export async function handleCopy(context: FocusContext) {
   ) {
     const selection = activeEl.value.substring(
       activeEl.selectionStart ?? 0,
-      activeEl.selectionEnd ?? 0
+      activeEl.selectionEnd ?? 0,
     );
     textToCopy = selection || activeEl.value;
     if (textToCopy) statusMessage = `✓ Copied text from input field.`;
@@ -178,7 +178,7 @@ export async function handleCut(context: FocusContext) {
     getUndoManagerForElement(activeEl).recordState(true);
     const textToCopy = activeEl.value.substring(
       activeEl.selectionStart ?? 0,
-      activeEl.selectionEnd ?? 0
+      activeEl.selectionEnd ?? 0,
     );
     const copied = await copyWithFallback(textToCopy);
     if (copied) {

@@ -43,7 +43,7 @@ export default defineConfig({
             // map monaco-editor to local stub in vitest
             "monaco-editor": path.resolve(
               __dirname,
-              "./src/tests/__mocks__/monaco-editor.ts"
+              "./src/tests/__mocks__/monaco-editor.ts",
             ),
           }
         : {}),

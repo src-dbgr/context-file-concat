@@ -58,7 +58,7 @@ function prettyBytes(n) {
 function listAssets(dir) {
   if (!fs.existsSync(dir)) {
     throw new Error(
-      `Assets directory not found: ${dir}. Did you run "npm run build"?`
+      `Assets directory not found: ${dir}. Did you run "npm run build"?`,
     );
   }
   return fs
@@ -112,14 +112,14 @@ function table(title, rows) {
   console.log(
     pad("Asset", widths[0]),
     pad("Raw", widths[1]),
-    pad("Brotli", widths[2])
+    pad("Brotli", widths[2]),
   );
   console.log("-".repeat(widths.reduce((a, b) => a + b, 0)));
   for (const r of rows) {
     console.log(
       pad(r.name, widths[0]),
       pad(prettyBytes(r.raw), widths[1]),
-      pad(prettyBytes(r.br), widths[2])
+      pad(prettyBytes(r.br), widths[2]),
     );
   }
 }
@@ -157,18 +157,18 @@ function main() {
   console.log("");
   console.log(
     `Entry file: ${entry ? entry.name : "(not found)"} (limit ${prettyBytes(
-      ENTRY_LIMIT
-    )})`
+      ENTRY_LIMIT,
+    )})`,
   );
   console.log(
-    `App total Brotli (no workers): ${prettyBytes(appTotal)} (limit ${prettyBytes(APP_LIMIT)})`
+    `App total Brotli (no workers): ${prettyBytes(appTotal)} (limit ${prettyBytes(APP_LIMIT)})`,
   );
   console.log(
-    `Worker total Brotli:          ${prettyBytes(workerTotal)} (limit ${prettyBytes(WORKER_LIMIT)})`
+    `Worker total Brotli:          ${prettyBytes(workerTotal)} (limit ${prettyBytes(WORKER_LIMIT)})`,
   );
   if (LEGACY_TOTAL != null) {
     console.log(
-      `Grand total Brotli:           ${prettyBytes(grandTotal)} (legacy limit ${prettyBytes(LEGACY_TOTAL)})`
+      `Grand total Brotli:           ${prettyBytes(grandTotal)} (legacy limit ${prettyBytes(LEGACY_TOTAL)})`,
     );
   }
   console.log("");
@@ -176,22 +176,22 @@ function main() {
   const violations = [];
   if (entry && entry.br > ENTRY_LIMIT) {
     violations.push(
-      `Entry ${entry.name} exceeds ${prettyBytes(ENTRY_LIMIT)} (got ${prettyBytes(entry.br)})`
+      `Entry ${entry.name} exceeds ${prettyBytes(ENTRY_LIMIT)} (got ${prettyBytes(entry.br)})`,
     );
   }
   if (appTotal > APP_LIMIT) {
     violations.push(
-      `APP total exceeds ${prettyBytes(APP_LIMIT)} (got ${prettyBytes(appTotal)})`
+      `APP total exceeds ${prettyBytes(APP_LIMIT)} (got ${prettyBytes(appTotal)})`,
     );
   }
   if (workerTotal > WORKER_LIMIT) {
     violations.push(
-      `WORKER total exceeds ${prettyBytes(WORKER_LIMIT)} (got ${prettyBytes(workerTotal)})`
+      `WORKER total exceeds ${prettyBytes(WORKER_LIMIT)} (got ${prettyBytes(workerTotal)})`,
     );
   }
   if (LEGACY_TOTAL != null && grandTotal > LEGACY_TOTAL) {
     violations.push(
-      `GRAND total exceeds ${prettyBytes(LEGACY_TOTAL)} (got ${prettyBytes(grandTotal)})`
+      `GRAND total exceeds ${prettyBytes(LEGACY_TOTAL)} (got ${prettyBytes(grandTotal)})`,
     );
   }
 
