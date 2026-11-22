@@ -1,11 +1,13 @@
 use context_file_concat::app;
 use context_file_concat::app::file_dialog::NativeDialogService;
 use context_file_concat::app::proxy::EventProxy;
-use context_file_concat::config;
+use context_file_concat::app::window_geometry::{self, Rect, WindowGeometry, MIN_WINDOW_SIZE};
 use std::sync::{Arc, Mutex};
 use tao::{
+    dpi::{LogicalPosition, LogicalSize},
     event::{Event, StartCause, WindowEvent},
-    event_loop::{ControlFlow, EventLoopBuilder},
+    event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget},
+    monitor::MonitorHandle,
     window::WindowBuilder,
 };
 use wry::WebViewBuilder;
@@ -27,16 +29,21 @@ async fn main() {
     // in the transport's outbox (see `app::transport`).
     let event_loop = EventLoopBuilder::<app::transport::Wake>::with_user_event().build();
 
-    // Load the persisted config exactly once; the window geometry is read from it.
+    // Load the persisted config exactly once; the window geometry is read from it and
+    // pulled back onto a visible monitor if necessary.
     let initial_state = app::state::AppState::default();
-    let (width, height) = initial_state.config.window_size;
-    let (pos_x, pos_y) = initial_state.config.window_position;
+    let mut geometry = WindowGeometry::from_config(&initial_state.config)
+        .clamped_to_visible(&logical_monitors(&event_loop));
+    let (min_width, min_height) = MIN_WINDOW_SIZE;
 
     let window = WindowBuilder::new()
         .with_title("CFC - Context File Concatenator")
-        .with_inner_size(tao::dpi::LogicalSize::new(width, height))
-        .with_position(tao::dpi::LogicalPosition::new(pos_x, pos_y))
-        .with_min_inner_size(tao::dpi::LogicalSize::new(900, 600))
+        .with_inner_size(LogicalSize::new(geometry.size.0, geometry.size.1))
+        .with_position(LogicalPosition::new(
+            geometry.position.0,
+            geometry.position.1,
+        ))
+        .with_min_inner_size(LogicalSize::new(min_width, min_height))
         .build(&event_loop)
         .expect("Failed to build Window");
 
@@ -162,6 +169,7 @@ async fn main() {
 
     let state_for_events = state.clone();
     let window_for_events = window.clone();
+    let mut geometry_saved = false;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -172,37 +180,33 @@ async fn main() {
             }
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
-                    tracing::info!("Close requested. Saving final window state...");
-                    let mut state_guard = state_for_events.lock().unwrap();
-                    let scale = window_for_events.scale_factor();
-                    let size = window_for_events.inner_size().to_logical::<f64>(scale);
-                    let position = window_for_events
-                        .outer_position()
-                        .unwrap_or_default()
-                        .to_logical::<f64>(scale);
-                    state_guard.config.window_size = (size.width, size.height);
-                    state_guard.config.window_position = (position.x, position.y);
-
-                    if let Err(e) = config::settings::save_config(&state_guard.config, None) {
-                        tracing::error!("Failed to save config on exit: {}", e);
-                    }
+                    tracing::info!("Close requested.");
                     *control_flow = ControlFlow::Exit;
                 }
-                // tao reports physical pixels; the config stores logical units because the
-                // window is restored with Logical{Size,Position}. Mixing both makes the
-                // window grow on every restart on HiDPI displays.
+                // The geometry is tracked outside the application state: a worker
+                // holding the state lock must not make resizing/moving stutter.
                 WindowEvent::Resized(size) => {
-                    let size = size.to_logical::<f64>(window_for_events.scale_factor());
-                    let mut state_guard = state_for_events.lock().unwrap();
-                    state_guard.config.window_size = (size.width, size.height);
+                    let scale = window_for_events.scale_factor();
+                    geometry.record_size((size.width.into(), size.height.into()), scale);
+                    geometry.sync_if_uncontended(&state_for_events);
                 }
                 WindowEvent::Moved(position) => {
-                    let position = position.to_logical::<f64>(window_for_events.scale_factor());
-                    let mut state_guard = state_for_events.lock().unwrap();
-                    state_guard.config.window_position = (position.x, position.y);
+                    let scale = window_for_events.scale_factor();
+                    geometry.record_position((position.x.into(), position.y.into()), scale);
+                    geometry.sync_if_uncontended(&state_for_events);
                 }
                 _ => (),
             },
+            // The one event every way of quitting ends in: closing the window
+            // (`ControlFlow::Exit`) as well as Cmd+Q / the Quit menu item on macOS,
+            // which terminate the application without a `CloseRequested`.
+            Event::LoopDestroyed if !geometry_saved => {
+                geometry_saved = true;
+                tracing::info!("Exiting. Saving final window state...");
+                if let Err(e) = window_geometry::persist(geometry, &state_for_events, None) {
+                    tracing::error!("Failed to save config on exit: {}", e);
+                }
+            }
             Event::UserEvent(app::transport::Wake) => {
                 // One wake announces exactly one queued event.
                 if let Some(user_event) = ui_events.next_event() {
@@ -212,4 +216,26 @@ async fn main() {
             _ => (),
         }
     });
+}
+
+/// The available monitors in logical units, the primary one first.
+fn logical_monitors<T>(event_loop: &EventLoopWindowTarget<T>) -> Vec<Rect> {
+    let to_rect = |monitor: MonitorHandle| {
+        let (position, size) = (monitor.position(), monitor.size());
+        Rect::from_physical(
+            position.x.into(),
+            position.y.into(),
+            size.width.into(),
+            size.height.into(),
+            monitor.scale_factor(),
+        )
+    };
+    // The primary monitor is listed again by `available_monitors`; the duplicate is
+    // harmless and keeps it in front as the fallback target.
+    event_loop
+        .primary_monitor()
+        .into_iter()
+        .chain(event_loop.available_monitors())
+        .filter_map(to_rect)
+        .collect()
 }
