@@ -46,7 +46,7 @@ export const TreeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>
       // present in backend, not required by UI:
       children_loaded: z.boolean().optional(),
     })
-    .passthrough()
+    .passthrough(),
 );
 
 /* --------------------------------- UiState --------------------------------- */
@@ -79,6 +79,22 @@ export const UiStateSchema = z
     patterns_need_rescan: z.boolean(),
   })
   .passthrough();
+
+/**
+ * Envelope-only variant of {@link UiStateSchema}: every top-level field is
+ * validated exactly as in the full schema, but `tree` is only checked to be an
+ * array of objects — no recursion into the nodes. The deep tree walk dominates
+ * validation cost on large trees, so production validates the envelope only,
+ * while DEV and tests keep the full schema.
+ */
+const ShallowTreeNodeSchema = z.custom<TreeNode>(
+  (value) =>
+    typeof value === "object" && value !== null && !Array.isArray(value),
+);
+
+export const UiStateEnvelopeSchema = UiStateSchema.extend({
+  tree: z.array(ShallowTreeNodeSchema),
+});
 
 /* ------------------------------ Incoming API ------------------------------- */
 export const ShowPreviewArgsSchema = z.tuple([
@@ -169,7 +185,7 @@ const _commandObjectSchemas = (
   z.object({
     command: z.literal(name),
     payload: CommandSchemas[name],
-  })
+  }),
 );
 
 type NonEmptyTuple<T> = [T, ...T[]];

@@ -5,6 +5,10 @@ import { render, screen, fireEvent } from "@testing-library/svelte";
 import FileTree from "$lib/components/FileTree.svelte";
 import { appState } from "$lib/stores/app";
 import type { TreeNode } from "$lib/types";
+import {
+  applyExpansionMemory,
+  clearExpansionMemory,
+} from "$lib/modules/treeExpansion";
 
 // Mock backend IPC post() to assert commands fired by UI
 vi.mock("$lib/services/backend", () => ({
@@ -32,7 +36,7 @@ function file(path: string, size = 123): TreeNode {
 function dir(
   path: string,
   expanded = true,
-  children: TreeNode[] = []
+  children: TreeNode[] = [],
 ): TreeNode {
   const name = path.split(/[\\/]/).pop() || path;
   return {
@@ -51,7 +55,7 @@ function dir(
 
 function seedState(
   tree: TreeNode[],
-  overrides: Partial<Parameters<typeof appState.set>[0]> = {}
+  overrides: Partial<Parameters<typeof appState.set>[0]> = {},
 ) {
   appState.set({
     is_scanning: false,
@@ -133,8 +137,9 @@ describe("FileTree", () => {
     expect(post).toHaveBeenCalledWith("deselectAll");
   });
 
-  it("bulk expand/collapse toggles only directories that differ", async () => {
-    const subA = dir("/repo/a", false, [file("/repo/a/1.txt")]); // collapsed
+  it("bulk expand/collapse sends exactly one expandCollapseAll per click", async () => {
+    const nested = dir("/repo/a/nested", false, [file("/repo/a/nested/x.txt")]);
+    const subA = dir("/repo/a", false, [file("/repo/a/1.txt"), nested]); // collapsed
     const subB = dir("/repo/b", true, [file("/repo/b/2.txt")]); // expanded
     seedState([subA, subB]);
 
@@ -148,10 +153,41 @@ describe("FileTree", () => {
     });
 
     await fireEvent.click(expandAll);
-    await fireEvent.click(collapseAll);
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenLastCalledWith("expandCollapseAll", true);
 
-    expect(post).toHaveBeenCalledWith("toggleExpansion", "/repo/a");
-    expect(post).toHaveBeenCalledWith("toggleExpansion", "/repo/b");
+    await fireEvent.click(collapseAll);
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post).toHaveBeenLastCalledWith("expandCollapseAll", false);
+
+    // No per-directory toggles: each one would trigger a full tree render.
+    const commands = vi.mocked(post).mock.calls.map(([command]) => command);
+    expect(commands).not.toContain("toggleExpansion");
+  });
+
+  it("bulk expand/collapse keeps the local expansion memory in sync", async () => {
+    const collapsed = () => [
+      dir("/repo/a", false, [file("/repo/a/1.txt")]),
+      dir("/repo/b", false, [file("/repo/b/2.txt")]),
+    ];
+    seedState(collapsed());
+    clearExpansionMemory();
+
+    render(FileTree);
+
+    await fireEvent.click(
+      await screen.findByRole("button", { name: /expand all/i }),
+    );
+    expect(applyExpansionMemory(collapsed()).map((n) => n.is_expanded)).toEqual(
+      [true, true],
+    );
+
+    await fireEvent.click(
+      await screen.findByRole("button", { name: /collapse all/i }),
+    );
+    expect(applyExpansionMemory(collapsed()).map((n) => n.is_expanded)).toEqual(
+      [false, false],
+    );
   });
 
   it("shows placeholder without current_path and supports keyboard activation", async () => {

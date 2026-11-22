@@ -12,6 +12,7 @@ import { get } from "svelte/store";
 
 import {
   UiStateSchema,
+  UiStateEnvelopeSchema,
   ScanProgressSchema,
   ShowPreviewArgsSchema,
   ShowGeneratedArgsSchema,
@@ -45,7 +46,7 @@ declare global {
       content: string,
       language: string,
       searchTerm: string | null | undefined,
-      path: string
+      path: string,
     ) => void;
     showGeneratedContent: (content: string, tokenCount: number) => void;
     showError: (msg: string) => void;
@@ -69,11 +70,14 @@ export function installWindowIPCHandlers(): void {
   let lastPath: string | null = null;
 
   window.render = (incoming: AppState) => {
-    const parsed = UiStateSchema.safeParse(incoming);
+    // Dev/tests: full deep validation. Prod: envelope only, so the recursive
+    // tree walk stays off the hot path (same DEV switch as backend.post()).
+    const schema = import.meta.env.DEV ? UiStateSchema : UiStateEnvelopeSchema;
+    const parsed = schema.safeParse(incoming);
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid render() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -124,7 +128,7 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid updateScanProgress() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -168,7 +172,7 @@ export function installWindowIPCHandlers(): void {
     content: string,
     language: string,
     searchTerm: string | null | undefined,
-    path: string
+    path: string,
   ) => {
     const parsed = ShowPreviewArgsSchema.safeParse([
       content,
@@ -179,7 +183,7 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid showPreviewContent() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -192,7 +196,7 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid showGeneratedContent() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -205,7 +209,7 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid showError() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -222,7 +226,7 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid showStatus() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -237,7 +241,7 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid fileSaveStatus() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -270,7 +274,7 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid setDragState() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
