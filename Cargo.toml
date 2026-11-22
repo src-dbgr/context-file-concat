@@ -13,7 +13,7 @@ categories = ["development-tools", "command-line-utilities"]
 [dependencies]
 # Web-View Architecture
 wry = "0.57"
-tao = "0.26"
+tao = "0.37"
 
 # Core Logic & Utilities
 tokio = { version = "1.0", features = ["full"] }
