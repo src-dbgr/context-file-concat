@@ -14,16 +14,6 @@ const { toast } = vi.hoisted(() => ({
 }));
 vi.mock("$lib/stores/toast", () => ({ toast }));
 
-// treeExpansion: applyExpansionMemory shall return identically; clearExpansionMemory only Spy
-const { clearExpansionMemory, applyExpansionMemory } = vi.hoisted(() => ({
-  clearExpansionMemory: vi.fn(),
-  applyExpansionMemory: vi.fn((x: unknown[]) => x),
-}));
-vi.mock("$lib/modules/treeExpansion", () => ({
-  clearExpansionMemory,
-  applyExpansionMemory,
-}));
-
 // i18n: t(key) => key
 vi.mock("$lib/i18n", () => {
   const t = {
@@ -180,28 +170,46 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     expect(fill.style.width).toMatch(/%$/);
   });
 
-  it("render applies expansion memory and clears it on path change", () => {
+  it("render takes the backend's expansion state as is", () => {
     const base = get(appState);
+    const dir = (path: string, is_expanded: boolean, children: unknown[]) => ({
+      path,
+      name: path,
+      is_directory: true,
+      is_expanded,
+      is_binary: false,
+      is_match: false,
+      is_previewed: false,
+      selection_state: "none",
+      size: 0,
+      children,
+      has_children: true,
+      children_loaded: true,
+    });
+    const snapshot = (tree: unknown[]) =>
+      ({
+        ...base,
+        current_path: "/a",
+        tree,
+        status_message: "Ready.",
+      }) as Parameters<typeof window.render>[0];
 
-    const p1 = {
-      ...base,
-      current_path: "/a",
-      tree: Array.isArray(base.tree) ? base.tree : [],
-      status_message: "Ready.",
-    } as Parameters<typeof window.render>[0];
+    // Expanded by the backend: the children arrive with the snapshot.
+    const expanded = [dir("/a/src", true, [dir("/a/src/core", false, [])])];
+    window.render(snapshot(expanded));
+    expect(get(appState).tree).toBe(expanded);
+    expect(get(appState).tree[0].is_expanded).toBe(true);
 
-    window.render(p1);
-    expect(applyExpansionMemory).toHaveBeenCalled();
+    // Collapsed by a later snapshot: nothing in the UI keeps it open.
+    window.render(snapshot([dir("/a/src", false, [])]));
+    const [src] = get(appState).tree;
+    expect(src.is_expanded).toBe(false);
+    expect(src.children).toEqual([]);
 
-    const p2 = {
-      ...base,
-      current_path: "/b",
-      tree: Array.isArray(base.tree) ? base.tree : [],
-      status_message: "Ready.",
-    } as Parameters<typeof window.render>[0];
-
-    window.render(p2);
-    expect(clearExpansionMemory).toHaveBeenCalled();
+    // ...and nothing keeps it closed either (e.g. search auto-expansion).
+    window.render(snapshot(expanded));
+    expect(get(appState).tree[0].is_expanded).toBe(true);
+    expect(get(appState).tree[0].children).toHaveLength(1);
   });
 
   it("render clears preview when current_path becomes null", () => {

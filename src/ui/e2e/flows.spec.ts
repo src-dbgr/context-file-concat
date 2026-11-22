@@ -18,7 +18,10 @@ type TreeNode = {
   is_previewed: boolean;
   selection_state: "none" | "full" | "partial";
   size: number;
+  /** Only expanded directories carry children (pruned snapshot). */
   children: TreeNode[];
+  has_children?: boolean;
+  children_loaded?: boolean;
 };
 
 type AppConfig = {
@@ -41,6 +44,8 @@ type AppState = {
   current_config_filename: string | null;
   status_message: string;
   selected_files_count: number;
+  tree_files_count: number;
+  tree_dirs_count: number;
   search_query: string;
   extension_filter: string;
   content_search_query: string;
@@ -133,6 +138,8 @@ function baseState(): AppState {
     current_config_filename: null,
     status_message: "Status: Ready.",
     selected_files_count: 0,
+    tree_files_count: 0,
+    tree_dirs_count: 0,
     search_query: "",
     extension_filter: "",
     content_search_query: "",
@@ -153,6 +160,8 @@ function withRepo(): AppState {
   const s = baseState();
   s.current_path = "/repo";
   s.tree = seedTree();
+  s.tree_files_count = 3;
+  s.tree_dirs_count = 2;
   s.status_message = "Status: Directory selected.";
   return s;
 }
@@ -209,6 +218,22 @@ function markSelected(nodes: TreeNode[], selected: Set<string>): TreeNode[] {
   });
 }
 
+/** Totals as the backend reports them for a fully expanded tree. */
+function countNodes(nodes: TreeNode[]): { files: number; dirs: number } {
+  let files = 0;
+  let dirs = 0;
+  for (const n of nodes) {
+    if (n.is_directory) {
+      const below = countNodes(n.children);
+      files += below.files;
+      dirs += 1 + below.dirs;
+    } else {
+      files += 1;
+    }
+  }
+  return { files, dirs };
+}
+
 function withFilter(q: string): AppState {
   const t = q.toLowerCase();
   const pred = (n: TreeNode) => n.name.toLowerCase().includes(t);
@@ -223,6 +248,9 @@ function withFilter(q: string): AppState {
   const selected = markSelected(pruned, new Set([selectedPath]));
 
   s.tree = selected;
+  const counts = countNodes(selected);
+  s.tree_files_count = counts.files;
+  s.tree_dirs_count = counts.dirs;
   s.selected_files_count = 1;
   return s;
 }

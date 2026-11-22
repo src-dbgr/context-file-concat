@@ -22,11 +22,6 @@ import {
 } from "$lib/ipc/schema";
 
 import {
-  applyExpansionMemory,
-  clearExpansionMemory,
-} from "$lib/modules/treeExpansion";
-
-import {
   showPreviewContent as showPreviewContentImpl,
   showGeneratedContent as showGeneratedContentImpl,
   clearPreview,
@@ -67,8 +62,6 @@ export function installWindowIPCHandlers(): void {
     return;
   }
 
-  let lastPath: string | null = null;
-
   window.render = (incoming: AppState) => {
     // Dev/tests: full deep validation. Prod: envelope only, so the recursive
     // tree walk stays off the hot path (same DEV switch as backend.post()).
@@ -85,8 +78,6 @@ export function installWindowIPCHandlers(): void {
 
     try {
       const prev = getState();
-      const nextPath = input?.current_path ?? null;
-      const safeTree = Array.isArray(input?.tree) ? input.tree : [];
 
       if (input?.status_message) {
         input.status_message = input.status_message.startsWith("Status:")
@@ -96,17 +87,11 @@ export function installWindowIPCHandlers(): void {
         input.status_message = "Status: Ready.";
       }
 
-      if (lastPath !== nextPath) clearExpansionMemory();
+      // The snapshot is taken as is. In particular the backend's `is_expanded`
+      // is authoritative: it decides which children are part of the tree.
+      appState.set(input);
 
-      const patched: AppState = {
-        ...input,
-        tree: applyExpansionMemory(safeTree),
-      };
-      appState.set(patched);
-
-      if (prev.current_path && !patched.current_path) clearPreview();
-
-      lastPath = nextPath;
+      if (prev.current_path && !input.current_path) clearPreview();
     } catch (err) {
       console.error("render() failed:", err);
       appState.update((s) => {

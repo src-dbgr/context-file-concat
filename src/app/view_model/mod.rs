@@ -4,12 +4,21 @@
 //! by the UI. It builds the file tree structure and computes various
 //! display-related properties. It is purely for data transformation and does not
 //! mutate the application state.
+//!
+//! Every `UiState` is a complete, self-contained snapshot of what the UI shows. The
+//! tree is pruned to the visible part: children are only sent for expanded directories
+//! (`AppState::expanded_dirs` is the single source of truth for expansion). Totals that
+//! would otherwise require the whole tree are sent as counters.
 
 mod tree_builder;
 mod tree_index;
 
 #[cfg(test)]
 mod cache_tests;
+#[cfg(test)]
+mod contract_tests;
+#[cfg(test)]
+mod pruning_tests;
 #[cfg(test)]
 mod reference;
 
@@ -22,6 +31,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tree_builder::{build_tree_nodes, TreeView};
+use tree_index::TreeCounts;
 
 /// A serializable representation of the application state for the UI.
 #[derive(Serialize, Clone, Debug)]
@@ -29,8 +39,16 @@ pub struct UiState {
     pub config: AppConfig,
     pub current_path: String,
     pub tree: Vec<TreeNode>,
+    /// The number of items (files *and* directories) of the unfiltered list.
     pub total_files_found: usize,
+    /// The number of items (files *and* directories) of the filtered list.
     pub visible_files_count: usize,
+    /// The number of files in the complete filtered tree, including those below
+    /// collapsed directories that are not part of `tree`.
+    pub tree_files_count: usize,
+    /// The number of directories in the complete filtered tree, including those below
+    /// collapsed directories that are not part of `tree`.
+    pub tree_dirs_count: usize,
     pub selected_files_count: usize,
     pub is_scanning: bool,
     pub is_generating: bool,
@@ -46,6 +64,9 @@ pub struct UiState {
 }
 
 /// A serializable representation of a single node in the file tree for the UI.
+///
+/// The tree is pruned to what is visible: only expanded directories carry their
+/// children. Everything else a row needs is part of the node itself.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct TreeNode {
     pub name: String,
@@ -53,7 +74,11 @@ pub struct TreeNode {
     pub is_directory: bool,
     pub is_binary: bool,
     pub size: u64,
+    /// The child nodes. Always empty for files and for collapsed directories.
     pub children: Vec<TreeNode>,
+    /// Whether the directory has children in the filtered list, even if they are not
+    /// part of `children` because the directory is collapsed. Always `false` for files.
+    pub has_children: bool,
     pub selection_state: String,
     pub is_expanded: bool,
     pub is_match: bool,
@@ -63,32 +88,15 @@ pub struct TreeNode {
     pub children_loaded: bool,
 }
 
+/// The visible part of the tree together with the totals of the complete tree.
+struct TreeSnapshot {
+    nodes: Vec<TreeNode>,
+    counts: TreeCounts,
+}
+
 /// Creates the complete `UiState` from the current `AppState`.
 pub fn generate_ui_state(state: &AppState) -> UiState {
-    let tree = if (state.is_scanning && state.full_file_list.is_empty())
-        // If content search is active but has no results, the tree should be empty
-        || (!state.content_search_query.is_empty() && state.content_search_results.is_empty())
-    {
-        Vec::new()
-    } else {
-        let items = state.filtered_file_list();
-        let index = state.tree_index_cache().get_or_build(
-            state.filtered_revision(),
-            Path::new(&state.current_path),
-            items,
-        );
-        let view = TreeView {
-            selected: &state.selected_files,
-            expanded: &state.expanded_dirs,
-            loaded_dirs: &state.loaded_dirs,
-            content_search_matches: &state.content_search_results,
-            filename_query: &state.search_query,
-            extension_filter: &state.extension_filter,
-            case_sensitive: state.config.case_sensitive_search,
-            previewed_path: state.previewed_file_path.as_deref(),
-        };
-        build_tree_nodes(items, &index, &view)
-    };
+    let tree = build_tree_snapshot(state);
 
     let status_message = if state.is_scanning {
         format!(
@@ -104,9 +112,11 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
     UiState {
         config: state.config.clone(),
         current_path: state.current_path.clone(),
-        tree,
+        tree: tree.nodes,
         total_files_found: state.full_file_list.len(),
         visible_files_count: state.filtered_file_list().len(),
+        tree_files_count: tree.counts.files,
+        tree_dirs_count: tree.counts.dirs,
         selected_files_count: state.selected_files.len(),
         is_scanning: state.is_scanning,
         is_generating: state.is_generating,
@@ -119,6 +129,40 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
         scan_progress: state.scan_progress.clone(),
         active_ignore_patterns: state.active_ignore_patterns.clone(),
         patterns_need_rescan: state.patterns_need_rescan,
+    }
+}
+
+/// Builds the pruned tree for the current state.
+fn build_tree_snapshot(state: &AppState) -> TreeSnapshot {
+    if (state.is_scanning && state.full_file_list.is_empty())
+        // If content search is active but has no results, the tree should be empty
+        || (!state.content_search_query.is_empty() && state.content_search_results.is_empty())
+    {
+        return TreeSnapshot {
+            nodes: Vec::new(),
+            counts: TreeCounts::default(),
+        };
+    }
+
+    let items = state.filtered_file_list();
+    let index = state.tree_index_cache().get_or_build(
+        state.filtered_revision(),
+        Path::new(&state.current_path),
+        items,
+    );
+    let view = TreeView {
+        selected: &state.selected_files,
+        expanded: &state.expanded_dirs,
+        loaded_dirs: &state.loaded_dirs,
+        content_search_matches: &state.content_search_results,
+        filename_query: &state.search_query,
+        extension_filter: &state.extension_filter,
+        case_sensitive: state.config.case_sensitive_search,
+        previewed_path: state.previewed_file_path.as_deref(),
+    };
+    TreeSnapshot {
+        nodes: build_tree_nodes(items, &index, &view),
+        counts: index.counts(),
     }
 }
 
@@ -313,6 +357,15 @@ mod tests {
         let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
         assert!(src_node.is_directory);
         assert!(src_node.children_loaded);
+        // Collapsed: the children are known but not part of the snapshot.
+        assert!(src_node.has_children);
+        assert!(src_node.children.is_empty());
+        assert_eq!(ui_state.tree_files_count, 2);
+        assert_eq!(ui_state.tree_dirs_count, 1);
+
+        state.expanded_dirs.insert(PathBuf::from("/project/src"));
+        let ui_state = generate_ui_state(&state);
+        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
         assert_eq!(src_node.children.len(), 1);
         assert_eq!(src_node.children[0].name, "main.rs");
     }

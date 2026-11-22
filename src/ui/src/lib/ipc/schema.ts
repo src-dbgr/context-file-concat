@@ -30,6 +30,12 @@ export const ConfigSchema = z
   .passthrough();
 
 /* ---------------------------------- Tree ----------------------------------- */
+/**
+ * The tree is a pruned snapshot: `children` is only filled for expanded
+ * directories. `has_children` and `children_loaded` are always sent by the
+ * backend (guarded by the Rust fixture contract test); they stay optional here
+ * so that the schema remains additive.
+ */
 export const TreeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>
   z
     .object({
@@ -43,7 +49,7 @@ export const TreeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>
       selection_state: z.enum(["none", "partial", "full"]),
       children: z.array(TreeNodeSchema),
       size: z.number(),
-      // present in backend, not required by UI:
+      has_children: z.boolean().optional(),
       children_loaded: z.boolean().optional(),
     })
     .passthrough(),
@@ -65,6 +71,9 @@ export const UiStateSchema = z
     tree: z.array(TreeNodeSchema),
     total_files_found: z.number(),
     visible_files_count: z.number(),
+    // Totals of the complete filtered tree (the pruned `tree` cannot provide them).
+    tree_files_count: z.number().int().nonnegative(),
+    tree_dirs_count: z.number().int().nonnegative(),
     selected_files_count: z.number(),
     is_scanning: z.boolean(),
     is_generating: z.boolean(),

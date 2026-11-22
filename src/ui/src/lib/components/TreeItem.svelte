@@ -2,7 +2,7 @@
   import type { TreeNode } from "$lib/types";
   import { post } from "$lib/services/backend";
   import { formatFileSize } from "$lib/utils";
-  import { recordDirExpanded } from "$lib/modules/treeExpansion";
+  import { toggleDirectory } from "$lib/modules/treeExpansion";
 
   // Runes props (no `export let` in Svelte 5)
   type Props = {
@@ -24,10 +24,8 @@
   );
 
   function toggleDir() {
-    // Optimistically remember the desired state so a later backend render
-    // cannot collapse the node again.
-    recordDirExpanded(node.path, !node.is_expanded);
-    post("toggleExpansion", node.path);
+    // Expansion is owned by the backend; the next render shows the result.
+    toggleDirectory(node);
   }
   function openFile() {
     post("loadFilePreview", node.path);

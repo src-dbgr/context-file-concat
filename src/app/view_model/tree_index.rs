@@ -24,6 +24,15 @@ pub(crate) struct TreeIndex {
     children: Vec<Vec<usize>>,
     /// Sorted items located directly below the root path.
     roots: Vec<usize>,
+    /// How many nodes the complete (unpruned) tree has.
+    counts: TreeCounts,
+}
+
+/// The number of file and directory nodes of a tree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TreeCounts {
+    pub files: usize,
+    pub dirs: usize,
 }
 
 impl TreeIndex {
@@ -60,11 +69,23 @@ impl TreeIndex {
         }
         roots.sort_by(display_order);
 
+        let counts = count_nodes(items, &children, &roots);
+
         Self {
             names,
             children,
             roots,
+            counts,
         }
+    }
+
+    /// The number of nodes of the complete tree, independent of what is expanded.
+    ///
+    /// Counts exactly the nodes a tree with every directory expanded would contain,
+    /// which is not necessarily the length of the item list (orphans are not part of
+    /// the tree).
+    pub(crate) fn counts(&self) -> TreeCounts {
+        self.counts
     }
 
     /// The number of items the index was built from.
@@ -86,6 +107,21 @@ impl TreeIndex {
     pub(crate) fn name(&self, index: usize) -> &str {
         &self.names[index]
     }
+}
+
+/// Counts the nodes reachable from `roots`, descending into directories only.
+fn count_nodes(items: &[FileItem], children: &[Vec<usize>], roots: &[usize]) -> TreeCounts {
+    let mut counts = TreeCounts::default();
+    let mut pending: Vec<usize> = roots.to_vec();
+    while let Some(index) = pending.pop() {
+        if items[index].is_directory {
+            counts.dirs += 1;
+            pending.extend_from_slice(&children[index]);
+        } else {
+            counts.files += 1;
+        }
+    }
+    counts
 }
 
 /// The name shown for an item in the tree.
@@ -211,6 +247,27 @@ mod tests {
         assert_eq!(index.roots(), [0]);
         assert!(index.children(0).is_empty());
         assert_eq!(index.len(), 2);
+    }
+
+    #[test]
+    fn counts_cover_the_whole_tree_but_not_orphans() {
+        let items = vec![
+            item("/r/a", true),
+            item("/r/a/deep", true),
+            item("/r/a/deep/f.rs", false),
+            item("/r/a/g.rs", false),
+            item("/r/empty", true),
+            item("/r/h.rs", false),
+            item("/r/missing/orphan.rs", false),
+            item("/elsewhere/x.rs", false),
+        ];
+        let index = TreeIndex::build(&items, Path::new("/r"));
+
+        assert_eq!(index.counts(), TreeCounts { files: 3, dirs: 3 });
+        assert_eq!(
+            TreeIndex::build(&[], Path::new("/r")).counts(),
+            TreeCounts::default()
+        );
     }
 
     #[test]

@@ -39,6 +39,8 @@ export const appState = createAppStateStore({
   current_config_filename: null,
   status_message: "Ready.",
   selected_files_count: 0,
+  tree_files_count: 0,
+  tree_dirs_count: 0,
   search_query: "",
   extension_filter: "",
   content_search_query: "",

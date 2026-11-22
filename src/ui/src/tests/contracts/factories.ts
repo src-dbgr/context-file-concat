@@ -46,7 +46,8 @@ export function makeValidTreeNode(path = "/repo/README.md") {
     selection_state: "none",
     children: [],
     size: 256,
-    // children_loaded is optional in UI schema
+    has_children: false,
+    children_loaded: true,
   };
   // Ensure it conforms – throws if invalid
   return TreeNodeSchema.parse(input);
@@ -64,6 +65,8 @@ export function makeValidTree() {
     is_previewed: false,
     selection_state: "none",
     size: 0,
+    has_children: true,
+    children_loaded: true,
     children: [
       makeValidTreeNode("/repo/src/index.ts"),
       makeValidTreeNode("/repo/src/util.ts"),
@@ -74,6 +77,32 @@ export function makeValidTree() {
   return [TreeNodeSchema.parse(dir)];
 }
 
+/**
+ * A collapsed directory as the backend sends it in a pruned snapshot: no
+ * children, but the flags a row needs to render and to request them.
+ */
+export function makeCollapsedDirNode(
+  path = "/repo/docs",
+  overrides: Partial<z.input<typeof TreeNodeSchema>> = {},
+) {
+  const input: z.input<typeof TreeNodeSchema> = {
+    path,
+    name: path.split(/[\\/]/).pop() ?? path,
+    is_directory: true,
+    is_expanded: false,
+    is_binary: false,
+    is_match: false,
+    is_previewed: false,
+    selection_state: "none",
+    children: [],
+    size: 0,
+    has_children: true,
+    children_loaded: true,
+    ...overrides,
+  };
+  return TreeNodeSchema.parse(input);
+}
+
 /** Fully valid UiState payload per UiStateSchema. */
 export function makeValidUiState(): z.input<typeof UiStateSchema> {
   return {
@@ -82,6 +111,8 @@ export function makeValidUiState(): z.input<typeof UiStateSchema> {
     tree: makeValidTree(),
     total_files_found: 3,
     visible_files_count: 3,
+    tree_files_count: 2,
+    tree_dirs_count: 1,
     selected_files_count: 1,
     is_scanning: false,
     is_generating: false,

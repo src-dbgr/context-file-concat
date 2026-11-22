@@ -5,8 +5,10 @@
   import type { AppState, TreeNode } from "$lib/types";
   import TreeItem from "./TreeItem.svelte";
   import {
-    recordBulkExpanded,
-    recordDirExpanded,
+    collapseDirectory,
+    expandDirectory,
+    setAllExpanded,
+    toggleDirectory,
   } from "$lib/modules/treeExpansion";
   import Spinner from "$lib/components/Spinner.svelte";
   import LinearProgress from "$lib/components/LinearProgress.svelte";
@@ -108,6 +110,8 @@
 
   type FlatItem = { node: TreeNode; level: number; index: number };
 
+  // The backend sends a pruned tree: children exist only below expanded
+  // directories, so this walk is bounded by the number of visible rows.
   function flattenTree(
     nodes: TreeNode[],
     level = 0,
@@ -283,21 +287,11 @@
     post("deselectAll");
   }
 
-  /**
-   * Bulk set expansion with a single backend command. The backend sets (or
-   * clears) the expansion of every directory and answers with one render,
-   * instead of one full tree update per toggled directory.
-   */
-  function bulkSetExpansion(expand: boolean) {
-    recordBulkExpanded($appState.tree, expand);
-    post("expandCollapseAll", expand);
-  }
-
   function onExpandAll() {
-    bulkSetExpansion(true);
+    setAllExpanded(true);
   }
   function onCollapseAll() {
-    bulkSetExpansion(false);
+    setAllExpanded(false);
   }
 
   // Keyboard activation for the placeholder
@@ -311,30 +305,16 @@
   // --- Stats ------------------------------------------------
   type TreeCounts = { files: number; folders: number };
 
-  function countFilesAndFolders(nodes: TreeNode[]): TreeCounts {
-    let files = 0;
-    let folders = 0;
-    const stack = [...(nodes || [])];
-    while (stack.length) {
-      const n = stack.pop()!;
-      if (n.is_directory) {
-        folders++;
-        if (n.children?.length) stack.push(...n.children);
-      } else {
-        files++;
-      }
-    }
-    return { files, folders };
-  }
-
-  // Always count visible (filtered) tree
-  const visibleCounts = $derived(countFilesAndFolders($appState.tree));
+  // Totals of the filtered tree. They come from the backend: the tree itself
+  // only contains what is expanded and cannot be counted here.
+  const visibleFiles = $derived($appState.tree_files_count);
+  const visibleFolders = $derived($appState.tree_dirs_count);
 
   // Baseline = last unfiltered counts. Update only when there is no active filter.
   let baselineCounts = $state<TreeCounts>({ files: 0, folders: 0 });
   $effect(() => {
     if (!hasActiveFilters($appState)) {
-      baselineCounts = visibleCounts;
+      baselineCounts = { files: visibleFiles, folders: visibleFolders };
     }
   });
 
@@ -348,7 +328,7 @@
   );
   const statsTextSecondary = $derived(
     hasActiveFilters($appState)
-      ? ` • ${$t("filetree.stats.visible")}: ${visibleCounts.files}`
+      ? ` • ${$t("filetree.stats.visible")}: ${visibleFiles}`
       : ""
   );
 
@@ -464,9 +444,7 @@
       e.preventDefault();
       if (node.is_directory) {
         if (!node.is_expanded) {
-          // keep memory in sync so backend render won't override
-          recordDirExpanded(node.path, true);
-          post("toggleExpansion", node.path);
+          expandDirectory(node);
         } else {
           // move to first child
           const next = focusedIndex + 1;
@@ -486,9 +464,7 @@
     if (e.key === "ArrowLeft") {
       e.preventDefault();
       if (node.is_directory && node.is_expanded) {
-        // mirror collapse into memory
-        recordDirExpanded(node.path, false);
-        post("toggleExpansion", node.path);
+        collapseDirectory(node);
       } else {
         const parent = findParentIndex(focusedIndex);
         if (parent !== -1) setFocusByIndex(parent);
@@ -500,8 +476,7 @@
     if (e.key === "Enter") {
       e.preventDefault();
       if (node.is_directory) {
-        recordDirExpanded(node.path, !node.is_expanded);
-        post("toggleExpansion", node.path);
+        toggleDirectory(node);
       } else {
         post("loadFilePreview", node.path);
       }

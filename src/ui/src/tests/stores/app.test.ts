@@ -14,6 +14,8 @@ function baseState(): AppState {
     current_config_filename: null,
     status_message: "Status: Ready.",
     selected_files_count: 0,
+    tree_files_count: 0,
+    tree_dirs_count: 0,
     search_query: "",
     extension_filter: "",
     content_search_query: "",
