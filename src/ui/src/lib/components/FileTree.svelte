@@ -283,26 +283,14 @@
     post("deselectAll");
   }
 
-  /** Collect all directory paths that need a toggle to reach the target expansion state. */
-  function collectToggleTargets(
-    nodes: TreeNode[],
-    expand: boolean,
-    acc: string[] = []
-  ): string[] {
-    for (const n of nodes) {
-      if (n.is_directory) {
-        if (n.is_expanded !== expand) acc.push(n.path);
-        if (n.children?.length) collectToggleTargets(n.children, expand, acc);
-      }
-    }
-    return acc;
-  }
-
-  /** Bulk set expansion by sending toggleExpansion for each directory that differs. */
+  /**
+   * Bulk set expansion with a single backend command. The backend sets (or
+   * clears) the expansion of every directory and answers with one render,
+   * instead of one full tree update per toggled directory.
+   */
   function bulkSetExpansion(expand: boolean) {
     recordBulkExpanded($appState.tree, expand);
-    const targets = collectToggleTargets($appState.tree, expand);
-    for (const path of targets) post("toggleExpansion", path);
+    post("expandCollapseAll", expand);
   }
 
   function onExpandAll() {
