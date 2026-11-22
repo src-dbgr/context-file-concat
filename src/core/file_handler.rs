@@ -6,7 +6,7 @@
 //! - [`FileHandler::generate_concatenated_content_simple`] orchestrates both, keeping
 //!   the blocking work off the async runtime and honouring cancellation.
 
-use super::{CoreError, FileItem, TreeGenerator};
+use super::{CoreError, FileItem, TreeGenerator, MAX_FILE_SIZE};
 use crate::utils::file_detection::{classify_by_extension, is_text_content, is_text_file};
 use std::collections::HashSet;
 use std::fs;
@@ -14,9 +14,6 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-
-/// Files larger than this are not inlined into the generated output.
-const MAX_CONTENT_FILE_SIZE: u64 = 20 * 1024 * 1024;
 
 /// Placeholder emitted instead of the content of binary / undecodable files.
 const BINARY_CONTENT_MARKER: &str = "[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]";
@@ -107,7 +104,7 @@ fn read_file_body(file_path: &Path) -> String {
 fn try_read_file_body(file_path: &Path) -> io::Result<String> {
     // Skip files that exceed the size limit to prevent excessive memory usage.
     let size = fs::metadata(file_path)?.len();
-    if size > MAX_CONTENT_FILE_SIZE {
+    if size > MAX_FILE_SIZE {
         return Ok(format!("[FILE TOO LARGE: {size} bytes - CONTENT SKIPPED]"));
     }
     Ok(decode_file_bytes(file_path, fs::read(file_path)?))
@@ -733,7 +730,7 @@ mod tests {
         let (_dir, root) = setup_test_environment();
         let project_name = root.file_name().unwrap().to_str().unwrap();
 
-        const MAX_SIZE: u64 = 20 * 1024 * 1024;
+        const MAX_SIZE: u64 = MAX_FILE_SIZE;
 
         // --- Setup für diesen spezifischen Test ---
         // Datei 1: Exakt die maximal erlaubte Grösse

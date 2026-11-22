@@ -1,6 +1,6 @@
 //! Provides the functionality for recursively scanning directories.
 
-use super::{CoreError, FileItem};
+use super::{CoreError, FileItem, MAX_FILE_SIZE};
 use crate::utils::file_detection::is_text_file;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -17,8 +17,6 @@ pub struct ScanProgress {
     pub current_scanning_path: String,
 }
 
-/// Files larger than this are neither listed by the scanner nor read by the content search.
-pub(crate) const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024;
 const PROGRESS_UPDATE_THROTTLE: Duration = Duration::from_millis(100);
 
 /// Scans a directory for files and subdirectories, respecting ignore patterns.

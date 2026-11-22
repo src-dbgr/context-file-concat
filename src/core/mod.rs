@@ -16,6 +16,10 @@ use std::path::PathBuf;
 // Re-export CoreError to make it accessible from the app module.
 pub use error::CoreError;
 
+/// Size limit shared by the whole core: files larger than this are not listed by the
+/// scanner, not read by the content search and not inlined into the generated output.
+pub(crate) const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024;
+
 /// Represents a single item (file or directory) found during a directory scan.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)] // VET: Added Default trait
 pub struct FileItem {

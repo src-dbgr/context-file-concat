@@ -1,7 +1,6 @@
 //! Provides logic for filtering and searching lists of `FileItem`s.
 
-use super::scanner::MAX_FILE_SIZE;
-use super::{FileItem, SearchFilter};
+use super::{FileItem, SearchFilter, MAX_FILE_SIZE};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
