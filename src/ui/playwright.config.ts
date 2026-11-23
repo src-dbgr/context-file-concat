@@ -27,10 +27,17 @@ export default defineConfig({
     timeout: 120_000,
   },
 
+  // The app runs in the system webview: WebKit on macOS (WKWebView) and Linux
+  // (WebKitGTK), Chromium on Windows (WebView2). Timing budgets and benchmarks
+  // (@budget, @bench) are calibrated for Chromium only; see package.json.
   projects: [
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "webkit",
+      use: { ...devices["Desktop Safari"] },
     },
   ],
 });

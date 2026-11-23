@@ -1,4 +1,4 @@
-name: Rust CI
+name: CI
 
 on:
   push:
@@ -6,116 +6,120 @@ on:
   pull_request:
     branches: ["main"]
 
+# A newer push to the same branch/PR supersedes the running one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
+# Pinning policy: GitHub's own actions (actions/*) by major version, third-party actions
+# by commit SHA with the released version as a comment.
+
 jobs:
-  build_and_test:
-    name: Build & Test
+  ui:
+    name: UI (lint, unit, contracts, build, budgets, E2E)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/ui
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-ui
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libssl-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libwebkit2gtk-4.1-dev
-
-      - name: Setup Node.js (24.x)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          check-latest: true
-          cache: "npm"
-          cache-dependency-path: "./src/ui/package-lock.json"
-
-      - name: Use npm 11 (align with packageManager)
-        shell: bash
-        run: |
-          if [ "$(npm -v | cut -d. -f1)" != "11" ]; then
-            npm i -g npm@11
-          fi
-          echo "Node: $(node -v)"
-          echo "npm : $(npm -v)"
-
-      - name: Enforce npm engine strictness (Node 24)
-        run: |
-          npm config set engine-strict true
-          node -v
-          npm -v
-        working-directory: ./src/ui
-
-      - name: Install npm dependencies (clean, deterministic)
-        run: npm ci
-        working-directory: ./src/ui
-
-      # 🔒 Quality gates (fail fast)
-      - name: Run ESLint (warnings treated as errors)
+      # Quality gates (fail fast, cheapest first)
+      - name: Prettier
+        run: npm run format:check
+      - name: ESLint (warnings are errors)
         run: npm run lint
-        working-directory: ./src/ui
-
-      - name: Run Svelte typecheck (warnings fail build)
+      - name: Svelte typecheck (warnings are errors)
         run: npm run typecheck
-        working-directory: ./src/ui
+      - name: Unit tests
+        run: npm test
+      - name: Contract tests (IPC schema, Rust fixture drift guard)
+        run: npm run test:contracts
 
-      - name: Build JavaScript bundle
+      - name: Build bundle
         run: npm run build
-        working-directory: ./src/ui
-
-      # 📦 Bundle budgets (no extra deps)
-      - name: Check bundle budgets (Brotli, split by app/workers)
+      # Limits live in scripts/check-budgets.mjs (see docs/ci-budgets.md).
+      - name: Bundle budgets (initial load / lazy chunks / workers)
         run: npm run budget:bundle
-        working-directory: ./src/ui
-        env:
-          ENTRY_BROTLI: "800000" # 0.8 MB
-          APP_TOTAL_BROTLI: "1000000" # 1.0 MB
-          WORKER_TOTAL_BROTLI: "1500000" # 1.5 MB
-          # Optional legacy guard for total:
-          # BUDGET_TOTAL_BROTLI: "2000000"
 
-      # ▶️ Playwright E2E
-      - name: Install Playwright browsers (chromium only)
-        run: npx -y playwright install --with-deps chromium
-        working-directory: ./src/ui
-
-      - name: Run Playwright E2E tests
-        run: npm run test:e2e -- --reporter=dot
-        working-directory: ./src/ui
-
-      # ⏱️ Runtime/smoothness budgets (deterministic conditions, no sleeps)
-      - name: Run E2E budget tests
+      # The app runs in WebKit (WKWebView, WebKitGTK) and Chromium (WebView2).
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium webkit
+      - name: E2E (Chromium)
+        run: npm run test:e2e -- --project=chromium --reporter=dot
+      - name: E2E (WebKit)
+        run: npm run test:e2e -- --project=webkit --reporter=dot
+      # Runtime budgets: deterministic conditions, Chromium only (see package.json).
+      - name: E2E runtime budgets
         run: npm run test:e2e:budgets -- --reporter=dot
-        working-directory: ./src/ui
         env:
           BUDGET_INIT_MS: "1500"
-          # GitHub-Runner are slow; 3.0s
-          BUDGET_VTREE_MS: "4000"
+          BUDGET_VTREE_MS: "4000" # GitHub runners are slow
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Upload bundle for the release build
+        uses: actions/upload-artifact@v7
         with:
-          components: clippy, rustfmt
+          name: ui-dist
+          path: src/ui/dist
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Build Rust (release sanity)
-        run: cargo build --release
+  # Debug builds do not embed src/ui/dist (see src/web_assets.rs), so this job needs no Node.
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      # Snapshots and fixtures are compared byte for byte; keep LF on Windows.
+      - name: Disable CRLF conversion
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/linux-deps
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Check formatting
+        if: runner.os == 'Linux'
         run: cargo fmt -- --check
-
-      - name: Run Clippy
-        run: cargo clippy -- -D warnings
-
-      - name: Run tests with snapshot verification
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests with snapshot verification
         env:
           INSTA_UPDATE: "no"
         run: cargo test --workspace
+
+  # The one optimized (LTO) build: proves that the release profile compiles and that the
+  # freshly built bundle can be embedded. Runs beside the tests, not in front of them.
+  release-build:
+    name: Release build (Linux, embeds the UI bundle)
+    needs: ui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/linux-deps
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Download UI bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: ui-dist
+          path: src/ui/dist
+      - name: Build (release)
+        run: cargo build --release

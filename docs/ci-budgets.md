@@ -4,30 +4,31 @@ This project enforces **bundle** and **runtime** budgets in CI.
 
 ## Bundle budgets
 
-We split built assets into:
+`src/ui/scripts/check-budgets.mjs` (`npm run budget:bundle`) puts every built JS/CSS asset into exactly one category and checks the Brotli total of each:
 
-- **ENTRY** – `index.js` (main entry).
-- **APP** – all non-worker JS/CSS (application code).
-- **WORKERS** – `*.worker-*.js` (Monaco workers: ts/css/html/json/editor).
+- **INITIAL** – what the page loads before it can start: everything `dist/index.html` references (entry script, `modulepreload` links, stylesheets) plus the transitive static imports of those scripts.
+- **LAZY** – all other non-worker chunks, fetched on demand through `import()` (Monaco and its language modes).
+- **WORKERS** – `*.worker*.js` (Monaco workers: ts/css/html/json/editor).
 
 **Defaults (Brotli):**
 
-- ENTRY ≤ **0.8 MB**
-- APP total ≤ **1.0 MB**
+- INITIAL ≤ **150 kB**
+- LAZY total ≤ **1.0 MB**
 - WORKERS total ≤ **1.5 MB**
 
-Configure via environment variables (bytes):
+A chunk that the entry imports statically counts as INITIAL, whatever its name: importing Monaco eagerly puts about 660 kB onto the initial load and fails the budget.
 
-````bash
-ENTRY_BROTLI=800000
-APP_TOTAL_BROTLI=1000000
+The limits live in the script; override them for an experiment via environment variables (bytes):
+
+```bash
+INITIAL_BROTLI=150000
+LAZY_TOTAL_BROTLI=1000000
 WORKER_TOTAL_BROTLI=1500000
-# Optional legacy grand total cap:
-# BUDGET_TOTAL_BROTLI=2000000
+```
 
 ## Runtime budgets (E2E)
 
-E2E tests under `src/ui/e2e/budgets.spec.ts` verify:
+E2E tests under `src/ui/e2e/budgets.spec.ts` verify (Chromium only – the thresholds are calibrated for it):
 
 1. **First mount time** – measured by `performance.measure('app-init')` in `main.ts` when `?budget=1` is present.
 2. **Virtualization smoothness** – with a 25k item file tree, we assert the virtualized DOM rows are ≤ 600 (structural proxy for smoothness).
@@ -51,7 +52,7 @@ npm run budget:bundle
 # E2E budget tests (use the same Playwright setup)
 npx playwright install --with-deps chromium
 npm run test:e2e:budgets
-````
+```
 
 ## Boot-Sequenz (Mermaid)
 

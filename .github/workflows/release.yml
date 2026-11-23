@@ -1,4 +1,3 @@
-# .github/workflows/release.yml
 name: Release
 
 on:
@@ -6,166 +5,126 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
-# Add permissions for GITHUB_TOKEN
-permissions:
-  contents: write
-  actions: read
-  packages: write
+# Pinning policy: see ci.yml.
 
 jobs:
-  create-release:
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.get_version.outputs.version }}
-    steps:
-      - name: Get version from tag
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Context File Concatenator v${{ steps.get_version.outputs.version }}
-          body: |
-            ## 🎉 Context File Concatenator v${{ steps.get_version.outputs.version }}
-
-            **Cross-platform desktop application for LLM context preparation**
-
-            ### 📦 Downloads
-            - **macOS**: Download the `.dmg` file below
-            - **Windows**: Download the `.zip` file below  
-            - **Linux**: Download the `.tar.gz` file below
-
-            ### ✨ What's New
-            See [CHANGELOG.md](https://github.com/src-dbgr/context-file-concat/blob/main/CHANGELOG.md) for details.
-          draft: false
-          prerelease: ${{ contains(steps.get_version.outputs.version, 'alpha') || contains(steps.get_version.outputs.version, 'beta') || contains(steps.get_version.outputs.version, 'rc') }}
-
   build:
-    needs: create-release
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: linux-x86_64
-            binary_name: context-file-concat
-            bundle_name: context-file-concat-${{ needs.create-release.outputs.version }}-linux-x86_64.tar.gz
-
+            ext: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             name: windows-x86_64
-            binary_name: context-file-concat.exe
-            bundle_name: context-file-concat-${{ needs.create-release.outputs.version }}-windows-x86_64.zip
-
+            ext: zip
           - os: macos-latest
             target: x86_64-apple-darwin
             name: macos-x86_64
-            binary_name: context-file-concat
-            bundle_name: context-file-concat-${{ needs.create-release.outputs.version }}-macos-x86_64.dmg
-
+            ext: dmg
           - os: macos-latest
             target: aarch64-apple-darwin
             name: macos-aarch64
-            binary_name: context-file-concat
-            bundle_name: context-file-concat-${{ needs.create-release.outputs.version }}-macos-aarch64.dmg
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install system dependencies (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libssl-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libwebkit2gtk-4.1-dev
-
-      - name: Setup Node.js (24.x)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          check-latest: true
-
-      - name: Use npm 11 (align with packageManager)
+            ext: dmg
+    defaults:
+      run:
         shell: bash
-        run: |
-          if [ "$(npm -v | cut -d. -f1)" != "11" ]; then
-            npm i -g npm@11
-          fi
-          echo "Node: $(node -v)"
-          echo "npm : $(npm -v)"
+    steps:
+      - uses: actions/checkout@v7
 
-      - name: Enforce npm engine strictness (Node 24)
-        run: |
-          npm config set engine-strict true
-          node -v
-          npm -v
-        working-directory: ./src/ui
+      # The asset names are documented in README.md ("Installation").
+      - name: Derive the asset name from the tag
+        run: echo "BUNDLE_NAME=context-file-concat-${GITHUB_REF_NAME#v}-${{ matrix.name }}.${{ matrix.ext }}" >> "$GITHUB_ENV"
 
-      - name: Install npm dependencies (clean, deterministic)
-        run: npm ci
-        working-directory: ./src/ui
+      - uses: ./.github/actions/linux-deps
+      - uses: ./.github/actions/setup-ui
 
       - name: Build JavaScript bundle
         run: npm run build
-        working-directory: ./src/ui
+        working-directory: src/ui
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Install cargo-bundle (macOS)
-        if: matrix.os == 'macos-latest'
-        run: cargo install cargo-bundle
-
-      - name: Create macOS app bundle
-        if: matrix.os == 'macos-latest'
+      - name: Create macOS app bundle and DMG
+        if: runner.os == 'macOS'
         run: |
+          cargo install cargo-bundle --version 0.12.0 --locked
           cargo bundle --release --target ${{ matrix.target }}
-          # Create DMG
-          hdiutil create -volname "Context File Concatenator" -srcfolder target/${{ matrix.target }}/release/bundle/osx -ov -format UDZO ${{ matrix.bundle_name }}
+          hdiutil create -volname "Context File Concatenator" \
+            -srcfolder target/${{ matrix.target }}/release/bundle/osx \
+            -ov -format UDZO "$BUNDLE_NAME"
 
       - name: Create Linux archive
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czf ../../../${{ matrix.bundle_name }} ${{ matrix.binary_name }}
+          tar -czf "../../../$BUNDLE_NAME" context-file-concat
 
       - name: Create Windows archive
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.bundle_name }} ${{ matrix.binary_name }}
+          7z a "../../../$BUNDLE_NAME" context-file-concat.exe
 
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Hand the asset to the release job
+        uses: actions/upload-artifact@v7
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.bundle_name }}
-          asset_name: ${{ matrix.bundle_name }}
-          asset_content_type: application/octet-stream
+          name: ${{ matrix.name }}
+          path: ${{ env.BUNDLE_NAME }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  # Publishes only when every platform built: one release with all four assets.
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all assets
+        uses: actions/download-artifact@v8
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Get version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          name: Context File Concatenator v${{ env.VERSION }}
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          files: assets/*
+          fail_on_unmatched_files: true
+          body: |
+            ## 🎉 Context File Concatenator v${{ env.VERSION }}
+
+            **Cross-platform desktop application for LLM context preparation**
+
+            ### 📦 Downloads
+            - **macOS**: Download the `.dmg` file below
+            - **Windows**: Download the `.zip` file below
+            - **Linux**: Download the `.tar.gz` file below
+
+            ### ✨ What's New
+            See [CHANGELOG.md](https://github.com/src-dbgr/context-file-concat/blob/main/CHANGELOG.md) for details.

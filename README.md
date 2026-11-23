@@ -128,7 +128,7 @@ For a deep dive into the system's structure, data flows, IPC contracts, and deve
 
 - **Unit Tests**: The `core` logic is tested with unit tests to ensure the correctness of individual components.
 - **Integration Tests**: Key application workflows are covered by integration tests that validate the interaction between the `app` and `core` layers without requiring a live UI.
-- **Continuous Integration (CI)**: A GitHub Actions workflow automatically runs `cargo fmt` (formatter), `cargo clippy` (linter) and `cargo test`, plus the UI lint, type check, build, bundle budget and Playwright end-to-end tests, on every push and pull request to maintain code quality and prevent regressions.
+- **Continuous Integration (CI)**: GitHub Actions run on every push and pull request to `main`. The Rust job (`cargo fmt`, `cargo clippy --all-targets`, `cargo test`) runs on Linux, macOS and Windows; the UI job runs Prettier, ESLint, the type check, the unit and IPC contract tests, the build, the bundle budgets and the Playwright end-to-end tests in Chromium and WebKit; one release build embeds the fresh bundle. A separate workflow checks the dependencies against the RustSec and npm advisory databases (`cargo audit`, `npm run audit:deps`).
 
 ---
 
@@ -167,4 +167,4 @@ To build and run the application locally, you need [Node.js/npm](https://nodejs.
     cargo test
     ```
 
-    The UI tests live in `src/ui` (`npm test`, `npm run test:contracts`, `npm run test:e2e`).
+    The UI tests live in `src/ui` (`npm test`, `npm run test:contracts`, `npm run test:e2e`). The end-to-end tests run in Chromium and WebKit; install both once with `npx playwright install chromium webkit`, or run a single engine with `npm run test:e2e -- --project=chromium`.
