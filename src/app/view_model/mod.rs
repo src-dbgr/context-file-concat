@@ -29,6 +29,7 @@ mod reference;
 #[cfg(test)]
 mod windowing_tests;
 
+use crate::app::correlation::CommandSeq;
 use crate::app::state::AppState;
 use crate::app::tree_index::TreeCounts;
 use serde::Serialize;
@@ -77,6 +78,11 @@ pub struct UiState {
     pub scan_progress: crate::core::ScanProgress,
     pub active_ignore_patterns: HashSet<String>,
     pub patterns_need_rescan: bool,
+    /// The number of the last command of the UI this snapshot accounts for (0: none
+    /// yet). It says nothing about the application state and is not derived from
+    /// it: [`generate_ui_state`] leaves it at 0, and the transport fills it in when
+    /// the snapshot is sent (see [`crate::app::correlation`]).
+    pub last_processed_seq: CommandSeq,
 }
 
 /// Creates the complete `UiState` from the current `AppState`.
@@ -112,6 +118,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
         scan_progress: status::scan_progress_for_ui(state),
         active_ignore_patterns: state.active_ignore_patterns.clone(),
         patterns_need_rescan: state.patterns_need_rescan,
+        last_processed_seq: 0,
     }
 }
 

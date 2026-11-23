@@ -778,11 +778,13 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "expanded",
+        "message": "{\"command\":\"initialize\",\"payload\":null,\"seq\":1}",
         "search_query": ""
       },
       "expect": {
         "first_path": "/project/alpha",
         "last_path": "/project/big/file-094.txt",
+        "last_processed_seq": 1,
         "located": null,
         "rows_count": 100,
         "rows_revision_changed": true,
@@ -793,16 +795,13 @@
     },
     {
       "action": {
-        "command": "setViewport",
         "kind": "command",
-        "payload": {
-          "count": 80,
-          "start": 200
-        }
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":80,\"start\":200},\"seq\":2}"
       },
       "expect": {
         "first_path": "/project/big/file-195.txt",
         "last_path": "/project/big/file-274.txt",
+        "last_processed_seq": 2,
         "located": null,
         "rows_count": 80,
         "rows_revision_changed": false,
@@ -813,16 +812,13 @@
     },
     {
       "action": {
-        "command": "setViewport",
         "kind": "command",
-        "payload": {
-          "count": 5000,
-          "start": 10
-        }
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":5000,\"start\":10},\"seq\":3}"
       },
       "expect": {
         "first_path": "/project/big/file-005.txt",
         "last_path": "/project/big/file-604.txt",
+        "last_processed_seq": 3,
         "located": null,
         "rows_count": 600,
         "rows_revision_changed": false,
@@ -833,16 +829,13 @@
     },
     {
       "action": {
-        "command": "setViewport",
         "kind": "command",
-        "payload": {
-          "count": 50,
-          "start": 100000
-        }
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":50,\"start\":100000},\"seq\":4}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 4,
         "located": null,
         "rows_count": 50,
         "rows_revision_changed": false,
@@ -853,16 +846,13 @@
     },
     {
       "action": {
-        "command": "setViewport",
         "kind": "command",
-        "payload": {
-          "count": 50,
-          "start": 630
-        }
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":50,\"start\":630},\"seq\":5}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 5,
         "located": null,
         "rows_count": 50,
         "rows_revision_changed": false,
@@ -873,15 +863,13 @@
     },
     {
       "action": {
-        "command": "setViewport",
         "kind": "command",
-        "payload": {
-          "start": 5
-        }
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"start\":5},\"seq\":6}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 6,
         "located": null,
         "rows_count": 50,
         "rows_revision_changed": false,
@@ -892,16 +880,13 @@
     },
     {
       "action": {
-        "command": "setViewport",
         "kind": "command",
-        "payload": {
-          "count": 0,
-          "start": 5
-        }
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":0,\"start\":5},\"seq\":7}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 7,
         "located": null,
         "rows_count": 50,
         "rows_revision_changed": false,
@@ -912,19 +897,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 1,
-          "target": {
-            "kind": "path",
-            "path": "/project/big/file-320.txt"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":1,\"target\":{\"kind\":\"path\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":8}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 8,
         "located": {
           "request": 1,
           "row": 325
@@ -938,19 +917,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 2,
-          "target": {
-            "kind": "parent_of",
-            "path": "/project/big/file-320.txt"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":2,\"target\":{\"kind\":\"parent_of\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":9}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 9,
         "located": {
           "request": 2,
           "row": 4
@@ -964,19 +937,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 3,
-          "target": {
-            "kind": "parent_of",
-            "path": "/project/big"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":3,\"target\":{\"kind\":\"parent_of\",\"path\":\"/project/big\"}},\"seq\":10}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 10,
         "located": {
           "request": 3,
           "row": null
@@ -990,20 +957,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 4,
-          "target": {
-            "from": 0,
-            "kind": "typeahead",
-            "prefix": "ze"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":4,\"target\":{\"from\":0,\"kind\":\"typeahead\",\"prefix\":\"ze\"}},\"seq\":11}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 11,
         "located": {
           "request": 4,
           "row": 646
@@ -1017,20 +977,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 5,
-          "target": {
-            "from": 647,
-            "kind": "typeahead",
-            "prefix": "ZE"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":5,\"target\":{\"from\":647,\"kind\":\"typeahead\",\"prefix\":\"ZE\"}},\"seq\":12}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 12,
         "located": {
           "request": 5,
           "row": 649
@@ -1044,20 +997,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 6,
-          "target": {
-            "from": 600,
-            "kind": "typeahead",
-            "prefix": "a"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":6,\"target\":{\"from\":600,\"kind\":\"typeahead\",\"prefix\":\"a\"}},\"seq\":13}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 13,
         "located": {
           "request": 6,
           "row": 0
@@ -1071,20 +1017,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 7,
-          "target": {
-            "from": 9999,
-            "kind": "typeahead",
-            "prefix": "ze"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":7,\"target\":{\"from\":9999,\"kind\":\"typeahead\",\"prefix\":\"ze\"}},\"seq\":14}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 14,
         "located": {
           "request": 7,
           "row": 646
@@ -1098,20 +1037,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 8,
-          "target": {
-            "from": 3,
-            "kind": "typeahead",
-            "prefix": "qq"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":8,\"target\":{\"from\":3,\"kind\":\"typeahead\",\"prefix\":\"qq\"}},\"seq\":15}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 15,
         "located": {
           "request": 8,
           "row": null
@@ -1125,19 +1057,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 9,
-          "target": {
-            "kind": "path",
-            "path": "/project/nope.txt"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":9,\"target\":{\"kind\":\"path\",\"path\":\"/project/nope.txt\"}},\"seq\":16}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 16,
         "located": {
           "request": 9,
           "row": null
@@ -1151,20 +1077,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 10,
-          "target": {
-            "from": 0,
-            "kind": "typeahead",
-            "prefix": ""
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":10,\"target\":{\"from\":0,\"kind\":\"typeahead\",\"prefix\":\"\"}},\"seq\":17}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 17,
         "located": {
           "request": 9,
           "row": null
@@ -1178,19 +1097,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 10,
-          "target": {
-            "kind": "sideways",
-            "path": "/project/big/file-320.txt"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":10,\"target\":{\"kind\":\"sideways\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":18}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 18,
         "located": {
           "request": 9,
           "row": null
@@ -1204,16 +1117,13 @@
     },
     {
       "action": {
-        "command": "setViewport",
         "kind": "command",
-        "payload": {
-          "count": 60,
-          "start": 300
-        }
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":60,\"start\":300},\"seq\":19}"
       },
       "expect": {
         "first_path": "/project/big/file-295.txt",
         "last_path": "/project/big/file-354.txt",
+        "last_processed_seq": 19,
         "located": {
           "request": 9,
           "row": null
@@ -1227,19 +1137,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 11,
-          "target": {
-            "kind": "path",
-            "path": "/project/big/file-320.txt"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":11,\"target\":{\"kind\":\"path\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":20}"
       },
       "expect": {
         "first_path": "/project/big/file-295.txt",
         "last_path": "/project/big/file-354.txt",
+        "last_processed_seq": 20,
         "located": {
           "request": 11,
           "row": 325
@@ -1256,11 +1160,13 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "collapsed",
+        "message": "{\"command\":\"setExpansion\",\"payload\":{\"expanded\":false,\"path\":\"/project/big\"},\"seq\":21}",
         "search_query": ""
       },
       "expect": {
         "first_path": "/project/alpha",
         "last_path": "/project/zeta.txt",
+        "last_processed_seq": 21,
         "located": {
           "request": 11,
           "row": null
@@ -1277,11 +1183,13 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "expanded",
+        "message": "{\"command\":\"setExpansion\",\"payload\":{\"expanded\":true,\"path\":\"/project/big\"},\"seq\":22}",
         "search_query": ""
       },
       "expect": {
         "first_path": "/project/big/file-295.txt",
         "last_path": "/project/big/file-354.txt",
+        "last_processed_seq": 22,
         "located": {
           "request": 11,
           "row": 325
@@ -1298,11 +1206,13 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "expanded",
+        "message": "{\"command\":\"toggleSelection\",\"payload\":\"/project/big/file-320.txt\",\"seq\":23}",
         "search_query": ""
       },
       "expect": {
         "first_path": "/project/big/file-295.txt",
         "last_path": "/project/big/file-354.txt",
+        "last_processed_seq": 23,
         "located": {
           "request": 11,
           "row": 325
@@ -1319,11 +1229,13 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "filtered",
+        "message": "{\"command\":\"updateFilters\",\"payload\":{\"searchQuery\":\"file-1\"},\"seq\":24}",
         "search_query": "file-1"
       },
       "expect": {
         "first_path": "/project/big",
         "last_path": "/project/big/file-158.txt",
+        "last_processed_seq": 24,
         "located": null,
         "rows_count": 60,
         "rows_revision_changed": true,
@@ -1334,16 +1246,13 @@
     },
     {
       "action": {
-        "command": "setViewport",
         "kind": "command",
-        "payload": {
-          "count": 30,
-          "start": 40
-        }
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":30,\"start\":40},\"seq\":25}"
       },
       "expect": {
         "first_path": "/project/big/file-139.txt",
         "last_path": "/project/big/file-168.txt",
+        "last_processed_seq": 25,
         "located": null,
         "rows_count": 30,
         "rows_revision_changed": false,
@@ -1354,20 +1263,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 12,
-          "target": {
-            "from": 0,
-            "kind": "typeahead",
-            "prefix": "file-15"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":12,\"target\":{\"from\":0,\"kind\":\"typeahead\",\"prefix\":\"file-15\"}},\"seq\":26}"
       },
       "expect": {
         "first_path": "/project/big/file-139.txt",
         "last_path": "/project/big/file-168.txt",
+        "last_processed_seq": 26,
         "located": {
           "request": 12,
           "row": 51
@@ -1384,11 +1286,13 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "filtered",
+        "message": "{\"command\":\"updateFilters\",\"payload\":{\"searchQuery\":\"file-1\"},\"seq\":27}",
         "search_query": "file-1"
       },
       "expect": {
         "first_path": "/project/big/file-139.txt",
         "last_path": "/project/big/file-168.txt",
+        "last_processed_seq": 27,
         "located": {
           "request": 12,
           "row": 51
@@ -1405,11 +1309,13 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "expanded",
+        "message": "{\"command\":\"updateFilters\",\"payload\":{\"searchQuery\":\"\"},\"seq\":28}",
         "search_query": ""
       },
       "expect": {
         "first_path": "/project/alpha",
         "last_path": "/project/big/file-024.txt",
+        "last_processed_seq": 28,
         "located": null,
         "rows_count": 30,
         "rows_revision_changed": true,
@@ -1420,16 +1326,13 @@
     },
     {
       "action": {
-        "command": "setViewport",
         "kind": "command",
-        "payload": {
-          "count": 70,
-          "start": 500
-        }
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":70,\"start\":500},\"seq\":29}"
       },
       "expect": {
         "first_path": "/project/big/file-495.txt",
         "last_path": "/project/big/file-564.txt",
+        "last_processed_seq": 29,
         "located": null,
         "rows_count": 70,
         "rows_revision_changed": false,
@@ -1440,19 +1343,13 @@
     },
     {
       "action": {
-        "command": "locateRow",
         "kind": "command",
-        "payload": {
-          "request": 13,
-          "target": {
-            "kind": "path",
-            "path": "/project/big/file-320.txt"
-          }
-        }
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":13,\"target\":{\"kind\":\"path\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":30}"
       },
       "expect": {
         "first_path": "/project/big/file-495.txt",
         "last_path": "/project/big/file-564.txt",
+        "last_processed_seq": 30,
         "located": {
           "request": 13,
           "row": 325
@@ -1466,20 +1363,120 @@
     },
     {
       "action": {
-        "command": "initialize",
         "kind": "command",
-        "payload": null
+        "message": "{\"command\":\"noSuchCommand\",\"payload\":null,\"seq\":31}"
+      },
+      "expect": {
+        "first_path": "/project/big/file-495.txt",
+        "last_path": "/project/big/file-564.txt",
+        "last_processed_seq": 31,
+        "located": {
+          "request": 13,
+          "row": 325
+        },
+        "rows_count": 70,
+        "rows_revision_changed": false,
+        "rows_start": 500,
+        "rows_total": 650
+      },
+      "name": "a command that does not exist changes nothing but the number"
+    },
+    {
+      "action": {
+        "kind": "command",
+        "message": "{\"command\":\"setViewport\",\"extra\":true,\"payload\":{\"count\":10,\"start\":0},\"seq\":32}"
+      },
+      "expect": {
+        "first_path": "/project/big/file-495.txt",
+        "last_path": "/project/big/file-564.txt",
+        "last_processed_seq": 32,
+        "located": {
+          "request": 13,
+          "row": 325
+        },
+        "rows_count": 70,
+        "rows_revision_changed": false,
+        "rows_start": 500,
+        "rows_total": 650
+      },
+      "name": "an envelope with more than a command is refused"
+    },
+    {
+      "action": {
+        "kind": "command",
+        "message": "not json"
+      },
+      "expect": {
+        "first_path": "/project/big/file-495.txt",
+        "last_path": "/project/big/file-564.txt",
+        "last_processed_seq": 32,
+        "located": {
+          "request": 13,
+          "row": 325
+        },
+        "rows_count": 70,
+        "rows_revision_changed": false,
+        "rows_start": 500,
+        "rows_total": 650
+      },
+      "name": "a message that is not JSON is answered and changes no number"
+    },
+    {
+      "action": {
+        "kind": "command",
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":10,\"start\":0}}"
+      },
+      "expect": {
+        "first_path": "/project/big/file-495.txt",
+        "last_path": "/project/big/file-564.txt",
+        "last_processed_seq": 32,
+        "located": {
+          "request": 13,
+          "row": 325
+        },
+        "rows_count": 70,
+        "rows_revision_changed": false,
+        "rows_start": 500,
+        "rows_total": 650
+      },
+      "name": "a command without a number is not executed"
+    },
+    {
+      "action": {
+        "kind": "command",
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":10,\"start\":0},\"seq\":\"12\"}"
+      },
+      "expect": {
+        "first_path": "/project/big/file-495.txt",
+        "last_path": "/project/big/file-564.txt",
+        "last_processed_seq": 32,
+        "located": {
+          "request": 13,
+          "row": 325
+        },
+        "rows_count": 70,
+        "rows_revision_changed": false,
+        "rows_start": 500,
+        "rows_total": 650
+      },
+      "name": "a number has to be a number"
+    },
+    {
+      "action": {
+        "kind": "command",
+        "message": "{\"command\":\"initialize\",\"payload\":null,\"seq\":1}"
       },
       "expect": {
         "first_path": "/project/alpha",
         "last_path": "/project/big/file-064.txt",
+        "last_processed_seq": 1,
         "located": null,
         "rows_count": 70,
         "rows_revision_changed": false,
         "rows_start": 0,
         "rows_total": 650
       },
-      "name": "a UI that starts gets the top of the list and no answer"
+      "name": "a UI that starts gets the top of the list, no answer, and its own numbers"
     }
   ]
 }

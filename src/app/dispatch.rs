@@ -44,6 +44,14 @@
 //!   immediately, and whatever the dialog command does after the dialog closes happens
 //!   after them.
 //!
+//! # Numbered commands
+//!
+//! A command can be dispatched with the number the UI gave it. The ordered lane then
+//! reports to its [`CommandProgress`] while it runs the command and when the command
+//! has finished or suspended; a blocking command is reported when the lane reaches
+//! its barrier. What that is good for is described in [`super::correlation`]; this
+//! module only says when.
+//!
 //! # Panics
 //!
 //! A panicking command is logged and dropped; the lanes keep running. This holds in
@@ -56,11 +64,20 @@ use std::any::Any;
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::Poll;
 
 use tokio::sync::{mpsc, oneshot};
 
-type Job = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+use super::correlation::{CommandProgress, CommandSeq};
+
+type Work = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// A command of the ordered lane, with the number the UI gave it (if any).
+struct Job {
+    seq: Option<CommandSeq>,
+    work: Work,
+}
 
 /// A command of the blocking lane together with its barrier.
 struct BlockingJob {
@@ -78,6 +95,7 @@ struct BlockingJob {
 pub struct CommandDispatcher {
     ordered: mpsc::UnboundedSender<Job>,
     blocking: mpsc::UnboundedSender<BlockingJob>,
+    progress: Arc<CommandProgress>,
 }
 
 impl CommandDispatcher {
@@ -90,16 +108,43 @@ impl CommandDispatcher {
         let (continuations, continuations_rx) = mpsc::unbounded_channel();
         let (blocking, blocking_rx) = mpsc::unbounded_channel();
 
-        tokio::spawn(run_ordered_lane(ordered_rx, continuations));
+        let progress = Arc::new(CommandProgress::default());
+
+        tokio::spawn(run_ordered_lane(
+            ordered_rx,
+            continuations,
+            progress.clone(),
+        ));
         tokio::spawn(run_continuation_lane(continuations_rx));
         tokio::spawn(run_blocking_lane(blocking_rx));
 
-        Self { ordered, blocking }
+        Self {
+            ordered,
+            blocking,
+            progress,
+        }
+    }
+
+    /// How far the ordered lane has got with the numbered commands.
+    pub fn progress(&self) -> &Arc<CommandProgress> {
+        &self.progress
     }
 
     /// Queues a command on the ordered lane. Never blocks.
-    pub fn dispatch(&self, command: impl Future<Output = ()> + Send + 'static) {
-        if self.ordered.send(Box::pin(command)).is_err() {
+    ///
+    /// `seq` is the number the UI gave the command, `None` for work that did not come
+    /// from the UI (a dropped path). A numbered command is processed once it has
+    /// finished or suspended for the first time.
+    pub fn dispatch(
+        &self,
+        seq: Option<CommandSeq>,
+        command: impl Future<Output = ()> + Send + 'static,
+    ) {
+        let job = Job {
+            seq,
+            work: Box::pin(command),
+        };
+        if self.ordered.send(job).is_err() {
             tracing::error!("Command dropped: the ordered lane is no longer running.");
         }
     }
@@ -109,14 +154,25 @@ impl CommandDispatcher {
     ///
     /// The command starts once the ordered commands dispatched before this call have
     /// been started, and once the blocking commands dispatched before it have ended.
-    pub fn dispatch_blocking(&self, command: impl FnOnce() + Send + 'static) {
+    ///
+    /// A numbered command is processed when the ordered lane reaches its barrier: at
+    /// its place in the order of the commands, before it starts. The lane does not
+    /// wait for a dialog, so neither does the number.
+    pub fn dispatch_blocking(
+        &self,
+        seq: Option<CommandSeq>,
+        command: impl FnOnce() + Send + 'static,
+    ) {
         // The barrier is a marker command: when the ordered lane gets to it, everything
         // ahead of it has run up to its end or its first suspension. If the lane is
         // gone, the sender is dropped, which releases the job as well.
         let (caught_up, ordered_lane_caught_up) = oneshot::channel();
-        let _ = self.ordered.send(Box::pin(async move {
-            let _ = caught_up.send(());
-        }));
+        let _ = self.ordered.send(Job {
+            seq,
+            work: Box::pin(async move {
+                let _ = caught_up.send(());
+            }),
+        });
 
         let job = BlockingJob {
             ordered_lane_caught_up,
@@ -138,11 +194,14 @@ impl Default for CommandDispatcher {
 /// continuation lane instead of being awaited here.
 async fn run_ordered_lane(
     mut commands: mpsc::UnboundedReceiver<Job>,
-    continuations: mpsc::UnboundedSender<Job>,
+    continuations: mpsc::UnboundedSender<Work>,
+    progress: Arc<CommandProgress>,
 ) {
-    while let Some(mut command) = commands.recv().await {
-        if run_until_first_suspension(&mut command).await.is_pending()
-            && continuations.send(command).is_err()
+    while let Some(Job { seq, mut work }) = commands.recv().await {
+        if run_until_first_suspension(&mut work, seq, &progress)
+            .await
+            .is_pending()
+            && continuations.send(work).is_err()
         {
             tracing::error!("Command abandoned: the continuation lane is no longer running.");
         }
@@ -150,19 +209,31 @@ async fn run_ordered_lane(
 }
 
 /// Polls the command exactly once. `Ready` also covers a command that panicked.
-async fn run_until_first_suspension(command: &mut Job) -> Poll<()> {
+///
+/// The poll is one synchronous call on the thread of the lane, which is what lets
+/// `progress` tell the events of a numbered command from those of everything else.
+async fn run_until_first_suspension(
+    command: &mut Work,
+    seq: Option<CommandSeq>,
+    progress: &CommandProgress,
+) -> Poll<()> {
     std::future::poll_fn(|cx| {
-        let first_poll = catch_unwind(AssertUnwindSafe(|| command.as_mut().poll(cx)));
-        Poll::Ready(first_poll.unwrap_or_else(|panic| {
-            log_panic(panic.as_ref());
-            Poll::Ready(())
-        }))
+        let mut poll = || {
+            catch_unwind(AssertUnwindSafe(|| command.as_mut().poll(cx))).unwrap_or_else(|panic| {
+                log_panic(panic.as_ref());
+                Poll::Ready(())
+            })
+        };
+        Poll::Ready(match seq {
+            Some(seq) => progress.while_answering(seq, poll),
+            None => poll(),
+        })
     })
     .await
 }
 
 /// Completes suspended commands one at a time.
-async fn run_continuation_lane(mut continuations: mpsc::UnboundedReceiver<Job>) {
+async fn run_continuation_lane(mut continuations: mpsc::UnboundedReceiver<Work>) {
     while let Some(mut continuation) = continuations.recv().await {
         std::future::poll_fn(|cx| {
             catch_unwind(AssertUnwindSafe(|| continuation.as_mut().poll(cx))).unwrap_or_else(
@@ -221,7 +292,7 @@ mod tests {
     /// everything dispatched before it on that lane has been started.
     async fn ordered_lane_drained(dispatcher: &CommandDispatcher) {
         let (done, wait) = oneshot::channel();
-        dispatcher.dispatch(async move {
+        dispatcher.dispatch(None, async move {
             let _ = done.send(());
         });
         tokio::time::timeout(Duration::from_secs(5), wait)
@@ -251,7 +322,7 @@ mod tests {
 
         for i in 0..2_000 {
             let journal = journal.clone();
-            dispatcher.dispatch(async move { journal.record(i.to_string()) });
+            dispatcher.dispatch(None, async move { journal.record(i.to_string()) });
         }
         ordered_lane_drained(&dispatcher).await;
 
@@ -268,7 +339,7 @@ mod tests {
         let counter = Arc::new(Mutex::new(0_u32));
         for _ in 0..200 {
             let counter = counter.clone();
-            dispatcher.dispatch(async move {
+            dispatcher.dispatch(None, async move {
                 let seen = *counter.lock().unwrap();
                 std::thread::yield_now();
                 *counter.lock().unwrap() = seen + 1;
@@ -285,13 +356,13 @@ mod tests {
         let journal = Journal::default();
 
         let slow = journal.clone();
-        dispatcher.dispatch(async move {
+        dispatcher.dispatch(None, async move {
             std::thread::sleep(Duration::from_millis(100));
             slow.record("slow");
         });
         for name in ["second", "third"] {
             let journal = journal.clone();
-            dispatcher.dispatch(async move { journal.record(name) });
+            dispatcher.dispatch(None, async move { journal.record(name) });
         }
         ordered_lane_drained(&dispatcher).await;
 
@@ -305,13 +376,13 @@ mod tests {
         let (finish_search, search_finished) = oneshot::channel::<()>();
 
         let search = journal.clone();
-        dispatcher.dispatch(async move {
+        dispatcher.dispatch(None, async move {
             search.record("search: started");
             let _ = search_finished.await;
             search.record("search: finished");
         });
         let next = journal.clone();
-        dispatcher.dispatch(async move { next.record("next") });
+        dispatcher.dispatch(None, async move { next.record("next") });
         ordered_lane_drained(&dispatcher).await;
 
         // The part before the suspension ran in order, the later command did not wait.
@@ -333,7 +404,7 @@ mod tests {
 
         for (name, finished) in [("first", first_finished), ("second", second_finished)] {
             let journal = journal.clone();
-            dispatcher.dispatch(async move {
+            dispatcher.dispatch(None, async move {
                 let _ = finished.await;
                 journal.record(name);
             });
@@ -356,12 +427,12 @@ mod tests {
         let (close_dialog, dialog_closed) = std::sync::mpsc::channel::<()>();
 
         let dialog = journal.clone();
-        dispatcher.dispatch_blocking(move || {
+        dispatcher.dispatch_blocking(None, move || {
             dialog_closed.recv().unwrap();
             dialog.record("dialog closed");
         });
         let next = journal.clone();
-        dispatcher.dispatch(async move { next.record("command") });
+        dispatcher.dispatch(None, async move { next.record("command") });
         ordered_lane_drained(&dispatcher).await;
         assert_eq!(journal.entries(), ["command"]);
 
@@ -377,16 +448,16 @@ mod tests {
             let journal = Journal::default();
 
             let slow = journal.clone();
-            dispatcher.dispatch(async move {
+            dispatcher.dispatch(None, async move {
                 std::thread::sleep(Duration::from_millis(20));
                 slow.record("edit");
             });
             let second = journal.clone();
-            dispatcher.dispatch(async move { second.record("second edit") });
+            dispatcher.dispatch(None, async move { second.record("second edit") });
             let dialog = journal.clone();
-            dispatcher.dispatch_blocking(move || dialog.record("dialog"));
+            dispatcher.dispatch_blocking(None, move || dialog.record("dialog"));
             let later = journal.clone();
-            dispatcher.dispatch(async move { later.record("later") });
+            dispatcher.dispatch(None, async move { later.record("later") });
 
             let entries = eventually(&journal, 4).await;
             assert_eq!(entries[..2], ["edit", "second edit"]);
@@ -404,13 +475,13 @@ mod tests {
         let (finish_search, search_finished) = oneshot::channel::<()>();
 
         let search = journal.clone();
-        dispatcher.dispatch(async move {
+        dispatcher.dispatch(None, async move {
             search.record("search: started");
             let _ = search_finished.await;
             search.record("search: finished");
         });
         let dialog = journal.clone();
-        dispatcher.dispatch_blocking(move || dialog.record("dialog"));
+        dispatcher.dispatch_blocking(None, move || dialog.record("dialog"));
 
         assert_eq!(eventually(&journal, 2).await, ["search: started", "dialog"]);
         finish_search.send(()).unwrap();
@@ -426,16 +497,16 @@ mod tests {
         let (close_first, first_closed) = std::sync::mpsc::channel::<()>();
 
         let first = journal.clone();
-        dispatcher.dispatch_blocking(move || {
+        dispatcher.dispatch_blocking(None, move || {
             first.record("first: open");
             first_closed.recv().unwrap();
         });
         let second = journal.clone();
-        dispatcher.dispatch_blocking(move || second.record("second: open"));
+        dispatcher.dispatch_blocking(None, move || second.record("second: open"));
         assert_eq!(eventually(&journal, 1).await, ["first: open"]);
 
         let command = journal.clone();
-        dispatcher.dispatch(async move { command.record("command") });
+        dispatcher.dispatch(None, async move { command.record("command") });
         ordered_lane_drained(&dispatcher).await;
         assert_eq!(journal.entries(), ["first: open", "command"]);
 
@@ -453,13 +524,13 @@ mod tests {
         let (close_first, first_closed) = std::sync::mpsc::channel::<()>();
 
         let first = journal.clone();
-        dispatcher.dispatch_blocking(move || {
+        dispatcher.dispatch_blocking(None, move || {
             first.record("first: open");
             first_closed.recv().unwrap();
             first.record("first: closed");
         });
         let second = journal.clone();
-        dispatcher.dispatch_blocking(move || second.record("second: open"));
+        dispatcher.dispatch_blocking(None, move || second.record("second: open"));
 
         assert_eq!(eventually(&journal, 1).await, ["first: open"]);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -477,30 +548,112 @@ mod tests {
         let dispatcher = CommandDispatcher::new();
         let journal = Journal::default();
 
-        dispatcher.dispatch(async { panic!("panic before the first suspension") });
-        dispatcher.dispatch(async {
+        dispatcher.dispatch(None, async { panic!("panic before the first suspension") });
+        dispatcher.dispatch(None, async {
             tokio::task::yield_now().await;
             panic!("panic after a suspension");
         });
-        dispatcher.dispatch_blocking(|| panic!("panic in a blocking command"));
+        dispatcher.dispatch_blocking(None, || panic!("panic in a blocking command"));
 
         let ordered = journal.clone();
-        dispatcher.dispatch(async move { ordered.record("ordered") });
+        dispatcher.dispatch(None, async move { ordered.record("ordered") });
         ordered_lane_drained(&dispatcher).await;
         assert_eq!(journal.entries(), ["ordered"]);
 
         let suspended = journal.clone();
-        dispatcher.dispatch(async move {
+        dispatcher.dispatch(None, async move {
             tokio::task::yield_now().await;
             suspended.record("continuation");
         });
         assert_eq!(eventually(&journal, 2).await, ["ordered", "continuation"]);
 
         let blocking = journal.clone();
-        dispatcher.dispatch_blocking(move || blocking.record("blocking"));
+        dispatcher.dispatch_blocking(None, move || blocking.record("blocking"));
         assert_eq!(
             eventually(&journal, 3).await,
             ["ordered", "continuation", "blocking"]
         );
+    }
+
+    // --- Numbered commands ---
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_numbered_command_is_processed_when_it_has_finished() {
+        let dispatcher = CommandDispatcher::new();
+        let progress = dispatcher.progress().clone();
+        assert_eq!(progress.last_processed(), 0);
+
+        let seen = Arc::new(Mutex::new(None));
+        let during = seen.clone();
+        let running = progress.clone();
+        dispatcher.dispatch(Some(1), async move {
+            *during.lock().unwrap() = Some(running.last_processed());
+        });
+        dispatcher.dispatch(None, async {});
+        ordered_lane_drained(&dispatcher).await;
+
+        // Not before it has run, and work without a number does not change it.
+        assert_eq!(*seen.lock().unwrap(), Some(0));
+        assert_eq!(progress.last_processed(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_numbered_command_is_processed_when_it_suspends() {
+        let dispatcher = CommandDispatcher::new();
+        let progress = dispatcher.progress().clone();
+        let journal = Journal::default();
+        let (finish_search, search_finished) = oneshot::channel::<()>();
+
+        let search = journal.clone();
+        dispatcher.dispatch(Some(1), async move {
+            let _ = search_finished.await;
+            search.record("search: finished");
+        });
+        ordered_lane_drained(&dispatcher).await;
+        assert_eq!(progress.last_processed(), 1);
+
+        // The command after it is not held back, and the continuation does not
+        // take the number back when it ends.
+        dispatcher.dispatch(Some(2), async {});
+        ordered_lane_drained(&dispatcher).await;
+        assert_eq!(progress.last_processed(), 2);
+        finish_search.send(()).unwrap();
+        eventually(&journal, 1).await;
+        assert_eq!(progress.last_processed(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_numbered_blocking_command_is_processed_at_its_barrier() {
+        let dispatcher = CommandDispatcher::new();
+        let progress = dispatcher.progress().clone();
+        let journal = Journal::default();
+        let (close_dialog, dialog_closed) = std::sync::mpsc::channel::<()>();
+
+        let dialog = journal.clone();
+        let at_start = progress.clone();
+        dispatcher.dispatch(Some(1), async {});
+        dispatcher.dispatch_blocking(Some(2), move || {
+            dialog.record(format!("dialog: open at {}", at_start.last_processed()));
+            dialog_closed.recv().unwrap();
+            dialog.record("dialog: closed");
+        });
+        assert_eq!(eventually(&journal, 1).await, ["dialog: open at 2"]);
+
+        // The dialog is still open; later commands are processed meanwhile, and the
+        // end of the dialog command does not change the number.
+        dispatcher.dispatch(Some(3), async {});
+        ordered_lane_drained(&dispatcher).await;
+        assert_eq!(progress.last_processed(), 3);
+        close_dialog.send(()).unwrap();
+        eventually(&journal, 2).await;
+        assert_eq!(progress.last_processed(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_numbered_command_that_panics_is_processed() {
+        let dispatcher = CommandDispatcher::new();
+        dispatcher.dispatch(Some(1), async { panic!("panic in a numbered command") });
+        ordered_lane_drained(&dispatcher).await;
+        assert_eq!(dispatcher.progress().last_processed(), 1);
     }
 }

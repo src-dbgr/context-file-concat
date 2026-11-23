@@ -1,0 +1,261 @@
+[
+  {
+    "command": "initialize",
+    "payload": null,
+    "seq": 1
+  },
+  {
+    "command": "selectDirectory",
+    "payload": null,
+    "seq": 2
+  },
+  {
+    "command": "rescanDirectory",
+    "payload": null,
+    "seq": 3
+  },
+  {
+    "command": "clearDirectory",
+    "payload": null,
+    "seq": 4
+  },
+  {
+    "command": "cancelScan",
+    "payload": null,
+    "seq": 5
+  },
+  {
+    "command": "loadDirectoryLevel",
+    "payload": "/project/src",
+    "seq": 6
+  },
+  {
+    "command": "setExpansion",
+    "payload": {
+      "expanded": true,
+      "path": "/project/src"
+    },
+    "seq": 7
+  },
+  {
+    "command": "expandCollapseAll",
+    "payload": true,
+    "seq": 8
+  },
+  {
+    "command": "expandCollapseAll",
+    "payload": false,
+    "seq": 9
+  },
+  {
+    "command": "setViewport",
+    "payload": {
+      "count": 90,
+      "start": 120
+    },
+    "seq": 10
+  },
+  {
+    "command": "toggleSelection",
+    "payload": "/project/src",
+    "seq": 11
+  },
+  {
+    "command": "toggleDirectorySelection",
+    "payload": "/project/src",
+    "seq": 12
+  },
+  {
+    "command": "selectAll",
+    "payload": null,
+    "seq": 13
+  },
+  {
+    "command": "deselectAll",
+    "payload": null,
+    "seq": 14
+  },
+  {
+    "command": "updateFilters",
+    "payload": {
+      "contentSearchQuery": "needle",
+      "extensionFilter": "rs",
+      "searchQuery": "main"
+    },
+    "seq": 15
+  },
+  {
+    "command": "updateFilters",
+    "payload": {
+      "contentSearchQuery": "",
+      "extensionFilter": "",
+      "searchQuery": ""
+    },
+    "seq": 16
+  },
+  {
+    "command": "loadFilePreview",
+    "payload": "/project/src",
+    "seq": 17
+  },
+  {
+    "command": "clearPreviewState",
+    "payload": null,
+    "seq": 18
+  },
+  {
+    "command": "generatePreview",
+    "payload": null,
+    "seq": 19
+  },
+  {
+    "command": "cancelGeneration",
+    "payload": null,
+    "seq": 20
+  },
+  {
+    "command": "pickOutputDirectory",
+    "payload": null,
+    "seq": 21
+  },
+  {
+    "command": "addIgnorePattern",
+    "payload": {
+      "pattern": "*.log"
+    },
+    "seq": 22
+  },
+  {
+    "command": "removeIgnorePattern",
+    "payload": {
+      "pattern": "*.log"
+    },
+    "seq": 23
+  },
+  {
+    "command": "clearIgnorePatterns",
+    "payload": null,
+    "seq": 24
+  },
+  {
+    "command": "addIgnorePath",
+    "payload": "/project/src",
+    "seq": 25
+  },
+  {
+    "command": "importConfig",
+    "payload": null,
+    "seq": 26
+  },
+  {
+    "command": "exportConfig",
+    "payload": null,
+    "seq": 27
+  },
+  {
+    "command": "locateRow",
+    "payload": {
+      "request": 1,
+      "target": {
+        "kind": "path",
+        "path": "/project/src/main.rs"
+      }
+    },
+    "seq": 28
+  },
+  {
+    "command": "locateRow",
+    "payload": {
+      "request": 2,
+      "target": {
+        "kind": "parent_of",
+        "path": "/project/src/main.rs"
+      }
+    },
+    "seq": 29
+  },
+  {
+    "command": "locateRow",
+    "payload": {
+      "request": 3,
+      "target": {
+        "from": 3,
+        "kind": "typeahead",
+        "prefix": "ma"
+      }
+    },
+    "seq": 30
+  },
+  {
+    "command": "saveFile",
+    "payload": {
+      "documentId": 7,
+      "kind": "generated"
+    },
+    "seq": 31
+  },
+  {
+    "command": "saveFile",
+    "payload": {
+      "content": "generated content, edited",
+      "kind": "edited"
+    },
+    "seq": 32
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "case_sensitive_search",
+      "value": true
+    },
+    "seq": 33
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "remove_empty_directories",
+      "value": true
+    },
+    "seq": 34
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "include_tree_by_default",
+      "value": false
+    },
+    "seq": 35
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "use_relative_paths",
+      "value": false
+    },
+    "seq": 36
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "output_filename",
+      "value": "context.txt"
+    },
+    "seq": 37
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "output_directory",
+      "value": "/home/user/out"
+    },
+    "seq": 38
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "output_directory",
+      "value": null
+    },
+    "seq": 39
+  }
+]

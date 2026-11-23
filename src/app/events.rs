@@ -1,6 +1,7 @@
-//! Defines the event and message structures for communication between the backend and frontend.
+//! Defines the events the backend sends to the frontend. (What the frontend sends is
+//! defined in [`super::ipc`].)
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::PathBuf;
 
 use super::state::GeneratedDocument;
@@ -87,13 +88,4 @@ pub enum IgnorePathRefusal {
     TrailingWhitespace { name: String },
     /// A name on the way to the entry is not valid Unicode; a pattern is text.
     NotUnicode { name: String },
-}
-
-/// A message received from the WebView via the IPC channel.
-#[derive(Deserialize, Debug)]
-pub struct IpcMessage {
-    /// The name of the command to execute.
-    pub command: String,
-    /// The payload associated with the command, as a JSON value.
-    pub payload: serde_json::Value,
 }

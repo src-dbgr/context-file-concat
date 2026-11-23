@@ -1,30 +1,32 @@
 # IPC Contracts
 
-> The UI and the host talk over two one-way channels: the UI **posts commands**, the host **calls `window.*` handlers**. There are no request/response pairs and no promises: a command never returns a value, its effect arrives as the next state snapshot.
+> The UI and the host talk over two one-way channels: the UI **posts commands**, the host **calls `window.*` handlers**. There are no request/response pairs and no promises: a command never returns a value, its effect arrives with a state snapshot. Which one is not guessed: the UI numbers its commands, and every snapshot states the number of the last command it accounts for.
 
 ## Overview
 
 ```text
-UI  ──  window.ipc.postMessage('{"command": "...", "payload": ...}')  ──▶  Host
-UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  ──  Host
+UI  ──  window.ipc.postMessage('{"seq": n, "command": "...", "payload": ...}')  ──▶  Host
+UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...          ──  Host
 ```
 
-| Concern                         | Where                                                                         |
-| ------------------------------- | ----------------------------------------------------------------------------- |
-| Sending commands                | `src/ui/src/lib/services/backend.ts` (`post`)                                 |
-| Command and state schemas (Zod) | `src/ui/src/lib/ipc/schema.ts`                                                |
-| Receiving host calls            | `src/ui/src/lib/ipc/handlers.ts` (`installWindowIPCHandlers`)                 |
-| Frontend types                  | `src/ui/src/lib/types.ts` (derived from the schemas with `z.infer`)           |
-| Command dispatch (host)         | `src/app/mod.rs` (`COMMANDS`, `dispatch_ipc_message`) → `src/app/commands.rs` |
-| Command ordering (host)         | `src/app/dispatch.rs` (`CommandDispatcher`)                                   |
-| Host → UI events                | `src/app/events.rs` (`UserEvent`), `src/app/mod.rs` (`handle_user_event`)     |
-| State snapshot (host)           | `src/app/view_model/` (`generate_ui_state`, `UiState`, `UiConfig`, `TreeRow`) |
-| Rows of the tree, their window  | `src/app/view_model/rows.rs` (host), `src/ui/src/lib/modules/treeWindow.ts`   |
-| Delivery / coalescing           | `src/app/transport.rs`                                                        |
+| Concern                         | Where                                                                           |
+| ------------------------------- | ------------------------------------------------------------------------------- |
+| Sending commands                | `src/ui/src/lib/services/backend.ts` (`post`)                                   |
+| Command and state schemas (Zod) | `src/ui/src/lib/ipc/schema.ts`                                                  |
+| Receiving host calls            | `src/ui/src/lib/ipc/handlers.ts` (`installWindowIPCHandlers`)                   |
+| Frontend types                  | `src/ui/src/lib/types.ts` (derived from the schemas with `z.infer`)             |
+| Messages and commands (host)    | `src/app/ipc.rs` (`IpcMessage`, `Command`)                                      |
+| Command dispatch (host)         | `src/app/mod.rs` (`dispatch_ipc_message`, `Command::into_work`) → `commands.rs` |
+| Command ordering (host)         | `src/app/dispatch.rs` (`CommandDispatcher`)                                     |
+| Commands and their snapshots    | `src/app/correlation.rs` (`CommandProgress`, `Correlated`)                      |
+| Host → UI events                | `src/app/events.rs` (`UserEvent`), `src/app/mod.rs` (`handle_user_event`)       |
+| State snapshot (host)           | `src/app/view_model/` (`generate_ui_state`, `UiState`, `UiConfig`, `TreeRow`)   |
+| Rows of the tree, their window  | `src/app/view_model/rows.rs` (host), `src/ui/src/lib/modules/treeWindow.ts`     |
+| Delivery / coalescing           | `src/app/transport.rs`                                                          |
 
 ## Principles
 
-- **Commands are fire-and-forget.** `post()` returns `void`. The host mutates its `AppState` and answers with a state snapshot (and, where applicable, one of the other host calls).
+- **A command has no result.** The host mutates its `AppState` and answers with a state snapshot (and, where applicable, one of the other host calls). What `post()` returns is the number of the command: a snapshot whose `last_processed_seq` has reached it accounts for the command, see [Commands and their snapshots](#commands-and-their-snapshots).
 - **Commands take effect in the order they were posted.** The host executes them one after the other, see [Command ordering](#command-ordering).
 - **Every state update is a complete snapshot.** `window.render(uiState)` replaces the UI's `appState` store wholesale. There are no diffs and no patches; a snapshot never depends on an earlier one. This is what allows the transport to drop a pending snapshot when a newer one is already available (latest wins, see `transport.rs`).
 - **The host owns the state, the UI owns none of it.** In particular the host is the single source of truth for selection, for **expansion** and for the **list of rows** the tree consists of (see below). The UI renders what it receives.
@@ -34,7 +36,9 @@ UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  �
 
 ## Commands (UI → Host)
 
-The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on the host the routing table `COMMANDS` in `src/app/mod.rs`. The two are compared by the [contract tests](#contract-tests): same command names, and every example payload the host serializes passes the schema of its command. The wire format is `{"command": <name>, "payload": <payload | null>}`.
+The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on the host the type `Command` in `src/app/ipc.rs`: one enum with a variant per command that carries the payload of the command. Reading a message into that type is the validation of the message and decides what runs with which payload, in one step; there is no list of command names beside it and no handler that looks at JSON. The two sides are compared by the [contract tests](#contract-tests): same command names, every example the host serializes passes the schema of its command, and `post()` writes the messages the host reads.
+
+The wire format is `{"seq": <number>, "command": <name>, "payload": <payload | null>}`. `seq` is the number of the message (see [Commands and their snapshots](#commands-and-their-snapshots)); it belongs to the envelope and is not part of any payload. A command without a payload is sent with `"payload": null`.
 
 | Command                         | Payload                                                 | Effect                                                                                                                                                                                                                                              |
 | ------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -65,11 +69,19 @@ The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on
 | `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog, see [Config import and export](#config-import-and-export)                                                                                                                                                          |
 | `addIgnorePath`                 | `string` (path)                                         | Adds the ignore pattern for exactly that entry of the loaded tree, see [The pattern of `addIgnorePath`](#the-pattern-of-addignorepath)                                                                                                              |
 
+### Messages that are refused
+
+Every message that is not a numbered command is treated the same way, whatever is wrong with it: it is not JSON, it has no `seq`, the command does not exist, the payload is missing a field, has one too many or one of the wrong type, the envelope holds more than `seq`, `command` and `payload`. The message is **logged** (the reason, not the payload; of a message that cannot be read at all the first 200 characters), it **changes nothing**, and it is **answered with the unchanged snapshot**, at its place in the order of the commands. If the message has a number, the snapshot accounts for it; a message without one changes no number. A dialog command that is refused opens no dialog (and `saveFile` is then answered with the snapshot, not with a `saveResult`).
+
+A message the host does not take at all is the one from another origin (see [Transport notes](#transport-notes)): it is dropped before it is read and not answered.
+
+Besides, a command can refuse what a well-formed message asks for (a blank ignore pattern, a type-ahead without a prefix, a preview of a path that is not listed). That is the business of the command and described with it; such a command answers with the unchanged snapshot as well.
+
 ### Filter texts
 
 One rule decides whether a filter text is set, for `searchQuery`, `extensionFilter` and `contentSearchQuery` alike: a text that is empty or consists of whitespace only is **not set**. It is ignored entirely: it does not filter, it starts no content search, and the UI does not show the "no results for filter" message for it. A text that is set is matched exactly as typed; it is not trimmed. The rule lives in `core::is_blank` on the host; the UI mirrors it in `hasActiveFilters` (`FileTree.svelte`).
 
-The payload has a type on the host (`UpdateFiltersPayload` in `commands.rs`): the three texts, each optional (a text that is left out is empty), and nothing else. A malformed payload changes nothing and is answered with the unchanged snapshot.
+The payload has a type on the host (`UpdateFiltersPayload` in `commands.rs`): the three texts, each optional (a text that is left out is empty), and nothing else.
 
 ### Content search
 
@@ -122,7 +134,7 @@ One type decides what the ignore patterns hide: `core::IgnoreRules` (`src/core/i
 - <a id="the-pattern-of-addignorepath"></a>**The pattern of `addIgnorePath`** (the ignore button of a tree row) hides that one entry and nothing else. It is the path relative to the loaded directory, **anchored with a leading `/`**, the names joined with `/` on every platform, a directory of the loaded list with a trailing `/`: `/README.md`, `/src/gen/`. Characters with a meaning in a pattern are escaped with a backslash (`\`, `*`, `?`, `[`, `]`, `{`, `}`), so `a[1].txt` becomes `/a\[1\].txt`; the leading slash also keeps `!important` and `#notes` from being read as a negation or a comment. The matcher drops the whitespace at the end of a pattern (of any kind, not only spaces), so a file name that ends with ASCII whitespace (space, tab, line feed, vertical tab, form feed, carriage return) has its last character written as a character class: `notes ` becomes `/notes[ ]`, a name that ends with a tab `/name[<TAB>]`. (A pattern typed by hand may also end with `\ `, as in a `.gitignore` file.) A path outside the loaded directory, a name that is not valid Unicode and a file name that ends with whitespace outside ASCII (a no-break space U+00A0, an ideographic space U+3000) have no pattern: nothing is added, and the command is answered with the unchanged snapshot. A directory with such a name has a pattern: the slash at its end protects the name. Where it is the name of a listed entry that stands in the way, the user has pressed a button and nothing was hidden, so the host says why before that snapshot: `window.ignorePathRefused({ reason, name })` with the reason `trailing_whitespace` or `not_unicode` and the name as the tree shows it; the UI words it as a toast in its language. (The UI knows paths as text, so an entry whose name is not valid Unicode comes back from it written lossily, with U+FFFD; the host recognizes the entry by that and makes no pattern of a path that names nothing.) (Before, the pattern was the bare relative path: `README.md` and `docs/` also hid entries of that name in subdirectories, and special characters were interpreted. Patterns saved by earlier versions keep that meaning; to hide a name at any depth, add it as a pattern with `addIgnorePattern`.)
 - `active_ignore_patterns` holds the patterns that decided about at least one entry of the scan: those that hid one and the negations that re-included one. Of several patterns matching the same entry only the deciding one is reported.
 
-The commands are idempotent (adding a pattern that is set, removing one that is not, and setting an option to its current value change nothing), a changed configuration is persisted, and **every config command is answered with a snapshot**, also when nothing changed. The UI relies on that: controls show the host's `config` and do not write to the store. This holds for every way these commands can end (`addIgnorePattern`, `removeIgnorePattern`, `clearIgnorePatterns`, `addIgnorePath`, `setConfigOption`): a payload that is refused (malformed, an unknown option, a blank pattern), `addIgnorePath` for a path outside the loaded directory or without a loaded directory. Refused payloads are logged on the host. The dialog command `pickOutputDirectory` is the exception that follows from its nature: a dismissed dialog sends nothing.
+The commands are idempotent (adding a pattern that is set, removing one that is not, and setting an option to its current value change nothing), a changed configuration is persisted, and **every config command is answered with a snapshot**, also when nothing changed. The UI relies on that: controls show the host's `config` and do not write to the store. This holds for every way these commands can end (`addIgnorePattern`, `removeIgnorePattern`, `clearIgnorePatterns`, `addIgnorePath`, `setConfigOption`): a message that is [refused](#messages-that-are-refused) (malformed, an unknown option), a blank pattern, `addIgnorePath` for a path outside the loaded directory or without a loaded directory. The dialog command `pickOutputDirectory` is the exception that follows from its nature: a dismissed dialog sends nothing.
 
 #### Config import and export
 
@@ -145,11 +157,11 @@ The file is replaced atomically: the configuration is written to a temporary fil
 A snapshot replaces the whole store, so a text field bound to the store would be reset by any snapshot that arrives while the user is typing (scan progress, the answer to another command, a snapshot from before the host has seen the latest input). The filter inputs (`Sidebar.svelte`) and the output fields (`HostTextInput.svelte`) therefore show a local draft and ask a `HostDraft` (`src/ui/src/lib/modules/hostDraft.ts`) whether a host value may replace it:
 
 - While the user is editing (changed, not sent yet: the 300 ms debounce of the filters, an output field that still has the focus), the draft stays.
-- After the text has been sent, host values that differ from it are skipped until the host reports the sent text (its answer to the command).
-- The wait for that answer is limited to 1.5 s, for the case that something else has changed the value in the meantime; the host is the source of truth. What ends the wait is always a host value that is newer than the send, never the time alone:
-  - If the host has reported differing values by then (they were skipped), a timer ends the wait and the field takes the latest host value; it does not depend on another snapshot arriving.
-  - If the host has reported nothing since the send, the value the field knows is older than the send and says nothing about the host's decision. The draft stays, and the next snapshot that arrives is shown. (Every command that sets a text is answered right away, also `updateFilters` with a content query; this keeps a typed text from being reset should an answer take longer all the same.)
+- After the text has been sent, the draft stays until the host has processed the command that carried it: `post()` returns the number of that command, and the draft is kept for every snapshot whose `last_processed_seq` is smaller (it was made before the host got to the command and says nothing about it).
+- From the first snapshot that has reached the number on, **the host's value is shown, whatever it is**. It is the sent text unless the host has decided otherwise (it refused the command, or a later command changed the value); the host is the source of truth.
 - The filters belong to the directory they were typed for. When `current_path` changes (another directory, or none after `clearDirectory`), a pending debounce is cancelled, the draft is given up and the host's filters are shown.
+
+There is no timer in this and no comparison of texts: every command that sets a text is answered (also one that is refused, and `updateFilters` with a content query right away, before the search), and the answer says itself that it is one. (Until 0.3.1 the draft waited for a snapshot that showed the sent text, for at most 1.5 s.)
 
 Changes made from script (word and line deletion with the keyboard, undo/redo, paste) dispatch an `input` event, so they are drafts like typed text.
 
@@ -162,11 +174,36 @@ post("selectAll"); // nullary command
 post("setExpansion", { path: "/repo/src", expanded: true }); // payload is type-checked per command
 ```
 
-`post` is overloaded so that the payload type follows from the command name. It does not return anything: do not `await` it.
+`post` is overloaded so that the payload type follows from the command name. It returns the number it has given the command (see below), not a result: there is nothing to `await`.
+
+### Commands and their snapshots
+
+The UI numbers the commands it posts: 1, 2, 3, ... in the order it posts them (`post()` in `backend.ts` is the only place that counts; the number is the `seq` of the envelope). The host states in every snapshot how far it has got: `last_processed_seq`, the number of the last command the snapshot accounts for (0 before the first one).
+
+**A snapshot carries `last_processed_seq = n` if it was sent by command `n` itself while that command ran on the ordered lane, or after that** (or after command `n` had finished or suspended there without sending one), and no later command has got that far. Commands pass the ordered lane in the order they were posted (see [Command ordering](#command-ordering)), so:
+
+> A snapshot with `last_processed_seq >= n` shows what command `n`, and every command posted before it, has done on the ordered lane: everything a command does before it finishes or suspends for the first time.
+
+What a command does later is not covered by its number and arrives with later snapshots, which carry the number that is current then:
+
+| Kind of command                                                  | Processed when                                                                                            | What follows later                                                |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| A command of the ordered lane that does not suspend (almost all) | It has run; the snapshot it sends is its answer                                                           | The results of background work it has started (a scan, a preview) |
+| A command that suspends (`updateFilters` with a content query)   | It suspends: the filter texts are stored and the first answer is sent                                     | The matches, from the continuation lane                           |
+| A dialog command (blocking lane)                                 | The ordered lane reaches its place in the order: every command posted before it has finished or suspended | Opening the dialog and whatever the command does when it closes   |
+| A message that is [refused](#messages-that-are-refused)          | It is answered with the unchanged snapshot                                                                | Nothing                                                           |
+
+So a dialog that stays open for minutes does not hold the number back (the lane does not wait for it either), and a dialog that is dismissed sends nothing: the number of its command shows up in the next snapshot. A dropped path is no command of the UI and has no number; the snapshots it leads to carry the number of the last command.
+
+The number is the one of the **last** command, not the highest one ever seen. Within a session of the UI it never goes back. A UI that starts anew (a reload) counts from 1 again, and the snapshots follow it.
+
+**Coalescing loses nothing.** The transport drops a snapshot that has not been delivered when a newer one is there. The newer one was sent later, so its number is at least as high: the UI may never see the answer to a particular command, but it always sees a snapshot that accounts for it.
+
+This is a concern of the transport on both sides, and no command knows about it. On the host the ordered lane reports which numbered command it is running, and the proxy the commands send their events through writes the number into every snapshot on its way out (`src/app/correlation.rs`; a snapshot is made and sent while the state is locked, so the order of sending is the order of making). The view model leaves the field at 0. In the UI `post()` counts, and whoever waits for the effect of a command compares the number it got with `last_processed_seq` of the store (today: the [text fields](#text-fields)).
 
 ### Command ordering
 
-`dispatch_ipc_message` does not execute anything itself. It parses the message and queues the command on a `CommandDispatcher` (`src/app/dispatch.rs`), which has three lanes:
+`dispatch_ipc_message` does not execute anything itself. It reads the message and queues the command on a `CommandDispatcher` (`src/app/dispatch.rs`), which has three lanes. On which lane a command runs is decided in one place, where its handler is bound to its payload (`Command::into_work` in `src/app/mod.rs`):
 
 | Lane         | Commands                                                                                                               | Guarantee                                                                                                             |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -276,7 +313,7 @@ Copying is done by the UI (`handleCopy` in `modules/clipboard.ts`), and it follo
 
 The distinction matters for line ends. The output keeps the line ends of its files, and Monaco gives a text one kind of line end: for an output of files with CRLF and LF line ends, the editor's value (`getValue()`) has all of them rewritten to the more frequent kind. An unedited output is therefore neither saved nor copied through the editor. The first edit makes the editor's text the output, with its uniform line ends, for the copy and the save alike.
 
-A payload that is neither of the two kinds is logged and not answered. The UI shows a toast per result (success, info, error with the reason) in its language.
+A payload that is neither of the two kinds is [refused](#messages-that-are-refused) like any malformed message: no dialog, no `saveResult`, the unchanged snapshot. The UI shows a toast per result (success, info, error with the reason) in its language.
 
 Measured for a selection of 2,560 files of 20 KiB each, an output of 52.8 MB (`large_output_benchmark` in `src/app/commands.rs`, release build, Apple M-series; the time until the output is shown adds the 1.2 s of the editor in both columns):
 
@@ -329,25 +366,26 @@ The scan is reported as complete (`is_scanning: false`, status "Indexing complet
 
 Produced by `generate_ui_state` (`src/app/view_model/mod.rs`), validated by `UiStateSchema`.
 
-| Field                                                      | Meaning                                                                |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `config`                                                   | The settings the UI displays (`UiConfig`), see below                   |
-| `current_path`                                             | Scanned root directory (`""` if none)                                  |
-| `rows`                                                     | The rows of the tree inside the window, in order, see below            |
-| `rows_start`                                               | The position of `rows[0]` in the list of all rows                      |
-| `rows_total`                                               | The number of rows of the tree: what the scrollbar spans               |
-| `rows_revision`                                            | Changes when the list of all rows does, and only then                  |
-| `located`                                                  | The answer to the last `locateRow`, or `null`                          |
-| `total_files_found`                                        | Items (files and directories) in the unfiltered list                   |
-| `visible_files_count`                                      | Items (files and directories) in the filtered list                     |
-| `tree_files_count`                                         | Files in the complete filtered tree, including the ones not sent       |
-| `tree_dirs_count`                                          | Directories in the complete filtered tree, including the ones not sent |
-| `selected_files_count`                                     | Selected files                                                         |
-| `is_scanning`, `is_generating`, `is_fully_scanned`         | Activity flags                                                         |
-| `status_message`, `scan_progress`                          | Status line and scan progress, see [Scan progress](#scan-progress)     |
-| `search_query`, `extension_filter`, `content_search_query` | Active filters                                                         |
-| `current_config_filename`                                  | Name of the imported config, or `null`                                 |
-| `active_ignore_patterns`, `patterns_need_rescan`           | Ignore pattern bookkeeping                                             |
+| Field                                                      | Meaning                                                                                                                                                                           |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config`                                                   | The settings the UI displays (`UiConfig`), see below                                                                                                                              |
+| `current_path`                                             | Scanned root directory (`""` if none)                                                                                                                                             |
+| `rows`                                                     | The rows of the tree inside the window, in order, see below                                                                                                                       |
+| `rows_start`                                               | The position of `rows[0]` in the list of all rows                                                                                                                                 |
+| `rows_total`                                               | The number of rows of the tree: what the scrollbar spans                                                                                                                          |
+| `rows_revision`                                            | Changes when the list of all rows does, and only then                                                                                                                             |
+| `located`                                                  | The answer to the last `locateRow`, or `null`                                                                                                                                     |
+| `total_files_found`                                        | Items (files and directories) in the unfiltered list                                                                                                                              |
+| `visible_files_count`                                      | Items (files and directories) in the filtered list                                                                                                                                |
+| `tree_files_count`                                         | Files in the complete filtered tree, including the ones not sent                                                                                                                  |
+| `tree_dirs_count`                                          | Directories in the complete filtered tree, including the ones not sent                                                                                                            |
+| `selected_files_count`                                     | Selected files                                                                                                                                                                    |
+| `is_scanning`, `is_generating`, `is_fully_scanned`         | Activity flags                                                                                                                                                                    |
+| `status_message`, `scan_progress`                          | Status line and scan progress, see [Scan progress](#scan-progress)                                                                                                                |
+| `search_query`, `extension_filter`, `content_search_query` | Active filters                                                                                                                                                                    |
+| `current_config_filename`                                  | Name of the imported config, or `null`                                                                                                                                            |
+| `active_ignore_patterns`, `patterns_need_rescan`           | Ignore pattern bookkeeping                                                                                                                                                        |
+| `last_processed_seq`                                       | The number of the last command the snapshot accounts for, see [Commands and their snapshots](#commands-and-their-snapshots). Written by the transport, not derived from the state |
 
 ### The config view
 
@@ -473,15 +511,15 @@ There is no optimistic update: a row changes when the snapshot arrives. Snapshot
   UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture
   ```
 
-- **TypeScript → Rust fixture (commands).** `src/app/command_contract_tests.rs` writes the routing table `COMMANDS` with example payloads into `src/ui/src/tests/contracts/fixtures/commands.json`; payloads with a type on the host (`ConfigOption`, `IgnorePatternPayload`, `SaveFilePayload`, `SetExpansionPayload`, `SetViewportPayload`, `LocateRowPayload`, `UpdateFiltersPayload`) are serialized from that type, one example per `ConfigOption` and per kind of `RowTarget` and of `SaveFilePayload`. These types reject unknown fields, and so do their schemas (`.strict()`). `rust-fixture.test.ts` checks that `CommandSchemas` has exactly the same command names, that every example passes the schema of its command unchanged, and that both sides know the same options of `setConfigOption` and the same kinds of row lookup. `COMMANDS` is what the router resolves names with, so a command cannot be routed without being part of the contract. The fixture is regenerated with the same command as above.
+- **TypeScript → Rust fixture (commands).** `src/app/command_contract_tests.rs` writes examples of every command down as values of `Command` (one per `ConfigOption`, per kind of `RowTarget` and of `SaveFilePayload`) and serializes them into two files: `fixtures/commands.json`, every command name with its example payloads, and `fixtures/command_messages.json`, the same examples as complete messages, numbered. The list of names is not kept by hand: it is the one serde states for the enum (`Command::wire_names`), the examples have to cover it, and every message is read back as the command it was written from. The payload types reject unknown fields, and so do their schemas (`.strict()`). `rust-fixture.test.ts` checks that `CommandSchemas` has exactly the same command names, that every example passes the schema of its command unchanged, that both sides know the same options of `setConfigOption` and the same kinds of row lookup, and that `post()`, in a development and in a production build, writes exactly the messages of `command_messages.json`. A command cannot be routed without being in the fixture, and it cannot be in the fixture without the UI knowing it. Regenerated with the same command.
 - **Rust → TypeScript fixture (host calls of the output).** `src/app/event_contract_tests.rs` builds every form of `ShowGeneratedContent`, `OutputSize` and `SaveResult`, turns each into the script the WebView evaluates and writes the arguments of those calls into `src/ui/src/tests/contracts/fixtures/output_events.json`. `rust-fixture.test.ts` checks that every example passes the schema of its handler unchanged and that both sides know the same statuses. Regenerated with the same command.
 - **Schema tests.** `src/ui/src/tests/contracts/` covers the command union, the state schema, property tests and JSON-schema snapshots (`npm run test:contracts`).
-- **The window, replayed (Rust → TypeScript).** The UI's tests have no host; what stands in for it (the E2E bridge and the fake host of the component tests) is one model, `src/ui/src/lib/dev/treeHostModel.ts`. `src/app/window_contract_tests.rs` runs a scenario through the real commands and writes what the host answered at every step into `fixtures/tree_window_scenario.json`: `setViewport` (also too large, behind the end, malformed), `locateRow` of every kind (also wrapping around, without a match, malformed), a list that changes, a selection that changes, filters that change, `initialize`; per step `rows_start`, the number of rows, `rows_total`, whether `rows_revision` changed, `located`, the first and last path. `tree-window-scenario.test.ts` replays the file against the model and requires the same answers, and that every snapshot of the model passes `UiStateSchema`. The fixture also states `Viewport::DEFAULT_ROWS` and `Viewport::MAX_ROWS`, which the test compares with the UI's constants and with what the schema accepts.
+- **The window, replayed (Rust → TypeScript).** The UI's tests have no host; what stands in for it (the E2E bridge and the fake host of the component tests) is one model, `src/ui/src/lib/dev/treeHostModel.ts`. `src/app/window_contract_tests.rs` posts a scenario to the real host, message by message as the WebView does (`dispatch_ipc_message`), and writes what was posted and what the host answered at every step into `fixtures/tree_window_scenario.json`: `setViewport` (also too large, behind the end, malformed), `locateRow` of every kind (also wrapping around, without a match, malformed), a list that changes, a selection that changes, filters that change, messages that are refused (an unknown command, an envelope with an extra field, no JSON, no number), `initialize` of a UI that counts from 1 again; per step `rows_start`, the number of rows, `rows_total`, whether `rows_revision` changed, `located`, the first and last path and `last_processed_seq`. `tree-window-scenario.test.ts` replays the file against the model and requires the same answers, and that every snapshot of the model passes `UiStateSchema`. The fixture also states `Viewport::DEFAULT_ROWS` and `Viewport::MAX_ROWS`, which the test compares with the UI's constants and with what the schema accepts.
 - **Rows.** `src/app/view_model/pruning_tests.rs` and the property tests in `cache_tests.rs` compare the rows with the original full-tree algorithm, pruned to the expanded part (the rows are put back into nested form for that, `reference::nest`). `windowing_tests.rs` covers the window (a property test: any viewport yields exactly that slice of the list), when the list is rebuilt, the row lookup, and the cost of a snapshot.
 
 ## Changing the contract
 
-1. **Host:** add the command to `commands.rs`, to `OrderedCommand` (or, if it waits for a native dialog, to `DialogCommand`) and to `COMMANDS` in `src/app/mod.rs`; the compiler then asks for its handler in `run_command` and for example payloads in `command_contract_tests.rs`. A field goes into `UiState` / `UiConfig` / `TreeRow`.
+1. **Host:** add the command to `Command` in `src/app/ipc.rs`, with the type of its payload, and its handler to `commands.rs` (it takes the payload as that type). The compiler then asks for the handler and the lane in `Command::into_work` (`src/app/mod.rs`) and for an example in `command_contract_tests.rs`. Nothing else names the command. A field goes into `UiState` / `UiConfig` / `TreeRow`.
 2. **UI:** extend `CommandSchemas` / `UiStateSchema` in `schema.ts`. The types in `types.ts` are derived from the schemas. Prefer additive changes.
 3. Regenerate the fixtures (see above) and update the factories in `src/ui/src/tests/contracts/`.
 4. Keep the snapshot self-contained: never send something that is only meaningful relative to an earlier update.
@@ -493,4 +531,4 @@ The host takes commands from the UI's own origin only. wry reports the URL of th
 
 The host serializes each `UserEvent` on the UI thread and evaluates the resulting `window.*` call in the WebView. An event that cannot be serialized is logged and skipped; no call is made for it. Consecutive undelivered state updates are coalesced to the latest one; the order relative to all other events is preserved (`src/app/transport.rs`).
 
-In E2E tests there is no host. `$lib/dev/e2eBridge.ts` (installed only when `$lib/dev/e2eShim.ts` allows it) exposes `window.__e2e.store.setAppState`, which sets the store directly. States seeded this way have to follow the same rules as real snapshots: `rows` is a window of a list of `rows_total` rows (all of it, for a small tree), children are rows only below expanded directories, counters filled in. For a list that is longer than a window the bridge has a stand-in for the host's windowing, `window.__e2e.host.setTree(state, rows)`: the model that the contract test above holds against the host (`treeHostModel.ts`), wired to the IPC. It validates the commands the UI posts with `CommandSchemas`, answers `setViewport`, `locateRow` and `initialize` asynchronously, and delivers its snapshots through `window.render`, so they pass the same validation as snapshots of the host (`e2e/tree-window.spec.ts`, the 25k budgets and benchmarks). `host.setLatency(ms)` makes it answer late, for tests of what the UI does while rows are under way.
+In E2E tests there is no host. `$lib/dev/e2eBridge.ts` (installed only when `$lib/dev/e2eShim.ts` allows it) exposes `window.__e2e.store.setAppState`, which sets the store directly. States seeded this way have to follow the same rules as real snapshots: `rows` is a window of a list of `rows_total` rows (all of it, for a small tree), children are rows only below expanded directories, counters filled in. For a list that is longer than a window the bridge has a stand-in for the host's windowing, `window.__e2e.host.setTree(state, rows)`: the model that the contract test above holds against the host (`treeHostModel.ts`), wired to the IPC. It reads the messages the UI posts the way the host does (number, command, payload; a message that is refused is answered with the unchanged snapshot), answers `setViewport`, `locateRow` and `initialize` asynchronously, states `last_processed_seq` like the host, and delivers its snapshots through `window.render`, so they pass the same validation as snapshots of the host (`e2e/tree-window.spec.ts`, the 25k budgets and benchmarks). `host.setLatency(ms)` makes it answer late, for tests of what the UI does while rows are under way.

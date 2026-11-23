@@ -3,10 +3,12 @@
 //! The UI's tests have no host. What stands in for it there (the E2E bridge and the
 //! fake host of the component tests) is one TypeScript model of the host's windowing,
 //! `src/ui/src/lib/dev/treeHostModel.ts`. This test is what keeps that model honest:
-//! it runs a scenario through the real commands (`setViewport` including a window
-//! that is too large or behind the end, `locateRow` of every kind, a list that
-//! changes, filters that change) and writes down, step by step, what the host
-//! answered. The UI replays the file against its model
+//! it posts a scenario to the real host, message by message, the way the WebView
+//! does (`dispatch_ipc_message`): `setViewport` including a window that is too large
+//! or behind the end, `locateRow` of every kind, a list that changes, filters that
+//! change, messages that are refused. It writes down, step by step, what was posted
+//! and what the host answered, including the number of the last command the answer
+//! accounts for (`last_processed_seq`). The UI replays the file against its model
 //! (`src/ui/src/tests/contracts/tree-window-scenario.test.ts`).
 //!
 //! The file also states the limits of the window, which the UI mirrors as constants.
@@ -14,8 +16,11 @@
 //! After an intentional change, regenerate the fixture with
 //! `UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture` and adapt the model.
 
-use super::commands;
+use super::correlation::CommandSeq;
+use super::dispatch::CommandDispatcher;
+use super::dispatch_ipc_message;
 use super::events::UserEvent;
+use super::file_dialog::DialogService;
 use super::filtering;
 use super::proxy::EventProxy;
 use super::shared_state::SharedState;
@@ -47,12 +52,30 @@ impl EventProxy for Snapshots {
 }
 
 impl Snapshots {
-    /// The answer to the command that has just run: the last snapshot sent.
+    /// The answer to the message that has just been dealt with: the one snapshot
+    /// that was sent.
     fn take_answer(&self) -> UiState {
         let mut sent = self.0.lock().unwrap();
-        let answer = sent.pop().expect("every command is answered");
-        sent.clear();
-        answer
+        assert_eq!(sent.len(), 1, "every message is answered once");
+        sent.pop().expect("one snapshot")
+    }
+}
+
+/// No message of the scenario opens a dialog.
+struct NoDialog;
+
+impl DialogService for NoDialog {
+    fn pick_directory(&self) -> Option<PathBuf> {
+        None
+    }
+    fn pick_config_to_import(&self) -> Option<PathBuf> {
+        None
+    }
+    fn export_config_path(&self) -> Option<PathBuf> {
+        None
+    }
+    fn save_output_file_path(&self, _config: &crate::config::AppConfig) -> Option<PathBuf> {
+        None
     }
 }
 
@@ -100,8 +123,11 @@ fn project() -> AppState {
 
 /// The scenario as it is written to the fixture.
 struct Recorder {
+    dispatcher: CommandDispatcher,
     state: SharedState,
     snapshots: Snapshots,
+    /// The number of the last message, as the UI counts them.
+    seq: CommandSeq,
     /// The distinct lists of rows the scenario shows, by name.
     lists: BTreeMap<String, Value>,
     steps: Vec<Value>,
@@ -112,8 +138,10 @@ struct Recorder {
 impl Recorder {
     fn new() -> Self {
         Self {
+            dispatcher: CommandDispatcher::new(),
             state: SharedState::new(project()),
             snapshots: Snapshots::default(),
+            seq: 0,
             lists: BTreeMap::new(),
             steps: Vec::new(),
             last_revision: None,
@@ -138,23 +166,61 @@ impl Recorder {
             "located": answer.located,
             "first_path": path(answer.rows.first()),
             "last_path": path(answer.rows.last()),
+            "last_processed_seq": answer.last_processed_seq,
         })
     }
 
-    /// A step in which the UI posts `command`: the model receives the same command.
-    fn command(&mut self, name: &str, command: &str, payload: Value, answer: UiState) {
+    /// The next message of the UI: `command` with `payload`, numbered.
+    fn message(&mut self, command: &str, payload: Value) -> String {
+        self.seq += 1;
+        json!({ "seq": self.seq, "command": command, "payload": payload }).to_string()
+    }
+
+    /// Posts `message` to the host the way the WebView does and waits for the
+    /// answer.
+    async fn post(&mut self, message: &str) -> UiState {
+        dispatch_ipc_message(
+            &self.dispatcher,
+            message.to_string(),
+            Arc::new(NoDialog),
+            self.snapshots.clone(),
+            self.state.clone(),
+        );
+        // The marker suspends once, so it passes through the ordered lane and the
+        // continuation lane behind the message.
+        let (done, marker_ran) = tokio::sync::oneshot::channel();
+        self.dispatcher.dispatch(None, async move {
+            tokio::task::yield_now().await;
+            let _ = done.send(());
+        });
+        marker_ran.await.expect("the marker command was dropped");
+        self.snapshots.take_answer()
+    }
+
+    /// A step in which the UI posts a message the model deals with itself: the
+    /// model receives the same message and has to answer like the host.
+    async fn posts(&mut self, name: &str, message: String) {
+        let answer = self.post(&message).await;
         let expect = self.expectation(&answer);
         self.steps.push(json!({
             "name": name,
-            "action": { "kind": "command", "command": command, "payload": payload },
+            "action": { "kind": "command", "message": message },
             "expect": expect,
         }));
     }
 
-    /// A step in which something else changes the state of the host (another
-    /// command, in the real application). The model is told what is shown now: the
-    /// list of all rows, by the name it has in `lists`, and the filter texts.
-    fn shows(&mut self, name: &str, list: &str, answer: UiState) {
+    /// A step in which a command changes what the host shows in a way the model
+    /// does not work out itself (a directory expanded, a filter applied, a file
+    /// selected). The model receives the message, for its number, and is told what
+    /// is shown now: the list of all rows, by the name it has in `lists`, and the
+    /// filter texts.
+    async fn changes(&mut self, name: &str, list: &str, command: &str, payload: Value) {
+        let message = self.message(command, payload);
+        let answer = self.post(&message).await;
+        self.shows(name, list, message, answer);
+    }
+
+    fn shows(&mut self, name: &str, list: &str, message: String, answer: UiState) {
         let (rows, search_query) = {
             let state = self.state.lock();
             let rows: Vec<Value> = all_rows(&state)
@@ -178,6 +244,7 @@ impl Recorder {
             "name": name,
             "action": {
                 "kind": "shows",
+                "message": message,
                 "list": list,
                 "current_path": answer.current_path,
                 "search_query": search_query,
@@ -186,38 +253,34 @@ impl Recorder {
         }));
     }
 
-    fn set_viewport(&mut self, name: &str, payload: Value) {
-        commands::set_viewport(payload.clone(), self.snapshots.clone(), self.state.clone());
-        let answer = self.snapshots.take_answer();
-        self.command(name, "setViewport", payload, answer);
+    async fn set_viewport(&mut self, name: &str, payload: Value) {
+        let message = self.message("setViewport", payload);
+        self.posts(name, message).await;
     }
 
-    fn locate(&mut self, name: &str, request: u32, target: Value) {
-        let payload = json!({ "request": request, "target": target });
-        commands::locate_row(payload.clone(), self.snapshots.clone(), self.state.clone());
-        let answer = self.snapshots.take_answer();
-        self.command(name, "locateRow", payload, answer);
+    async fn locate(&mut self, name: &str, request: u32, target: Value) {
+        let message = self.message("locateRow", json!({ "request": request, "target": target }));
+        self.posts(name, message).await;
     }
 
-    fn set_expansion(&mut self, name: &str, list: &str, path: &str, expanded: bool) {
-        commands::set_expansion(
+    async fn set_expansion(&mut self, name: &str, list: &str, path: &str, expanded: bool) {
+        self.changes(
+            name,
+            list,
+            "setExpansion",
             json!({ "path": path, "expanded": expanded }),
-            self.snapshots.clone(),
-            self.state.clone(),
-        );
-        let answer = self.snapshots.take_answer();
-        self.shows(name, list, answer);
+        )
+        .await;
     }
 
     async fn update_filters(&mut self, name: &str, list: &str, search_query: &str) {
-        commands::update_filters(
+        self.changes(
+            name,
+            list,
+            "updateFilters",
             json!({ "searchQuery": search_query }),
-            self.snapshots.clone(),
-            self.state.clone(),
         )
         .await;
-        let answer = self.snapshots.take_answer();
-        self.shows(name, list, answer);
     }
 
     fn fixture(self) -> String {
@@ -240,125 +303,169 @@ async fn record_scenario() -> String {
     let file_320 = "/project/big/file-320.txt";
 
     // --- The window ---
-    commands::initialize(scenario.snapshots.clone(), scenario.state.clone());
-    let answer = scenario.snapshots.take_answer();
-    scenario.shows("a tree is shown: the default window", "expanded", answer);
+    scenario
+        .changes(
+            "a tree is shown: the default window",
+            "expanded",
+            "initialize",
+            Value::Null,
+        )
+        .await;
 
-    scenario.set_viewport(
-        "a window in the middle",
-        json!({ "start": 200, "count": 80 }),
-    );
-    scenario.set_viewport(
-        "a window larger than the host sends",
-        json!({ "start": 10, "count": 5000 }),
-    );
-    scenario.set_viewport(
-        "a window behind the end is moved up to the end",
-        json!({ "start": 100_000, "count": 50 }),
-    );
-    scenario.set_viewport(
-        "a window that reaches over the end",
-        json!({ "start": 630, "count": 50 }),
-    );
-    scenario.set_viewport(
-        "a malformed viewport changes nothing",
-        json!({ "start": 5 }),
-    );
-    scenario.set_viewport(
-        "a viewport without rows changes nothing",
-        json!({ "start": 5, "count": 0 }),
-    );
+    scenario
+        .set_viewport(
+            "a window in the middle",
+            json!({ "start": 200, "count": 80 }),
+        )
+        .await;
+    scenario
+        .set_viewport(
+            "a window larger than the host sends",
+            json!({ "start": 10, "count": 5000 }),
+        )
+        .await;
+    scenario
+        .set_viewport(
+            "a window behind the end is moved up to the end",
+            json!({ "start": 100_000, "count": 50 }),
+        )
+        .await;
+    scenario
+        .set_viewport(
+            "a window that reaches over the end",
+            json!({ "start": 630, "count": 50 }),
+        )
+        .await;
+    scenario
+        .set_viewport(
+            "a malformed viewport changes nothing",
+            json!({ "start": 5 }),
+        )
+        .await;
+    scenario
+        .set_viewport(
+            "a viewport without rows changes nothing",
+            json!({ "start": 5, "count": 0 }),
+        )
+        .await;
 
     // --- Looking up a row ---
-    scenario.locate(
-        "the row of a path",
-        1,
-        json!({ "kind": "path", "path": file_320 }),
-    );
-    scenario.locate(
-        "the row of the parent, far above the window",
-        2,
-        json!({ "kind": "parent_of", "path": file_320 }),
-    );
-    scenario.locate(
-        "a row at the top level has no parent row",
-        3,
-        json!({ "kind": "parent_of", "path": "/project/big" }),
-    );
-    scenario.locate(
-        "type-ahead finds the first row from `from` on",
-        4,
-        json!({ "kind": "typeahead", "prefix": "ze", "from": 0 }),
-    );
-    scenario.locate(
-        "type-ahead continues behind the row it found, ignoring case",
-        5,
-        json!({ "kind": "typeahead", "prefix": "ZE", "from": 647 }),
-    );
-    scenario.locate(
-        "type-ahead wraps around at the end of the list",
-        6,
-        json!({ "kind": "typeahead", "prefix": "a", "from": 600 }),
-    );
-    scenario.locate(
-        "type-ahead from behind the list starts at the top",
-        7,
-        json!({ "kind": "typeahead", "prefix": "ze", "from": 9_999 }),
-    );
-    scenario.locate(
-        "type-ahead without a match",
-        8,
-        json!({ "kind": "typeahead", "prefix": "qq", "from": 3 }),
-    );
-    scenario.locate(
-        "a path that is not listed",
-        9,
-        json!({ "kind": "path", "path": "/project/nope.txt" }),
-    );
-    scenario.locate(
-        "a type-ahead for nothing changes nothing",
-        10,
-        json!({ "kind": "typeahead", "prefix": "", "from": 0 }),
-    );
-    scenario.locate(
-        "a malformed lookup changes nothing",
-        10,
-        json!({ "kind": "sideways", "path": file_320 }),
-    );
+    scenario
+        .locate(
+            "the row of a path",
+            1,
+            json!({ "kind": "path", "path": file_320 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "the row of the parent, far above the window",
+            2,
+            json!({ "kind": "parent_of", "path": file_320 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "a row at the top level has no parent row",
+            3,
+            json!({ "kind": "parent_of", "path": "/project/big" }),
+        )
+        .await;
+    scenario
+        .locate(
+            "type-ahead finds the first row from `from` on",
+            4,
+            json!({ "kind": "typeahead", "prefix": "ze", "from": 0 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "type-ahead continues behind the row it found, ignoring case",
+            5,
+            json!({ "kind": "typeahead", "prefix": "ZE", "from": 647 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "type-ahead wraps around at the end of the list",
+            6,
+            json!({ "kind": "typeahead", "prefix": "a", "from": 600 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "type-ahead from behind the list starts at the top",
+            7,
+            json!({ "kind": "typeahead", "prefix": "ze", "from": 9_999 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "type-ahead without a match",
+            8,
+            json!({ "kind": "typeahead", "prefix": "qq", "from": 3 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "a path that is not listed",
+            9,
+            json!({ "kind": "path", "path": "/project/nope.txt" }),
+        )
+        .await;
+    scenario
+        .locate(
+            "a type-ahead for nothing changes nothing",
+            10,
+            json!({ "kind": "typeahead", "prefix": "", "from": 0 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "a malformed lookup changes nothing",
+            10,
+            json!({ "kind": "sideways", "path": file_320 }),
+        )
+        .await;
 
     // --- The list changes ---
-    scenario.set_viewport(
-        "a window in the long directory",
-        json!({ "start": 300, "count": 60 }),
-    );
-    scenario.locate(
-        "the row of a file in it",
-        11,
-        json!({ "kind": "path", "path": file_320 }),
-    );
-    scenario.set_expansion(
-        "the directory is collapsed: a shorter list, the window at its end, the file no row",
-        "collapsed",
-        "/project/big",
-        false,
-    );
-    scenario.set_expansion(
-        "the directory is expanded again: the window and the row are back",
-        "expanded",
-        "/project/big",
-        true,
-    );
-    commands::toggle_selection(
-        json!(file_320),
-        scenario.snapshots.clone(),
-        scenario.state.clone(),
-    );
-    let answer = scenario.snapshots.take_answer();
-    scenario.shows(
-        "a change of the selection leaves the list alone",
-        "expanded",
-        answer,
-    );
+    scenario
+        .set_viewport(
+            "a window in the long directory",
+            json!({ "start": 300, "count": 60 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "the row of a file in it",
+            11,
+            json!({ "kind": "path", "path": file_320 }),
+        )
+        .await;
+    scenario
+        .set_expansion(
+            "the directory is collapsed: a shorter list, the window at its end, the file no row",
+            "collapsed",
+            "/project/big",
+            false,
+        )
+        .await;
+    scenario
+        .set_expansion(
+            "the directory is expanded again: the window and the row are back",
+            "expanded",
+            "/project/big",
+            true,
+        )
+        .await;
+    scenario
+        .changes(
+            "a change of the selection leaves the list alone",
+            "expanded",
+            "toggleSelection",
+            json!(file_320),
+        )
+        .await;
 
     // --- The filters change ---
     scenario
@@ -368,15 +475,19 @@ async fn record_scenario() -> String {
             "file-1",
         )
         .await;
-    scenario.set_viewport(
-        "a window of the filtered list",
-        json!({ "start": 40, "count": 30 }),
-    );
-    scenario.locate(
-        "a lookup in the filtered list",
-        12,
-        json!({ "kind": "typeahead", "prefix": "file-15", "from": 0 }),
-    );
+    scenario
+        .set_viewport(
+            "a window of the filtered list",
+            json!({ "start": 40, "count": 30 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "a lookup in the filtered list",
+            12,
+            json!({ "kind": "typeahead", "prefix": "file-15", "from": 0 }),
+        )
+        .await;
     scenario
         .update_filters(
             "the same filter again changes nothing about the window",
@@ -392,24 +503,72 @@ async fn record_scenario() -> String {
         .update_filters("the filter is cleared: from the top again", "expanded", "")
         .await;
 
+    // --- Before a new UI ---
+    scenario
+        .set_viewport(
+            "a window further down",
+            json!({ "start": 500, "count": 70 }),
+        )
+        .await;
+    scenario
+        .locate(
+            "and a lookup",
+            13,
+            json!({ "kind": "path", "path": file_320 }),
+        )
+        .await;
+
+    // --- Messages that are refused ---
+    let message = scenario.message("noSuchCommand", Value::Null);
+    scenario
+        .posts(
+            "a command that does not exist changes nothing but the number",
+            message,
+        )
+        .await;
+    scenario.seq += 1;
+    let message = json!({
+        "seq": scenario.seq,
+        "command": "setViewport",
+        "payload": { "start": 0, "count": 10 },
+        "extra": true,
+    })
+    .to_string();
+    scenario
+        .posts("an envelope with more than a command is refused", message)
+        .await;
+    scenario
+        .posts(
+            "a message that is not JSON is answered and changes no number",
+            "not json".to_string(),
+        )
+        .await;
+    let message = json!({
+        "command": "setViewport",
+        "payload": { "start": 0, "count": 10 },
+    })
+    .to_string();
+    scenario
+        .posts("a command without a number is not executed", message)
+        .await;
+    let message = json!({
+        "seq": "12",
+        "command": "setViewport",
+        "payload": { "start": 0, "count": 10 },
+    })
+    .to_string();
+    scenario.posts("a number has to be a number", message).await;
+
     // --- A new UI ---
-    scenario.set_viewport(
-        "a window further down",
-        json!({ "start": 500, "count": 70 }),
-    );
-    scenario.locate(
-        "and a lookup",
-        13,
-        json!({ "kind": "path", "path": file_320 }),
-    );
-    commands::initialize(scenario.snapshots.clone(), scenario.state.clone());
-    let answer = scenario.snapshots.take_answer();
-    scenario.command(
-        "a UI that starts gets the top of the list and no answer",
-        "initialize",
-        Value::Null,
-        answer,
-    );
+    // A UI that starts (anew) counts its commands from 1.
+    scenario.seq = 0;
+    let message = scenario.message("initialize", Value::Null);
+    scenario
+        .posts(
+            "a UI that starts gets the top of the list, no answer, and its own numbers",
+            message,
+        )
+        .await;
 
     scenario.fixture()
 }
@@ -474,9 +633,16 @@ async fn window_scenario_covers_the_edges_of_the_contract() {
     assert_eq!(expect("type-ahead without")["located"]["row"], Value::Null);
     assert_eq!(expect("a malformed lookup")["located"]["request"], 9);
     assert_eq!(expect("a type-ahead for nothing")["located"]["request"], 9);
+    // What an answer shows, without the number it accounts for.
+    let view = |name: &str| {
+        let mut view = expect(name).clone();
+        view["last_processed_seq"] = Value::Null;
+        view["rows_revision_changed"] = Value::Null;
+        view
+    };
     assert_eq!(
-        expect("a viewport without rows"),
-        expect("a window that reaches over")
+        view("a viewport without rows"),
+        view("a window that reaches over")
     );
 
     let collapsed = expect("the directory is collapsed");
@@ -510,4 +676,29 @@ async fn window_scenario_covers_the_edges_of_the_contract() {
     let restarted = expect("a UI that starts");
     assert_eq!(restarted["rows_start"], 0);
     assert_eq!(restarted["located"], Value::Null);
+
+    // The numbers: every step that posts a numbered message is answered under that
+    // number, whether the message is a command or not; a message without a number
+    // leaves it alone; and a UI that starts anew is followed.
+    let seq_of = |name: &str| expect(name)["last_processed_seq"].as_u64().unwrap();
+    assert_eq!(seq_of("a tree is shown"), 1);
+    assert_eq!(seq_of("a window in the middle"), 2);
+    assert_eq!(seq_of("a malformed viewport"), 6);
+    let unknown = seq_of("a command that does not exist");
+    assert!(unknown > 30, "{unknown}");
+    assert_eq!(seq_of("an envelope with more"), unknown + 1);
+    assert_eq!(seq_of("a message that is not JSON"), unknown + 1);
+    assert_eq!(seq_of("a command without a number"), unknown + 1);
+    assert_eq!(seq_of("a number has to be"), unknown + 1);
+    assert_eq!(restarted["last_processed_seq"], 1);
+    for refused in [
+        "a command that does not exist",
+        "an envelope with more",
+        "a message that is not JSON",
+        "a command without a number",
+        "a number has to be",
+    ] {
+        let (answer, before) = (view(refused), view("and a lookup"));
+        assert_eq!(answer, before, "{refused}");
+    }
 }

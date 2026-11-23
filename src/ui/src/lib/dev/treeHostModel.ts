@@ -5,14 +5,22 @@
 // It is the one TypeScript implementation of what
 // `src/app/view_model/rows.rs` and the commands `setViewport`, `locateRow`
 // and `initialize` do: it keeps the list of all rows, the window the UI asked
-// for and the last row lookup, and states them in snapshots. That it behaves
+// for and the last row lookup, and states them in snapshots. It reads the
+// messages of the UI the way the host does (`src/app/ipc.rs`), and like the
+// host it states in every snapshot the number of the last command it has
+// processed (`last_processed_seq`, `src/app/correlation.rs`). That it behaves
 // like the host is not a matter of care: the host records a scenario
 // (`src/app/window_contract_tests.rs` →
 // `tests/contracts/fixtures/tree_window_scenario.json`) and
 // `tests/contracts/tree-window-scenario.test.ts` replays it against this
 // model, step by step.
 
-import { CommandSchemas } from "$lib/ipc/schema";
+import {
+  AnyCommandMessageSchema,
+  type CommandName,
+  type CommandSeq,
+  type PayloadFor,
+} from "$lib/ipc/schema";
 import {
   DEFAULT_WINDOW_ROWS,
   MAX_WINDOW_ROWS,
@@ -20,11 +28,66 @@ import {
 } from "$lib/modules/treeWindow";
 import type { AppState, TreeRow } from "$lib/types";
 
-/** A state without the fields that describe the window of rows. */
+/**
+ * A state without the fields the model fills in: those that describe the
+ * window of rows, and the number of the last command.
+ */
 export type TreeLessState = Omit<
   AppState,
-  "rows" | "rows_start" | "rows_total" | "rows_revision" | "located"
+  | "rows"
+  | "rows_start"
+  | "rows_total"
+  | "rows_revision"
+  | "located"
+  | "last_processed_seq"
 >;
+
+/** A message of the UI, as far as it could be read (`IpcMessage` on the host). */
+type ReadMessage =
+  /** A numbered command. */
+  | {
+      kind: "command";
+      seq: CommandSeq;
+      command: {
+        [K in CommandName]: { command: K; payload: PayloadFor<K> };
+      }[CommandName];
+    }
+  /** A numbered message that is no command. */
+  | { kind: "refused"; seq: CommandSeq }
+  /** Not a message at all: it has no number. */
+  | { kind: "unreadable" };
+
+/**
+ * Reads a message the way the host does (`IpcMessage::parse`): the number is
+ * taken off the envelope, and what is left has to be a command and nothing
+ * else.
+ */
+function readMessage(message: string): ReadMessage {
+  let posted: unknown;
+  try {
+    posted = JSON.parse(message);
+  } catch {
+    return { kind: "unreadable" };
+  }
+  if (typeof posted !== "object" || posted === null || Array.isArray(posted)) {
+    return { kind: "unreadable" };
+  }
+  const { seq, ...rest } = posted as Record<string, unknown>;
+  if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0) {
+    return { kind: "unreadable" };
+  }
+  // A command without a payload may be posted without one.
+  const parsed = AnyCommandMessageSchema.safeParse({ payload: null, ...rest });
+  if (!parsed.success) return { kind: "refused", seq };
+  return {
+    kind: "command",
+    seq,
+    command: parsed.data as Extract<
+      ReadMessage,
+      { kind: "command" }
+    >["command"],
+  };
+}
 
 /** The directory `path` lies in, as the host's `Path::parent` sees it. */
 function parentOf(path: string): string | null {
@@ -58,6 +121,8 @@ export class TreeHostModel {
   private revision = 0;
   /** The path of the last lookup: every snapshot states where it is. */
   private located: { request: number; path: string | null } | null = null;
+  /** The number of the last numbered message that was received. */
+  private processedSeq: CommandSeq = 0;
 
   /**
    * The state of the host has changed by something this model does not do
@@ -81,43 +146,54 @@ export class TreeHostModel {
   }
 
   /**
-   * Takes a command of the UI. Returns `true` if it is one the model answers
-   * with a snapshot (`setViewport`, `locateRow`, `initialize`), also when its
-   * payload is refused: like the host, the model then changes nothing and
-   * answers all the same.
+   * Takes a message of the UI, as it was posted. Returns `true` if it is one
+   * the model answers with a snapshot:
+   *
+   * - `setViewport`, `locateRow` and `initialize`, which it carries out;
+   * - a message that is refused (not a message, an unknown command, a payload
+   *   that does not fit): like the host, the model then changes nothing and
+   *   answers all the same.
+   *
+   * Every other command is one the host answers too, but with a state this
+   * model does not work out: whoever uses the model says what is shown then
+   * (`show`). A numbered message is processed by being received, whichever of
+   * these it is, and the snapshots say so from then on.
    */
-  receive(command: string, payload: unknown): boolean {
-    if (command === "setViewport") {
-      const parsed = CommandSchemas.setViewport.safeParse(payload);
-      if (parsed.success) {
-        this.viewport = {
-          start: parsed.data.start,
-          count: Math.min(parsed.data.count, MAX_WINDOW_ROWS),
-        };
-      }
+  receive(message: string): boolean {
+    const read = readMessage(message);
+    if (read.kind === "unreadable") return true;
+    this.processedSeq = read.seq;
+    if (read.kind === "refused") return true;
+
+    const { command } = read;
+    if (command.command === "setViewport") {
+      this.viewport = {
+        start: command.payload.start,
+        count: Math.min(command.payload.count, MAX_WINDOW_ROWS),
+      };
       return true;
     }
-    if (command === "locateRow") {
-      const parsed = CommandSchemas.locateRow.safeParse(payload);
-      if (parsed.success) {
-        const { request, target } = parsed.data;
-        const path =
-          target.kind === "path"
-            ? target.path
-            : target.kind === "parent_of"
-              ? parentOf(target.path)
-              : this.typeahead(target.prefix, target.from);
-        this.located = { request, path };
-      }
+    if (command.command === "locateRow") {
+      const { request, target } = command.payload;
+      const path =
+        target.kind === "path"
+          ? target.path
+          : target.kind === "parent_of"
+            ? parentOf(target.path)
+            : this.typeahead(target.prefix, target.from);
+      this.located = { request, path };
       return true;
     }
-    if (command === "initialize") {
-      if (CommandSchemas.initialize.safeParse(payload).success) {
-        this.showFromTheTop();
-      }
+    if (command.command === "initialize") {
+      this.showFromTheTop();
       return true;
     }
     return false;
+  }
+
+  /** The number of the last command the model has processed. */
+  get lastProcessedSeq(): CommandSeq {
+    return this.processedSeq;
   }
 
   /** The snapshot of the current state; `null` before anything is shown. */
@@ -135,6 +211,7 @@ export class TreeHostModel {
         request: this.located.request,
         row: this.rowOf(this.located.path),
       },
+      last_processed_seq: this.processedSeq,
     };
   }
 

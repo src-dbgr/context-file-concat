@@ -3,41 +3,41 @@
    * A text field for a value that the host owns.
    *
    * It shows the host's value, but the text being typed is local: snapshots
-   * that arrive while the user is editing do not reset it (see `HostDraft`).
+   * that arrive while the user is editing do not reset it, and neither do
+   * those from before the host has processed the edit (see `HostDraft`).
    * The edit is handed to `oncommit` when the field is left or Enter is
-   * pressed (the `change` event); the caller sends it as an intent command.
+   * pressed (the `change` event); the caller sends it as an intent command
+   * and returns the number of that command (what `post()` returns).
    */
-  import { onDestroy, untrack } from "svelte";
+  import { untrack } from "svelte";
   import { HostDraft } from "$lib/modules/hostDraft";
   import { appState } from "$lib/stores/app";
+  import type { CommandSeq } from "$lib/ipc/schema";
 
   type Props = {
     id: string;
     /** The value the host reports. */
     value: string;
-    oncommit: (value: string) => void;
+    /** Sends the edit; returns the number of the command that carries it. */
+    oncommit: (value: string) => CommandSeq;
   };
   let { id, value, oncommit }: Props = $props();
 
-  // Shows the host's value unless the draft holds it back.
-  function syncFromHost() {
-    if (draft.accepts(value)) text = value;
-  }
-  const draft = new HostDraft<string>({ onAckTimeout: syncFromHost });
+  const draft = new HostDraft();
   let text = $state(untrack(() => value));
 
-  // Runs for every snapshot of the host, also for one that reports the same
-  // value again: the draft goes by the reports that arrive after a send.
+  // Runs for every snapshot of the host: shows the host's value unless the
+  // draft holds it back.
   $effect(() => {
-    void $appState;
+    const processed = $appState.last_processed_seq;
     void value;
-    untrack(syncFromHost);
+    untrack(() => {
+      if (draft.accepts(processed)) text = value;
+    });
   });
-  onDestroy(() => draft.reset());
 
   function commit() {
-    draft.sent(text);
-    oncommit(text);
+    draft.sent(oncommit(text));
   }
 
   // Left without a `change` event: the text is what it was when the field was

@@ -1,7 +1,9 @@
 // src/app/commands.rs
 //! Contains all the command handlers that are callable from the frontend via IPC.
 //!
-//! Each function in this module corresponds to a specific `IpcMessage::command`.
+//! Each function in this module corresponds to one [`Command`](super::ipc::Command)
+//! and takes its payload as the type the command carries: a handler never sees JSON,
+//! and a message whose payload does not fit never reaches one (see [`super::ipc`]).
 //! These handlers are responsible for interacting with the `AppState` and the `core`
 //! logic, and for sending `UserEvent`s back to the UI.
 
@@ -139,36 +141,25 @@ impl ConfigOption {
     }
 }
 
-/// Deserializes the payload of a command; a malformed one is logged and dropped.
-fn parse_payload<T: serde::de::DeserializeOwned>(
-    command: &str,
-    payload: serde_json::Value,
-) -> Option<T> {
-    serde_json::from_value(payload)
-        .map_err(|e| tracing::warn!("Failed to deserialize {command} payload: {e}"))
-        .ok()
-}
-
-/// Answers a command that changes nothing with the state as it is.
+/// Answers a request that changes nothing with the state as it is.
 ///
 /// The UI shows what the host reports and waits for the answer to what it has sent
-/// (see `HostDraft` in the UI), so a command whose payload is refused is answered like
-/// any other: with a snapshot, which then shows that nothing has changed.
-fn answer_unchanged<P: EventProxy>(proxy: &P, state: &SharedState) {
+/// (see `HostDraft` in the UI), so a request that is refused is answered like any
+/// other: with a snapshot, which then shows that nothing has changed. This goes for
+/// a command that refuses what it was asked for as well as for a message that is no
+/// command at all (see [`super::ipc`]).
+pub(crate) fn answer_unchanged<P: EventProxy>(proxy: &P, state: &SharedState) {
     send_state(proxy, &state.lock());
 }
 
 /// Adds one ignore pattern. Adding a pattern that is already set changes nothing.
 ///
 /// See [`change_config`] for what a pattern change does to the loaded directory.
-pub async fn add_ignore_pattern<P: EventProxy>(
-    payload: serde_json::Value,
+pub(crate) async fn add_ignore_pattern<P: EventProxy>(
+    IgnorePatternPayload { pattern }: IgnorePatternPayload,
     proxy: P,
     state: SharedState,
 ) {
-    let Some(IgnorePatternPayload { pattern }) = parse_payload("addIgnorePattern", payload) else {
-        return answer_unchanged(&proxy, &state);
-    };
     if is_blank(&pattern) {
         tracing::warn!("Ignoring a blank ignore pattern.");
         return answer_unchanged(&proxy, &state);
@@ -180,15 +171,11 @@ pub async fn add_ignore_pattern<P: EventProxy>(
 }
 
 /// Removes one ignore pattern. Removing a pattern that is not set changes nothing.
-pub async fn remove_ignore_pattern<P: EventProxy>(
-    payload: serde_json::Value,
+pub(crate) async fn remove_ignore_pattern<P: EventProxy>(
+    IgnorePatternPayload { pattern }: IgnorePatternPayload,
     proxy: P,
     state: SharedState,
 ) {
-    let Some(IgnorePatternPayload { pattern }) = parse_payload("removeIgnorePattern", payload)
-    else {
-        return answer_unchanged(&proxy, &state);
-    };
     change_config(&proxy, &state, |config| {
         config.ignore_patterns.remove(&pattern);
     })
@@ -201,14 +188,11 @@ pub async fn clear_ignore_patterns<P: EventProxy>(proxy: P, state: SharedState) 
 }
 
 /// Sets one user-editable option of the configuration (see [`ConfigOption`]).
-pub async fn set_config_option<P: EventProxy>(
-    payload: serde_json::Value,
+pub(crate) async fn set_config_option<P: EventProxy>(
+    option: ConfigOption,
     proxy: P,
     state: SharedState,
 ) {
-    let Some(option) = parse_payload::<ConfigOption>("setConfigOption", payload) else {
-        return answer_unchanged(&proxy, &state);
-    };
     change_config(&proxy, &state, |config| option.apply_to(config)).await;
 }
 
@@ -367,26 +351,21 @@ pub(crate) struct UpdateFiltersPayload {
 /// Otherwise, it just re-applies the filename and extension filters on the existing file list.
 /// Either way the directories of the matches are expanded, except for those the user
 /// collapsed since the filters were last empty (see [`AppState::reveal_directory`]).
-///
-/// A malformed payload changes nothing and is answered with the unchanged state.
-pub async fn update_filters<P: EventProxy>(
-    payload: serde_json::Value,
+pub(crate) async fn update_filters<P: EventProxy>(
+    filters: UpdateFiltersPayload,
     proxy: P,
     state: SharedState,
 ) {
-    update_filters_with(payload, proxy, state, tasks::RealFileSearcher).await;
+    update_filters_with(filters, proxy, state, tasks::RealFileSearcher).await;
 }
 
 /// [`update_filters`] with the searcher that looks through the file contents.
 async fn update_filters_with<P: EventProxy, S: tasks::FileSearcher>(
-    payload: serde_json::Value,
+    filters: UpdateFiltersPayload,
     proxy: P,
     state: SharedState,
     searcher: S,
 ) {
-    let Some(filters) = parse_payload::<UpdateFiltersPayload>("updateFilters", payload) else {
-        return answer_unchanged(&proxy, &state);
-    };
     let should_search_content = state.lock().set_filter_texts(
         filters.search_query,
         filters.extension_filter,
@@ -410,16 +389,7 @@ async fn update_filters_with<P: EventProxy, S: tasks::FileSearcher>(
 /// Only an entry of the loaded list can be previewed (see [`is_listed`]). A request
 /// for any other path reads nothing: it is answered with an error and the unchanged
 /// state.
-pub fn load_file_preview<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
-    let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) else {
-        tracing::warn!(
-            "Failed to deserialize path string from payload: {:?}",
-            payload
-        );
-        return;
-    };
-    let path = PathBuf::from(path_str);
-
+pub fn load_file_preview<P: EventProxy>(path: PathBuf, proxy: P, state: SharedState) {
     {
         let state_guard = state.lock();
         if !is_listed(&state_guard, &path) {
@@ -451,20 +421,8 @@ fn is_listed(state: &AppState, path: &Path) -> bool {
 /// This is triggered when a user expands a directory that hasn't been fully scanned yet.
 /// The directory is marked as expanded by the command itself; only the scan of the
 /// level runs in the background.
-pub fn load_directory_level<P: EventProxy>(
-    payload: serde_json::Value,
-    proxy: P,
-    state: SharedState,
-) {
-    if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
-        let path = PathBuf::from(path_str);
-        start_lazy_load_scan(path, proxy, state);
-    } else {
-        tracing::warn!(
-            "Failed to deserialize path string from payload: {:?}",
-            payload
-        );
-    }
+pub fn load_directory_level<P: EventProxy>(path: PathBuf, proxy: P, state: SharedState) {
+    start_lazy_load_scan(path, proxy, state);
 }
 
 /// Adds an ignore pattern for a specific file or directory of the loaded tree (via
@@ -483,14 +441,8 @@ pub fn load_directory_level<P: EventProxy>(
 /// either way. Where it is the name of the entry that stands in the way, the user
 /// pressed a button on a row and nothing happened: they are told why
 /// ([`UserEvent::IgnorePathRefused`]), before the state update.
-pub async fn add_ignore_path<P: EventProxy>(
-    payload: serde_json::Value,
-    proxy: P,
-    state: SharedState,
-) {
-    let pattern = parse_payload::<PathBuf>("addIgnorePath", payload)
-        .ok_or(NoPattern::NotInTheLoadedDirectory)
-        .and_then(|path| ignore_pattern_for_path(&state.lock(), &path));
+pub async fn add_ignore_path<P: EventProxy>(path: PathBuf, proxy: P, state: SharedState) {
+    let pattern = ignore_pattern_for_path(&state.lock(), &path);
     let pattern = match pattern {
         Ok(pattern) => pattern,
         Err(reason) => {
@@ -635,66 +587,46 @@ fn escape_pattern_characters(name: &str) -> String {
 }
 
 /// Toggles the selection state of a single file.
-pub fn toggle_selection<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
-    if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
-        with_state_and_notify(&state, &proxy, |s| {
-            let path = PathBuf::from(path_str);
-            if s.selected_files.contains(&path) {
-                s.selected_files.remove(&path);
-            } else {
-                s.selected_files.insert(path);
-            }
-        });
-    } else {
-        tracing::warn!(
-            "Failed to deserialize path string from payload: {:?}",
-            payload
-        );
-    }
+pub fn toggle_selection<P: EventProxy>(path: PathBuf, proxy: P, state: SharedState) {
+    with_state_and_notify(&state, &proxy, |s| {
+        if s.selected_files.contains(&path) {
+            s.selected_files.remove(&path);
+        } else {
+            s.selected_files.insert(path);
+        }
+    });
 }
 
 /// Toggles the selection state of all files within a directory.
-pub fn toggle_directory_selection<P: EventProxy>(
-    payload: serde_json::Value,
-    proxy: P,
-    state: SharedState,
-) {
-    if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
-        with_state_and_notify(&state, &proxy, |s| {
-            let dir_path = PathBuf::from(path_str);
-            // Important: only operate on the currently *visible* files in that directory.
-            // The same subtree determines the checkbox state the UI shows for it.
-            let Some(subtree) = super::selection::subtree_selection(
-                s.filtered_file_list(),
-                &s.file_tree(),
-                &s.selected_files,
-                &dir_path,
-            ) else {
-                tracing::warn!(
-                    "Cannot toggle the selection of unlisted path {:?}",
-                    dir_path
-                );
-                return;
-            };
+pub fn toggle_directory_selection<P: EventProxy>(dir_path: PathBuf, proxy: P, state: SharedState) {
+    with_state_and_notify(&state, &proxy, |s| {
+        // Important: only operate on the currently *visible* files in that directory.
+        // The same subtree determines the checkbox state the UI shows for it.
+        let Some(subtree) = super::selection::subtree_selection(
+            s.filtered_file_list(),
+            &s.file_tree(),
+            &s.selected_files,
+            &dir_path,
+        ) else {
+            tracing::warn!(
+                "Cannot toggle the selection of unlisted path {:?}",
+                dir_path
+            );
+            return;
+        };
 
-            if subtree.state == super::selection::SelectionState::Full {
-                // If fully selected, deselect all
-                s.selected_files.remove_all(&subtree.files);
-            } else {
-                // If partially or not selected, select all
-                s.selected_files.extend(subtree.files);
-            }
-        });
-    } else {
-        tracing::warn!(
-            "Failed to deserialize path string from payload: {:?}",
-            payload
-        );
-    }
+        if subtree.state == super::selection::SelectionState::Full {
+            // If fully selected, deselect all
+            s.selected_files.remove_all(&subtree.files);
+        } else {
+            // If partially or not selected, select all
+            s.selected_files.extend(subtree.files);
+        }
+    });
 }
 
 /// Payload of [`set_expansion`].
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetExpansionPayload {
     pub path: PathBuf,
@@ -707,19 +639,18 @@ pub(crate) struct SetExpansionPayload {
 /// a gesture that is delivered twice (key repeat, double click) before the UI has
 /// rendered the answer to the first one still ends in the state the user asked for.
 /// The state is always sent, also when nothing changed, so every request is answered.
-pub fn set_expansion<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
-    match serde_json::from_value::<SetExpansionPayload>(payload) {
-        Ok(SetExpansionPayload { path, expanded }) => {
-            with_state_and_notify(&state, &proxy, |s| {
-                if expanded {
-                    s.expand_directories([path]);
-                } else {
-                    s.collapse_directories([path]);
-                }
-            });
+pub(crate) fn set_expansion<P: EventProxy>(
+    SetExpansionPayload { path, expanded }: SetExpansionPayload,
+    proxy: P,
+    state: SharedState,
+) {
+    with_state_and_notify(&state, &proxy, |s| {
+        if expanded {
+            s.expand_directories([path]);
+        } else {
+            s.collapse_directories([path]);
         }
-        Err(e) => tracing::warn!("Failed to deserialize setExpansion payload: {e}"),
-    }
+    });
 }
 
 /// Payload of [`set_viewport`]: the part of the tree's rows the UI shows.
@@ -729,7 +660,8 @@ pub(crate) struct SetViewportPayload {
     /// The first row of the window.
     pub start: usize,
     /// The number of rows of the window, overscan included. A window without rows
-    /// is not a viewport: 0 is refused, like by the UI's schema.
+    /// is not a viewport: 0 is no value of this type, so a message with it is
+    /// refused like any malformed one, as it is by the UI's schema.
     pub count: std::num::NonZeroUsize,
 }
 
@@ -738,12 +670,12 @@ pub(crate) struct SetViewportPayload {
 ///
 /// The host caps the size of the window ([`Viewport::MAX_ROWS`]) and moves a window
 /// that lies behind the end of the list up to its end; the snapshot states where its
-/// rows start. A malformed payload changes nothing and is answered with the
-/// unchanged snapshot.
-pub fn set_viewport<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
-    let Some(SetViewportPayload { start, count }) = parse_payload("setViewport", payload) else {
-        return answer_unchanged(&proxy, &state);
-    };
+/// rows start.
+pub(crate) fn set_viewport<P: EventProxy>(
+    SetViewportPayload { start, count }: SetViewportPayload,
+    proxy: P,
+    state: SharedState,
+) {
     with_state_and_notify(&state, &proxy, |s| {
         s.tree_view.set_viewport(Viewport::new(start, count.get()));
     });
@@ -788,11 +720,13 @@ impl RowTarget {
 /// together with the number of the request. The window is not moved; the UI scrolls
 /// where it wants to and reports its viewport.
 ///
-/// A malformed payload is answered with the unchanged snapshot.
-pub fn locate_row<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
-    let Some(LocateRowPayload { request, target }) = parse_payload("locateRow", payload) else {
-        return answer_unchanged(&proxy, &state);
-    };
+/// A lookup of nothing (a type-ahead without a prefix) is answered with the unchanged
+/// snapshot.
+pub(crate) fn locate_row<P: EventProxy>(
+    LocateRowPayload { request, target }: LocateRowPayload,
+    proxy: P,
+    state: SharedState,
+) {
     if target.is_malformed() {
         tracing::warn!("Refused a locateRow without anything to look for");
         return answer_unchanged(&proxy, &state);
@@ -813,28 +747,20 @@ pub fn locate_row<P: EventProxy>(payload: serde_json::Value, proxy: P, state: Sh
 /// Directories a filter hides are not touched: what was expanded outside the filter
 /// is still expanded when the filter is cleared, whichever of the two the user chose
 /// in between.
-pub fn expand_collapse_all<P: EventProxy>(
-    payload: serde_json::Value,
-    proxy: P,
-    state: SharedState,
-) {
-    if let Ok(expand) = serde_json::from_value::<bool>(payload.clone()) {
-        with_state_and_notify(&state, &proxy, |s| {
-            let visible_directories: Vec<PathBuf> = s
-                .filtered_file_list()
-                .iter()
-                .filter(|i| i.is_directory)
-                .map(|i| i.path.clone())
-                .collect();
-            if expand {
-                s.expand_directories(visible_directories);
-            } else {
-                s.collapse_directories(visible_directories);
-            }
-        });
-    } else {
-        tracing::warn!("Failed to deserialize boolean from payload: {:?}", payload);
-    }
+pub fn expand_collapse_all<P: EventProxy>(expand: bool, proxy: P, state: SharedState) {
+    with_state_and_notify(&state, &proxy, |s| {
+        let visible_directories: Vec<PathBuf> = s
+            .filtered_file_list()
+            .iter()
+            .filter(|i| i.is_directory)
+            .map(|i| i.path.clone())
+            .collect();
+        if expand {
+            s.expand_directories(visible_directories);
+        } else {
+            s.collapse_directories(visible_directories);
+        }
+    });
 }
 
 /// Selects all *currently visible* files in the file tree.
@@ -1008,18 +934,12 @@ impl SaveContent {
 /// generation that ends while the user is choosing the file does not change it. The
 /// command is answered with a [`SaveResult`]. A document the host does not hold (any
 /// more) is a failed save; the dialog is not opened for it.
-///
-/// A payload that is not a [`SaveFilePayload`] is logged and ignored.
-pub fn save_file<P: EventProxy, D: DialogService + ?Sized>(
+pub(crate) fn save_file<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
-    payload: serde_json::Value,
+    payload: SaveFilePayload,
     proxy: P,
     state: SharedState,
 ) {
-    let Some(payload) = parse_payload::<SaveFilePayload>("saveFile", payload) else {
-        return;
-    };
-
     let (content, config) = {
         let state_guard = state.lock();
         let content = match payload {
@@ -1159,6 +1079,13 @@ mod tests {
     use crate::core::FileItem;
     use crate::utils::test_helpers::setup_test_logging;
     use serde_json::json;
+
+    /// The payload of a command, read the way a message of the UI is: as the type
+    /// the command carries. A test of a handler starts where the handler does, with
+    /// a payload that fits; what does not fit is refused before (see `app::ipc`).
+    fn typed<T: serde::de::DeserializeOwned>(payload: serde_json::Value) -> T {
+        serde_json::from_value(payload).expect("the payload fits its command")
+    }
     use std::fs as std_fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -1580,7 +1507,7 @@ mod tests {
             "extensionFilter": "",
             "contentSearchQuery": ""
         });
-        update_filters(filters, harness.proxy.clone(), harness.state.clone()).await;
+        update_filters(typed(filters), harness.proxy.clone(), harness.state.clone()).await;
 
         let ui_state = harness.last_state_update().unwrap();
         assert_eq!(ui_state.visible_files_count, 2);
@@ -1598,7 +1525,7 @@ mod tests {
 
         let path_to_ignore = harness.root_path.join("docs");
         let payload = json!(path_to_ignore);
-        add_ignore_path(payload, harness.proxy.clone(), harness.state.clone()).await;
+        add_ignore_path(typed(payload), harness.proxy.clone(), harness.state.clone()).await;
 
         let final_state = harness.last_state_update().unwrap();
         assert!(!final_state.is_scanning, "No scan must have been started");
@@ -1809,7 +1736,7 @@ mod tests {
         }
 
         let payload = json!("/some/path/to/ignore.txt");
-        add_ignore_path(payload, harness.proxy.clone(), harness.state.clone()).await;
+        add_ignore_path(typed(payload), harness.proxy.clone(), harness.state.clone()).await;
 
         {
             let final_patterns_count = harness.state.lock().config.ignore_patterns.len();
@@ -1850,75 +1777,31 @@ mod tests {
         }
     }
 
-    /// Malformed payloads change nothing and are not answered. That includes a whole
-    /// configuration, the payload of the former `updateConfig`: no command accepts one.
+    /// A request the command itself refuses changes nothing and is answered all the
+    /// same: the UI shows what the host reports, so it has to be told that nothing
+    /// changed. (A payload that does not fit its command never gets here; see
+    /// `a_refused_message_changes_nothing_and_is_answered_under_its_number` in
+    /// `app/mod.rs`.)
     #[tokio::test]
-    async fn test_config_commands_reject_malformed_payloads() {
+    async fn test_config_commands_answer_what_they_refuse() {
         let mut harness = TestHarness::new();
         let initial_config = harness.state.lock().config.clone();
-        let whole_config = serde_json::to_value(AppConfig {
-            output_filename: "smuggled.txt".to_string(),
-            ..initial_config.clone()
-        })
-        .unwrap();
 
-        for payload in [
-            json!({ "some_random_key": "some_value" }),
-            json!({ "option": "window_size", "value": [1.0, 1.0] }),
-            json!({ "option": "last_directory", "value": "/elsewhere" }),
-            json!({ "option": "max_file_size_mb", "value": 1 }),
-            json!({ "option": "case_sensitive_search", "value": "yes" }),
-            json!({ "option": "case_sensitive_search", "value": true, "extra": 1 }),
-            json!({ "option": "output_filename" }),
-            whole_config.clone(),
-        ] {
-            set_config_option(
-                payload.clone(),
-                harness.proxy.clone(),
-                harness.state.clone(),
-            )
-            .await;
-            assert_eq!(harness.state_updates_sent(), 1, "answer to {payload}");
+        // A blank text is not a pattern.
+        for blank in ["", "   ", "\t"] {
+            add_pattern(&harness, blank).await;
+            assert_eq!(harness.state_updates_sent(), 1, "answer to {blank:?}");
         }
-        for payload in [
-            json!("*.log"),
-            json!({ "pattern": 7 }),
-            json!({ "pattern": "*.log", "extra": true }),
-            whole_config,
-        ] {
-            add_ignore_pattern(
-                payload.clone(),
-                harness.proxy.clone(),
-                harness.state.clone(),
-            )
-            .await;
-            assert_eq!(harness.state_updates_sent(), 1, "answer to add {payload}");
-            remove_ignore_pattern(
-                payload.clone(),
-                harness.proxy.clone(),
-                harness.state.clone(),
-            )
-            .await;
-            assert_eq!(
-                harness.state_updates_sent(),
-                1,
-                "answer to remove {payload}"
-            );
-        }
+        // A path that is no entry of the loaded directory has no pattern.
         add_ignore_path(
-            json!({ "path": "src" }),
+            PathBuf::from("src"),
             harness.proxy.clone(),
             harness.state.clone(),
         )
         .await;
         assert_eq!(harness.state_updates_sent(), 1, "answer to addIgnorePath");
 
-        // A blank text is not a pattern.
-        add_pattern(&harness, "   ").await;
-        assert_eq!(harness.state_updates_sent(), 1, "answer to a blank pattern");
-
-        // Nothing was changed, nothing was saved, and each refusal was answered once:
-        // the UI shows what the host reports, so it has to be told that nothing changed.
+        // Nothing was changed, nothing was saved, and each refusal was answered once.
         assert_eq!(harness.state.lock().config, initial_config);
         harness
             .expect_no_event_within(QUIET_PERIOD, "Nothing else is sent")
@@ -1954,7 +1837,7 @@ mod tests {
             "contentSearchQuery": "world"
         });
 
-        update_filters(filters, harness.proxy.clone(), harness.state.clone()).await;
+        update_filters(typed(filters), harness.proxy.clone(), harness.state.clone()).await;
 
         let final_state = harness.last_state_update().unwrap();
         assert_eq!(final_state.content_search_query, "world");
@@ -1971,7 +1854,12 @@ mod tests {
         let initial_patterns_count = harness.state.lock().config.ignore_patterns.len();
         let outside_path = json!("/etc/hosts");
 
-        add_ignore_path(outside_path, harness.proxy.clone(), harness.state.clone()).await;
+        add_ignore_path(
+            typed(outside_path),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
 
         // Answered with the unchanged state.
         assert_eq!(harness.state_updates_sent(), 1);
@@ -2251,7 +2139,7 @@ mod tests {
         let patterns = harness.state.lock().config.ignore_patterns.clone();
 
         add_ignore_path(
-            json!(harness.root_path.join("name\u{a0}")),
+            typed(json!(harness.root_path.join("name\u{a0}"))),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -2294,7 +2182,7 @@ mod tests {
         let patterns = harness.state.lock().config.ignore_patterns.clone();
 
         add_ignore_path(
-            json!(path.to_string_lossy()),
+            typed(json!(path.to_string_lossy())),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -2334,7 +2222,7 @@ mod tests {
         harness.set_initial_files(&["name"]);
 
         add_ignore_path(
-            json!("/somewhere/else"),
+            typed(json!("/somewhere/else")),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -2373,7 +2261,12 @@ mod tests {
         ]);
         let nested = harness.root_path.join("src").join("gen");
 
-        add_ignore_path(json!(nested), harness.proxy.clone(), harness.state.clone()).await;
+        add_ignore_path(
+            typed(json!(nested)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
 
         let state = harness.state.lock();
         assert!(
@@ -2415,8 +2308,18 @@ mod tests {
             filtering::apply_filters(&mut state);
         }
 
-        add_ignore_path(json!(dir), harness.proxy.clone(), harness.state.clone()).await;
-        add_ignore_path(json!(file), harness.proxy.clone(), harness.state.clone()).await;
+        add_ignore_path(
+            typed(json!(dir)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+        add_ignore_path(
+            typed(json!(file)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
 
         assert_eq!(harness.state_updates_sent(), 2);
         let state = harness.state.lock();
@@ -2433,7 +2336,7 @@ mod tests {
         let path_to_ignore = harness.root_path.join("docs");
         let payload = json!(path_to_ignore);
         add_ignore_path(
-            payload.clone(),
+            typed(payload.clone()),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -2445,7 +2348,7 @@ mod tests {
         let _ = harness.last_state_update();
         let patterns_before = harness.state.lock().config.ignore_patterns.clone();
 
-        add_ignore_path(payload, harness.proxy.clone(), harness.state.clone()).await;
+        add_ignore_path(typed(payload), harness.proxy.clone(), harness.state.clone()).await;
 
         // The command is answered, but nothing has changed and no scan is started.
         let ui_state = harness
@@ -2555,7 +2458,7 @@ mod tests {
         }
         let payload = json!(file_path);
 
-        load_file_preview(payload, harness.proxy.clone(), harness.state.clone());
+        load_file_preview(typed(payload), harness.proxy.clone(), harness.state.clone());
 
         // The command answers with the state (the file is highlighted) right away ...
         let Some(UserEvent::StateUpdate(_)) = harness.event_rx.try_recv().ok() else {
@@ -2589,7 +2492,7 @@ mod tests {
         harness.set_initial_files(&["preview.txt"]);
 
         load_file_preview(
-            json!(file_path),
+            typed(json!(file_path)),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -2618,7 +2521,7 @@ mod tests {
             .insert(harness.root_path.join("src"));
 
         let payload = json!(sub_dir);
-        load_directory_level(payload, harness.proxy.clone(), harness.state.clone());
+        load_directory_level(typed(payload), harness.proxy.clone(), harness.state.clone());
 
         // The command itself marks the directory as expanded and says so.
         let components_of = |ui_state: &UiState| {
@@ -2660,11 +2563,15 @@ mod tests {
         harness.create_file("src/main.rs", "");
         harness.set_initial_files(&["src"]);
 
-        load_directory_level(json!(src), harness.proxy.clone(), harness.state.clone());
+        load_directory_level(
+            typed(json!(src)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
         // On the single-threaded test runtime the load has not run yet.
         assert!(harness.state.lock().expanded_dirs.contains(&src));
         set_expansion(
-            json!({ "path": src, "expanded": false }),
+            typed(json!({ "path": src, "expanded": false })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -2699,14 +2606,14 @@ mod tests {
         let payload = json!(file_path);
 
         toggle_selection(
-            payload.clone(),
+            typed(payload.clone()),
             harness.proxy.clone(),
             harness.state.clone(),
         );
         let ui_state1 = harness.last_state_update().unwrap();
         assert_eq!(ui_state1.selected_files_count, 1);
 
-        toggle_selection(payload, harness.proxy.clone(), harness.state.clone());
+        toggle_selection(typed(payload), harness.proxy.clone(), harness.state.clone());
         let ui_state2 = harness.last_state_update().unwrap();
         assert_eq!(ui_state2.selected_files_count, 0);
     }
@@ -2720,14 +2627,14 @@ mod tests {
         let payload = json!(dir_path);
 
         toggle_directory_selection(
-            payload.clone(),
+            typed(payload.clone()),
             harness.proxy.clone(),
             harness.state.clone(),
         );
         let ui_state_select = harness.last_state_update().unwrap();
         assert_eq!(ui_state_select.selected_files_count, 1);
 
-        toggle_directory_selection(payload, harness.proxy.clone(), harness.state.clone());
+        toggle_directory_selection(typed(payload), harness.proxy.clone(), harness.state.clone());
         let ui_state_deselect = harness.last_state_update().unwrap();
         assert_eq!(ui_state_deselect.selected_files_count, 0);
     }
@@ -2756,7 +2663,7 @@ mod tests {
         assert_eq!(initial.rows.len(), Viewport::DEFAULT_ROWS);
 
         set_viewport(
-            json!({ "start": 600, "count": 40 }),
+            typed(json!({ "start": 600, "count": 40 })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -2767,7 +2674,7 @@ mod tests {
 
         // Every later snapshot carries that window, whatever it answers.
         toggle_selection(
-            json!(harness.root_path.join("file0601.rs")),
+            typed(json!(harness.root_path.join("file0601.rs"))),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -2780,7 +2687,7 @@ mod tests {
 
         // The host bounds the window; a window behind the end is moved up.
         set_viewport(
-            json!({ "start": 990, "count": 1_000_000 }),
+            typed(json!({ "start": 990, "count": 1_000_000 })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -2793,39 +2700,28 @@ mod tests {
         assert_eq!(harness.last_state_update().unwrap().rows_start, 0);
     }
 
+    /// A type-ahead without a prefix is a lookup the types allow, but it asks for
+    /// nothing: it is answered with the unchanged snapshot.
     #[tokio::test]
-    async fn test_malformed_viewport_and_locate_payloads_are_answered_unchanged() {
+    async fn test_a_lookup_of_nothing_is_answered_unchanged() {
         let mut harness = harness_with_files(300);
         set_viewport(
-            json!({ "start": 200, "count": 10 }),
+            typed(json!({ "start": 200, "count": 10 })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
         harness.last_state_update().unwrap();
 
-        for payload in [
-            json!(null),
-            json!({ "start": -1, "count": 10 }),
-            json!({ "start": 1 }),
-            json!({ "start": 1, "count": 0 }),
-            json!({ "start": 1, "count": 2, "extra": true }),
-        ] {
-            set_viewport(payload, harness.proxy.clone(), harness.state.clone());
-            let answer = harness.last_state_update().expect("answered");
-            assert_eq!((answer.rows_start, answer.rows.len()), (200, 10));
-        }
-        for payload in [
-            json!(null),
-            json!({ "request": 1 }),
-            json!({ "request": 1, "target": { "kind": "nope" } }),
-            json!({ "request": 1, "target": { "kind": "path", "path": "/x", "extra": 1 } }),
-            json!({ "request": -1, "target": { "kind": "path", "path": "/x" } }),
-            json!({ "request": 1, "target": { "kind": "typeahead", "prefix": "", "from": 0 } }),
-        ] {
-            locate_row(payload, harness.proxy.clone(), harness.state.clone());
-            let answer = harness.last_state_update().expect("answered");
-            assert_eq!(answer.located, None);
-        }
+        locate_row(
+            typed(
+                json!({ "request": 1, "target": { "kind": "typeahead", "prefix": "", "from": 0 } }),
+            ),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        let answer = harness.last_state_update().expect("answered");
+        assert_eq!(answer.located, None);
+        assert_eq!((answer.rows_start, answer.rows.len()), (200, 10));
     }
 
     #[tokio::test]
@@ -2837,14 +2733,14 @@ mod tests {
         harness.create_file("readme.md", "");
         harness.set_initial_files(&["src", "src/main.rs", "src/mod.rs", "readme.md"]);
         set_expansion(
-            json!({ "path": src, "expanded": true }),
+            typed(json!({ "path": src, "expanded": true })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
         // 0 src, 1 main.rs, 2 mod.rs, 3 readme.md
         let mut locate = |request: u32, target: serde_json::Value| {
             locate_row(
-                json!({ "request": request, "target": target }),
+                typed(json!({ "request": request, "target": target })),
                 harness.proxy.clone(),
                 harness.state.clone(),
             );
@@ -2882,7 +2778,7 @@ mod tests {
         // The answer stays true when the list changes: `main.rs` is no row any more.
         assert_eq!(locate(8, json!({ "kind": "path", "path": main })), Some(1));
         set_expansion(
-            json!({ "path": src, "expanded": false }),
+            typed(json!({ "path": src, "expanded": false })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -2904,14 +2800,22 @@ mod tests {
         // Expanding twice (key repeat, double click) leaves the directory expanded,
         // and each request is answered with a snapshot.
         for _ in 0..2 {
-            set_expansion(set(true), harness.proxy.clone(), harness.state.clone());
+            set_expansion(
+                typed(set(true)),
+                harness.proxy.clone(),
+                harness.state.clone(),
+            );
             let ui_state = harness.last_state_update().unwrap();
             assert!(ui_state.root_rows()[0].is_expanded);
         }
         assert_eq!(harness.state.lock().expanded_dirs.len(), 1);
 
         for _ in 0..2 {
-            set_expansion(set(false), harness.proxy.clone(), harness.state.clone());
+            set_expansion(
+                typed(set(false)),
+                harness.proxy.clone(),
+                harness.state.clone(),
+            );
             let ui_state = harness.last_state_update().unwrap();
             assert!(!ui_state.root_rows()[0].is_expanded);
         }
@@ -2927,12 +2831,12 @@ mod tests {
         harness.state.lock().expanded_dirs.insert(docs.clone());
 
         set_expansion(
-            json!({ "path": src, "expanded": true }),
+            typed(json!({ "path": src, "expanded": true })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
         set_expansion(
-            json!({ "path": src, "expanded": false }),
+            typed(json!({ "path": src, "expanded": false })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -2944,35 +2848,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_expansion_handles_invalid_payload() {
-        let mut harness = TestHarness::new();
-        for invalid_payload in [
-            json!("/a/bare/path"),
-            json!({ "path": "/repo/src" }),
-            json!({ "expanded": true }),
-            json!({ "path": "/repo/src", "expanded": "yes" }),
-            json!({ "path": "/repo/src", "expanded": true, "extra": 1 }),
-            json!(null),
-        ] {
-            set_expansion(
-                invalid_payload,
-                harness.proxy.clone(),
-                harness.state.clone(),
-            );
-        }
-        harness
-            .expect_no_event_within(QUIET_PERIOD, "No event expected")
-            .await;
-        assert!(harness.state.lock().expanded_dirs.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_expand_collapse_all() {
         let mut harness = TestHarness::new();
         harness.create_dir("src");
         harness.set_initial_files(&["src"]);
 
-        expand_collapse_all(json!(true), harness.proxy.clone(), harness.state.clone());
+        expand_collapse_all(
+            typed(json!(true)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
         let ui_state1 = harness.last_state_update().unwrap();
         assert_eq!(
             ui_state1
@@ -2983,7 +2868,11 @@ mod tests {
             1
         );
 
-        expand_collapse_all(json!(false), harness.proxy.clone(), harness.state.clone());
+        expand_collapse_all(
+            typed(json!(false)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
         let ui_state2 = harness.last_state_update().unwrap();
         assert!(ui_state2.root_rows().into_iter().all(|n| !n.is_expanded));
     }
@@ -3071,7 +2960,7 @@ mod tests {
 
         save_file(
             harness.dialog.as_ref(),
-            json!({ "kind": "edited", "content": content_to_save }),
+            typed(json!({ "kind": "edited", "content": content_to_save })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -3098,7 +2987,7 @@ mod tests {
     fn save_generated(harness: &TestHarness, document_id: u64) {
         save_file(
             harness.dialog.as_ref(),
-            json!({ "kind": "generated", "documentId": document_id }),
+            typed(json!({ "kind": "generated", "documentId": document_id })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -3143,7 +3032,7 @@ mod tests {
 
         save_file(
             harness.dialog.as_ref(),
-            json!({ "kind": "edited", "content": "generated, then edited\n" }),
+            typed(json!({ "kind": "edited", "content": "generated, then edited\n" })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -3307,7 +3196,7 @@ mod tests {
 
         save_file(
             &dialog,
-            json!({ "kind": "generated", "documentId": shown.id() }),
+            typed(json!({ "kind": "generated", "documentId": shown.id() })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -3470,7 +3359,11 @@ mod tests {
     async fn refused_preview(harness: &mut TestHarness, path: &Path) -> String {
         let previewed_before = harness.state.lock().previewed_file_path.clone();
 
-        load_file_preview(json!(path), harness.proxy.clone(), harness.state.clone());
+        load_file_preview(
+            typed(json!(path)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
 
         let Some(UserEvent::ShowError(message)) = harness.event_rx.try_recv().ok() else {
             panic!("Expected the preview of {path:?} to be refused with an error");
@@ -3570,7 +3463,11 @@ mod tests {
         let listed = harness.create_file("listed.txt", "listed content");
         let unlisted = harness.create_file("unlisted.txt", "unlisted content");
         harness.set_initial_files(&["listed.txt"]);
-        load_file_preview(json!(listed), harness.proxy.clone(), harness.state.clone());
+        load_file_preview(
+            typed(json!(listed)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
         let _ = harness.event_rx.try_recv();
         assert!(matches!(
             harness.get_next_event().await,
@@ -3800,52 +3697,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_save_file_handles_invalid_payload() {
-        let mut harness = TestHarness::new();
-        let save_path = harness.root_path.join("output.txt");
-        harness.dialog.set_save_file(Some(save_path.clone()));
-        let invalid_payload = json!(12345);
-
-        save_file(
-            harness.dialog.as_ref(),
-            invalid_payload,
-            harness.proxy.clone(),
-            harness.state.clone(),
-        );
-
-        assert!(
-            !save_path.exists(),
-            "No file should have been written with an invalid payload"
-        );
-
-        harness
-            .expect_no_event_within(
-                QUIET_PERIOD,
-                "No event should be sent for an invalid payload",
-            )
-            .await;
-    }
-
-    #[tokio::test]
-    async fn test_load_directory_level_handles_invalid_payload() {
-        let mut harness = TestHarness::new();
-        let invalid_payload = json!({ "path": "/not/a/string/path" });
-
-        load_directory_level(
-            invalid_payload,
-            harness.proxy.clone(),
-            harness.state.clone(),
-        );
-
-        harness
-            .expect_no_event_within(
-                QUIET_PERIOD,
-                "No event should be sent for an invalid payload",
-            )
-            .await;
-    }
-
-    #[tokio::test]
     async fn test_save_file_sends_error_on_io_failure() {
         let mut harness = TestHarness::new();
         // A cross-platform way to cause an I/O error is to try to write to a directory path.
@@ -3854,7 +3705,7 @@ mod tests {
 
         save_file(
             harness.dialog.as_ref(),
-            json!({ "kind": "edited", "content": "some content" }),
+            typed(json!({ "kind": "edited", "content": "some content" })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -3901,27 +3752,9 @@ mod tests {
     // SECTION: New tests for coverage increase
     // =========================================================================================
 
-    // --- Tests for invalid payloads ---
+    // --- Payloads ---
 
-    #[tokio::test]
-    async fn test_update_filters_handles_invalid_payload() {
-        let mut harness = TestHarness::new();
-        let invalid_payload = json!("not a map");
-        update_filters(
-            invalid_payload,
-            harness.proxy.clone(),
-            harness.state.clone(),
-        )
-        .await;
-        // Answered with the unchanged state: the filter inputs wait for the echo.
-        assert_eq!(harness.state_updates_sent(), 1);
-        harness
-            .expect_no_event_within(QUIET_PERIOD, "Nothing else is sent")
-            .await;
-    }
-
-    /// The payload has a type on the host: unknown fields and wrong value types are
-    /// refused as a whole (nothing is applied), a text that is left out is empty.
+    /// A filter text that is left out is empty.
     #[tokio::test]
     async fn test_update_filters_payload_is_typed() {
         let mut harness = TestHarness::new();
@@ -3929,17 +3762,7 @@ mod tests {
         let filter =
             |payload| update_filters(payload, harness.proxy.clone(), harness.state.clone());
 
-        for refused in [
-            json!({ "searchQuery": "main", "search_query": "x" }),
-            json!({ "searchQuery": "main", "extra": true }),
-            json!({ "searchQuery": 7 }),
-            json!({ "searchQuery": "main", "extensionFilter": null }),
-        ] {
-            filter(refused.clone()).await;
-            assert_eq!(harness.state.lock().search_query, "", "{refused}");
-        }
-
-        filter(json!({ "searchQuery": "main" })).await;
+        filter(typed(json!({ "searchQuery": "main" }))).await;
         {
             let state = harness.state.lock();
             assert_eq!(state.search_query, "main");
@@ -3958,7 +3781,7 @@ mod tests {
             json!({ "searchQuery": "", "extensionFilter": "md", "contentSearchQuery": "" })
         );
         update_filters(
-            serde_json::to_value(&all).unwrap(),
+            typed(serde_json::to_value(&all).unwrap()),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -4002,7 +3825,7 @@ mod tests {
             content_search_query: String::new(),
         };
         update_filters(
-            serde_json::to_value(payload).unwrap(),
+            typed(serde_json::to_value(payload).unwrap()),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -4025,7 +3848,11 @@ mod tests {
             .lock()
             .collapse_directories([a.clone(), deep.clone()]);
 
-        expand_collapse_all(json!(true), harness.proxy.clone(), harness.state.clone());
+        expand_collapse_all(
+            typed(json!(true)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
 
         assert_eq!(
             expanded(&harness),
@@ -4046,7 +3873,11 @@ mod tests {
             .expand_directories([a, deep, b.clone()]);
         type_filter(&harness, "", "rs").await;
 
-        expand_collapse_all(json!(false), harness.proxy.clone(), harness.state.clone());
+        expand_collapse_all(
+            typed(json!(false)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
 
         assert_eq!(expanded(&harness), HashSet::from([b.clone()]));
         let ui_state = harness.last_state_update().unwrap();
@@ -4070,10 +3901,18 @@ mod tests {
     async fn test_expand_and_collapse_all_without_a_filter_reach_every_directory() {
         let (harness, a, deep, b) = harness_with_two_branches();
 
-        expand_collapse_all(json!(true), harness.proxy.clone(), harness.state.clone());
+        expand_collapse_all(
+            typed(json!(true)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
         assert_eq!(expanded(&harness), HashSet::from([a, deep, b]));
 
-        expand_collapse_all(json!(false), harness.proxy.clone(), harness.state.clone());
+        expand_collapse_all(
+            typed(json!(false)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
         assert!(expanded(&harness).is_empty());
     }
 
@@ -4086,7 +3925,7 @@ mod tests {
         assert_eq!(expanded(&harness), HashSet::from([a.clone(), deep.clone()]));
 
         set_expansion(
-            json!({ "path": a, "expanded": false }),
+            typed(json!({ "path": a, "expanded": false })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -4110,7 +3949,7 @@ mod tests {
         let (harness, a, deep, b) = harness_with_two_branches();
         type_filter(&harness, "", "rs").await;
         set_expansion(
-            json!({ "path": a, "expanded": false }),
+            typed(json!({ "path": a, "expanded": false })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -4121,12 +3960,12 @@ mod tests {
 
         // Expanding by hand ends the hold on that directory.
         set_expansion(
-            json!({ "path": a, "expanded": true }),
+            typed(json!({ "path": a, "expanded": true })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
         set_expansion(
-            json!({ "path": a, "expanded": false }),
+            typed(json!({ "path": a, "expanded": false })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -4143,7 +3982,11 @@ mod tests {
         type_filter(&harness, "r", "").await;
         assert_eq!(expanded(&harness), HashSet::from([a.clone(), deep.clone()]));
 
-        expand_collapse_all(json!(false), harness.proxy.clone(), harness.state.clone());
+        expand_collapse_all(
+            typed(json!(false)),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
         type_filter(&harness, "rs", "").await;
 
         assert!(!expanded(&harness).contains(&a));
@@ -4159,7 +4002,7 @@ mod tests {
         let src = harness.root_path.join("src");
         harness.set_initial_files(&["src", "src/main.rs"]);
         update_filters(
-            json!({ "contentSearchQuery": "needle" }),
+            typed(json!({ "contentSearchQuery": "needle" })),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -4167,7 +4010,7 @@ mod tests {
         assert_eq!(expanded(&harness), HashSet::from([src.clone()]));
 
         set_expansion(
-            json!({ "path": src, "expanded": false }),
+            typed(json!({ "path": src, "expanded": false })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -4180,48 +4023,6 @@ mod tests {
         let _ = harness.last_state_update();
     }
 
-    #[tokio::test]
-    async fn test_load_file_preview_handles_invalid_payload() {
-        let mut harness = TestHarness::new();
-        let invalid_payload = json!(["not a string"]);
-        load_file_preview(
-            invalid_payload,
-            harness.proxy.clone(),
-            harness.state.clone(),
-        );
-        harness
-            .expect_no_event_within(QUIET_PERIOD, "No event expected")
-            .await;
-    }
-
-    #[tokio::test]
-    async fn test_toggle_selection_handles_invalid_payload() {
-        let mut harness = TestHarness::new();
-        let invalid_payload = json!({ "path": "/some/path" });
-        toggle_selection(
-            invalid_payload,
-            harness.proxy.clone(),
-            harness.state.clone(),
-        );
-        harness
-            .expect_no_event_within(QUIET_PERIOD, "No event expected")
-            .await;
-    }
-
-    #[tokio::test]
-    async fn test_expand_collapse_all_handles_invalid_payload() {
-        let mut harness = TestHarness::new();
-        let invalid_payload = json!("not a boolean");
-        expand_collapse_all(
-            invalid_payload,
-            harness.proxy.clone(),
-            harness.state.clone(),
-        );
-        harness
-            .expect_no_event_within(QUIET_PERIOD, "No event expected")
-            .await;
-    }
-
     // --- Tests for user cancellation / dialog returning None ---
 
     #[tokio::test]
@@ -4230,7 +4031,7 @@ mod tests {
         harness.dialog.set_save_file(None);
         save_file(
             harness.dialog.as_ref(),
-            json!({ "kind": "edited", "content": "content" }),
+            typed(json!({ "kind": "edited", "content": "content" })),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -4408,7 +4209,7 @@ mod tests {
         let non_existent_path = harness.root_path.join("non_existent_file.txt");
         harness.set_initial_files(&["non_existent_file.txt"]);
         let payload = json!(non_existent_path);
-        load_file_preview(payload, harness.proxy.clone(), harness.state.clone());
+        load_file_preview(typed(payload), harness.proxy.clone(), harness.state.clone());
 
         let mut error_event_found = false;
         // The command sends two events: an error and a state update. We check for the error.
@@ -4437,7 +4238,7 @@ mod tests {
 
         // 2. Toggle the directory. It should now select all files.
         toggle_directory_selection(
-            json!(dir_path),
+            typed(json!(dir_path)),
             harness.proxy.clone(),
             harness.state.clone(),
         );
@@ -4577,7 +4378,9 @@ mod tests {
         };
 
         let command = tokio::spawn(update_filters_with(
-            json!({ "searchQuery": "", "extensionFilter": "rs", "contentSearchQuery": "needle" }),
+            typed(
+                json!({ "searchQuery": "", "extensionFilter": "rs", "contentSearchQuery": "needle" }),
+            ),
             harness.proxy.clone(),
             harness.state.clone(),
             searcher,
@@ -4625,7 +4428,7 @@ mod tests {
             ]),
         };
         let command = tokio::spawn(update_filters_with(
-            json!({ "contentSearchQuery": "needle" }),
+            typed(json!({ "contentSearchQuery": "needle" })),
             harness.proxy.clone(),
             harness.state.clone(),
             searcher,
@@ -4635,7 +4438,7 @@ mod tests {
 
         // Another filter, with the content query as the UI shows it.
         update_filters(
-            json!({ "searchQuery": "main", "contentSearchQuery": "needle" }),
+            typed(json!({ "searchQuery": "main", "contentSearchQuery": "needle" })),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -4847,7 +4650,7 @@ mod tests {
         };
 
         // --- ACT ---
-        add_ignore_pattern(json!({ "pattern": "*.log" }), proxy, state.clone()).await;
+        add_ignore_pattern(typed(json!({ "pattern": "*.log" })), proxy, state.clone()).await;
 
         // --- ASSERT ---
 
@@ -4948,7 +4751,7 @@ mod tests {
 
     async fn add_pattern(harness: &TestHarness, pattern: &str) {
         add_ignore_pattern(
-            json!({ "pattern": pattern }),
+            typed(json!({ "pattern": pattern })),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -4957,7 +4760,7 @@ mod tests {
 
     async fn remove_pattern(harness: &TestHarness, pattern: &str) {
         remove_ignore_pattern(
-            json!({ "pattern": pattern }),
+            typed(json!({ "pattern": pattern })),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -4966,7 +4769,7 @@ mod tests {
 
     async fn set_option(harness: &TestHarness, option: ConfigOption) {
         set_config_option(
-            serde_json::to_value(option).unwrap(),
+            typed(serde_json::to_value(option).unwrap()),
             harness.proxy.clone(),
             harness.state.clone(),
         )
@@ -5482,6 +5285,7 @@ mod tests {
 
         // What the UI posts for an output it has not changed, as it arrives.
         let message = serde_json::to_string(&json!({
+            "seq": 1,
             "command": "saveFile",
             "payload": { "kind": "generated", "documentId": document.id() },
         }))
@@ -5489,10 +5293,16 @@ mod tests {
         let bytes = document.text().len() as u64;
         drop(document);
         let saving = std::time::Instant::now();
-        let parsed: crate::app::events::IpcMessage = serde_json::from_str(&message).unwrap();
+        let crate::app::ipc::IpcMessage::Command {
+            command: crate::app::ipc::Command::SaveFile(payload),
+            ..
+        } = crate::app::ipc::IpcMessage::parse(&message)
+        else {
+            panic!("the message is a saveFile command");
+        };
         save_file(
             harness.dialog.as_ref(),
-            parsed.payload,
+            payload,
             harness.proxy.clone(),
             harness.state.clone(),
         );

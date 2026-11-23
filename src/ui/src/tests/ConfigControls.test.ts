@@ -4,7 +4,14 @@
 //
 // The host owns the configuration. The UI shows the last snapshot and sends
 // one intent per edit; it never sends its copy of the configuration back. The
-// tests play the host by hand: `hostSends()` is a snapshot arriving.
+// tests play the host by hand. `post()` numbers the commands, and a snapshot
+// states the number of the last command it accounts for:
+//
+// - `hostAnswers()` is a snapshot of a host that has processed everything the
+//   UI has posted so far;
+// - `hostSends()` is a snapshot from before that (scan progress that was on
+//   its way, the answer to an earlier command): it accounts for no more than
+//   the last `hostAnswers()` did.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, fireEvent } from "@testing-library/svelte";
@@ -12,7 +19,6 @@ import { tick } from "svelte";
 import Sidebar from "$lib/components/Sidebar.svelte";
 import StatusBar from "$lib/components/StatusBar.svelte";
 import { appState, getState } from "$lib/stores/app";
-import { ACK_TIMEOUT_MS } from "$lib/modules/hostDraft";
 import { deleteLineBackward, deleteWordBackward } from "$lib/modules/actions";
 import { UiStateSchema } from "$lib/ipc/schema";
 import type { AppState, Config } from "$lib/types";
@@ -28,19 +34,34 @@ type Overrides = Partial<Omit<AppState, "config">> & {
   config?: Partial<Config>;
 };
 
+/** The number `post()` gave the last command. */
+let lastPosted = 0;
+/** The number of the last command the host has processed. */
+let processed = 0;
+
 function snapshot(overrides: Overrides = {}): AppState {
   const base = UiStateSchema.parse(makeValidUiState());
   return {
     ...base,
+    last_processed_seq: processed,
     ...overrides,
     config: { ...base.config, ...overrides.config },
   };
 }
 
-/** A snapshot of the host arrives: the store is replaced, as `render()` does. */
+/**
+ * A snapshot of the host arrives: the store is replaced, as `render()` does.
+ * It accounts for the commands the host had processed before (see above).
+ */
 async function hostSends(overrides: Overrides = {}) {
   appState.set(snapshot(overrides));
   await tick();
+}
+
+/** The host has processed every command posted so far and sends a snapshot. */
+async function hostAnswers(overrides: Overrides = {}) {
+  processed = lastPosted;
+  await hostSends(overrides);
 }
 
 function input(id: string): HTMLInputElement {
@@ -56,7 +77,11 @@ async function type(el: HTMLInputElement, value: string) {
 const posted = () => vi.mocked(post).mock.calls;
 
 beforeEach(() => {
-  vi.mocked(post).mockClear();
+  lastPosted = 0;
+  processed = 0;
+  vi.mocked(post).mockReset();
+  // Like the real `post()`: every command gets the next number.
+  vi.mocked(post).mockImplementation(() => ++lastPosted);
   appState.set(snapshot());
 });
 
@@ -164,13 +189,13 @@ describe("Sidebar and StatusBar: options are set one at a time", () => {
       // The store is the host's snapshot; a click does not write to it.
       expect(getState().config[option]).toBe(false);
 
-      await hostSends({ config: { [option]: true } });
+      await hostAnswers({ config: { [option]: true } });
       expect(input(id).checked).toBe(true);
 
       vi.mocked(post).mockClear();
       await fireEvent.click(input(id));
       expect(posted()).toEqual([["setConfigOption", { option, value: false }]]);
-      await hostSends();
+      await hostAnswers();
       expect(input(id).checked).toBe(false);
     }
   });
@@ -200,7 +225,7 @@ describe("Sidebar and StatusBar: options are set one at a time", () => {
     expect(posted()).toEqual([
       ["setConfigOption", { option: "output_directory", value: null }],
     ]);
-    await hostSends({ config: { output_directory: null } });
+    await hostAnswers({ config: { output_directory: null } });
     expect(field.value).toBe("");
 
     vi.mocked(post).mockClear();
@@ -222,7 +247,7 @@ describe("text being typed survives snapshots", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("keeps the output file name while it is edited and until it is acknowledged", async () => {
+  it("keeps the output file name while it is edited and until its command is answered", async () => {
     render(StatusBar);
     const field = input("output-filename");
 
@@ -237,7 +262,7 @@ describe("text being typed survives snapshots", () => {
     await hostSends({ status_message: "Still scanning..." });
     expect(field.value).toBe("context.md");
 
-    await hostSends({ config: { output_filename: "context.md" } });
+    await hostAnswers({ config: { output_filename: "context.md" } });
     expect(field.value).toBe("context.md");
 
     // Afterwards the host's value is shown again (e.g. an imported config).
@@ -304,7 +329,7 @@ describe("text being typed survives snapshots", () => {
     expect(search.value).toBe("main");
 
     // The answer to updateFilters.
-    await hostSends({ search_query: "main" });
+    await hostAnswers({ search_query: "main" });
     expect(search.value).toBe("main");
 
     // From now on the host is followed again, e.g. when it resets the filters.
@@ -312,14 +337,37 @@ describe("text being typed survives snapshots", () => {
     expect(search.value).toBe("");
   });
 
-  it("keeps typing on while an earlier filter text is acknowledged", async () => {
+  it("does not take a snapshot for the answer because it shows the sent text", async () => {
+    // What counts is the number, not the value. The host showed "main" before
+    // (an earlier state), the user types it again, and a snapshot from before
+    // the command is still under way: it is not the answer, and what follows
+    // it is not shown yet either.
+    appState.set(snapshot({ search_query: "main" }));
+    render(Sidebar);
+    const search = input("search-query");
+
+    await type(search, "mai");
+    vi.advanceTimersByTime(300);
+    await type(search, "main");
+    vi.advanceTimersByTime(300);
+    expect(posted()).toHaveLength(2);
+
+    await hostSends({ search_query: "main" });
+    await hostSends({ search_query: "something older" });
+    expect(search.value).toBe("main");
+
+    await hostAnswers({ search_query: "main" });
+    expect(search.value).toBe("main");
+  });
+
+  it("keeps typing on while an earlier filter text is answered", async () => {
     render(Sidebar);
     const search = input("search-query");
 
     await type(search, "ma");
     vi.advanceTimersByTime(300);
     await type(search, "main");
-    await hostSends({ search_query: "ma" }); // answer to the first send
+    await hostAnswers({ search_query: "ma" }); // answer to the first send
     expect(search.value).toBe("main");
 
     vi.advanceTimersByTime(300);
@@ -327,71 +375,84 @@ describe("text being typed survives snapshots", () => {
       { searchQuery: "ma" },
       { searchQuery: "main" },
     ]);
-    await hostSends({ search_query: "main" });
+    // The first answer again (it accounts for the first command only).
+    await hostSends({ search_query: "ma" });
+    expect(search.value).toBe("main");
+    await hostAnswers({ search_query: "main" });
     expect(search.value).toBe("main");
   });
 
-  it("follows the host again when the sent filters are never acknowledged", async () => {
-    render(Sidebar);
-    const search = input("search-query");
-
-    await type(search, "main");
-    vi.advanceTimersByTime(300);
-    await hostSends({ search_query: "" });
-    expect(search.value).toBe("main");
-
-    // The host keeps reporting something else: it has decided differently.
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS);
-    await hostSends({ search_query: "" });
-    expect(search.value).toBe("");
-  });
-
-  it("follows the host when the wait runs out, without another snapshot", async () => {
+  it("shows what the host has decided as soon as it answers", async () => {
     render(Sidebar);
     const search = input("search-query");
     const content = input("content-search-query");
 
     await type(content, "needle");
     vi.advanceTimersByTime(300);
-    // The host decided differently, and this is its last word for now.
-    await hostSends({ search_query: "from-host", content_search_query: "" });
-    expect(content.value).toBe("needle");
-
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS - 1);
-    await tick();
-    expect(content.value).toBe("needle");
-
-    vi.advanceTimersByTime(1);
-    await tick();
+    // The host has processed the command and reports other filters (it
+    // refused the command, or something else has changed them since): that
+    // is shown at once, without waiting for anything.
+    await hostAnswers({ search_query: "from-host", content_search_query: "" });
     expect(content.value).toBe("");
     expect(search.value).toBe("from-host");
   });
 
-  describe("a content search that takes longer than the wait", () => {
-    // A host that answers `updateFilters` only when the search has finished:
-    // no snapshot arrives in the meantime.
-    it("keeps the typed query, and the matches' snapshot is shown as usual", async () => {
+  it("follows a host that answers with the filters it had before", async () => {
+    render(Sidebar);
+    const content = input("content-search-query");
+
+    await type(content, "needle");
+    vi.advanceTimersByTime(300);
+    // The same values as before the send, from before the command...
+    await hostSends({ status_message: "something else happened" });
+    expect(content.value).toBe("needle");
+    // ...and as the answer to it.
+    await hostAnswers({ status_message: "refused" });
+    expect(content.value).toBe("");
+  });
+
+  it("takes the answer to a later command for the answer to its own", async () => {
+    // The answer to `updateFilters` was coalesced with the one to a command
+    // posted after it: one snapshot accounts for both.
+    render(Sidebar);
+    const search = input("search-query");
+
+    await type(search, "main");
+    vi.advanceTimersByTime(300);
+    lastPosted += 3; // other commands of the UI
+    await hostAnswers({ search_query: "main", status_message: "all done" });
+    await hostSends({ search_query: "" });
+    expect(search.value).toBe("");
+  });
+
+  describe("a host that takes its time", () => {
+    const AN_HOUR = 60 * 60 * 1000;
+
+    it("keeps the typed query for as long as no answer arrives", async () => {
       render(Sidebar);
       const content = input("content-search-query");
 
       await type(content, "needle");
       vi.advanceTimersByTime(300);
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS * 3);
+      // Nothing is waiting to run: no timer decides about the text.
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(AN_HOUR);
+      await hostSends({ status_message: "from before the command" });
       await tick();
       expect(content.value).toBe("needle");
 
-      await hostSends({ content_search_query: "needle" });
+      await hostAnswers({ content_search_query: "needle" });
       expect(content.value).toBe("needle");
     });
 
-    it("sends the query along when another filter is typed afterwards", async () => {
+    it("sends the query along when another filter is typed meanwhile", async () => {
       render(Sidebar);
       const content = input("content-search-query");
       const search = input("search-query");
 
       await type(content, "needle");
       vi.advanceTimersByTime(300);
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS + 1);
+      vi.advanceTimersByTime(AN_HOUR);
       await tick();
 
       await type(search, "main");
@@ -407,45 +468,16 @@ describe("text being typed survives snapshots", () => {
       expect(content.value).toBe("needle");
     });
 
-    it("follows the host if its first snapshot after the wait says otherwise", async () => {
-      render(Sidebar);
-      const content = input("content-search-query");
+    it("keeps a committed output file name", async () => {
+      render(StatusBar);
+      const field = input("output-filename");
 
-      await type(content, "needle");
-      vi.advanceTimersByTime(300);
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS * 2);
-      await tick();
-
-      // E.g. the filters were cleared by another route.
-      await hostSends({ content_search_query: "" });
-      expect(content.value).toBe("");
+      await type(field, "context.md");
+      await fireEvent.change(field);
+      vi.advanceTimersByTime(AN_HOUR);
+      await hostSends({ status_message: "from before the command" });
+      expect(field.value).toBe("context.md");
     });
-
-    it("still follows a host that keeps reporting the old filters", async () => {
-      render(Sidebar);
-      const content = input("content-search-query");
-
-      await type(content, "needle");
-      vi.advanceTimersByTime(300);
-      // The same values as before the send, but reported after it.
-      await hostSends({ status_message: "something else happened" });
-      expect(content.value).toBe("needle");
-
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
-      await tick();
-      expect(content.value).toBe("");
-    });
-  });
-
-  it("keeps a committed output file name while the host has not answered", async () => {
-    render(StatusBar);
-    const field = input("output-filename");
-
-    await type(field, "context.md");
-    await fireEvent.change(field);
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS * 2);
-    await tick();
-    expect(field.value).toBe("context.md");
   });
 
   it("shows the host's output file name again when it answers with the old one", async () => {
@@ -455,27 +487,20 @@ describe("text being typed survives snapshots", () => {
     await type(field, "context.md");
     await fireEvent.change(field);
     // The answer: the host has kept its value (the same as before the send).
-    await hostSends({ status_message: "answered" });
-    expect(field.value).toBe("context.md");
-
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS);
-    await tick();
+    await hostAnswers({ status_message: "answered" });
     expect(field.value).toBe("output.txt");
   });
 
-  it("does not let the end of the wait reset text typed in the meantime", async () => {
-    render(Sidebar);
-    const search = input("search-query");
+  it("shows the output directory the host has made of the one that was entered", async () => {
+    render(StatusBar);
+    const field = input("output-dir");
 
-    await type(search, "ma");
-    vi.advanceTimersByTime(300);
-    await hostSends({ search_query: "" });
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS - 100);
-    await type(search, "main"); // debounce pending when the wait runs out
-
-    vi.advanceTimersByTime(100);
-    await tick();
-    expect(search.value).toBe("main");
+    await type(field, "/out/");
+    await fireEvent.change(field);
+    await hostSends({ status_message: "from before the command" });
+    expect(field.value).toBe("/out/");
+    await hostAnswers({ config: { output_directory: "/out" } });
+    expect(field.value).toBe("/out");
   });
 
   it("shows the cleared filters when the directory is cleared right after typing", async () => {
@@ -486,13 +511,9 @@ describe("text being typed survives snapshots", () => {
     vi.advanceTimersByTime(300);
     expect(posted()).toHaveLength(1);
 
-    // "Clear directory" within the wait for the acknowledgement: the only
-    // snapshot that follows differs from what was sent.
-    await hostSends({ current_path: "", content_search_query: "" });
-    expect(content.value).toBe("");
-
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS * 2);
-    await tick();
+    // "Clear directory" right behind the filters: the snapshot that follows
+    // differs from what was sent.
+    await hostAnswers({ current_path: "", content_search_query: "" });
     expect(content.value).toBe("");
     expect(posted()).toHaveLength(1);
   });
@@ -512,12 +533,15 @@ describe("text being typed survives snapshots", () => {
     expect(search.value).toBe("");
   });
 
-  it("does not wait for the acknowledgement of a text sent to the previous directory", async () => {
+  it("does not wait for the answer to a text sent to the previous directory", async () => {
     render(Sidebar);
     const search = input("search-query");
 
     await type(search, "main");
     vi.advanceTimersByTime(300);
+    // The other directory is shown by a snapshot from before the command
+    // (a drop that was under way): the filters belong to the directory they
+    // were typed for.
     await hostSends({ current_path: "/another/project", search_query: "" });
     expect(search.value).toBe("");
 

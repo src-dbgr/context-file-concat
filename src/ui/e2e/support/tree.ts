@@ -11,6 +11,11 @@ import type { Page } from "@playwright/test";
  *   valid snapshot as long as the tree fits into one window.
  * - `setTree` hands the rows to the stand-in host of the E2E bridge, which
  *   answers the viewport reports of the UI with windows like the real host.
+ *
+ * A snapshot states the number of the last command it accounts for
+ * (`last_processed_seq`). A seeded snapshot is one of a host that has
+ * processed everything the UI has posted, unless the spec states a number
+ * itself (to play a snapshot from before a command).
  */
 
 /** A node of a tree as a spec writes it down. */
@@ -61,6 +66,11 @@ export type AppState = {
   content_search_query: string;
   active_ignore_patterns: string[];
   config: AppConfig;
+  /**
+   * The number of the last command the snapshot accounts for. Left out: the
+   * one of the last command the UI has posted.
+   */
+  last_processed_seq?: number;
 };
 
 /** The rows of a tree: preorder, the children of expanded directories only. */
@@ -155,26 +165,35 @@ function snapshotOf(state: AppState) {
   };
 }
 
+type Bridge = {
+  render: (s: unknown) => void;
+  __e2e: {
+    store: { setAppState: (s: unknown) => void };
+    host: { processedSeq: () => number };
+  };
+};
+
 /**
  * Delivers `state` the way the host does, through `window.render`, so the
  * snapshot is validated and every reaction of the UI to a host snapshot runs.
  */
 export async function renderAsHost(page: Page, state: AppState): Promise<void> {
   await page.evaluate((next) => {
-    (window as unknown as { render: (s: unknown) => void }).render(next);
+    const w = window as unknown as Bridge;
+    // Unless the spec says otherwise, the host has processed every command.
+    w.render({ last_processed_seq: w.__e2e.host.processedSeq(), ...next });
   }, snapshotOf(state));
 }
 
 /** Replaces the state of the UI with a snapshot that holds every row. */
 export async function setAppState(page: Page, state: AppState): Promise<void> {
-  const snapshot = snapshotOf(state);
   await page.evaluate((next) => {
-    (
-      window as unknown as {
-        __e2e: { store: { setAppState: (s: unknown) => void } };
-      }
-    ).__e2e.store.setAppState(next);
-  }, snapshot);
+    const w = window as unknown as Bridge;
+    w.__e2e.store.setAppState({
+      last_processed_seq: w.__e2e.host.processedSeq(),
+      ...next,
+    });
+  }, snapshotOf(state));
 }
 
 /**
@@ -182,7 +201,8 @@ export async function setAppState(page: Page, state: AppState): Promise<void> {
  * window the UI asks for.
  */
 export async function setTree(page: Page, state: AppState): Promise<void> {
-  const { tree, ...rest } = state;
+  // The number of the last command is the stand-in host's to state.
+  const { tree, last_processed_seq: _seq, ...rest } = state;
   await page.evaluate(
     ([base, rows]) => {
       (

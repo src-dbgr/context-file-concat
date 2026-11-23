@@ -67,6 +67,7 @@ function seedApp(overrides: Partial<Parameters<typeof appState.set>[0]> = {}) {
     rows_total: 0,
     rows_revision: 0,
     located: null,
+    last_processed_seq: 0,
     current_path: "/repo",
     current_config_filename: null,
     status_message: "Status: Ready.",

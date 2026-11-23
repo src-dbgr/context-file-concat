@@ -1,33 +1,42 @@
 //! Cross-language contract test for the commands (UI → host).
 //!
 //! The counterpart of `view_model/contract_tests.rs`, which guards the other direction.
-//! For every command of the routing table ([`COMMANDS`]) this test serializes example
-//! payloads, wherever a command has a payload type from that very type, and compares
-//! the result with a JSON fixture that is committed inside the UI's test directory.
-//! The UI validates each example with its `CommandSchemas` and checks that it knows
-//! exactly the same command names (`src/ui/src/tests/contracts/rust-fixture.test.ts`).
+//! The commands of the host are one type, [`Command`]: reading a message into it is
+//! what validates and routes the message. This test writes examples of every command
+//! down, as values of that type, and serializes them into two JSON fixtures that are
+//! committed inside the UI's test directory:
 //!
-//! After an intentional change, regenerate the fixture with
+//! * `commands.json`: every command name with example payloads. The UI validates
+//!   each example with its `CommandSchemas` and checks that it knows exactly the
+//!   same command names (`src/ui/src/tests/contracts/rust-fixture.test.ts`).
+//! * `command_messages.json`: the same examples as complete messages, numbered, as
+//!   the host reads them. The UI checks that `post()` writes exactly these.
+//!
+//! The list of names is not kept by hand: it is the one serde states for the enum
+//! ([`Command::wire_names`]), and the examples have to cover it.
+//!
+//! After an intentional change, regenerate the fixtures with
 //! `UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture` and adapt the UI schema.
 
 use super::commands::{
     ConfigOption, IgnorePatternPayload, LocateRowPayload, RowTarget, SaveFilePayload,
     SetExpansionPayload, SetViewportPayload, UpdateFiltersPayload,
 };
-use super::{Command, DialogCommand, OrderedCommand, COMMANDS};
+use super::correlation::CommandSeq;
+use super::ipc::{Command, IpcMessage};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/ui/src/tests/contracts/fixtures/commands.json"
 );
+const MESSAGES_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/ui/src/tests/contracts/fixtures/command_messages.json"
+);
 const UPDATE_ENV: &str = "UPDATE_CONTRACT_FIXTURES";
-
-fn to_json<T: serde::Serialize>(payload: T) -> Value {
-    serde_json::to_value(payload).expect("payload is serializable")
-}
 
 /// One example per option. The `match` does not compile once an option is added
 /// without being listed here.
@@ -94,95 +103,152 @@ fn save_file_examples() -> Vec<SaveFilePayload> {
     examples
 }
 
-/// Example payloads of a command, as the UI has to send them.
-fn example_payloads(command: Command) -> Vec<Value> {
-    use OrderedCommand as C;
-    let path = || to_json(PathBuf::from("/project/src"));
-    let pattern = || {
-        to_json(IgnorePatternPayload {
-            pattern: "*.log".to_string(),
-        })
+/// Examples of every command, as the UI has to send them: at least one per command,
+/// and one per kind where a payload has kinds.
+///
+/// The `match` does not compile once a command is added without being listed here,
+/// and `the_examples_cover_every_command` fails until it has an example.
+pub(super) fn example_commands() -> Vec<Command> {
+    use Command as C;
+    let path = || PathBuf::from("/project/src");
+    let pattern = || IgnorePatternPayload {
+        pattern: "*.log".to_string(),
     };
 
-    match command {
-        Command::Dialog(command) => match command {
-            DialogCommand::SelectDirectory
-            | DialogCommand::PickOutputDirectory
-            | DialogCommand::ImportConfig
-            | DialogCommand::ExportConfig => vec![Value::Null],
-            DialogCommand::SaveFile => save_file_examples().into_iter().map(to_json).collect(),
-        },
-        Command::Ordered(command) => match command {
+    let mut examples = vec![
+        C::Initialize,
+        C::SelectDirectory,
+        C::RescanDirectory,
+        C::ClearDirectory,
+        C::CancelScan,
+        C::LoadDirectoryLevel(path()),
+        C::SetExpansion(SetExpansionPayload {
+            path: path(),
+            expanded: true,
+        }),
+        C::ExpandCollapseAll(true),
+        C::ExpandCollapseAll(false),
+        C::SetViewport(SetViewportPayload {
+            start: 120,
+            count: std::num::NonZeroUsize::new(90).expect("not zero"),
+        }),
+        C::ToggleSelection(path()),
+        C::ToggleDirectorySelection(path()),
+        C::SelectAll,
+        C::DeselectAll,
+        C::UpdateFilters(UpdateFiltersPayload {
+            search_query: "main".to_string(),
+            extension_filter: "rs".to_string(),
+            content_search_query: "needle".to_string(),
+        }),
+        C::UpdateFilters(UpdateFiltersPayload::default()),
+        C::LoadFilePreview(path()),
+        C::ClearPreviewState,
+        C::GeneratePreview,
+        C::CancelGeneration,
+        C::PickOutputDirectory,
+        C::AddIgnorePattern(pattern()),
+        C::RemoveIgnorePattern(pattern()),
+        C::ClearIgnorePatterns,
+        C::AddIgnorePath(path()),
+        C::ImportConfig,
+        C::ExportConfig,
+    ];
+    examples.extend(
+        row_target_examples()
+            .into_iter()
+            .enumerate()
+            .map(|(request, target)| {
+                C::LocateRow(LocateRowPayload {
+                    request: request as u32 + 1,
+                    target,
+                })
+            }),
+    );
+    examples.extend(save_file_examples().into_iter().map(C::SaveFile));
+    examples.extend(config_option_examples().into_iter().map(C::SetConfigOption));
+
+    for example in &examples {
+        match example {
             C::Initialize
+            | C::SelectDirectory
             | C::RescanDirectory
             | C::ClearDirectory
             | C::CancelScan
+            | C::LoadDirectoryLevel(_)
+            | C::SetExpansion(_)
+            | C::ExpandCollapseAll(_)
+            | C::SetViewport(_)
+            | C::LocateRow(_)
+            | C::ToggleSelection(_)
+            | C::ToggleDirectorySelection(_)
             | C::SelectAll
             | C::DeselectAll
+            | C::UpdateFilters(_)
+            | C::LoadFilePreview(_)
             | C::ClearPreviewState
             | C::GeneratePreview
             | C::CancelGeneration
-            | C::ClearIgnorePatterns => vec![Value::Null],
-            C::LoadDirectoryLevel
-            | C::ToggleSelection
-            | C::ToggleDirectorySelection
-            | C::LoadFilePreview
-            | C::AddIgnorePath => vec![path()],
-            C::SetExpansion => vec![to_json(SetExpansionPayload {
-                path: PathBuf::from("/project/src"),
-                expanded: true,
-            })],
-            C::ExpandCollapseAll => vec![json!(true), json!(false)],
-            C::SetViewport => vec![to_json(SetViewportPayload {
-                start: 120,
-                count: std::num::NonZeroUsize::new(90).expect("not zero"),
-            })],
-            C::LocateRow => row_target_examples()
-                .into_iter()
-                .enumerate()
-                .map(|(request, target)| {
-                    to_json(LocateRowPayload {
-                        request: request as u32 + 1,
-                        target,
-                    })
-                })
-                .collect(),
-            C::UpdateFilters => vec![
-                to_json(UpdateFiltersPayload {
-                    search_query: "main".to_string(),
-                    extension_filter: "rs".to_string(),
-                    content_search_query: "needle".to_string(),
-                }),
-                to_json(UpdateFiltersPayload::default()),
-            ],
-            C::AddIgnorePattern | C::RemoveIgnorePattern => vec![pattern()],
-            C::SetConfigOption => config_option_examples().into_iter().map(to_json).collect(),
-        },
+            | C::SaveFile(_)
+            | C::PickOutputDirectory
+            | C::AddIgnorePattern(_)
+            | C::RemoveIgnorePattern(_)
+            | C::ClearIgnorePatterns
+            | C::AddIgnorePath(_)
+            | C::SetConfigOption(_)
+            | C::ImportConfig
+            | C::ExportConfig => {}
+        }
     }
+    examples
 }
 
-fn fixture_json() -> String {
-    let commands: serde_json::Map<String, Value> = COMMANDS
+/// A command as the UI posts it: `{"seq", "command", "payload"}`. The UI always
+/// sends a payload, `null` for a command that has none.
+fn message(seq: CommandSeq, command: &Command) -> Value {
+    let mut message = serde_json::to_value(command).expect("a command is serializable");
+    let fields = message.as_object_mut().expect("a command is an object");
+    fields.entry("payload").or_insert(Value::Null);
+    fields.insert("seq".to_string(), json!(seq));
+    message
+}
+
+/// The examples as numbered messages, in the order they are posted.
+fn example_messages() -> Vec<Value> {
+    example_commands()
         .iter()
-        .map(|(name, command)| (name.to_string(), Value::Array(example_payloads(*command))))
-        .collect();
-    let mut json =
-        serde_json::to_string_pretty(&Value::Object(commands)).expect("fixture is serializable");
+        .zip(1..)
+        .map(|(command, seq)| message(seq, command))
+        .collect()
+}
+
+fn pretty(fixture: &impl serde::Serialize) -> String {
+    let mut json = serde_json::to_string_pretty(fixture).expect("fixture is serializable");
     json.push('\n');
     json
 }
 
-#[test]
-fn contract_fixture_matches_the_commands_of_the_routing_table() {
-    let actual = fixture_json();
+/// Every command name with its example payloads.
+fn fixture_json() -> String {
+    let mut commands: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for message in example_messages() {
+        let name = message["command"].as_str().expect("a name").to_string();
+        commands
+            .entry(name)
+            .or_default()
+            .push(message["payload"].clone());
+    }
+    pretty(&commands)
+}
 
+fn assert_fixture(path: &str, actual: &str) {
     if std::env::var_os(UPDATE_ENV).is_some() {
-        std::fs::write(FIXTURE_PATH, &actual).expect("fixture is writable");
+        std::fs::write(path, actual).expect("fixture is writable");
         return;
     }
 
-    let expected = std::fs::read_to_string(FIXTURE_PATH)
-        .unwrap_or_else(|e| panic!("cannot read {FIXTURE_PATH}: {e}"))
+    let expected = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
         .replace("\r\n", "\n");
     assert_eq!(
         actual, expected,
@@ -193,48 +259,52 @@ fn contract_fixture_matches_the_commands_of_the_routing_table() {
 }
 
 #[test]
-fn routing_table_lists_every_command_once() {
-    let names: BTreeSet<&str> = COMMANDS.iter().map(|(name, _)| *name).collect();
-    assert_eq!(names.len(), COMMANDS.len(), "duplicate command name");
-
-    let mut targets = Vec::new();
-    for (name, command) in COMMANDS {
-        assert!(!targets.contains(command), "{name} shares its target");
-        targets.push(*command);
-        assert_eq!(Command::from_name(name), Some(*command));
-        assert!(!example_payloads(*command).is_empty(), "{name}");
-    }
-    assert_eq!(Command::from_name("updateConfig"), None);
-    assert_eq!(Command::from_name("nope"), None);
+fn contract_fixture_matches_the_commands_of_the_host() {
+    assert_fixture(FIXTURE_PATH, &fixture_json());
 }
 
-/// The typed examples are what the handlers accept: they survive the way back.
 #[test]
-fn typed_example_payloads_are_accepted_by_the_host() {
-    for option in config_option_examples() {
-        let parsed: ConfigOption = serde_json::from_value(to_json(&option)).unwrap();
-        assert_eq!(parsed, option);
+fn contract_fixture_matches_the_messages_the_host_reads() {
+    assert_fixture(MESSAGES_FIXTURE_PATH, &pretty(&example_messages()));
+}
+
+/// The names are those of the enum, each command has an example, and no example
+/// names anything else.
+#[test]
+fn the_examples_cover_every_command() {
+    let names: BTreeSet<&str> = Command::wire_names().iter().copied().collect();
+    assert_eq!(names.len(), Command::wire_names().len(), "duplicate name");
+
+    let with_example: BTreeSet<String> =
+        example_commands().iter().map(Command::wire_name).collect();
+    assert_eq!(
+        with_example.iter().map(String::as_str).collect::<Vec<_>>(),
+        names.into_iter().collect::<Vec<_>>()
+    );
+}
+
+/// What is written into the fixtures is what the host accepts: every message is read
+/// back as the command it was made of, under its number.
+#[test]
+fn the_example_messages_are_read_as_the_commands_they_were_made_of() {
+    for (command, seq) in example_commands().into_iter().zip(1..) {
+        let message = message(seq, &command);
+        assert_eq!(
+            IpcMessage::parse(&message.to_string()),
+            IpcMessage::Command { seq, command },
+            "{message}"
+        );
     }
-    for example in save_file_examples() {
-        let parsed: SaveFilePayload = serde_json::from_value(to_json(&example)).unwrap();
-        assert_eq!(parsed, example);
-    }
-    for payload in example_payloads(Command::Ordered(OrderedCommand::AddIgnorePattern)) {
-        serde_json::from_value::<IgnorePatternPayload>(payload).unwrap();
-    }
-    for payload in example_payloads(Command::Ordered(OrderedCommand::SetExpansion)) {
-        serde_json::from_value::<SetExpansionPayload>(payload).unwrap();
-    }
-    for payload in example_payloads(Command::Ordered(OrderedCommand::SetViewport)) {
-        let parsed: SetViewportPayload = serde_json::from_value(payload.clone()).unwrap();
-        assert_eq!(to_json(parsed), payload);
-    }
-    for payload in example_payloads(Command::Ordered(OrderedCommand::LocateRow)) {
-        let parsed: LocateRowPayload = serde_json::from_value(payload.clone()).unwrap();
-        assert_eq!(to_json(parsed), payload);
-    }
-    for payload in example_payloads(Command::Ordered(OrderedCommand::UpdateFilters)) {
-        let parsed: UpdateFiltersPayload = serde_json::from_value(payload.clone()).unwrap();
-        assert_eq!(to_json(parsed), payload);
+}
+
+/// A payload has one way to be written: serializing what was read gives the message
+/// back. (The UI compares what it posts with these very messages.)
+#[test]
+fn the_example_messages_are_written_one_way() {
+    for example in example_messages() {
+        let IpcMessage::Command { seq, command } = IpcMessage::parse(&example.to_string()) else {
+            panic!("not a command: {example}");
+        };
+        assert_eq!(message(seq, &command), example);
     }
 }

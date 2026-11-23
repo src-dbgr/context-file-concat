@@ -4,6 +4,7 @@
 // module free of top-level side effects, so that it is tree-shaken otherwise.
 
 import { appState, getState } from "$lib/stores/app";
+import type { CommandSeq } from "$lib/ipc/schema";
 import type { AppState, TreeRow } from "$lib/types";
 import { TreeHostModel, type TreeLessState } from "./treeHostModel";
 
@@ -37,6 +38,14 @@ type E2EHostAPI = {
   hold: () => void;
   /** Deliver the answers kept back since `hold`, in order, and go on. */
   release: () => void;
+  /**
+   * The number of the last command the UI has posted, which the stand-in host
+   * has processed by receiving it. It is what `last_processed_seq` of a
+   * snapshot has to be for the UI to take it for one from after its commands;
+   * a spec that seeds a snapshot by hand states it (or a smaller number, to
+   * play a snapshot from before).
+   */
+  processedSeq: () => CommandSeq;
 };
 
 type E2EDebugAPI = {
@@ -80,6 +89,9 @@ function listVisibleFileNames(): string[] {
  * delivers its snapshots through `window.render`, so they pass the same
  * validation as the snapshots of the host. It answers asynchronously, as the
  * host does: a command never changes the state while it is being posted.
+ *
+ * It listens from the start where a spec has installed `window.ipc` before
+ * the app (to record what is posted), and from `setTree` on otherwise.
  */
 function createTreeHost(): E2EHostAPI {
   const model = new TreeHostModel();
@@ -94,14 +106,7 @@ function createTreeHost(): E2EHostAPI {
   }
 
   function handle(message: string) {
-    let posted: { command?: unknown; payload?: unknown };
-    try {
-      posted = JSON.parse(message) as typeof posted;
-    } catch {
-      return;
-    }
-    if (typeof posted.command !== "string") return;
-    if (model.receive(posted.command, posted.payload ?? null)) {
+    if (model.receive(message)) {
       if (held !== null) held += 1;
       else setTimeout(deliver, latencyMs);
     }
@@ -120,7 +125,11 @@ function createTreeHost(): E2EHostAPI {
     };
   }
 
+  // Without `window.ipc` nothing can be posted, so there is nothing to miss.
+  if ((window.ipc as Window["ipc"] | undefined) !== undefined) intercept();
+
   return {
+    processedSeq: () => model.lastProcessedSeq,
     setTree(state: TreeLessState, rows: TreeRow[]) {
       intercept();
       model.show(state, rows);

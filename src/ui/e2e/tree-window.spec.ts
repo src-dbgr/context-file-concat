@@ -84,7 +84,11 @@ async function posted(page: Page, command: string): Promise<Posted[]> {
   return page.evaluate(
     (name) =>
       (window as unknown as { __posted: string[] }).__posted
-        .map((message) => JSON.parse(message) as Posted)
+        // The command, without the number of its envelope.
+        .map((message) => {
+          const { command, payload } = JSON.parse(message) as Posted;
+          return { command, payload };
+        })
         .filter((message) => message.command === name),
     command,
   );

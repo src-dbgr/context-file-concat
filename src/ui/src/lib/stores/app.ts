@@ -17,6 +17,7 @@ export const appState = writable<AppState>({
   rows_total: 0,
   rows_revision: 0,
   located: null,
+  last_processed_seq: 0,
   current_path: "",
   current_config_filename: null,
   status_message: "Ready.",

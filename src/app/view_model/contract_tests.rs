@@ -110,6 +110,14 @@ fn representative_state() -> AppState {
     state
 }
 
+/// The snapshot of the representative state as it leaves the host: the transport
+/// has written the number of the last command into it (see `app::correlation`).
+fn representative_snapshot() -> UiState {
+    let mut ui_state = generate_ui_state(&representative_state());
+    ui_state.last_processed_seq = 41;
+    ui_state
+}
+
 fn to_fixture_json(ui_state: &UiState) -> String {
     let mut json = serde_json::to_string_pretty(ui_state).expect("UiState is serializable");
     json.push('\n');
@@ -118,7 +126,7 @@ fn to_fixture_json(ui_state: &UiState) -> String {
 
 #[test]
 fn contract_fixture_matches_the_serialized_ui_state() {
-    let actual = to_fixture_json(&generate_ui_state(&representative_state()));
+    let actual = to_fixture_json(&representative_snapshot());
 
     if std::env::var_os(UPDATE_ENV).is_some() {
         std::fs::write(FIXTURE_PATH, &actual).expect("fixture is writable");
