@@ -125,7 +125,6 @@ async fn run_command<P: EventProxy>(msg: IpcMessage, proxy: P, state: Arc<Mutex<
         "toggleDirectorySelection" => {
             commands::toggle_directory_selection(msg.payload, proxy, state)
         }
-        "toggleExpansion" => commands::toggle_expansion(msg.payload, proxy, state),
         "setExpansion" => commands::set_expansion(msg.payload, proxy, state),
         "expandCollapseAll" => commands::expand_collapse_all(msg.payload, proxy, state),
         "selectAll" => commands::select_all(proxy, state),
@@ -352,16 +351,21 @@ mod tests {
         }
     }
 
+    /// A command that flips a state shows whether every command is executed exactly
+    /// once: a lost or repeated one would leave the file deselected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn an_odd_number_of_toggles_toggles_once() {
         let mut harness = Harness::new();
 
         for _ in 0..101 {
-            harness.send("toggleExpansion", serde_json::json!("/repo/src"));
+            harness.send("toggleSelection", serde_json::json!("/repo/src/main.rs"));
         }
         harness.events(101).await;
 
-        assert!(harness.is_expanded("/repo/src"));
+        let state = harness.state.lock().unwrap();
+        assert!(state
+            .selected_files
+            .contains(&PathBuf::from("/repo/src/main.rs")));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

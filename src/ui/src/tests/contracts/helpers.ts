@@ -61,7 +61,6 @@ export function makeWireConfig(
     window_position: [100, 100],
     auto_load_last_directory: false,
     max_file_size_mb: 20,
-    scan_chunk_size: 100,
     ...overrides,
   };
 }

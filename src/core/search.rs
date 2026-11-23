@@ -1,7 +1,7 @@
 //! Provides logic for filtering and searching lists of `FileItem`s.
 
 use super::file_handler::decode_text;
-use super::{FileItem, SearchFilter, MAX_FILE_SIZE};
+use super::{FileItem, MAX_FILE_SIZE};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ const NO_EXTENSION: &str = "no extension";
 ///
 /// **Filename query**
 /// - An empty query is *inactive*. It is not trimmed: a query of blanks is active and
-///   looks for blanks.
+///   looks for blanks (file names may contain them).
 /// - The query must be contained in the *file name* (the last path component), never in
 ///   the directories leading to it.
 /// - File names that are not valid Unicode are compared in their lossy form (invalid
@@ -31,7 +31,8 @@ const NO_EXTENSION: &str = "no extension";
 /// - Case-insensitive matching compares the Unicode lowercase forms of both sides.
 ///
 /// **Extension filter**
-/// - An empty filter is *inactive*.
+/// - An empty filter is *inactive*. It is not trimmed either: a filter of blanks is
+///   active and names an extension no path has.
 /// - One leading dot of the filter is ignored (`.rs` equals `rs`).
 /// - A path *with* an extension (as defined by [`Path::extension`]) matches if the
 ///   extension equals the filter, ignoring ASCII case. Only the last extension counts
@@ -140,26 +141,12 @@ impl FileNameMatcher {
     }
 }
 
-impl From<&SearchFilter> for FileNameMatcher {
-    fn from(filter: &SearchFilter) -> Self {
-        Self::new(&filter.query, &filter.extension, filter.case_sensitive)
-    }
-}
-
 /// A utility struct for searching and filtering file lists.
 ///
 /// This struct is stateless and provides methods as associated functions.
 pub struct SearchEngine;
 
 impl SearchEngine {
-    /// Checks if a single `FileItem` matches the given filter criteria.
-    ///
-    /// Shorthand for [`FileNameMatcher::matches_all`]. To test many items against the
-    /// same filter, build the [`FileNameMatcher`] once instead.
-    pub fn matches_filter(file: &FileItem, filter: &SearchFilter) -> bool {
-        FileNameMatcher::from(filter).matches_all(&file.path)
-    }
-
     /// Recursively removes directories from a list that do not contain any files.
     ///
     /// This implementation is optimized to run in near-linear time O(N).
@@ -222,6 +209,34 @@ impl SearchEngine {
     }
 }
 
+/// Describes one content search: what to look for and under which conditions.
+///
+/// This is the complete input of a search besides the files themselves, so it can be
+/// handed through layers as one value.
+#[derive(Debug, Clone)]
+pub struct ContentSearchRequest {
+    /// The text to look for. Used as it is, i.e. not trimmed.
+    pub query: String,
+    /// `true` if the case of the query has to match.
+    pub case_sensitive: bool,
+    /// Files larger than this many bytes are not searched.
+    pub max_file_size: u64,
+    /// Raised by whoever started the search once nobody waits for its result any more.
+    pub cancel_flag: Arc<AtomicBool>,
+}
+
+impl ContentSearchRequest {
+    /// A request with the size limit of the core that is never cancelled.
+    pub fn new(query: impl Into<String>, case_sensitive: bool) -> Self {
+        Self {
+            query: query.into(),
+            case_sensitive,
+            max_file_size: MAX_FILE_SIZE,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
 /// Searches the *contents* of files for a query string.
 ///
 /// The query is normalised once on construction, so the same instance can be applied
@@ -236,6 +251,14 @@ pub struct ContentSearch {
     max_file_size: u64,
     /// Raised by whoever started the search once nobody waits for its result any more.
     cancel_flag: Arc<AtomicBool>,
+}
+
+impl From<ContentSearchRequest> for ContentSearch {
+    fn from(request: ContentSearchRequest) -> Self {
+        Self::new(&request.query, request.case_sensitive)
+            .with_max_file_size(request.max_file_size)
+            .with_cancel_flag(request.cancel_flag)
+    }
 }
 
 impl ContentSearch {
@@ -263,9 +286,9 @@ impl ContentSearch {
         self
     }
 
-    /// Overrides the size limit, so tests do not need to create huge files.
-    #[cfg(test)]
-    fn with_max_file_size(mut self, max_file_size: u64) -> Self {
+    /// Replaces the size limit: files larger than `max_file_size` bytes are not
+    /// searched. The limit may be stricter or more generous than the default.
+    pub fn with_max_file_size(mut self, max_file_size: u64) -> Self {
         self.max_file_size = max_file_size;
         self
     }
@@ -398,6 +421,60 @@ mod tests {
         let result = ContentSearch::new("needle", true).matching_paths(&[large]);
 
         assert!(result.is_empty());
+    }
+
+    /// The default is not a ceiling: a more generous limit is honoured.
+    #[test]
+    fn test_content_search_honours_a_limit_above_the_default() {
+        let dir = tempdir().unwrap();
+        let size = MAX_FILE_SIZE + 1;
+        let mut content = "needle".to_string();
+        content.push_str(&" ".repeat(size as usize - content.len()));
+        let large = write_text_file(dir.path(), "large.txt", &content);
+
+        let with_default_limit =
+            ContentSearch::new("needle", true).matching_paths(std::slice::from_ref(&large));
+        let with_raised_limit = ContentSearch::new("needle", true)
+            .with_max_file_size(size)
+            .matching_paths(std::slice::from_ref(&large));
+
+        assert!(with_default_limit.is_empty());
+        assert_eq!(with_raised_limit, HashSet::from([large.path]));
+    }
+
+    #[test]
+    fn test_content_search_request_defaults_to_the_limit_of_the_core() {
+        let request = ContentSearchRequest::new("needle", true);
+
+        assert_eq!(request.max_file_size, MAX_FILE_SIZE);
+        assert!(!request.cancel_flag.load(Ordering::SeqCst));
+    }
+
+    /// A search built from a request takes over every part of it.
+    #[test]
+    fn test_content_search_from_request_applies_query_case_limit_and_flag() {
+        let dir = tempdir().unwrap();
+        let at_limit = write_text_file(dir.path(), "at_limit.txt", "NEEDLE 890");
+        let too_large = write_text_file(dir.path(), "too_large.txt", "NEEDLE 8901");
+        let other_case = write_text_file(dir.path(), "other_case.txt", "needle");
+        let files = vec![at_limit.clone(), too_large, other_case.clone()];
+        let request = |case_sensitive| ContentSearchRequest {
+            max_file_size: 10,
+            ..ContentSearchRequest::new("NEEDLE", case_sensitive)
+        };
+
+        let case_sensitive = ContentSearch::from(request(true)).matching_paths(&files);
+        let case_insensitive = ContentSearch::from(request(false)).matching_paths(&files);
+        let cancelled = request(false);
+        cancelled.cancel_flag.store(true, Ordering::SeqCst);
+        let cancelled = ContentSearch::from(cancelled).matching_paths(&files);
+
+        assert_eq!(case_sensitive, HashSet::from([at_limit.path.clone()]));
+        assert_eq!(
+            case_insensitive,
+            HashSet::from([at_limit.path, other_case.path])
+        );
+        assert!(cancelled.is_empty());
     }
 
     #[test]
@@ -665,31 +742,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_matches_filter_applies_the_same_rules_as_the_matcher() {
-        for case in CASES {
-            let filter = SearchFilter {
-                query: case.query.to_string(),
-                extension: case.extension.to_string(),
-                case_sensitive: case.case_sensitive,
-            };
-            let item = FileItem {
-                path: PathBuf::from(case.path),
-                ..Default::default()
-            };
-
-            assert_eq!(
-                SearchEngine::matches_filter(&item, &filter),
-                case.all,
-                "query {:?}, extension {:?}, path {:?}",
-                case.query,
-                case.extension,
-                case.path
-            );
-        }
-    }
-
-    #[cfg(unix)]
     #[test]
     fn test_file_name_matcher_compares_non_unicode_names_in_their_lossy_form() {
         use std::ffi::OsStr;

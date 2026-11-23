@@ -187,7 +187,9 @@ describe("treeExpansion – expansion intents go to the backend", () => {
       }
     }
     const sent = vi.mocked(post).mock.calls.map(([command]) => command);
-    expect(sent).not.toContain("toggleExpansion");
+    expect(new Set(sent)).toEqual(
+      new Set(["setExpansion", "loadDirectoryLevel"]),
+    );
   });
 
   it("setAllExpanded sends one bulk command", () => {

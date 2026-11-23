@@ -86,12 +86,9 @@ function expansionCommands(): unknown[][] {
   return vi
     .mocked(post)
     .mock.calls.filter(([command]) =>
-      [
-        "toggleExpansion",
-        "setExpansion",
-        "loadDirectoryLevel",
-        "expandCollapseAll",
-      ].includes(command),
+      ["setExpansion", "loadDirectoryLevel", "expandCollapseAll"].includes(
+        command,
+      ),
     );
 }
 
@@ -206,7 +203,6 @@ describe("FileTree", () => {
 
     // No per-directory toggles: each one would trigger a full tree render.
     const commands = vi.mocked(post).mock.calls.map(([command]) => command);
-    expect(commands).not.toContain("toggleExpansion");
     expect(commands).not.toContain("setExpansion");
   });
 

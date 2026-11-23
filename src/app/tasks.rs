@@ -27,8 +27,8 @@ use crate::config::AppConfig;
 use crate::core::file_handler::GenerationRequest;
 use crate::core::scanner::ScanRequest;
 use crate::core::{
-    ContentSearch, CoreError, DirectoryScanner, FileHandler, FileItem, ScanProgress, SearchEngine,
-    MAX_FILE_SIZE,
+    ContentSearch, ContentSearchRequest, CoreError, DirectoryScanner, FileHandler, FileItem,
+    ScanProgress, SearchEngine,
 };
 use tiktoken_rs::cl100k_base;
 
@@ -68,14 +68,14 @@ pub trait Tokenizer: Send + Sync {
 
 /// A trait abstracting the file content search functionality.
 pub trait FileSearcher: Send + Sync {
-    /// Returns the paths of the files whose content contains `query`. Files larger
-    /// than `max_file_size` bytes are not searched.
+    /// Returns the paths of the files whose content matches `request`.
+    ///
+    /// Once the cancellation flag of the request is raised the result is no longer
+    /// needed; an implementation should then stop and may return anything.
     fn search(
         &self,
         files_to_search: Vec<FileItem>,
-        query: &str,
-        case_sensitive: bool,
-        max_file_size: u64,
+        request: ContentSearchRequest,
     ) -> impl Future<Output = HashSet<PathBuf>> + Send;
 }
 
@@ -155,36 +155,13 @@ impl FileSearcher for RealFileSearcher {
     async fn search(
         &self,
         files_to_search: Vec<FileItem>,
-        query: &str,
-        case_sensitive: bool,
-        max_file_size: u64,
+        request: ContentSearchRequest,
     ) -> HashSet<PathBuf> {
-        let search = ContentSearch::new(query, case_sensitive);
-        tokio::task::spawn_blocking(move || {
-            let files = files_within_size_limit(files_to_search, max_file_size);
-            search.matching_paths(&files)
-        })
-        .await
-        .unwrap_or_default()
+        let search = ContentSearch::from(request);
+        tokio::task::spawn_blocking(move || search.matching_paths(&files_to_search))
+            .await
+            .unwrap_or_default()
     }
-}
-
-/// Drops the files that are larger than `max_file_size` bytes on disk (blocking IO).
-///
-/// `ContentSearch` enforces the default limit of the core ([`MAX_FILE_SIZE`]) by
-/// itself, so only a stricter limit needs to be applied here. A more generous one
-/// stays capped at the default for the content search.
-fn files_within_size_limit(files: Vec<FileItem>, max_file_size: u64) -> Vec<FileItem> {
-    if max_file_size >= MAX_FILE_SIZE {
-        return files;
-    }
-    files
-        .into_iter()
-        .filter(|item| {
-            item.is_directory
-                || std::fs::metadata(&item.path).is_ok_and(|m| m.len() <= max_file_size)
-        })
-        .collect()
 }
 
 //================================================================================================//
@@ -748,7 +725,7 @@ pub async fn search_in_files<P: EventProxy, S: FileSearcher>(
     state: Arc<Mutex<AppState>>,
     searcher: S,
 ) {
-    let (token, files_to_search, query, case_sensitive, max_file_size) = {
+    let (token, files_to_search, request) = {
         let mut state_guard = state
             .lock()
             .expect("Mutex was poisoned. This should not happen.");
@@ -759,17 +736,19 @@ pub async fn search_in_files<P: EventProxy, S: FileSearcher>(
             proxy.send_event(event);
             return;
         }
-        (
-            state_guard.begin_content_search(),
-            state_guard.full_file_list.clone(),
-            state_guard.content_search_query.clone(),
-            state_guard.config.case_sensitive_search,
-            state_guard.config.max_file_size_bytes(),
-        )
+        let token = state_guard.begin_content_search();
+        let request = ContentSearchRequest {
+            query: state_guard.content_search_query.clone(),
+            case_sensitive: state_guard.config.case_sensitive_search,
+            max_file_size: state_guard.config.max_file_size_bytes(),
+            // Superseding or clearing the search raises the flag, so the searcher
+            // stops reading files nobody is waiting for.
+            cancel_flag: token.cancel_flag(),
+        };
+        (token, state_guard.full_file_list.clone(), request)
     };
-    let matching_paths = searcher
-        .search(files_to_search, &query, case_sensitive, max_file_size)
-        .await;
+    let query = request.query.clone();
+    let matching_paths = searcher.search(files_to_search, request).await;
     let mut state_guard = state
         .lock()
         .expect("Mutex was poisoned. This should not happen.");
@@ -788,6 +767,7 @@ mod tests {
     use super::*;
     use crate::app::view_model::UiState;
     use crate::config::AppConfig;
+    use crate::core::MAX_FILE_SIZE;
     use crate::utils::test_helpers::running_as_root;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
@@ -1029,7 +1009,7 @@ mod tests {
         }
     }
     impl FileSearcher for MockFileSearcher {
-        async fn search(&self, _: Vec<FileItem>, _: &str, _: bool, _: u64) -> HashSet<PathBuf> {
+        async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> HashSet<PathBuf> {
             self.results.lock().unwrap().clone()
         }
     }
@@ -1042,7 +1022,7 @@ mod tests {
         matching: HashSet<PathBuf>,
     }
     impl FileSearcher for ListBoundFileSearcher {
-        async fn search(&self, files: Vec<FileItem>, _: &str, _: bool, _: u64) -> HashSet<PathBuf> {
+        async fn search(&self, files: Vec<FileItem>, _: ContentSearchRequest) -> HashSet<PathBuf> {
             files
                 .into_iter()
                 .map(|item| item.path)
@@ -1071,7 +1051,7 @@ mod tests {
         }
     }
     impl FileSearcher for GatedFileSearcher {
-        async fn search(&self, _: Vec<FileItem>, _: &str, _: bool, _: u64) -> HashSet<PathBuf> {
+        async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> HashSet<PathBuf> {
             if let Some(started) = self.started.lock().unwrap().take() {
                 let _ = started.send(());
             }
@@ -2238,59 +2218,177 @@ mod tests {
         assert!(content.contains("[FILE TOO LARGE: 6 bytes - CONTENT SKIPPED]"));
     }
 
-    /// A limit stricter than the default of the core reaches the content search.
+    /// The real searcher takes the size limit from the request, whether it is stricter
+    /// or more generous than another one.
     #[tokio::test]
-    async fn real_searcher_applies_a_stricter_file_size_limit() {
+    async fn real_searcher_applies_the_file_size_limit_of_the_request() {
         let harness = TestHarness::new();
         let small = harness.root_path.join("small.txt");
         let large = harness.root_path.join("large.txt");
         std::fs::write(&small, "needle").unwrap();
         std::fs::write(&large, "needle and hay").unwrap();
         let files = vec![file_item(&small, 1), file_item(&large, 1)];
+        let request = |max_file_size| ContentSearchRequest {
+            max_file_size,
+            ..ContentSearchRequest::new("needle", true)
+        };
 
-        let limited = RealFileSearcher
-            .search(files.clone(), "needle", true, 6)
-            .await;
-        let unlimited = RealFileSearcher
-            .search(files, "needle", true, MAX_FILE_SIZE)
-            .await;
+        let limited = RealFileSearcher.search(files.clone(), request(6)).await;
+        let generous = RealFileSearcher.search(files, request(u64::MAX)).await;
 
         assert_eq!(limited, HashSet::from([small.clone()]));
-        assert_eq!(unlimited, HashSet::from([small, large]));
+        assert_eq!(generous, HashSet::from([small, large]));
     }
 
-    /// `search_in_files` hands the limit of the configuration to the searcher.
+    /// The real searcher does not read anything for a request that is already cancelled.
     #[tokio::test]
-    async fn search_in_files_passes_the_configured_size_limit() {
-        struct LimitRecorder(Arc<Mutex<Option<u64>>>);
-        impl FileSearcher for LimitRecorder {
-            async fn search(
-                &self,
-                _: Vec<FileItem>,
-                _: &str,
-                _: bool,
-                max_file_size: u64,
-            ) -> HashSet<PathBuf> {
-                *self.0.lock().unwrap() = Some(max_file_size);
-                HashSet::new()
-            }
+    async fn real_searcher_stops_for_a_cancelled_request() {
+        let harness = TestHarness::new();
+        let file = harness.root_path.join("a.txt");
+        std::fs::write(&file, "needle").unwrap();
+        let request = ContentSearchRequest::new("needle", true);
+        request.cancel_flag.store(true, Ordering::SeqCst);
+
+        let result = RealFileSearcher
+            .search(vec![file_item(&file, 1)], request)
+            .await;
+
+        assert!(result.is_empty());
+    }
+
+    /// A searcher that keeps the request it was given and finds nothing.
+    #[derive(Clone, Default)]
+    struct RequestRecorder(Arc<Mutex<Option<ContentSearchRequest>>>);
+    impl RequestRecorder {
+        fn recorded(&self) -> ContentSearchRequest {
+            self.0.lock().unwrap().clone().expect("A search must run")
         }
+    }
+    impl FileSearcher for RequestRecorder {
+        async fn search(
+            &self,
+            _: Vec<FileItem>,
+            request: ContentSearchRequest,
+        ) -> HashSet<PathBuf> {
+            *self.0.lock().unwrap() = Some(request);
+            HashSet::new()
+        }
+    }
+
+    /// `search_in_files` describes the search completely: query, case sensitivity and
+    /// size limit come from the state, the flag belongs to this search run.
+    #[tokio::test]
+    async fn search_in_files_passes_the_request_to_the_searcher() {
+        let harness = TestHarness::new();
+        {
+            let mut state = harness.state.lock().unwrap();
+            // More generous than the default of the core: must arrive uncapped.
+            state.config.max_file_size_mb = 64;
+            state.config.case_sensitive_search = true;
+            state.content_search_query = " Needle ".to_string();
+        }
+        let recorder = RequestRecorder::default();
+
+        search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            recorder.clone(),
+        )
+        .await;
+
+        let request = recorder.recorded();
+        assert_eq!(request.query, " Needle ");
+        assert!(request.case_sensitive);
+        assert_eq!(request.max_file_size, 64 * 1024 * 1024);
+        assert!(!request.cancel_flag.load(Ordering::SeqCst));
+    }
+
+    /// `refresh_content_search` runs the same search, so it hands over the same request.
+    #[tokio::test]
+    async fn refresh_content_search_passes_the_request_to_the_searcher() {
         let harness = TestHarness::new();
         {
             let mut state = harness.state.lock().unwrap();
             state.config.max_file_size_mb = 3;
             state.content_search_query = "needle".to_string();
         }
-        let recorded = Arc::new(Mutex::new(None));
+        let recorder = RequestRecorder::default();
 
+        refresh_content_search(&harness.proxy, &harness.state, recorder.clone()).await;
+
+        let request = recorder.recorded();
+        assert_eq!(request.query, "needle");
+        assert!(!request.case_sensitive);
+        assert_eq!(request.max_file_size, 3 * 1024 * 1024);
+    }
+
+    /// A searcher that signals when it has been asked, then waits until the test has
+    /// superseded the search and only then lets the real search run.
+    struct SupersededSearcher {
+        asked: Mutex<Option<oneshot::Sender<()>>>,
+        superseded: Mutex<Option<oneshot::Receiver<()>>>,
+        found_after_supersession: Arc<Mutex<Option<HashSet<PathBuf>>>>,
+    }
+    impl FileSearcher for SupersededSearcher {
+        async fn search(
+            &self,
+            files: Vec<FileItem>,
+            request: ContentSearchRequest,
+        ) -> HashSet<PathBuf> {
+            let asked = self.asked.lock().unwrap().take().unwrap();
+            let superseded = self.superseded.lock().unwrap().take().unwrap();
+            asked.send(()).unwrap();
+            superseded.await.unwrap();
+            let found = RealFileSearcher.search(files, request).await;
+            *self.found_after_supersession.lock().unwrap() = Some(found.clone());
+            found
+        }
+    }
+
+    /// A search that has been superseded stops: the flag of its request is raised, so
+    /// the real search does not read the files that are still ahead of it.
+    #[tokio::test]
+    async fn superseded_content_search_stops_reading_files() {
+        let harness = TestHarness::new();
+        let file = harness.root_path.join("a.txt");
+        std::fs::write(&file, "needle").unwrap();
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.full_file_list = vec![file_item(&file, 1)];
+            state.content_search_query = "needle".to_string();
+        }
+        let (asked_tx, asked) = oneshot::channel();
+        let (superseded_tx, superseded) = oneshot::channel();
+        let found_after_supersession = Arc::new(Mutex::new(None));
+        let outdated_search = tokio::spawn(search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            SupersededSearcher {
+                asked: Mutex::new(Some(asked_tx)),
+                superseded: Mutex::new(Some(superseded)),
+                found_after_supersession: found_after_supersession.clone(),
+            },
+        ));
+        asked.await.expect("The outdated search must start");
+
+        // Act: a newer search supersedes the one that is still running.
+        let recorder = RequestRecorder::default();
         search_in_files(
             harness.proxy.clone(),
             harness.state.clone(),
-            LimitRecorder(recorded.clone()),
+            recorder.clone(),
         )
         .await;
+        superseded_tx.send(()).unwrap();
+        outdated_search.await.unwrap();
 
-        assert_eq!(*recorded.lock().unwrap(), Some(3 * 1024 * 1024));
+        // Assert: the outdated search no longer read the file that matches ...
+        assert_eq!(
+            *found_after_supersession.lock().unwrap(),
+            Some(HashSet::new())
+        );
+        // ... while the flag of the current search stays down.
+        assert!(!recorder.recorded().cancel_flag.load(Ordering::SeqCst));
     }
 
     /// Tests the edge case where handle_scan_error is called when no scan is active.
@@ -2936,7 +3034,7 @@ mod tests {
     async fn deep_scan_without_content_query_does_not_search() {
         struct UnexpectedSearch;
         impl FileSearcher for UnexpectedSearch {
-            async fn search(&self, _: Vec<FileItem>, _: &str, _: bool, _: u64) -> HashSet<PathBuf> {
+            async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> HashSet<PathBuf> {
                 panic!("No search expected without a content query");
             }
         }

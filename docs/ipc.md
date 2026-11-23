@@ -9,17 +9,17 @@ UI  ──  window.ipc.postMessage('{"command": "...", "payload": ...}')  ──
 UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  ──  Host
 ```
 
-| Concern                         | Where                                                             |
-| ------------------------------- | ----------------------------------------------------------------- |
-| Sending commands                | `src/ui/src/lib/services/backend.ts` (`post`)                     |
-| Command and state schemas (Zod) | `src/ui/src/lib/ipc/schema.ts`                                    |
-| Receiving host calls            | `src/ui/src/lib/ipc/handlers.ts` (`installWindowIPCHandlers`)     |
-| Frontend types                  | `src/ui/src/lib/types.ts`                                         |
-| Command dispatch (host)         | `src/app/mod.rs` (`dispatch_ipc_message`) → `src/app/commands.rs`   |
-| Command ordering (host)         | `src/app/dispatch.rs` (`CommandDispatcher`)                       |
+| Concern                         | Where                                                                     |
+| ------------------------------- | ------------------------------------------------------------------------- |
+| Sending commands                | `src/ui/src/lib/services/backend.ts` (`post`)                             |
+| Command and state schemas (Zod) | `src/ui/src/lib/ipc/schema.ts`                                            |
+| Receiving host calls            | `src/ui/src/lib/ipc/handlers.ts` (`installWindowIPCHandlers`)             |
+| Frontend types                  | `src/ui/src/lib/types.ts`                                                 |
+| Command dispatch (host)         | `src/app/mod.rs` (`dispatch_ipc_message`) → `src/app/commands.rs`         |
+| Command ordering (host)         | `src/app/dispatch.rs` (`CommandDispatcher`)                               |
 | Host → UI events                | `src/app/events.rs` (`UserEvent`), `src/app/mod.rs` (`handle_user_event`) |
-| State snapshot (host)           | `src/app/view_model/` (`generate_ui_state`, `UiState`, `TreeNode`) |
-| Delivery / coalescing           | `src/app/transport.rs`                                            |
+| State snapshot (host)           | `src/app/view_model/` (`generate_ui_state`, `UiState`, `TreeNode`)        |
+| Delivery / coalescing           | `src/app/transport.rs`                                                    |
 
 ## Principles
 
@@ -35,45 +35,44 @@ UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  �
 
 The single source of truth is `CommandSchemas` in `schema.ts`; names and payloads must match `run_command` / `DialogCommand` in `src/app/mod.rs`. The wire format is `{"command": <name>, "payload": <payload | null>}`.
 
-| Command                    | Payload                                                    | Effect                                                                 |
-| -------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `initialize`               | `null`                                                     | Sends the current snapshot                                              |
-| `selectDirectory`          | `null`                                                     | Opens the directory dialog and scans the choice                        |
-| `rescanDirectory`          | `null`                                                     | Rescans the current directory, keeping selection and expansion         |
-| `clearDirectory`           | `null`                                                     | Resets all directory-related state                                     |
-| `cancelScan`               | `null`                                                     | Cancels the running scan                                               |
-| `loadDirectoryLevel`       | `string` (path)                                            | Scans one directory level, marks it loaded **and expands it**          |
-| `setExpansion`             | `{ path: string, expanded: boolean }` (no other fields)    | Expands or collapses one directory. Idempotent; always answered with a snapshot |
-| `toggleExpansion`          | `string` (path)                                            | Flips one directory. Not idempotent and not used by the UI, see [Expansion](#expansion-one-source-of-truth) |
-| `expandCollapseAll`        | `boolean`                                                  | Expands (`true`) or collapses (`false`) every listed directory         |
-| `toggleSelection`          | `string` (path)                                            | Selects/deselects one file                                             |
-| `toggleDirectorySelection` | `string` (path)                                            | Selects/deselects all files below a directory                          |
-| `selectAll` / `deselectAll`| `null`                                                     | Selects all listed files / clears the selection                        |
-| `updateFilters`            | `{ searchQuery, extensionFilter, contentSearchQuery }`     | Applies the filters; expands the ancestors of matches                  |
-| `loadFilePreview`          | `string` (path)                                            | Answers with `showPreviewContent`                                      |
-| `clearPreviewState`        | `null`                                                     | Clears the previewed file                                              |
-| `generatePreview`          | `null`                                                     | Concatenates the selection; answers with `showGeneratedContent`        |
-| `cancelGeneration`         | `null`                                                     | Cancels the running generation                                         |
-| `saveFile`                 | `string` (content)                                         | Opens the save dialog; answers with `fileSaveStatus`                   |
-| `pickOutputDirectory`      | `null`                                                     | Opens the dialog and stores the choice in the config                   |
-| `updateConfig`             | full config (`ConfigSchema`)                               | Stores the config and applies it, see [Config changes](#config-changes) |
-| `importConfig` / `exportConfig` | `null`                                                | Config import/export via dialog                                        |
-| `addIgnorePath`            | `string` (path)                                            | Adds an ignore pattern for the path and rescans                        |
+| Command                         | Payload                                                 | Effect                                                                          |
+| ------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `initialize`                    | `null`                                                  | Sends the current snapshot                                                      |
+| `selectDirectory`               | `null`                                                  | Opens the directory dialog and scans the choice                                 |
+| `rescanDirectory`               | `null`                                                  | Rescans the current directory, keeping selection and expansion                  |
+| `clearDirectory`                | `null`                                                  | Resets all directory-related state                                              |
+| `cancelScan`                    | `null`                                                  | Cancels the running scan                                                        |
+| `loadDirectoryLevel`            | `string` (path)                                         | Scans one directory level, marks it loaded **and expands it**                   |
+| `setExpansion`                  | `{ path: string, expanded: boolean }` (no other fields) | Expands or collapses one directory. Idempotent; always answered with a snapshot |
+| `expandCollapseAll`             | `boolean`                                               | Expands (`true`) or collapses (`false`) every listed directory                  |
+| `toggleSelection`               | `string` (path)                                         | Selects/deselects one file                                                      |
+| `toggleDirectorySelection`      | `string` (path)                                         | Selects/deselects all files below a directory                                   |
+| `selectAll` / `deselectAll`     | `null`                                                  | Selects all listed files / clears the selection                                 |
+| `updateFilters`                 | `{ searchQuery, extensionFilter, contentSearchQuery }`  | Applies the filters; expands the ancestors of matches                           |
+| `loadFilePreview`               | `string` (path)                                         | Answers with `showPreviewContent`                                               |
+| `clearPreviewState`             | `null`                                                  | Clears the previewed file                                                       |
+| `generatePreview`               | `null`                                                  | Concatenates the selection; answers with `showGeneratedContent`                 |
+| `cancelGeneration`              | `null`                                                  | Cancels the running generation                                                  |
+| `saveFile`                      | `string` (content)                                      | Opens the save dialog; answers with `fileSaveStatus`                            |
+| `pickOutputDirectory`           | `null`                                                  | Opens the dialog and stores the choice in the config                            |
+| `updateConfig`                  | full config (`ConfigSchema`)                            | Stores the config and applies it, see [Config changes](#config-changes)         |
+| `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog                                                 |
+| `addIgnorePath`                 | `string` (path)                                         | Adds an ignore pattern for the path and rescans                                 |
 
 ### Config changes
 
 `updateConfig` always stores and persists the config. What else it does depends on what changed:
 
-| Change                                             | Effect                                                                                                                                                                                         |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Ignore pattern added or removed **during a scan**  | The scan is restarted with the new patterns (selection and expansion are kept). A scan works with the patterns it was started with, so its result would otherwise bring ignored entries back.   |
-| Ignore pattern added, no scan running              | Applied to the loaded file list right away; no rescan.                                                                                                                                         |
-| Ignore pattern removed, no scan running            | Sets `patterns_need_rescan`; the UI offers `rescanDirectory`.                                                                                                                                   |
-| `case_sensitive_search`                            | Filters are re-applied; an active content search is repeated, because its matches depend on the setting.                                                                                       |
-| `remove_empty_directories`                         | Filters are re-applied.                                                                                                                                                                        |
-| `max_file_size_mb`                                 | Used by the next scan, lazy load, content search and generation. Not exposed in the UI (it round-trips the value); set it in the config file. See the note below.                               |
+| Change                                            | Effect                                                                                                                                                                                        |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ignore pattern added or removed **during a scan** | The scan is restarted with the new patterns (selection and expansion are kept). A scan works with the patterns it was started with, so its result would otherwise bring ignored entries back. |
+| Ignore pattern added, no scan running             | Applied to the loaded file list right away; no rescan.                                                                                                                                        |
+| Ignore pattern removed, no scan running           | Sets `patterns_need_rescan`; the UI offers `rescanDirectory`.                                                                                                                                 |
+| `case_sensitive_search`                           | Filters are re-applied; an active content search is repeated, because its matches depend on the setting.                                                                                      |
+| `remove_empty_directories`                        | Filters are re-applied.                                                                                                                                                                       |
+| `max_file_size_mb`                                | Used by the next scan, lazy load, content search and generation. Not exposed in the UI (it round-trips the value); set it in the config file. See the note below.                             |
 
-`max_file_size_mb` is the size limit in MiB (default 20): larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search honours limits up to the default of 20 MiB and never reads larger files.
+`max_file_size_mb` is the size limit in MiB (default 20): larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search does not read larger files either. The value is not capped: a limit above the default is honoured by all of them.
 
 ```ts
 import { post } from "$lib/services/backend";
@@ -88,11 +87,11 @@ post("setExpansion", { path: "/repo/src", expanded: true }); // payload is type-
 
 `dispatch_ipc_message` does not execute anything itself. It parses the message and queues the command on a `CommandDispatcher` (`src/app/dispatch.rs`), which has three lanes:
 
-| Lane         | Commands                                                                   | Guarantee                                                                                         |
-| ------------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Ordered      | Everything except the dialog commands                                      | Commands start in arrival order; a command runs without interleaving until it finishes or suspends |
-| Continuation | The rest of a command that suspended (`updateFilters` during a content search) | Finished one at a time, in the order the commands were posted                                     |
-| Blocking     | `selectDirectory`, `saveFile`, `pickOutputDirectory`, `importConfig`, `exportConfig` | One at a time, in arrival order, on the blocking thread pool                                      |
+| Lane         | Commands                                                                             | Guarantee                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| Ordered      | Everything except the dialog commands                                                | Commands start in arrival order; a command runs without interleaving until it finishes or suspends |
+| Continuation | The rest of a command that suspended (`updateFilters` during a content search)       | Finished one at a time, in the order the commands were posted                                      |
+| Blocking     | `selectDirectory`, `saveFile`, `pickOutputDirectory`, `importConfig`, `exportConfig` | One at a time, in arrival order, on the blocking thread pool                                       |
 
 What follows from that:
 
@@ -105,16 +104,16 @@ What follows from that:
 
 Each `UserEvent` is turned into exactly one call of a `window.*` function installed by `installWindowIPCHandlers()`:
 
-| `UserEvent`            | Call                                                        | Schema                     |
-| ---------------------- | ----------------------------------------------------------- | -------------------------- |
-| `StateUpdate`          | `window.render(uiState)`                                    | `UiStateSchema`            |
-| `ScanProgress`         | `window.updateScanProgress({ files_scanned, large_files_skipped, current_scanning_path })` | `ScanProgressSchema` |
-| `ShowFilePreview`      | `window.showPreviewContent(content, language, searchTerm, path)` | `ShowPreviewArgsSchema` |
-| `ShowGeneratedContent` | `window.showGeneratedContent(content, tokenCount)`          | `ShowGeneratedArgsSchema`  |
-| `ShowError`            | `window.showError(message)`                                 | `StatusMessageSchema`      |
-| `ConfigExported`       | `window.showStatus(message)`                                | `StatusMessageSchema`      |
-| `SaveComplete`         | `window.fileSaveStatus(success, path)`                      | `FileSaveStatusArgsSchema` |
-| `DragStateChanged`     | `window.setDragState(isDragging)`                           | `DragStateSchema`          |
+| `UserEvent`            | Call                                                                                       | Schema                     |
+| ---------------------- | ------------------------------------------------------------------------------------------ | -------------------------- |
+| `StateUpdate`          | `window.render(uiState)`                                                                   | `UiStateSchema`            |
+| `ScanProgress`         | `window.updateScanProgress({ files_scanned, large_files_skipped, current_scanning_path })` | `ScanProgressSchema`       |
+| `ShowFilePreview`      | `window.showPreviewContent(content, language, searchTerm, path)`                           | `ShowPreviewArgsSchema`    |
+| `ShowGeneratedContent` | `window.showGeneratedContent(content, tokenCount)`                                         | `ShowGeneratedArgsSchema`  |
+| `ShowError`            | `window.showError(message)`                                                                | `StatusMessageSchema`      |
+| `ConfigExported`       | `window.showStatus(message)`                                                               | `StatusMessageSchema`      |
+| `SaveComplete`         | `window.fileSaveStatus(success, path)`                                                     | `FileSaveStatusArgsSchema` |
+| `DragStateChanged`     | `window.setDragState(isDragging)`                                                          | `DragStateSchema`          |
 
 Errors are reported as plain strings through `showError`; there is no error-code protocol.
 
@@ -122,21 +121,21 @@ Errors are reported as plain strings through `showError`; there is no error-code
 
 Produced by `generate_ui_state` (`src/app/view_model/mod.rs`), validated by `UiStateSchema`.
 
-| Field                                                         | Meaning                                                                    |
-| ------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `config`                                                      | The application config                                                     |
-| `current_path`                                                | Scanned root directory (`""` if none)                                      |
-| `tree`                                                        | **Pruned** tree of the filtered file list, see below                       |
-| `total_files_found`                                           | Items (files and directories) in the unfiltered list                       |
-| `visible_files_count`                                         | Items (files and directories) in the filtered list                         |
-| `tree_files_count`                                            | Files in the complete filtered tree, including the ones not sent           |
-| `tree_dirs_count`                                             | Directories in the complete filtered tree, including the ones not sent     |
-| `selected_files_count`                                        | Selected files                                                             |
-| `is_scanning`, `is_generating`, `is_fully_scanned`            | Activity flags                                                             |
-| `status_message`, `scan_progress`                             | Status line and scan progress                                              |
-| `search_query`, `extension_filter`, `content_search_query`    | Active filters                                                             |
-| `current_config_filename`                                     | Name of the imported config, or `null`                                     |
-| `active_ignore_patterns`, `patterns_need_rescan`              | Ignore pattern bookkeeping                                                 |
+| Field                                                      | Meaning                                                                |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `config`                                                   | The application config                                                 |
+| `current_path`                                             | Scanned root directory (`""` if none)                                  |
+| `tree`                                                     | **Pruned** tree of the filtered file list, see below                   |
+| `total_files_found`                                        | Items (files and directories) in the unfiltered list                   |
+| `visible_files_count`                                      | Items (files and directories) in the filtered list                     |
+| `tree_files_count`                                         | Files in the complete filtered tree, including the ones not sent       |
+| `tree_dirs_count`                                          | Directories in the complete filtered tree, including the ones not sent |
+| `selected_files_count`                                     | Selected files                                                         |
+| `is_scanning`, `is_generating`, `is_fully_scanned`         | Activity flags                                                         |
+| `status_message`, `scan_progress`                          | Status line and scan progress                                          |
+| `search_query`, `extension_filter`, `content_search_query` | Active filters                                                         |
+| `current_config_filename`                                  | Name of the imported config, or `null`                                 |
+| `active_ignore_patterns`, `patterns_need_rescan`           | Ignore pattern bookkeeping                                             |
 
 ### The pruned tree
 
@@ -148,27 +147,27 @@ Sending the complete tree on every update costs ~14 MB of JSON at 50,000 files, 
 
 `TreeNode`:
 
-| Field             | Meaning                                                                                                              |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `name`, `path`    | Display name and absolute path (the node's identity)                                                                 |
-| `is_directory`, `is_binary`, `size` | Kind and size                                                                                      |
-| `children`        | Child nodes, directories first, then by name. **Empty for files and for collapsed directories**                      |
-| `has_children`    | **Required.** The directory has children in the filtered list, whether or not they were sent. `false` for files and for directories that are empty or not loaded yet |
-| `is_expanded`     | The directory is expanded. Authoritative; `children` is filled exactly for expanded directories                      |
-| `children_loaded` | **Required.** `false` for a directory whose content has not been scanned yet (lazy loading). Always `true` for files               |
-| `selection_state` | `"none" \| "partial" \| "full"`. For directories it is computed from **all** files below it, also the ones not sent |
-| `is_match`        | The node matches the filename, extension or content filter                                                           |
-| `is_previewed`    | The file is shown in the preview panel                                                                               |
+| Field                               | Meaning                                                                                                                                                              |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`, `path`                      | Display name and absolute path (the node's identity)                                                                                                                 |
+| `is_directory`, `is_binary`, `size` | Kind and size                                                                                                                                                        |
+| `children`                          | Child nodes, directories first, then by name. **Empty for files and for collapsed directories**                                                                      |
+| `has_children`                      | **Required.** The directory has children in the filtered list, whether or not they were sent. `false` for files and for directories that are empty or not loaded yet |
+| `is_expanded`                       | The directory is expanded. Authoritative; `children` is filled exactly for expanded directories                                                                      |
+| `children_loaded`                   | **Required.** `false` for a directory whose content has not been scanned yet (lazy loading). Always `true` for files                                                 |
+| `selection_state`                   | `"none" \| "partial" \| "full"`. For directories it is computed from **all** files below it, also the ones not sent                                                  |
+| `is_match`                          | The node matches the filename, extension or content filter                                                                                                           |
+| `is_previewed`                      | The file is shown in the preview panel                                                                                                                               |
 
 Because the tree is partial, the UI must not derive totals from it. `tree_files_count` and `tree_dirs_count` describe the complete filtered tree and are independent of what is expanded. (`visible_files_count` is the raw length of the filtered list and counts directories and items outside the tree as well; the file tree header uses the `tree_*` counters.)
 
 Measured for a synthetic project of 50,000 files in 550 directories (`payload_of_a_large_project_is_proportional_to_what_is_expanded` in `src/app/view_model/pruning_tests.rs`):
 
-| Snapshot                                           | JSON size   |
-| -------------------------------------------------- | ----------- |
-| Complete tree (previous behaviour, any update)     | 13.9 MB     |
-| Everything collapsed (50 rows)                     | 12.6 kB     |
-| One directory chain expanded (160 rows)            | 42.5 kB     |
+| Snapshot                                       | JSON size |
+| ---------------------------------------------- | --------- |
+| Complete tree (previous behaviour, any update) | 13.9 MB   |
+| Everything collapsed (50 rows)                 | 12.6 kB   |
+| One directory chain expanded (160 rows)        | 42.5 kB   |
 
 "Expand all" still produces the complete tree; that is inherent to showing every row.
 
@@ -178,20 +177,20 @@ Measured for a synthetic project of 50,000 files in 550 directories (`payload_of
 
 Every way of changing the expansion is therefore a command, and the result is visible with the next snapshot:
 
-| Gesture                                                    | Command                                   |
-| ---------------------------------------------------------- | ----------------------------------------- |
-| Click on chevron or directory name, `Enter`                | `setExpansion` with the opposite of the rendered `is_expanded` |
-| `ArrowRight` on a collapsed directory                      | `setExpansion { expanded: true }`         |
-| `ArrowLeft` on an expanded directory                       | `setExpansion { expanded: false }`        |
+| Gesture                                                                         | Command                                                                        |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Click on chevron or directory name, `Enter`                                     | `setExpansion` with the opposite of the rendered `is_expanded`                 |
+| `ArrowRight` on a collapsed directory                                           | `setExpansion { expanded: true }`                                              |
+| `ArrowLeft` on an expanded directory                                            | `setExpansion { expanded: false }`                                             |
 | Any of the above on a directory with `children_loaded: false` (no scan running) | `loadDirectoryLevel`; the host loads the level, marks it loaded and expands it |
-| "Expand all" / "Collapse all"                              | `expandCollapseAll`                       |
-| Typing into a filter                                       | `updateFilters`; the host expands the ancestors of all matches |
+| "Expand all" / "Collapse all"                                                   | `expandCollapseAll`                                                            |
+| Typing into a filter                                                            | `updateFilters`; the host expands the ancestors of all matches                 |
 
 The mapping from gesture to command lives in `src/ui/src/lib/modules/treeExpansion.ts`. While a scan is running the host refuses lazy loads (the scan delivers the children itself), so the UI sends `setExpansion` in that case.
 
 There is no optimistic update: a row changes when the snapshot arrives. Snapshots are cheap enough for that, and it rules out the UI and the host disagreeing.
 
-**Gestures name their target state.** Because there is no optimistic update, a gesture can fire a second time before the snapshot answering the first one has been rendered: key repeat on `ArrowRight`, a double click on the chevron. The second event still sees the old row. If the UI sent "flip it" (`toggleExpansion`), the second event would undo the first and the directory would end up collapsed again. The UI therefore always sends the state the gesture should lead to, derived from the row the user acted on, and `setExpansion` is idempotent on the host. This also holds for the gestures that read as "toggle" (chevron, name, `Enter`): the user acts on what is on screen ("open this collapsed directory"), so two activations of the same rendered row ask for the same state twice. `toggleExpansion` stays in the contract for callers that have no rendered state to derive a target from; the UI does not use it.
+**Gestures name their target state.** Because there is no optimistic update, a gesture can fire a second time before the snapshot answering the first one has been rendered: key repeat on `ArrowRight`, a double click on the chevron. The second event still sees the old row. If the UI sent "flip it", the second event would undo the first and the directory would end up collapsed again. The UI therefore always sends the state the gesture should lead to, derived from the row the user acted on, and `setExpansion` is idempotent on the host. This also holds for the gestures that read as "toggle" (chevron, name, `Enter`): the user acts on what is on screen ("open this collapsed directory"), so two activations of the same rendered row ask for the same state twice. There is no "flip it" command in the contract.
 
 ## Contract tests
 

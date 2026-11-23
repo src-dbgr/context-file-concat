@@ -21,7 +21,6 @@ describe("Property: path-based commands accept non-empty strings", () => {
     "loadFilePreview",
     "toggleSelection",
     "toggleDirectorySelection",
-    "toggleExpansion",
     "addIgnorePath",
   ] as const;
 

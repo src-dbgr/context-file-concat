@@ -25,7 +25,6 @@ export const ConfigSchema = z
     window_position: Tuple2,
     auto_load_last_directory: z.boolean(),
     max_file_size_mb: z.number(),
-    scan_chunk_size: z.number(),
   })
   .passthrough();
 
@@ -159,7 +158,6 @@ export const CommandSchemas = {
   loadFilePreview: PathPayload,
   toggleSelection: PathPayload,
   toggleDirectorySelection: PathPayload,
-  toggleExpansion: PathPayload,
   setExpansion: SetExpansionPayload,
   expandCollapseAll: BoolPayload,
   selectAll: NullPayload,

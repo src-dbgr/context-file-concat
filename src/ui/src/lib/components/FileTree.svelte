@@ -333,12 +333,10 @@
   );
 
   // --- Helpers ---------------------------------------------------------------
+  // A filter is active as soon as its text is not empty. Nothing is trimmed: the
+  // host matches the texts as typed, so a query of blanks filters for blanks.
   function hasActiveFilters(s: AppState): boolean {
-    return !!(
-      s.search_query?.trim() ||
-      s.extension_filter?.trim() ||
-      s.content_search_query?.trim()
-    );
+    return !!(s.search_query || s.extension_filter || s.content_search_query);
   }
 
   // Center only the body (not the header) when showing placeholder/empty/scan states
@@ -614,7 +612,7 @@
           {/each}
         </div>
       </div>
-    {:else if $appState.search_query?.trim() || $appState.extension_filter?.trim() || $appState.content_search_query?.trim()}
+    {:else if hasActiveFilters($appState)}
       <div class="message-display" role="status" aria-live="polite">
         <div class="message-icon">
           <svg

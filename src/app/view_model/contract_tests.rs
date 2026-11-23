@@ -56,7 +56,6 @@ fn representative_state() -> AppState {
         window_position: (100.0, 50.0),
         auto_load_last_directory: true,
         max_file_size_mb: 20,
-        scan_chunk_size: 100,
     };
     state.current_path = "/project".to_string();
     state.full_file_list = vec![

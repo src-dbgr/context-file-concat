@@ -191,7 +191,6 @@ fn migrate_legacy_config(config_content: &str) -> Result<AppConfig> {
         defaults.auto_load_last_directory,
     )?;
     ensure_field_from_default(obj, "max_file_size_mb", defaults.max_file_size_mb)?;
-    ensure_field_from_default(obj, "scan_chunk_size", defaults.scan_chunk_size)?;
 
     let migrated_config: AppConfig = serde_json::from_value(Value::Object(obj.clone()))?;
     tracing::info!("Successfully migrated legacy config");
@@ -414,6 +413,88 @@ pub mod tests {
         harness.write_to_config_file(&legacy_json.to_string());
         let result = import_config(&harness.config_path);
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // SECTION: Retired settings
+    // =========================================================================
+
+    /// A complete configuration as an older version wrote it: with the retired
+    /// `scan_chunk_size` and with settings that differ from the defaults.
+    fn config_json_with_retired_field() -> (Value, AppConfig) {
+        let expected = AppConfig {
+            case_sensitive_search: true,
+            max_file_size_mb: 7,
+            output_filename: "kept.txt".to_string(),
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&expected).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("scan_chunk_size".to_string(), json!(100));
+        (value, expected)
+    }
+
+    #[test]
+    fn test_config_with_retired_field_deserializes_without_migration() {
+        let (value, expected) = config_json_with_retired_field();
+
+        let config: AppConfig = serde_json::from_value(value).unwrap();
+
+        assert_eq!(config, expected);
+    }
+
+    #[test]
+    fn test_load_config_accepts_file_with_retired_field() {
+        let harness = TestHarness::new();
+        let (value, expected) = config_json_with_retired_field();
+        harness.write_to_config_file(&value.to_string());
+
+        let config = load_config(Some(&harness.config_path)).unwrap();
+
+        assert_eq!(config, expected);
+    }
+
+    #[test]
+    fn test_import_config_accepts_file_with_retired_field() {
+        let harness = TestHarness::new();
+        let (value, expected) = config_json_with_retired_field();
+        harness.write_to_config_file(&value.to_string());
+
+        let config = import_config(&harness.config_path).unwrap();
+
+        assert_eq!(config, expected);
+    }
+
+    /// The migration of an incomplete file tolerates the retired field as well.
+    #[test]
+    fn test_migrate_legacy_config_ignores_retired_field() {
+        let legacy = json!({ "case_sensitive_search": true, "scan_chunk_size": 100 });
+
+        let config = migrate_legacy_config(&legacy.to_string()).unwrap();
+
+        assert_eq!(
+            config,
+            AppConfig {
+                case_sensitive_search: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_saved_and_exported_config_do_not_contain_retired_field() {
+        let harness = TestHarness::new();
+        let export_path = harness.temp_path().join("export.json");
+
+        save_config(&AppConfig::default(), Some(&harness.config_path)).unwrap();
+        export_config(&AppConfig::default(), &export_path).unwrap();
+
+        for path in [&harness.config_path, &export_path] {
+            let written = fs::read_to_string(path).unwrap();
+            assert!(!written.contains("scan_chunk_size"), "{path:?}");
+        }
     }
 
     // =========================================================================

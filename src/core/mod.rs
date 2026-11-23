@@ -37,19 +37,8 @@ pub struct FileItem {
     pub parent: Option<PathBuf>,
 }
 
-/// Defines the criteria for filtering files.
-#[derive(Debug, Clone)]
-pub struct SearchFilter {
-    /// A string to match against filenames.
-    pub query: String,
-    /// A file extension to filter by (e.g., "rs", "txt").
-    pub extension: String,
-    /// `true` if the filename query should be case-sensitive.
-    pub case_sensitive: bool,
-}
-
 // The public vocabulary of the core, so that callers do not depend on its file layout.
 pub use file_handler::FileHandler;
 pub use scanner::{DirectoryScanner, ScanProgress, ScanRequest};
-pub use search::{ContentSearch, FileNameMatcher, SearchEngine};
+pub use search::{ContentSearch, ContentSearchRequest, FileNameMatcher, SearchEngine};
 pub use tree_generator::TreeGenerator;

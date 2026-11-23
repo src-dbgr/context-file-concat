@@ -459,29 +459,6 @@ pub fn toggle_directory_selection<P: EventProxy>(
     }
 }
 
-/// Toggles the expanded/collapsed state of a directory in the UI tree.
-pub fn toggle_expansion<P: EventProxy>(
-    payload: serde_json::Value,
-    proxy: P,
-    state: Arc<Mutex<AppState>>,
-) {
-    if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
-        with_state_and_notify(&state, &proxy, |s| {
-            let path = PathBuf::from(path_str);
-            if s.expanded_dirs.contains(&path) {
-                s.expanded_dirs.remove(&path);
-            } else {
-                s.expanded_dirs.insert(path);
-            }
-        });
-    } else {
-        tracing::warn!(
-            "Failed to deserialize path string from payload: {:?}",
-            payload
-        );
-    }
-}
-
 /// Payload of [`set_expansion`].
 #[derive(serde::Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -492,7 +469,7 @@ struct SetExpansionPayload {
 
 /// Sets the expanded/collapsed state of a directory in the UI tree.
 ///
-/// Unlike [`toggle_expansion`] this names the target state, which makes it idempotent:
+/// The command names the target state instead of flipping it, which makes it idempotent:
 /// a gesture that is delivered twice (key repeat, double click) before the UI has
 /// rendered the answer to the first one still ends in the state the user asked for.
 /// The state is always sent, also when nothing changed, so every request is answered.
@@ -1548,26 +1525,6 @@ mod tests {
         toggle_directory_selection(payload, harness.proxy.clone(), harness.state.clone());
         let ui_state_deselect = harness.last_state_update().unwrap();
         assert_eq!(ui_state_deselect.selected_files_count, 0);
-    }
-
-    #[tokio::test]
-    async fn test_toggle_expansion_adds_and_removes_dir() {
-        let mut harness = TestHarness::new();
-        let dir_to_toggle = harness.create_dir("src");
-        harness.set_initial_files(&["src"]);
-        let payload = json!(dir_to_toggle);
-
-        toggle_expansion(
-            payload.clone(),
-            harness.proxy.clone(),
-            harness.state.clone(),
-        );
-        let ui_state1 = harness.last_state_update().unwrap();
-        assert!(ui_state1.tree[0].is_expanded);
-
-        toggle_expansion(payload, harness.proxy.clone(), harness.state.clone());
-        let ui_state2 = harness.last_state_update().unwrap();
-        assert!(!ui_state2.tree[0].is_expanded);
     }
 
     #[tokio::test]
