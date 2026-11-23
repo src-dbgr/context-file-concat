@@ -3,7 +3,7 @@ import { test, expect, Page } from "@playwright/test";
 /**
  * Benchmarks (dev-only):
  * - Keine künstlichen Waits. Es wird nur auf deterministische Bedingungen gewartet.
- * - Nutzt window.__e2e.store.setAppState (siehe e2eBridge / e2eShim).
+ * - Nutzt window.__e2e.store.setAppState (siehe e2eBridge; nur im e2e-Build vorhanden).
  * - Misst mit Performance Marks/Measures im Browser.
  *
  * Thresholds via ENV:

@@ -6,7 +6,9 @@
  */
 
 import { appState, getState } from "$lib/stores/app";
+import { scanProgress } from "$lib/stores/scanProgress";
 import { toast } from "$lib/stores/toast";
+import { truncate } from "$lib/utils";
 import { t as tStore } from "$lib/i18n";
 import { get } from "svelte/store";
 
@@ -52,6 +54,11 @@ declare global {
   }
 }
 
+/** How long an error reported by the host stays on screen. */
+const HOST_ERROR_TOAST_MS = 10_000;
+/** Upper bound for the host text shown in a toast. */
+const HOST_ERROR_MAX_CHARS = 300;
+
 /** Install window.* handlers exactly once (re-install is harmless but avoided). */
 export function installWindowIPCHandlers(): void {
   // If already installed, return early.
@@ -91,6 +98,10 @@ export function installWindowIPCHandlers(): void {
       // is authoritative: it decides which children are part of the tree.
       appState.set(input);
 
+      // The progress shown belongs to one scan: forget it when none is
+      // running and when a new one starts.
+      if (!input.is_scanning || !prev.is_scanning) scanProgress.reset();
+
       if (prev.current_path && !input.current_path) clearPreview();
     } catch (err) {
       console.error("render() failed:", err);
@@ -117,40 +128,11 @@ export function installWindowIPCHandlers(): void {
       );
       return;
     }
-    const { files_scanned, current_scanning_path, large_files_skipped } =
-      parsed.data;
-
-    const tr = get(tStore);
-
-    const scanTextEl = document.querySelector(".scan-text");
-    if (scanTextEl)
-      (scanTextEl as HTMLElement).textContent = tr("filetree.scanning");
-
-    const filesCountEl = document.getElementById("scan-files-count");
-    if (filesCountEl)
-      (filesCountEl as HTMLElement).textContent =
-        `${files_scanned} files processed`;
-
-    const currentPathEl = document.getElementById("scan-current-path");
-    if (currentPathEl)
-      (currentPathEl as HTMLElement).textContent =
-        current_scanning_path || "Processing...";
-
-    const skippedEl = document.getElementById("scan-skipped-count");
-    if (skippedEl) {
-      (skippedEl as HTMLElement).textContent =
-        large_files_skipped > 0
-          ? `${large_files_skipped} large files skipped`
-          : "";
-      (skippedEl as HTMLElement).style.display =
-        large_files_skipped > 0 ? "inline" : "none";
-    }
-
-    const fillEl = document.getElementById("scan-progress-fill");
-    if (fillEl && files_scanned > 0) {
-      (fillEl as HTMLElement).style.width =
-        `${Math.min(90, (files_scanned / 1000) * 100)}%`;
-    }
+    scanProgress.report({
+      files_scanned: parsed.data.files_scanned,
+      large_files_skipped: parsed.data.large_files_skipped,
+      current_scanning_path: parsed.data.current_scanning_path,
+    });
   };
 
   window.showPreviewContent = (
@@ -202,8 +184,14 @@ export function installWindowIPCHandlers(): void {
       s.status_message = `Error: ${parsed.data}`;
       return s;
     });
+    // The toast carries the message itself: the status line is overwritten
+    // by the next state snapshot.
     const tr = get(tStore);
-    toast.error(tr("toast.renderFailed"));
+    const text = parsed.data.trim();
+    toast.error(
+      text ? truncate(text, HOST_ERROR_MAX_CHARS) : tr("toast.renderFailed"),
+      { title: tr("toast.errorTitle"), duration: HOST_ERROR_TOAST_MS },
+    );
   };
 
   window.showStatus = (msg: string) => {

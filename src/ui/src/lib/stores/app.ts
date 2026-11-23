@@ -62,7 +62,6 @@ export const hasVisibleItems = derived(
 
 export const editorInstance =
   writable<monaco.editor.IStandaloneCodeEditor | null>(null);
-export const editorDecorations = writable<string[]>([]);
 export const previewedPath = writable<string | null>(null);
 export const patternFilter = writable<string>("");
 

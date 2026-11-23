@@ -214,6 +214,13 @@ register("en", {
   "toast.saveCancelled": "Save cancelled",
   "toast.saveFailed": "Failed to save file",
   "toast.renderFailed": "An error occurred",
+  "toast.errorTitle": "Error",
+  "preview.copied": "Copied!",
+  "preview.copyFailed": "Failed",
+  "preview.searchMatch": "Search match",
+  "scan.starting": "Starting scan...",
+  "scan.filesScanned": "Files scanned: {count}",
+  "scan.largeFilesSkipped": "Large files skipped: {count}",
 });
 
 register("de", {
@@ -332,4 +339,11 @@ register("de", {
   "toast.saveCancelled": "Speichern abgebrochen",
   "toast.saveFailed": "Datei konnte nicht gespeichert werden",
   "toast.renderFailed": "Ein Fehler ist aufgetreten",
+  "toast.errorTitle": "Fehler",
+  "preview.copied": "Kopiert!",
+  "preview.copyFailed": "Fehlgeschlagen",
+  "preview.searchMatch": "Suchtreffer",
+  "scan.starting": "Scan wird gestartet...",
+  "scan.filesScanned": "Gescannte Dateien: {count}",
+  "scan.largeFilesSkipped": "Große Dateien übersprungen: {count}",
 });

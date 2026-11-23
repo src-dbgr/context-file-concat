@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  truncate,
   formatFileSize,
   generateStatsString,
   splitPathForDisplay,
@@ -75,5 +76,22 @@ describe("utils.splitPathForDisplay", () => {
     const { pathPart, filename } = splitPathForDisplay("README.md", "/proj");
     expect(pathPart).toBe("");
     expect(filename).toBe("README.md");
+  });
+});
+
+describe("utils.truncate", () => {
+  it("leaves a text that fits as it is", () => {
+    expect(truncate("short", 10)).toBe("short");
+    expect(truncate("exactly10!", 10)).toBe("exactly10!");
+  });
+
+  it("cuts a longer text to the limit and marks the cut", () => {
+    const cut = truncate("abcdefghijklmnop", 10);
+    expect(cut).toBe("abcdefghi…");
+    expect(cut.length).toBe(10);
+  });
+
+  it("does not leave a space before the ellipsis", () => {
+    expect(truncate("abc def ghi jkl", 9)).toBe("abc def…");
   });
 });

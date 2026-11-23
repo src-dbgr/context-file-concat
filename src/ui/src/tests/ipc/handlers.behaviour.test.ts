@@ -3,6 +3,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { get } from "svelte/store";
 import { appState } from "$lib/stores/app";
+import { scanProgress } from "$lib/stores/scanProgress";
 
 /**
  * Hoisted mocks (evaluated before Imports)
@@ -103,7 +104,11 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     window.showError("Boom");
     const state = get(appState);
     expect(state.status_message).toMatch(/^Error: /);
-    expect(toast.error).toHaveBeenCalledWith("toast.renderFailed");
+    // The toast carries the text of the host, under a localized title.
+    expect(toast.error).toHaveBeenCalledWith("Boom", {
+      title: "toast.errorTitle",
+      duration: 10_000,
+    });
   });
 
   it("showStatus updates status", () => {
@@ -137,13 +142,7 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     expect(container.classList.contains("drag-over")).toBe(false);
   });
 
-  it("updateScanProgress writes progress text and width when scanning", () => {
-    el("div", { className: "scan-text" });
-    el("div", { id: "scan-files-count" });
-    el("div", { id: "scan-current-path" });
-    el("div", { id: "scan-skipped-count" });
-    el("div", { id: "scan-progress-fill" });
-
+  it("updateScanProgress reports to the scanProgress store when scanning", () => {
     appState.update((s) => {
       s.is_scanning = true;
       return s;
@@ -155,19 +154,11 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
       large_files_skipped: 1,
     });
 
-    const scanText = document.querySelector(".scan-text") as HTMLElement;
-    const files = document.getElementById("scan-files-count") as HTMLElement;
-    const current = document.getElementById("scan-current-path") as HTMLElement;
-    const skipped = document.getElementById(
-      "scan-skipped-count",
-    ) as HTMLElement;
-    const fill = document.getElementById("scan-progress-fill") as HTMLElement;
-
-    expect(scanText.textContent).toBe("filetree.scanning");
-    expect(files.textContent).toContain("files processed");
-    expect(current.textContent).toBe("/some/path");
-    expect(skipped.textContent).toContain("large files skipped");
-    expect(fill.style.width).toMatch(/%$/);
+    expect(get(scanProgress)).toEqual({
+      files_scanned: 10,
+      current_scanning_path: "/some/path",
+      large_files_skipped: 1,
+    });
   });
 
   it("render takes the backend's expansion state as is", () => {

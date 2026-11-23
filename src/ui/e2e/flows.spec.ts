@@ -3,7 +3,7 @@ import AxeBuilder from "@axe-core/playwright";
 
 /**
  * Deterministic E2E:
- * - Bridge is enabled via __PW_E2E flag + ?e2e=1 (see main.ts)
+ * - The bridge (window.__e2e) is part of the e2e build only (see vite.config.ts, main.ts)
  * - State transitions via window.__e2e.store.setAppState (no timers)
  * - No "any", no artificial timeouts, no regression to production logic
  */
@@ -52,13 +52,6 @@ type AppState = {
   active_ignore_patterns: string[];
   config: AppConfig;
 };
-
-test.beforeEach(async ({ page }) => {
-  // Ensure bridge loads in production preview before app init
-  await page.addInitScript(() => {
-    (window as unknown as { __PW_E2E: boolean }).__PW_E2E = true;
-  });
-});
 
 function seedTree(): TreeNode[] {
   return [
@@ -437,6 +430,9 @@ test.describe("Keyboard on the controls of a tree row", () => {
       ).__e2e.store.setAppState(next);
     }, withRepo());
     await expect(page.locator(".tree .tree-item-container")).toHaveCount(5);
+    // A tree that appears takes the focus to its first row, one frame later.
+    // Wait for that, or it can land after the focus a test sets itself.
+    await expect(page.locator('.tree [data-index="0"]')).toBeFocused();
   });
 
   /** Focus a control of a row, press a key on it, return what was posted. */
