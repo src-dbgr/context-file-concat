@@ -1,5 +1,42 @@
 # Changelog
 
+## [Unreleased]
+
+### Highlights
+
+- **Large projects stay fast**: the host sends only the visible window of the tree (about 55 kB per update instead of up to 130 MB at 500k files); a click costs well under a millisecond on the host. The scan publishes its results while it runs, and background events never hold the state lock for work on the whole list.
+- **Deterministic IPC**: every command carries a session id and sequence number, every snapshot reports the last processed one; commands are one typed enum, malformed messages are refused uniformly, and snapshots can only be built under the state lock (enforced by the compiler).
+- **Security**: strict Content Security Policy and `nosniff` on the app protocol, IPC accepted only from the app's own origin, `data:`/`blob:` navigation blocked, every path from the UI checked against the loaded project, config export without personal paths.
+- **Accessibility**: WCAG AA contrast in both themes, accessible names, one tab stop for the tree (roving tabindex), Tab no longer swallowed.
+
+### Added
+
+- Incremental, explorable scan: the tree fills in while the deep scan runs; directories can be expanded and loaded during a scan.
+- Output size estimate with a warning above 20 MiB and a refusal above 200 MiB.
+- Typed save result (saved / cancelled / failed) and error toasts with the host's message.
+- `Delete` on a tree row ignores it (macOS: `fn+⌫`); a notice when an entry cannot be ignored.
+- `CFC_CONFIG_DIR` to use another configuration directory.
+- CI on Linux, macOS and Windows, MSRV check (Rust 1.88), dependency audits, WebKit E2E, initial-load bundle budget.
+
+### Changed
+
+- Ignore patterns follow `.gitignore` semantics everywhere (negation included) through one rule set; patterns from the ignore button are anchored at the project root and escaped.
+- Content search, preview, generation and scan share one binary/text rule and one decoding rule (UTF-8, else Windows-1252 for legacy text).
+- Expansion is owned by the host; expand/collapse is idempotent; "Expand all" only affects the directories the filters show.
+- An unedited generated output is saved and copied from the host's bytes; save no longer sends the content back.
+- Window geometry is stored in its own `window.json` (migrated once from `config.json`), in logical units.
+- Monaco is loaded with the first preview and only its base editor worker is shipped (dist 12.6 MB → 4.6 MB).
+- Upgraded wry 0.57, tao 0.37; the macOS menu uses objc2.
+
+### Fixed
+
+- Scans, generations, searches, previews and lazy loads that were superseded could overwrite newer state.
+- A failed or cancelled rescan, a nonexistent dropped path or a directory change no longer loses the loaded project or the generated output.
+- Lazy loading showed ignored files; ignore patterns added during a scan were re-added by its result.
+- The window grew on every restart on HiDPI displays; geometry was not saved on Cmd+Q.
+- `cargo test` wrote the developer's real configuration file.
+- Path traversal through `loadDirectoryLevel`; unlisted paths could be selected or expanded.
+
 ## [0.3.1] - 2025-09-28
 
 ### Changed
