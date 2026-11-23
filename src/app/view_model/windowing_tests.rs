@@ -36,7 +36,7 @@ fn state_of(items: Vec<FileItem>) -> AppState {
         .filter(|item| item.is_directory)
         .map(|item| item.path.clone())
         .collect();
-    state.full_file_list = items;
+    state.set_full_file_list(items);
     state.is_fully_scanned = true;
     filtering::apply_filters(&mut state);
     state
@@ -151,9 +151,11 @@ fn a_new_tree_is_shown_from_the_top() {
 
     state.reset_directory_state();
     state.current_path = "/root".to_string();
-    state.full_file_list = (0..10)
-        .map(|i| item(&format!("/root/file{i}.rs"), false))
-        .collect();
+    state.set_full_file_list(
+        (0..10)
+            .map(|i| item(&format!("/root/file{i}.rs"), false))
+            .collect(),
+    );
     filtering::apply_filters(&mut state);
 
     let ui_state = generate_ui_state(&state);

@@ -191,7 +191,7 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
         );
 
         let visible_paths: HashSet<_> = state
-            .full_file_list
+            .full_file_list()
             .iter()
             .map(|item| {
                 item.path
@@ -231,7 +231,7 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
         );
 
         let all_paths: HashSet<_> = state
-            .full_file_list
+            .full_file_list()
             .iter()
             .map(|item| {
                 item.path

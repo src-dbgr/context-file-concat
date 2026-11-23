@@ -1,4 +1,18 @@
 {
+  "ignorePathRefused": [
+    [
+      {
+        "name": "notes ",
+        "reason": "trailing_whitespace"
+      }
+    ],
+    [
+      {
+        "name": "bad�.txt",
+        "reason": "not_unicode"
+      }
+    ]
+  ],
   "outputSizeNotice": [
     [
       {

@@ -1,7 +1,8 @@
 //! Cross-language contract test for the host calls of the output (host → UI).
 //!
 //! The counterpart of `command_contract_tests.rs` for the events around generating
-//! and saving: `showGeneratedContent`, `outputSizeNotice` and `saveResult`. For every
+//! and saving (`showGeneratedContent`, `outputSizeNotice`, `saveResult`) and for the
+//! notice of the ignore button (`ignorePathRefused`). For every
 //! form such an event can take, this test builds the event, turns it into the script
 //! the WebView evaluates ([`script_for`]) and writes the arguments of that call into
 //! a JSON fixture that is committed inside the UI's test directory. The UI validates
@@ -12,7 +13,7 @@
 //! After an intentional change, regenerate the fixture with
 //! `UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture` and adapt the UI schema.
 
-use super::events::{OutputSizeNotice, SaveResult, UserEvent};
+use super::events::{IgnorePathRefusal, OutputSizeNotice, SaveResult, UserEvent};
 use super::script_for;
 use super::state::GeneratedDocument;
 use super::tasks::{LARGE_OUTPUT_SIZE, MAX_OUTPUT_SIZE};
@@ -59,6 +60,21 @@ fn example_events() -> Vec<UserEvent> {
         }
     }
 
+    let refusals = vec![
+        IgnorePathRefusal::TrailingWhitespace {
+            name: "notes\u{a0}".to_string(),
+        },
+        IgnorePathRefusal::NotUnicode {
+            name: "bad\u{fffd}.txt".to_string(),
+        },
+    ];
+    for refusal in &refusals {
+        match refusal {
+            IgnorePathRefusal::TrailingWhitespace { .. } | IgnorePathRefusal::NotUnicode { .. } => {
+            }
+        }
+    }
+
     let documents = vec![
         UserEvent::ShowGeneratedContent {
             document: GeneratedDocument::for_test(
@@ -77,6 +93,7 @@ fn example_events() -> Vec<UserEvent> {
         .into_iter()
         .chain(notices.into_iter().map(UserEvent::OutputSize))
         .chain(save_results.into_iter().map(UserEvent::SaveResult))
+        .chain(refusals.into_iter().map(UserEvent::IgnorePathRefused))
         .collect()
 }
 
@@ -133,6 +150,11 @@ fn examples_cover_every_handler_of_the_output() {
         .collect();
     assert_eq!(
         handlers,
-        ["outputSizeNotice", "saveResult", "showGeneratedContent"]
+        [
+            "ignorePathRefused",
+            "outputSizeNotice",
+            "saveResult",
+            "showGeneratedContent"
+        ]
     );
 }

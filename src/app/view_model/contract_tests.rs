@@ -58,7 +58,7 @@ fn representative_state() -> AppState {
         max_file_size_mb: 20,
     };
     state.current_path = "/project".to_string();
-    state.full_file_list = vec![
+    state.set_full_file_list(vec![
         // Expanded directory, partially selected.
         item("/project/src", true, false, 0),
         // Collapsed directory inside it whose hidden files are all selected.
@@ -77,8 +77,8 @@ fn representative_state() -> AppState {
         item("/project/empty", true, false, 0),
         item("/project/logo.png", false, true, 65536),
         item("/project/README.md", false, false, 256),
-    ];
-    let listed = state.full_file_list.clone();
+    ]);
+    let listed = state.full_file_list().to_vec();
     state.set_filtered_file_list(listed);
 
     state.expanded_dirs = paths(&["/project/src"]).into();

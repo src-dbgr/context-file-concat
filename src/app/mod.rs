@@ -16,6 +16,7 @@ mod helpers;
 pub mod proxy;
 pub mod selection;
 pub mod shared_state;
+mod staged;
 pub mod state;
 pub mod tasks;
 pub mod tracked;
@@ -321,6 +322,9 @@ fn script_for(event: &UserEvent) -> serde_json::Result<String> {
         UserEvent::OutputSize(notice) => {
             format!("window.outputSizeNotice({});", json(notice)?)
         }
+        UserEvent::IgnorePathRefused(refusal) => {
+            format!("window.ignorePathRefused({});", json(refusal)?)
+        }
         UserEvent::ShowError(msg) => format!("window.showError({});", json(msg)?),
         UserEvent::SaveResult(result) => format!("window.saveResult({});", json(result)?),
         UserEvent::ConfigExported(success) => format!(
@@ -367,6 +371,7 @@ fn event_name(event: &UserEvent) -> &'static str {
         UserEvent::StateUpdate(_) => "StateUpdate",
         UserEvent::ShowFilePreview { .. } => "ShowFilePreview",
         UserEvent::ShowGeneratedContent { .. } => "ShowGeneratedContent",
+        UserEvent::IgnorePathRefused(_) => "IgnorePathRefused",
         UserEvent::ShowError(_) => "ShowError",
         UserEvent::OutputSize(_) => "OutputSize",
         UserEvent::SaveResult(_) => "SaveResult",
@@ -755,7 +760,7 @@ mod tests {
 
     fn listed_names(state: &AppState) -> Vec<String> {
         let mut names: Vec<String> = state
-            .full_file_list
+            .full_file_list()
             .iter()
             .filter_map(|item| item.path.file_name())
             .map(|name| name.to_string_lossy().to_string())
@@ -778,7 +783,7 @@ mod tests {
             assert!(!state.is_scanning(), "round {round}");
             assert_eq!(state.status, StatusNotice::ScanCancelled, "round {round}");
             assert!(!state.is_fully_scanned, "round {round}");
-            assert!(state.full_file_list.is_empty(), "round {round}");
+            assert!(state.full_file_list().is_empty(), "round {round}");
         }
     }
 
@@ -795,7 +800,7 @@ mod tests {
             let state = harness.state.lock();
             assert_eq!(state.current_path, "", "round {round}");
             assert!(!state.is_scanning(), "round {round}");
-            assert!(state.full_file_list.is_empty(), "round {round}");
+            assert!(state.full_file_list().is_empty(), "round {round}");
             assert_eq!(state.config.last_directory, None, "round {round}");
         }
     }
@@ -1090,8 +1095,17 @@ mod tests {
     }
 
     /// The ordered-lane guarantee holds for a drop as for a rescan: the cancel that
-    /// follows it cancels it. What was loaded before is still there.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    /// follows it cancels it. What was loaded before is still there, because the
+    /// cancel is there before the scan has looked at the dropped path.
+    ///
+    /// That last part is what the single-threaded runtime is for. Both commands are
+    /// queued before the lane runs, and the lane runs them back to back, so the task
+    /// of the scan gets its first turn after the cancel. With worker threads the
+    /// lane may start the drop before the cancel has been queued; the scan then has
+    /// time to find its path and enter the directory, and the cancel, which still
+    /// cancels it, leaves the dropped directory loaded (the other legal outcome, see
+    /// the test below).
+    #[tokio::test(flavor = "current_thread")]
     async fn a_cancel_sent_right_after_a_drop_cancels_the_drop() {
         for round in 0..20 {
             let project = project_on_disk("a.txt");
@@ -1111,6 +1125,61 @@ mod tests {
         }
     }
 
+    /// However a drop and the cancel behind it are timed: the scan ends cancelled,
+    /// and the directory that is loaded is whole. It is the previous one, untouched,
+    /// if the cancel came before the scan had found the dropped path, and the
+    /// dropped one (as far as the scan got) otherwise; never a mixture.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_cancel_after_a_drop_leaves_one_of_the_two_directories_loaded() {
+        for round in 0..20 {
+            let project = project_on_disk("a.txt");
+            let second = project_on_disk("second.txt");
+            let harness = Harness::with_scanned_project(project.path()).await;
+
+            harness.drop_path(second.path());
+            if round % 2 == 1 {
+                // Time for the scan to get somewhere.
+                tokio::task::yield_now().await;
+            }
+            harness.send("cancelScan", serde_json::Value::Null);
+            harness.quiescence().await;
+
+            let (loaded, status, is_scanning) = {
+                let state = harness.state.lock();
+                (
+                    PathBuf::from(&state.current_path),
+                    state.status.clone(),
+                    state.is_scanning(),
+                )
+            };
+            assert!(!is_scanning, "round {round}");
+            if loaded == project.path() {
+                assert_eq!(status, StatusNotice::ScanCancelled, "round {round}");
+                harness
+                    .assert_scanned_project_is_untouched(project.path(), &format!("round {round}"));
+            } else {
+                assert_eq!(loaded, second.path(), "round {round}");
+                let state = harness.state.lock();
+                // Cancelled, unless the scan was through before the cancel came.
+                assert!(
+                    state.status == StatusNotice::ScanCancelled || state.is_fully_scanned,
+                    "round {round}: {:?}",
+                    state.status
+                );
+                // Nothing of the previous directory is left.
+                assert!(state.selected_files.is_empty(), "round {round}");
+                assert!(state.search_query.is_empty(), "round {round}");
+                assert!(
+                    state
+                        .full_file_list()
+                        .iter()
+                        .all(|item| item.path.starts_with(second.path())),
+                    "round {round}"
+                );
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn a_clear_sent_right_after_a_drop_leaves_no_directory_loaded() {
         for round in 0..20 {
@@ -1125,7 +1194,7 @@ mod tests {
             let state = harness.state.lock();
             assert_eq!(state.current_path, "", "round {round}");
             assert!(!state.is_scanning(), "round {round}");
-            assert!(state.full_file_list.is_empty(), "round {round}");
+            assert!(state.full_file_list().is_empty(), "round {round}");
             assert_eq!(state.config.last_directory, None, "round {round}");
         }
     }
@@ -1315,15 +1384,17 @@ mod tests {
     fn ui_state_with_tree(paths: &[PathBuf]) -> Box<view_model::UiState> {
         let mut state = AppState::default();
         state.current_path = "/repo".to_string();
-        state.full_file_list = paths
-            .iter()
-            .map(|path| crate::core::FileItem {
-                path: path.clone(),
-                parent: path.parent().map(Path::to_path_buf),
-                depth: 1,
-                ..Default::default()
-            })
-            .collect();
+        state.set_full_file_list(
+            paths
+                .iter()
+                .map(|path| crate::core::FileItem {
+                    path: path.clone(),
+                    parent: path.parent().map(Path::to_path_buf),
+                    depth: 1,
+                    ..Default::default()
+                })
+                .collect(),
+        );
         filtering::apply_filters(&mut state);
         Box::new(view_model::generate_ui_state(&state))
     }

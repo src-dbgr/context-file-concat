@@ -9,37 +9,173 @@
 //! presentation (`view_model`), which only reads the state.
 
 use crate::app::state::AppState;
-use crate::config::AppConfig;
 use crate::core::{is_blank, FileItem, FileNameMatcher, SearchEngine};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Applies all current filters to the full file list to generate the visible list.
+///
+/// Where the filters let everything through, the visible list is the file list
+/// itself (shared, not copied).
 pub fn apply_filters(state: &mut AppState) {
-    let all_dirs_in_full_list: HashSet<PathBuf> = state
-        .full_file_list
-        .iter()
-        .filter(|i| i.is_directory)
-        .map(|i| i.path.clone())
-        .collect();
+    let filtered = FilterInputs::of(state).apply(&state.shared_full_file_list());
+    state.set_shared_filtered_file_list(filtered);
+}
 
-    // A directory whose content has not been loaded is not known to be empty.
-    let unloaded_dirs: HashSet<PathBuf> = all_dirs_in_full_list
-        .difference(&state.loaded_dirs)
-        .cloned()
-        .collect();
+/// Everything the filters make their result of, apart from the file list: the
+/// values as they were in the state at one moment.
+///
+/// This is what lets the filters be applied without the state, i.e. without the
+/// lock on it ([`FilterInputs::apply`]), and what tells afterwards whether the
+/// result still belongs to the state ([`FilterInputs::is_current`]). The filters
+/// applied to the state itself ([`apply_filters`]) go the same way, so there is one
+/// definition of what they do.
+#[derive(Debug, Clone)]
+pub(crate) struct FilterInputs {
+    root_path: PathBuf,
+    search_query: String,
+    extension_filter: String,
+    case_sensitive: bool,
+    /// The matches of the content filter, `None` if there is none to apply
+    /// ([`AppState::content_filter_matches`]).
+    content_matches: Option<Arc<HashSet<PathBuf>>>,
+    /// The setting. Empty directories are removed from a complete list only.
+    remove_empty_directories: bool,
+    is_fully_scanned: bool,
+    loaded_dirs: LoadedDirs,
+}
 
-    let filtered = apply_filters_on_data(
-        &state.full_file_list,
-        &PathBuf::from(&state.current_path),
-        &state.config,
-        &state.file_name_matcher(),
-        state.content_filter_matches(),
-        &unloaded_dirs,
-        state.is_fully_scanned,
-    );
-    state.set_filtered_file_list(filtered);
+/// The directories whose content is in the list: an empty directory that is not
+/// one of them is not known to be empty, and stays.
+#[derive(Debug, Clone)]
+enum LoadedDirs {
+    /// Empty directories are not removed, so it does not matter.
+    NotAsked,
+    These(HashSet<PathBuf>),
+    /// Every directory of the list.
+    All,
+}
+
+impl FilterInputs {
+    /// The inputs as they are in `state`.
+    pub(crate) fn of(state: &AppState) -> Self {
+        let remove_empty_directories = state.config.remove_empty_directories;
+        Self {
+            root_path: PathBuf::from(&state.current_path),
+            search_query: state.search_query.clone(),
+            extension_filter: state.extension_filter.clone(),
+            case_sensitive: state.config.case_sensitive_search,
+            content_matches: state.shared_content_filter_matches(),
+            remove_empty_directories,
+            is_fully_scanned: state.is_fully_scanned,
+            loaded_dirs: if remove_empty_directories && state.is_fully_scanned {
+                LoadedDirs::These(state.loaded_dirs.clone())
+            } else {
+                LoadedDirs::NotAsked
+            },
+        }
+    }
+
+    /// `true` if these are the inputs of `state` as it is now: whatever these
+    /// inputs made of a list, the filters of `state` make of the same list.
+    ///
+    /// The matches of the content filter are the same if they are the same set (the
+    /// same allocation: the state gets another one whenever they are replaced), not
+    /// if they are equal.
+    pub(crate) fn is_current(&self, state: &AppState) -> bool {
+        let same_matches = match (&self.content_matches, state.shared_content_filter_matches()) {
+            (None, None) => true,
+            (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, &theirs),
+            _ => false,
+        };
+        same_matches
+            && self.root_path == Path::new(&state.current_path)
+            && self.search_query == state.search_query
+            && self.extension_filter == state.extension_filter
+            && self.case_sensitive == state.config.case_sensitive_search
+            && self.remove_empty_directories == state.config.remove_empty_directories
+            && self.is_fully_scanned == state.is_fully_scanned
+            && match &self.loaded_dirs {
+                LoadedDirs::NotAsked | LoadedDirs::All => true,
+                LoadedDirs::These(loaded_dirs) => *loaded_dirs == state.loaded_dirs,
+            }
+    }
+
+    /// The path the list lies below.
+    pub(crate) fn root_path(&self) -> &Path {
+        &self.root_path
+    }
+
+    /// The inputs with `matches` as the matches of the content filter.
+    pub(crate) fn with_content_matches(mut self, matches: Arc<HashSet<PathBuf>>) -> Self {
+        self.content_matches = Some(matches);
+        self
+    }
+
+    /// The inputs with `directory` loaded as well.
+    pub(crate) fn with_loaded_directory(mut self, directory: &Path) -> Self {
+        if let LoadedDirs::These(loaded_dirs) = &mut self.loaded_dirs {
+            loaded_dirs.insert(directory.to_path_buf());
+        }
+        self
+    }
+
+    /// The inputs for the list once it is complete: every directory is loaded.
+    pub(crate) fn of_the_complete_list(mut self) -> Self {
+        self.is_fully_scanned = true;
+        self.loaded_dirs = LoadedDirs::All;
+        self
+    }
+
+    fn removes_empty_directories(&self) -> bool {
+        self.remove_empty_directories && self.is_fully_scanned
+    }
+
+    fn name_matcher(&self) -> FileNameMatcher {
+        FileNameMatcher::new(
+            &self.search_query,
+            &self.extension_filter,
+            self.case_sensitive,
+        )
+    }
+
+    /// `true` if the filters let every item of a list through: the filtered list is
+    /// then the list, item by item.
+    ///
+    /// This restates what [`apply_filters_on_data`] does when none of its steps is
+    /// active, for the callers that want to know it without running the filters.
+    pub(crate) fn lets_everything_through(&self) -> bool {
+        !self.removes_empty_directories()
+            && self.content_matches.is_none()
+            && !self.name_matcher().is_active()
+    }
+
+    /// What the filters make of `list`. Where they let everything through, that is
+    /// `list` itself: no item is copied.
+    pub(crate) fn apply(&self, list: &Arc<Vec<FileItem>>) -> Arc<Vec<FileItem>> {
+        if self.lets_everything_through() {
+            return Arc::clone(list);
+        }
+        // A directory whose content has not been loaded is not known to be empty.
+        let unloaded_dirs: HashSet<PathBuf> = match &self.loaded_dirs {
+            LoadedDirs::These(loaded_dirs) if self.removes_empty_directories() => list
+                .iter()
+                .filter(|item| item.is_directory && !loaded_dirs.contains(&item.path))
+                .map(|item| item.path.clone())
+                .collect(),
+            _ => HashSet::new(),
+        };
+        Arc::new(apply_filters_on_data(
+            list,
+            &self.root_path,
+            self.removes_empty_directories(),
+            &self.name_matcher(),
+            self.content_matches.as_deref(),
+            &unloaded_dirs,
+        ))
+    }
 }
 
 /// Applies the filters after the filter texts have changed, and reveals what the
@@ -88,7 +224,7 @@ fn directories_of_matches(state: &AppState, limit: usize) -> Vec<PathBuf> {
     let items = state.filtered_file_list();
     let index = state.file_tree();
     let name_matcher = state.file_name_matcher();
-    let content_matches = &state.content_search_results;
+    let content_matches = state.content_search_results();
     if !name_matcher.is_active() && content_matches.is_empty() {
         return Vec::new();
     }
@@ -160,14 +296,13 @@ fn get_required_ancestors(file_paths: &HashSet<PathBuf>, root_path: &Path) -> Ha
 fn apply_filters_on_data(
     full_file_list: &[FileItem],
     root_path: &Path,
-    config: &AppConfig,
+    remove_empty_directories: bool,
     name_matcher: &FileNameMatcher,
     content_matches: Option<&HashSet<PathBuf>>,
     dirs_to_preserve: &HashSet<PathBuf>,
-    is_fully_scanned: bool,
 ) -> Vec<FileItem> {
     // Step 1: Create the base list. If "remove empty" is on, prune the full list first.
-    let mut working_list: Vec<FileItem> = if config.remove_empty_directories && is_fully_scanned {
+    let mut working_list: Vec<FileItem> = if remove_empty_directories {
         SearchEngine::remove_empty_directories(
             full_file_list.to_vec(),
             full_file_list,
@@ -239,12 +374,10 @@ mod tests {
         state.current_path = "/project".to_string();
         for directory in 0..directories {
             let path = format!("/project/dir{directory:04}");
-            state
-                .full_file_list
-                .push(create_test_file_item(&path, true));
-            state
-                .full_file_list
-                .push(create_test_file_item(&format!("{path}/match.rs"), false));
+            state.edit_full_file_list(|list| {
+                list.push(create_test_file_item(&path, true));
+                list.push(create_test_file_item(&format!("{path}/match.rs"), false));
+            });
         }
         state.is_fully_scanned = true;
         state
@@ -285,7 +418,7 @@ mod tests {
         let mut state = AppState::default();
         state.config = create_test_config();
         state.current_path = "/project".to_string();
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             create_test_file_item("/project/a", true),
             create_test_file_item("/project/a/deep", true),
             create_test_file_item("/project/a/deep/hit.rs", false),
@@ -294,7 +427,7 @@ mod tests {
             create_test_file_item("/project/b/miss.txt", false),
             create_test_file_item("/project/c", true),
             create_test_file_item("/project/c/hit.rs", false),
-        ];
+        ]);
         state.is_fully_scanned = true;
         state.extension_filter = "rs".to_string();
 
@@ -312,7 +445,9 @@ mod tests {
         apply_filters(&mut state);
         auto_expand_for_matches(&mut state);
         assert!(state.expanded_dirs.is_empty());
-        state.content_search_results = HashSet::from([PathBuf::from("/project/dir0001/match.rs")]);
+        state.set_content_search_results(HashSet::from([PathBuf::from(
+            "/project/dir0001/match.rs",
+        )]));
         auto_expand_for_matches(&mut state);
         assert_eq!(
             state.expanded_dirs,
@@ -335,11 +470,11 @@ mod tests {
         let mut state = AppState::default();
         state.config = create_test_config();
         state.current_path = "/project".to_string();
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             create_test_file_item("/project/src", true),
             create_test_file_item("/project/src/main.rs", false),
             create_test_file_item("/project/src/lib.rs", false),
-        ];
+        ]);
         state.search_query = "main".to_string();
         apply_filters(&mut state);
 
@@ -355,11 +490,11 @@ mod tests {
         let mut state = AppState::default();
         state.config = create_test_config();
         state.current_path = "/project".to_string();
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             create_test_file_item("/project/src", true),
             create_test_file_item("/project/src/main.rs", false),
             create_test_file_item("/project/README.md", false),
-        ];
+        ]);
         state.extension_filter = "md".to_string();
         apply_filters(&mut state);
 
@@ -377,13 +512,13 @@ mod tests {
         let mut state = AppState::default();
         state.config = create_test_config();
         state.current_path = "/project".to_string();
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             create_test_file_item("/project/src", true),
             create_test_file_item("/project/src/main.rs", false),
             create_test_file_item("/project/README.md", false),
-        ];
+        ]);
         state.content_search_query = "nonexistent".to_string();
-        state.content_search_results = HashSet::new(); // No matches
+        state.set_content_search_results(HashSet::new()); // No matches
         apply_filters(&mut state);
 
         assert_eq!(state.filtered_file_list().len(), 0);
@@ -402,10 +537,10 @@ mod tests {
         let mut state = AppState::default();
         state.config = create_test_config();
         state.current_path = "/project".to_string();
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             create_test_file_item("/project/release notes.md", false),
             create_test_file_item("/project/main.rs", false),
-        ];
+        ]);
         state
     }
 
@@ -454,11 +589,11 @@ mod tests {
         let mut state = state_with_and_without_blank();
         state.content_search_query = " \t".to_string();
 
-        state.content_search_results = HashSet::from([PathBuf::from("/project/main.rs")]);
+        state.set_content_search_results(HashSet::from([PathBuf::from("/project/main.rs")]));
         apply_filters(&mut state);
         assert_eq!(visible_paths(&state).len(), 2);
 
-        state.content_search_results.clear();
+        state.set_content_search_results(HashSet::new());
         apply_filters(&mut state);
         assert_eq!(visible_paths(&state).len(), 2);
         assert_eq!(generate_ui_state(&state).root_rows().len(), 2);
@@ -471,11 +606,11 @@ mod tests {
         let mut state = AppState::default();
         state.config = create_test_config();
         state.current_path = "/project".to_string();
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             create_test_file_item("/project/build", true),
             create_test_file_item("/project/build/Makefile", false),
             create_test_file_item("/project/build/main.rs", false),
-        ];
+        ]);
         state.extension_filter = "No Extension".to_string();
 
         apply_filters(&mut state);
@@ -495,7 +630,7 @@ mod tests {
         let mut state = AppState::default();
         state.config = create_test_config();
         state.current_path = "/project".to_string();
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             create_test_file_item("/project/src", true),
             create_test_file_item("/project/src/deep", true),
             create_test_file_item("/project/src/deep/needle.rs", false),
@@ -504,7 +639,7 @@ mod tests {
             create_test_file_item("/project/found_by_content.txt", false),
             create_test_file_item("/project/other", true),
             create_test_file_item("/project/other/hit.txt", false),
-        ];
+        ]);
         state.search_query = "needle".to_string();
         apply_filters(&mut state);
         auto_expand_for_matches(&mut state);
@@ -521,7 +656,7 @@ mod tests {
         state.search_query.clear();
         state.expanded_dirs.clear();
         state.content_search_query = "hit".to_string();
-        state.content_search_results = HashSet::from([PathBuf::from("/project/other/hit.txt")]);
+        state.set_content_search_results(HashSet::from([PathBuf::from("/project/other/hit.txt")]));
         apply_filters(&mut state);
         auto_expand_for_matches(&mut state);
         assert_eq!(
@@ -550,10 +685,10 @@ mod tests {
         let empty_dir_path = PathBuf::from("/project/empty_dir");
         let file_path = PathBuf::from("/project/file.txt");
 
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             create_test_file_item("/project/empty_dir", true),
             create_test_file_item("/project/file.txt", false),
-        ];
+        ]);
         state.loaded_dirs.insert(empty_dir_path.clone());
         state.is_fully_scanned = true;
         state.expanded_dirs.insert(empty_dir_path.clone()); // User expands the empty dir

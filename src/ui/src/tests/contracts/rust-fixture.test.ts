@@ -18,6 +18,7 @@ import {
   CommandSchemas,
   ConfigOptionSchema,
   OutputSizeNoticeSchema,
+  IgnorePathRefusalSchema,
   SaveFilePayloadSchema,
   SaveResultSchema,
   ShowGeneratedArgsSchema,
@@ -279,8 +280,13 @@ const outputEventSchemas: Record<string, z.ZodTypeAny> = {
   // These handlers take one argument, an object.
   saveResult: SaveResultSchema,
   outputSizeNotice: OutputSizeNoticeSchema,
+  ignorePathRefused: IgnorePathRefusalSchema,
 };
-const takesOneObject = new Set(["saveResult", "outputSizeNotice"]);
+const takesOneObject = new Set([
+  "saveResult",
+  "outputSizeNotice",
+  "ignorePathRefused",
+]);
 
 describe("[IPC Contracts] host calls of the generated output", () => {
   it("knows exactly the handlers the host calls", () => {
@@ -319,6 +325,17 @@ describe("[IPC Contracts] host calls of the generated output", () => {
     );
     expect(statuses("outputSizeNotice")).toEqual(
       new Set(OutputSizeNoticeSchema.options.map((o) => o.shape.status.value)),
+    );
+  });
+
+  it("covers every reason the ignore button is refused for on both sides", () => {
+    const reasons = new Set(
+      outputEvents.ignorePathRefused.map(
+        ([argument]) => (argument as { reason: string }).reason,
+      ),
+    );
+    expect(reasons).toEqual(
+      new Set(IgnorePathRefusalSchema.options.map((o) => o.shape.reason.value)),
     );
   });
 });

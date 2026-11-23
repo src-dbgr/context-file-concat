@@ -219,6 +219,11 @@ register("en", {
   "toast.outputTooLargeTitle": "Output too large",
   "toast.outputTooLarge":
     "The selection would produce about {size}; the limit is {limit}. Select fewer files.",
+  "toast.ignoreRefusedTitle": "Not ignored",
+  "toast.ignoreRefusedWhitespace":
+    "No ignore pattern can name \u201c{name}\u201d: the name ends with a whitespace character that a pattern drops. Nothing was added. Rename the file, or ignore its folder.",
+  "toast.ignoreRefusedNotUnicode":
+    "No ignore pattern can name \u201c{name}\u201d: the name is not valid Unicode. Nothing was added. Rename the entry, or ignore its folder.",
   "toast.renderFailed": "An error occurred",
   "toast.errorTitle": "Error",
   "preview.copied": "Copied!",
@@ -376,6 +381,11 @@ register("de", {
   "toast.outputTooLargeTitle": "Ausgabe zu groß",
   "toast.outputTooLarge":
     "Die Auswahl ergäbe etwa {size}; die Grenze liegt bei {limit}. Wähle weniger Dateien aus.",
+  "toast.ignoreRefusedTitle": "Nicht ignoriert",
+  "toast.ignoreRefusedWhitespace":
+    "Kein Ignore-Muster kann \u201e{name}\u201c benennen: Der Name endet mit einem Leerraumzeichen, das ein Muster verwirft. Es wurde nichts hinzugefügt. Benenne die Datei um oder ignoriere ihren Ordner.",
+  "toast.ignoreRefusedNotUnicode":
+    "Kein Ignore-Muster kann \u201e{name}\u201c benennen: Der Name ist kein gültiges Unicode. Es wurde nichts hinzugefügt. Benenne den Eintrag um oder ignoriere seinen Ordner.",
   "toast.renderFailed": "Ein Fehler ist aufgetreten",
   "toast.errorTitle": "Fehler",
   "preview.copied": "Kopiert!",

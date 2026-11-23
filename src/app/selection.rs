@@ -48,9 +48,13 @@ pub(crate) struct SelectionChange {
 /// keep a revision and a short journal of the single changes: that is what lets the
 /// selection counts of the directories ([`SelectionCountsCache`]) follow a click in
 /// the time of the click instead of counting the whole tree again.
+///
+/// The set is shared, so that it can be read without the lock on the state it lives
+/// in ([`SelectedFiles::snapshot`]). A change while somebody else holds it is made to
+/// a copy, which becomes the set.
 #[derive(Debug)]
 pub struct SelectedFiles {
-    files: HashSet<PathBuf>,
+    files: Arc<HashSet<PathBuf>>,
     /// Identifies the current content, see [`NEXT_REVISION`].
     revision: u64,
     /// The revision the journal starts from.
@@ -65,7 +69,7 @@ impl SelectedFiles {
         if self.files.contains(&path) {
             return false;
         }
-        self.files.insert(path.clone());
+        Arc::make_mut(&mut self.files).insert(path.clone());
         self.record(path, true);
         true
     }
@@ -77,9 +81,10 @@ impl SelectedFiles {
 
     /// Deselects `path`. Returns `true` if it was selected.
     pub fn remove(&mut self, path: &Path) -> bool {
-        if !self.files.remove(path) {
+        if !self.files.contains(path) {
             return false;
         }
+        Arc::make_mut(&mut self.files).remove(path);
         self.record(path.to_path_buf(), false);
         true
     }
@@ -88,8 +93,9 @@ impl SelectedFiles {
     pub fn extend(&mut self, paths: Vec<PathBuf>) {
         if Self::is_wholesale(paths.len()) {
             let before = self.files.len();
-            self.files.reserve(paths.len());
-            self.files.extend(paths);
+            let files = Arc::make_mut(&mut self.files);
+            files.reserve(paths.len());
+            files.extend(paths);
             if self.files.len() != before {
                 self.changed_wholesale();
             }
@@ -104,8 +110,9 @@ impl SelectedFiles {
     pub fn remove_all(&mut self, paths: &[PathBuf]) {
         if Self::is_wholesale(paths.len()) {
             let before = self.files.len();
+            let files = Arc::make_mut(&mut self.files);
             for path in paths {
-                self.files.remove(path);
+                files.remove(path);
             }
             if self.files.len() != before {
                 self.changed_wholesale();
@@ -120,18 +127,48 @@ impl SelectedFiles {
     /// Deselects everything.
     pub fn clear(&mut self) {
         if !self.files.is_empty() {
-            self.files.clear();
+            self.files = Arc::default();
             self.changed_wholesale();
         }
     }
 
     /// Keeps the paths `keep` returns `true` for.
-    pub fn retain(&mut self, keep: impl FnMut(&PathBuf) -> bool) {
-        let before = self.files.len();
-        self.files.retain(keep);
-        if self.files.len() != before {
-            self.changed_wholesale();
+    pub fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) {
+        // Looked at before anything is touched: a set that stays is not copied.
+        if self.files.iter().all(&mut keep) {
+            return;
         }
+        Arc::make_mut(&mut self.files).retain(keep);
+        self.changed_wholesale();
+    }
+
+    /// The selection as it is now, to be read after the lock on its owner has been
+    /// released.
+    pub(crate) fn snapshot(&self) -> SelectionSnapshot {
+        SelectionSnapshot {
+            files: Arc::clone(&self.files),
+            revision: self.revision,
+        }
+    }
+
+    /// Keeps the paths `keep` returns `true` for, like [`SelectedFiles::retain`],
+    /// for a caller that has asked `keep` about a snapshot of the selection already:
+    /// `rejected` says which paths of that snapshot do not stay. Only what was
+    /// selected since then is looked at here, so this costs what has changed, not
+    /// what is selected.
+    pub(crate) fn retain_since(&mut self, rejected: Rejected, keep: impl Fn(&Path) -> bool) {
+        let Some(changes) = self.changes_since(rejected.revision) else {
+            // More has changed than is known: everything is looked at.
+            self.retain(|path| keep(path));
+            return;
+        };
+        let rejected_since: Vec<PathBuf> = changes
+            .iter()
+            .filter(|change| change.selected && !keep(&change.path))
+            .map(|change| change.path.clone())
+            .collect();
+        self.remove_all(&rejected.paths);
+        self.remove_all(&rejected_since);
     }
 
     /// Identifies the current content of the set.
@@ -179,6 +216,43 @@ impl SelectedFiles {
     }
 }
 
+/// The selection as it was at one moment, see [`SelectedFiles::snapshot`].
+#[derive(Debug)]
+pub(crate) struct SelectionSnapshot {
+    files: Arc<HashSet<PathBuf>>,
+    revision: u64,
+}
+
+impl SelectionSnapshot {
+    /// The paths of the snapshot that `keep` does not return `true` for. The
+    /// snapshot ends here: nobody is to hold the selection longer than needed.
+    pub(crate) fn rejected(self, keep: impl Fn(&Path) -> bool) -> Rejected {
+        Rejected {
+            paths: self
+                .files
+                .iter()
+                .filter(|path| !keep(path))
+                .cloned()
+                .collect(),
+            revision: self.revision,
+        }
+    }
+
+    /// `true` if nothing was selected.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
+/// The paths of a snapshot of the selection that are not to stay selected, see
+/// [`SelectedFiles::retain_since`].
+#[derive(Debug)]
+pub(crate) struct Rejected {
+    paths: Vec<PathBuf>,
+    /// The revision of the selection the snapshot was taken of.
+    revision: u64,
+}
+
 impl Default for SelectedFiles {
     fn default() -> Self {
         Self::from(HashSet::new())
@@ -189,7 +263,7 @@ impl From<HashSet<PathBuf>> for SelectedFiles {
     fn from(files: HashSet<PathBuf>) -> Self {
         let revision = next_revision();
         Self {
-            files,
+            files: Arc::new(files),
             revision,
             journal_base: revision,
             journal: Vec::new(),
@@ -213,7 +287,7 @@ impl std::ops::Deref for SelectedFiles {
 
 impl PartialEq<HashSet<PathBuf>> for SelectedFiles {
     fn eq(&self, other: &HashSet<PathBuf>) -> bool {
-        &self.files == other
+        *self.files == *other
     }
 }
 
@@ -442,6 +516,49 @@ impl DirectorySelection {
         self.add(items, index, &change.path, change.selected);
     }
 
+    /// The counts of `items`, which is the list these counts were made for with
+    /// items appended from position `base_len` on; `index` is the hierarchy of
+    /// `items` and `selected` the selection the counts are up to date with.
+    ///
+    /// Appending does not change what was counted: a file that was there is still
+    /// below the same directories. What is new are the appended files that are
+    /// selected, and each of them is counted into the directories above it. The
+    /// cost is in proportion to what was appended, not to the list.
+    ///
+    /// `None` if the counts do not follow that simply, and the list has to be
+    /// counted as a whole: an appended item is listed more than once (it stands
+    /// for an item that was there, or for another appended one, whose weights
+    /// change by it), or an appended directory is the parent of items that were
+    /// there (which were below no listed directory before).
+    pub(crate) fn extended(
+        mut self,
+        items: &[FileItem],
+        index: &TreeIndex,
+        base_len: usize,
+        selected: &HashSet<PathBuf>,
+    ) -> Option<Self> {
+        if self.selected_below.len() != base_len || base_len > items.len() {
+            return None;
+        }
+        let follows = (base_len..items.len()).all(|item| {
+            index.occurrences(item) <= 1
+                && !(items[item].is_directory
+                    && index.children(item).iter().any(|&child| child < base_len))
+        });
+        if !follows {
+            return None;
+        }
+        self.selected_below.resize(items.len(), 0);
+        if !selected.is_empty() {
+            for file in base_len..items.len() {
+                if !items[file].is_directory && selected.contains(&items[file].path) {
+                    self.add_file(items, index, file, true);
+                }
+            }
+        }
+        Some(self)
+    }
+
     /// Counts the file at `path` in (`selected`) or out of the directories above it.
     fn add(&mut self, items: &[FileItem], index: &TreeIndex, path: &Path, selected: bool) {
         let Some(file) = index.position(items, path) else {
@@ -450,6 +567,12 @@ impl DirectorySelection {
         if items[file].is_directory {
             return;
         }
+        self.add_file(items, index, file, selected);
+    }
+
+    /// Counts the file at position `file` in (`selected`) or out of the directories
+    /// above it.
+    fn add_file(&mut self, items: &[FileItem], index: &TreeIndex, file: usize, selected: bool) {
         // How often the directory at hand counts the file; more than once only in a
         // list that names a path more than once.
         let mut weight = 1usize;
@@ -551,6 +674,50 @@ impl SelectionCountsCache {
             counts: Arc::clone(&counts),
         });
         counts
+    }
+
+    /// The counts for `items` and `selected` if the cache has them at hand (it
+    /// holds the counts of this list and can follow the selection from there),
+    /// taken out of the cache; `None` otherwise. Nothing is counted for this.
+    ///
+    /// This is for the owner of a list that is about to be replaced by a longer
+    /// one, see [`DirectorySelection::extended`].
+    pub(crate) fn take_current(
+        &self,
+        list_revision: u64,
+        root_path: &Path,
+        items: &[FileItem],
+        index: &TreeIndex,
+        selected: &SelectedFiles,
+    ) -> Option<DirectorySelection> {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        let cached = slot.take().filter(|cached| {
+            cached.list_revision == list_revision && cached.root_path == root_path
+        })?;
+        let changes = selected.changes_since(cached.selection_revision)?;
+        let mut counts = Arc::unwrap_or_clone(cached.counts);
+        for change in changes {
+            counts.apply(items, index, change);
+        }
+        Some(counts)
+    }
+
+    /// Makes `counts`, which were made elsewhere for the list of `list_revision`
+    /// below `root_path` and the selection of `selection_revision`, the cached ones.
+    pub(crate) fn install(
+        &self,
+        list_revision: u64,
+        root_path: &Path,
+        selection_revision: u64,
+        counts: DirectorySelection,
+    ) {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some(CachedSelection {
+            list_revision,
+            root_path: root_path.to_path_buf(),
+            selection_revision,
+            counts: Arc::new(counts),
+        });
     }
 
     fn count(
@@ -909,6 +1076,198 @@ mod tests {
         let counts = cache.get_or_update(2, Path::new("/other"), &items, &index, &files);
         assert_eq!(cache.full_count_count(), 4);
         assert_eq!(state_of(&counts, &files, "/r/src"), SelectionState::None);
+    }
+
+    /// Extending the counts of a list by what was appended to it gives the counts a
+    /// fresh count of the longer list gives, whatever the list is like (any order,
+    /// paths listed twice, items whose directory is not listed or listed later) and
+    /// wherever it is cut; where they do not follow that simply, it says so.
+    #[test]
+    fn extended_counts_match_a_fresh_count_of_the_longer_list() {
+        // The paths of a small tree; a list is some of them in some order, some
+        // more than once.
+        let paths: Vec<(String, bool)> = ["/r/a", "/r/a/x", "/r/b"]
+            .into_iter()
+            .map(|directory| (directory.to_string(), true))
+            .chain(
+                [
+                    "/r/f", "/r/a/f", "/r/a/g", "/r/a/x/f", "/r/a/x/g", "/r/b/f", "/r/c/f",
+                ]
+                .into_iter()
+                .map(|file| (file.to_string(), false)),
+            )
+            .collect();
+        let mut random = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |bound: usize| {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            (random % bound as u64) as usize
+        };
+
+        let (mut extended, mut refused, mut refused_for_a_parent) = (0, 0, 0);
+        for round in 0..20_000 {
+            let length = 1 + next(12);
+            // Mostly the order of a walk and no path twice, as lists are.
+            let tidy = next(3) > 0;
+            let items: Vec<FileItem> = if tidy {
+                let mut chosen: Vec<&(String, bool)> =
+                    paths.iter().filter(|_| next(3) > 0).collect();
+                chosen.sort();
+                chosen
+                    .iter()
+                    .map(|(path, is_dir)| item(path, *is_dir))
+                    .collect()
+            } else {
+                (0..length)
+                    .map(|_| {
+                        let (path, is_directory) = &paths[next(paths.len())];
+                        item(path, *is_directory)
+                    })
+                    .collect()
+            };
+            let selection: HashSet<PathBuf> = paths
+                .iter()
+                .filter(|(_, is_directory)| !is_directory && next(2) == 0)
+                .map(|(path, _)| PathBuf::from(path))
+                .collect();
+            let base_len = next(items.len() + 1);
+            let root = Path::new("/r");
+
+            let base_index = TreeIndex::build(&items[..base_len], root);
+            let base = DirectorySelection::count(&items[..base_len], &base_index, &selection);
+            let index = TreeIndex::build(&items, root);
+            let fresh = DirectorySelection::count(&items, &index, &selection);
+
+            match base.extended(&items, &index, base_len, &selection) {
+                Some(counts) => {
+                    extended += 1;
+                    for (position, listed) in items.iter().enumerate() {
+                        if listed.is_directory {
+                            assert_eq!(
+                                counts.selected_below[position],
+                                fresh.selected_below[position],
+                                "round {round}: {} in {items:?} cut at {base_len}",
+                                listed.path.display()
+                            );
+                        }
+                    }
+                }
+                None => {
+                    refused += 1;
+                    let twice = (base_len..items.len()).any(|item| index.occurrences(item) > 1);
+                    refused_for_a_parent += usize::from(!twice);
+                }
+            }
+        }
+        // All three happen, so all three are tested.
+        assert!(extended > 5_000, "{extended}");
+        assert!(refused > 1_000, "{refused}");
+        assert!(refused_for_a_parent > 100, "{refused_for_a_parent}");
+
+        // Counts of another list are not extended.
+        let items = project();
+        let index = TreeIndex::build(&items, Path::new("/r"));
+        let counts = DirectorySelection::count(&items, &index, &HashSet::new());
+        assert!(counts
+            .clone()
+            .extended(&items, &index, items.len() - 1, &HashSet::new())
+            .is_none());
+        assert!(counts
+            .extended(&items[..2], &index, items.len(), &HashSet::new())
+            .is_none());
+    }
+
+    /// The cache hands out the counts it has for a list (following the selection
+    /// from where it was), and takes counts that were made elsewhere.
+    #[test]
+    fn the_cache_hands_out_its_counts_and_takes_counts_made_elsewhere() {
+        let items = project();
+        let root = Path::new("/r");
+        let index = TreeIndex::build(&items, root);
+        let cache = SelectionCountsCache::default();
+        let mut files = SelectedFiles::default();
+
+        // Nothing is counted for this.
+        assert!(cache
+            .take_current(1, root, &items, &index, &files)
+            .is_none());
+        assert_eq!(cache.full_count_count(), 0);
+
+        drop(cache.get_or_update(1, root, &items, &index, &files));
+        files.insert(path("/r/src/core/a.rs"));
+        assert!(cache
+            .take_current(2, root, &items, &index, &files)
+            .is_none());
+        drop(cache.get_or_update(1, root, &items, &index, &files));
+        files.insert(path("/r/src/main.rs"));
+        let counts = cache.take_current(1, root, &items, &index, &files).unwrap();
+        assert_eq!(counts, DirectorySelection::count(&items, &index, &files));
+
+        // The counts of a longer list, installed for the selection as it is.
+        let mut longer = items.clone();
+        longer.push(item("/r/src/core/c.rs", false));
+        files.insert(path("/r/src/core/c.rs"));
+        let longer_index = TreeIndex::build(&longer, root);
+        let counts = counts
+            .extended(&longer, &longer_index, items.len(), &files)
+            .unwrap();
+        let counted = cache.full_count_count();
+        cache.install(2, root, files.revision(), counts);
+        files.remove(&path("/r/src/core/a.rs"));
+        let current = cache.get_or_update(2, root, &longer, &longer_index, &files);
+        assert_eq!(cache.full_count_count(), counted, "not counted again");
+        assert_eq!(
+            *current,
+            DirectorySelection::count(&longer, &longer_index, &files)
+        );
+    }
+
+    /// A snapshot is the selection of its moment, whatever happens to the selection
+    /// afterwards; and what was asked about it does not have to be asked again.
+    #[test]
+    fn a_snapshot_answers_for_its_moment_and_the_rest_is_caught_up() {
+        let listed = |path: &Path| path.starts_with("/r/listed");
+        let mut files = SelectedFiles::default();
+        files.extend(vec![
+            path("/r/listed/a"),
+            path("/r/gone/b"),
+            path("/r/gone/c"),
+        ]);
+
+        let snapshot = files.snapshot();
+        assert!(!snapshot.is_empty());
+        // Selected and deselected since the snapshot.
+        files.insert(path("/r/listed/d"));
+        files.insert(path("/r/gone/e"));
+        files.remove(&path("/r/gone/c"));
+        let rejected = snapshot.rejected(listed);
+        assert_eq!(rejected.paths.len(), 2, "what the snapshot held");
+
+        files.retain_since(rejected, listed);
+        assert_eq!(
+            files,
+            HashSet::from([path("/r/listed/a"), path("/r/listed/d")])
+        );
+
+        // More has changed since the snapshot than is known: everything is asked.
+        let rejected = files.snapshot().rejected(listed);
+        files.extend(
+            (0..=JOURNAL_CAPACITY)
+                .map(|file| path(&format!("/r/gone/{file}")))
+                .collect(),
+        );
+        files.insert(path("/r/listed/z"));
+        files.retain_since(rejected, listed);
+        assert_eq!(files.len(), 3);
+
+        // A selection that stays as it is keeps its revision.
+        let revision = files.revision();
+        files.retain(|_| true);
+        let rejected = files.snapshot().rejected(listed);
+        files.retain_since(rejected, listed);
+        assert_eq!(files.revision(), revision);
+        assert!(SelectedFiles::default().snapshot().is_empty());
     }
 
     #[test]

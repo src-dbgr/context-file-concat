@@ -308,7 +308,7 @@ impl VisibleRowsCache {
 
 /// `true` if the tree is not shown at all, whatever the file list holds.
 fn is_tree_suppressed(state: &AppState) -> bool {
-    (state.is_scanning() && state.full_file_list.is_empty())
+    (state.is_scanning() && state.full_file_list().is_empty())
         // A content filter without matches leaves nothing to show. (While the first
         // search for a query is still running there is no content filter yet.)
         || state
@@ -382,7 +382,7 @@ fn rows_in(state: &AppState, rows: &VisibleRows, window: Range<usize>) -> Vec<Tr
         directory_selection: &state.directory_selection(),
         expanded: &state.expanded_dirs,
         loaded_dirs: &state.loaded_dirs,
-        content_search_matches: &state.content_search_results,
+        content_search_matches: state.content_search_results(),
         name_matcher: &state.file_name_matcher(),
         previewed_path: state.previewed_file_path.as_deref(),
     };

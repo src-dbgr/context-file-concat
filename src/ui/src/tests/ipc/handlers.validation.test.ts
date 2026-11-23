@@ -109,6 +109,24 @@ describe("ipc/handlers – validation paths with real Zod schemas", () => {
     expect(warn).toHaveBeenCalledTimes(invalid.length);
   });
 
+  it("ignorePathRefused: an invalid refusal is ignored with a warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const invalid: unknown[] = [
+      { reason: "trailing_whitespace" },
+      { reason: "too_long", name: "a" },
+      { reason: "not_unicode", name: 1 },
+      { reason: "not_unicode", name: "a", extra: 0 },
+      "notes",
+      null,
+    ];
+    for (const refusal of invalid) {
+      window.ignorePathRefused(
+        refusal as Parameters<typeof window.ignorePathRefused>[0],
+      );
+    }
+    expect(warn).toHaveBeenCalledTimes(invalid.length);
+  });
+
   it("setDragState: invalid boolean is ignored with a warning", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     window.setDragState("true" as unknown as boolean);

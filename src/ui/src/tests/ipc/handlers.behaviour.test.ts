@@ -57,6 +57,7 @@ vi.mock("$lib/ipc/schema", () => {
     StatusMessageSchema: { safeParse: passthrough },
     SaveResultSchema: { safeParse: passthrough },
     OutputSizeNoticeSchema: { safeParse: passthrough },
+    IgnorePathRefusalSchema: { safeParse: passthrough },
     DragStateSchema: { safeParse: passthrough },
   };
 });
@@ -198,6 +199,33 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
       { title: "toast.outputTooLargeTitle", duration: 10_000 },
     );
     expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it("ignorePathRefused: says why the button added nothing, and for long enough", () => {
+    window.ignorePathRefused({
+      reason: "trailing_whitespace",
+      name: "notes\u00a0",
+    });
+    expect(toast.warning).toHaveBeenLastCalledWith(
+      'toast.ignoreRefusedWhitespace {"name":"notes\u00a0"}',
+      { title: "toast.ignoreRefusedTitle", duration: 10_000 },
+    );
+
+    window.ignorePathRefused({ reason: "not_unicode", name: "bad\ufffd.txt" });
+    expect(toast.warning).toHaveBeenLastCalledWith(
+      'toast.ignoreRefusedNotUnicode {"name":"bad\ufffd.txt"}',
+      { title: "toast.ignoreRefusedTitle", duration: 10_000 },
+    );
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("ignorePathRefused: a long name is cut", () => {
+    window.ignorePathRefused({
+      reason: "not_unicode",
+      name: "x".repeat(1000),
+    });
+    const [text] = toast.warning.mock.calls[0] as [string];
+    expect(text.length).toBeLessThan(400);
   });
 
   it("setDragState toggles css class on the file tree container", () => {

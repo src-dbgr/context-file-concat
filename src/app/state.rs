@@ -1,8 +1,8 @@
 //! Defines the central, mutable state of the application.
 
-use crate::app::selection::{DirectorySelection, SelectedFiles, SelectionCountsCache};
+use crate::app::selection::{DirectorySelection, Rejected, SelectedFiles, SelectionCountsCache};
 use crate::app::tracked::Tracked;
-use crate::app::tree_index::{TreeIndex, TreeIndexCache};
+use crate::app::tree_index::{IndexedList, TreeIndex, TreeIndexCache};
 use crate::app::view_model::TreeViewState;
 use crate::config::{AppConfig, ConfigSnapshot, ConfigStore};
 use crate::core::{is_blank, FileItem, FileNameMatcher, ScanProgress};
@@ -320,10 +320,11 @@ impl AheadOfWalk {
     }
 
     /// The paths the walk has not listed.
-    fn unconfirmed(self) -> HashSet<PathBuf> {
+    fn unconfirmed(&self) -> HashSet<PathBuf> {
         self.confirmed
-            .into_iter()
-            .filter_map(|(path, confirmed)| (!confirmed).then_some(path))
+            .iter()
+            .filter(|(_, confirmed)| !**confirmed)
+            .map(|(path, _)| path.clone())
             .collect()
     }
 }
@@ -364,6 +365,56 @@ pub enum AfterAbandonedScan {
     Reopen { path: PathBuf, token: ScanToken },
 }
 
+/// What the state has no use for any more and what takes time to drop: a file list or
+/// the hierarchy of one (an allocation or two per item, tens of milliseconds for a
+/// large project). Whoever is handed one holds the lock on the state; it is to be
+/// dropped after the lock has been released.
+#[must_use = "drop it after the lock on the state has been released"]
+#[derive(Default)]
+pub(crate) struct Discarded(Vec<Box<dyn Send>>);
+
+impl Discarded {
+    /// Adds `value` to what is dropped with this.
+    pub(crate) fn add(&mut self, value: impl Send + 'static) {
+        self.0.push(Box::new(value));
+    }
+}
+
+/// Lists that were prepared without holding the lock on the state, to be installed
+/// in one step ([`AppState::install_file_lists`]).
+pub(crate) struct FileLists {
+    /// The new file list; `None` if the file list stays as it is.
+    pub full: Option<Arc<Vec<FileItem>>>,
+    /// The new filtered list with its hierarchy; `None` if the filtered list stays
+    /// as it is.
+    pub filtered: Option<IndexedList>,
+    /// `Some(n)` if the new filtered list is the one before it with items appended
+    /// from position `n` on: what was counted for the list before still holds then.
+    pub appended_from: Option<usize>,
+}
+
+/// The items of `items` whose path is not in `list`, in their order.
+pub(crate) fn unlisted_items(list: &[FileItem], items: Vec<FileItem>) -> Vec<FileItem> {
+    let new_paths: HashSet<&Path> = items.iter().map(|item| item.path.as_path()).collect();
+    let already_listed: HashSet<PathBuf> = list
+        .iter()
+        .filter(|item| new_paths.contains(item.path.as_path()))
+        .map(|item| item.path.clone())
+        .collect();
+    drop(new_paths);
+    let mut items = items;
+    items.retain(|item| !already_listed.contains(&item.path));
+    items
+}
+
+/// The paths of the directories in `list`.
+pub(crate) fn directories_of(list: &[FileItem]) -> HashSet<PathBuf> {
+    list.iter()
+        .filter(|item| item.is_directory)
+        .map(|item| item.path.clone())
+        .collect()
+}
+
 /// Holds the complete, mutable state of the application.
 ///
 /// It is shared between threads (the event loop, the command lanes and background
@@ -375,10 +426,22 @@ pub struct AppState {
     /// The absolute path to the currently loaded directory.
     pub current_path: String,
     /// The complete, unfiltered list of all files and directories found in the scan.
-    pub full_file_list: Vec<FileItem>,
+    /// Private: it is read through [`AppState::full_file_list`] and changed through
+    /// methods that give it a new revision (`file_list_revision`), which is how
+    /// work that was prepared for one list can tell that the list is another one
+    /// now. Shared, so that such work can read it without holding the lock on the
+    /// state; whoever holds a second handle keeps an unchanged list.
+    full_file_list: Arc<Vec<FileItem>>,
+    /// Identifies the current content of `full_file_list`.
+    file_list_revision: u64,
     /// The list of files and directories visible in the UI after applying filters.
-    /// Private so that every change goes through [`AppState::set_filtered_file_list`].
-    filtered_file_list: Vec<FileItem>,
+    /// Private so that every change goes through [`AppState::set_filtered_file_list`]
+    /// or its relatives. Shared like the file list, and never changed in place.
+    /// Where the filters let everything through it is the file list itself, the
+    /// same allocation ([`AppState::filtered_list_is_file_list`]).
+    filtered_file_list: Arc<Vec<FileItem>>,
+    /// The revision of the file list the filtered list was made from.
+    filtered_from: u64,
     /// The set of absolute paths to files that are currently selected by the user.
     pub selected_files: SelectedFiles,
     /// The set of absolute paths to directories that are expanded in the UI tree.
@@ -396,8 +459,10 @@ pub struct AppState {
     pub extension_filter: String,
     /// The current search query for file content.
     pub content_search_query: String,
-    /// The set of paths that match the current content search query.
-    pub content_search_results: HashSet<PathBuf>,
+    /// The set of paths that match the current content search query. Private and
+    /// shared for the same reason as the file list: whoever holds a second handle
+    /// can tell by it whether the matches are still the same.
+    content_search_results: Arc<HashSet<PathBuf>>,
     /// `true` once a search for the content query has delivered its matches. Until
     /// then there is nothing the content filter could work with, see
     /// [`AppState::content_filter_matches`].
@@ -481,8 +546,10 @@ impl AppState {
         Self {
             config,
             current_path: String::new(),
-            full_file_list: Vec::new(),
-            filtered_file_list: Vec::new(),
+            full_file_list: Arc::default(),
+            file_list_revision: 0,
+            filtered_file_list: Arc::default(),
+            filtered_from: 0,
             selected_files: SelectedFiles::default(),
             expanded_dirs: Tracked::default(),
             collapsed_under_filter: HashSet::new(),
@@ -490,7 +557,7 @@ impl AppState {
             search_query: String::new(),
             extension_filter: String::new(),
             content_search_query: String::new(),
-            content_search_results: HashSet::new(),
+            content_search_results: Arc::default(),
             content_search_answered: false,
             current_config_filename: None,
             scan_progress: no_scan_progress(),
@@ -816,12 +883,38 @@ impl AppState {
         token: &ContentSearchToken,
         matches: HashSet<PathBuf>,
     ) -> bool {
+        self.finish_content_search_shared(token, Arc::new(matches))
+    }
+
+    /// [`AppState::finish_content_search`] with matches that the caller holds as
+    /// well: they become the matches of the state as that very set.
+    pub(crate) fn finish_content_search_shared(
+        &mut self,
+        token: &ContentSearchToken,
+        matches: Arc<HashSet<PathBuf>>,
+    ) -> bool {
         if !self.content_search.finish(&token.0) {
             return false;
         }
         self.content_search_results = matches;
         self.content_search_answered = true;
         true
+    }
+
+    /// `true` if `token` belongs to the content search whose matches are awaited.
+    pub(crate) fn is_current_content_search(&self, token: &ContentSearchToken) -> bool {
+        self.content_search.is_current(&token.0)
+    }
+
+    /// The paths that match the content query, as the last search delivered them.
+    pub fn content_search_results(&self) -> &HashSet<PathBuf> {
+        &self.content_search_results
+    }
+
+    /// Replaces the matches of the content query. They are a set of their own from
+    /// here on, also if they are equal to the previous ones.
+    pub fn set_content_search_results(&mut self, matches: HashSet<PathBuf>) {
+        self.content_search_results = Arc::new(matches);
     }
 
     /// Ends the search identified by `token` without a result (the search failed). The
@@ -837,7 +930,7 @@ impl AppState {
     /// running, so it cannot bring matches back. To be used when the query is cleared.
     pub fn clear_content_search(&mut self) {
         self.content_search.cancel();
-        self.content_search_results.clear();
+        self.set_content_search_results(HashSet::new());
         self.content_search_answered = false;
     }
 
@@ -853,7 +946,16 @@ impl AppState {
         }
         let awaiting_first_matches =
             self.content_search.is_active() && !self.content_search_answered;
-        (!awaiting_first_matches).then_some(&self.content_search_results)
+        (!awaiting_first_matches).then_some(&*self.content_search_results)
+    }
+
+    /// [`AppState::content_filter_matches`] as a handle that can be kept after the
+    /// lock on the state has been released, and compared with a later one: the
+    /// same allocation is the same set of matches.
+    pub(crate) fn shared_content_filter_matches(&self) -> Option<Arc<HashSet<PathBuf>>> {
+        self.content_filter_matches()
+            .is_some()
+            .then(|| Arc::clone(&self.content_search_results))
     }
 
     /// `true` if at least one of the three filters is set (not [blank](is_blank)).
@@ -984,6 +1086,39 @@ impl AppState {
         )
     }
 
+    /// The complete, unfiltered list of all files and directories found in the scan.
+    pub fn full_file_list(&self) -> &[FileItem] {
+        &self.full_file_list
+    }
+
+    /// The file list in a form that can be read after the lock on the state has
+    /// been released. It is the list of [`AppState::file_list_revision`] as it is
+    /// now; the state gets another one when the list changes.
+    pub(crate) fn shared_full_file_list(&self) -> Arc<Vec<FileItem>> {
+        Arc::clone(&self.full_file_list)
+    }
+
+    /// Identifies the current content of the file list: it changes with every
+    /// change of the list, whatever the change is.
+    pub(crate) fn file_list_revision(&self) -> u64 {
+        self.file_list_revision
+    }
+
+    /// Replaces the file list. The filtered list is not touched; the caller applies
+    /// the filters.
+    pub fn set_full_file_list(&mut self, files: Vec<FileItem>) {
+        self.full_file_list = Arc::new(files);
+        self.file_list_revision += 1;
+    }
+
+    /// Changes the file list in place (as far as nobody else holds it: otherwise the
+    /// change is made to a copy, which becomes the list). The filtered list is not
+    /// touched; the caller applies the filters.
+    pub fn edit_full_file_list(&mut self, edit: impl FnOnce(&mut Vec<FileItem>)) {
+        edit(Arc::make_mut(&mut self.full_file_list));
+        self.file_list_revision += 1;
+    }
+
     /// Makes `files` the result of the first, shallow phase of a scan of `root`.
     ///
     /// The list then holds a single level, so `root` is the only directory whose
@@ -1001,10 +1136,12 @@ impl AppState {
             ahead_of_walk.add(&item.path);
         }
         self.ahead_of_walk = Some(ahead_of_walk);
-        self.full_file_list = files;
+        self.set_full_file_list(files);
         self.loaded_dirs = HashSet::from([root.to_path_buf()]);
         for (directory, items) in self.levels_before_walk.take().unwrap_or_default() {
-            self.add_directory_level(&directory, items);
+            let added = unlisted_items(&self.full_file_list, items);
+            self.note_directory_level(&directory, &added);
+            self.edit_full_file_list(|list| list.extend(added));
         }
     }
 
@@ -1019,17 +1156,34 @@ impl AppState {
     /// Does nothing and returns `false` for a stale token. The filtered list is not
     /// touched; the caller applies the filters when it publishes the change.
     pub fn merge_scanned_items(&mut self, token: &ScanToken, items: Vec<FileItem>) -> bool {
-        if !self.is_current_scan(token) {
+        let Some(mut new_items) = self.confirm_scanned_items(token, items) else {
             return false;
-        }
-        let ahead_of_walk = self.ahead_of_walk.get_or_insert_with(AheadOfWalk::default);
-        self.full_file_list.reserve(items.len());
-        for item in items {
-            if !ahead_of_walk.confirm(&item.path) {
-                self.full_file_list.push(item);
-            }
+        };
+        if !new_items.is_empty() {
+            self.edit_full_file_list(|list| list.append(&mut new_items));
         }
         true
+    }
+
+    /// Tells which of `items`, listed by the walk of the scan identified by `token`,
+    /// are not in the file list yet, and returns those; the others (their level was
+    /// published ahead of the walk) are confirmed as seen by the walk. The file list
+    /// itself is not changed: this is the first half of
+    /// [`AppState::merge_scanned_items`], for a caller that adds the items later
+    /// ([`AppState::install_file_lists`]).
+    ///
+    /// Returns `None` for a stale token.
+    pub(crate) fn confirm_scanned_items(
+        &mut self,
+        token: &ScanToken,
+        mut items: Vec<FileItem>,
+    ) -> Option<Vec<FileItem>> {
+        if !self.is_current_scan(token) {
+            return None;
+        }
+        let ahead_of_walk = self.ahead_of_walk.get_or_insert_with(AheadOfWalk::default);
+        items.retain(|item| !ahead_of_walk.confirm(&item.path));
+        Some(items)
     }
 
     /// Declares the file list complete on behalf of the scan identified by `token`,
@@ -1047,32 +1201,70 @@ impl AppState {
         token: &ScanToken,
         active_patterns: HashSet<String>,
     ) -> bool {
+        let Some(not_found) = self.items_the_walk_did_not_find(token) else {
+            return false;
+        };
+        if !not_found.is_empty() {
+            self.edit_full_file_list(|list| list.retain(|item| !not_found.contains(&item.path)));
+        }
+        let loaded_dirs = directories_of(&self.full_file_list);
+        let listed: HashSet<&Path> = if self.selected_files.is_empty() {
+            HashSet::new()
+        } else {
+            let items = self.full_file_list.iter();
+            items.map(|item| item.path.as_path()).collect()
+        };
+        self.selected_files
+            .retain(|path| listed.contains(path.as_path()));
+        self.end_walk(active_patterns, loaded_dirs);
+        true
+    }
+
+    /// The paths that are in the file list ahead of the walk of the scan identified
+    /// by `token` and that the walk has not listed: when the walk has ended, they
+    /// are what has to leave the list. `None` for a stale token.
+    pub(crate) fn items_the_walk_did_not_find(
+        &self,
+        token: &ScanToken,
+    ) -> Option<HashSet<PathBuf>> {
+        self.is_current_scan(token).then(|| {
+            self.ahead_of_walk
+                .as_ref()
+                .map(AheadOfWalk::unconfirmed)
+                .unwrap_or_default()
+        })
+    }
+
+    /// [`AppState::complete_scanned_file_list`] without its work on the file list,
+    /// for a caller that has done that work without holding the lock and installs
+    /// its result in the same breath ([`AppState::install_file_lists`]):
+    /// `loaded_dirs` are the directories of the complete list. The caller has also
+    /// asked about a snapshot of the selection which selected paths are not in the
+    /// list (`not_listed`); `is_listed` answers that for what was selected since.
+    ///
+    /// Does nothing and returns `false` for a stale token.
+    pub(crate) fn complete_walk(
+        &mut self,
+        token: &ScanToken,
+        active_patterns: HashSet<String>,
+        loaded_dirs: HashSet<PathBuf>,
+        not_listed: Rejected,
+        is_listed: impl Fn(&Path) -> bool,
+    ) -> bool {
         if !self.is_current_scan(token) {
             return false;
         }
-        let not_found = self
-            .ahead_of_walk
-            .take()
-            .map(AheadOfWalk::unconfirmed)
-            .unwrap_or_default();
-        if !not_found.is_empty() {
-            self.full_file_list
-                .retain(|item| !not_found.contains(&item.path));
-        }
-        if !self.selected_files.is_empty() {
-            let listed: HashSet<&PathBuf> =
-                self.full_file_list.iter().map(|item| &item.path).collect();
-            self.selected_files.retain(|path| listed.contains(path));
-        }
-        self.loaded_dirs = self
-            .full_file_list
-            .iter()
-            .filter(|item| item.is_directory)
-            .map(|item| item.path.clone())
-            .collect();
+        self.selected_files.retain_since(not_listed, is_listed);
+        self.end_walk(active_patterns, loaded_dirs);
+        true
+    }
+
+    /// What the end of a walk means for everything but the lists.
+    fn end_walk(&mut self, active_patterns: HashSet<String>, loaded_dirs: HashSet<PathBuf>) {
+        self.ahead_of_walk = None;
+        self.loaded_dirs = loaded_dirs;
         self.active_ignore_patterns = active_patterns;
         self.is_fully_scanned = true;
-        true
     }
 
     /// Adds `items`, the content of `directory` as a lazy load has listed it, to the
@@ -1093,48 +1285,57 @@ impl AppState {
         if !self.is_current_lazy_load(token) {
             return false;
         }
+        let added = unlisted_items(&self.full_file_list, items.clone());
+        self.record_directory_level(token, directory, items, &added, active_patterns);
+        self.edit_full_file_list(|list| list.extend(added));
+        true
+    }
+
+    /// [`AppState::merge_directory_level`] without its work on the file list, for a
+    /// caller that has done that work without holding the lock and installs its
+    /// result in the same breath ([`AppState::install_file_lists`]): `items` is the
+    /// level as it was listed, `added` are the items of it that were not in the
+    /// list.
+    ///
+    /// Does nothing and returns `false` for a stale token.
+    pub(crate) fn record_directory_level(
+        &mut self,
+        token: &LazyLoadToken,
+        directory: &Path,
+        items: Vec<FileItem>,
+        added: &[FileItem],
+        active_patterns: HashSet<String>,
+    ) -> bool {
+        if !self.is_current_lazy_load(token) {
+            return false;
+        }
         self.active_ignore_patterns.extend(active_patterns);
         // The list this goes into is about to be replaced by the first level of the
         // scan that has begun; the level is entered into that list again.
         if let Some(levels) = self.levels_before_walk.as_mut() {
-            levels.push((directory.to_path_buf(), items.clone()));
+            levels.push((directory.to_path_buf(), items));
         }
-        self.add_directory_level(directory, items);
+        self.note_directory_level(directory, added);
         true
     }
 
-    /// Enters `items`, the content of `directory`, into the file list (unless they
-    /// are there) and marks the directory as loaded.
-    fn add_directory_level(&mut self, directory: &Path, items: Vec<FileItem>) {
+    /// `directory` is loaded, and `added`, the items of its level that were not in
+    /// the list, are ahead of the walk while a scan walks the project.
+    fn note_directory_level(&mut self, directory: &Path, added: &[FileItem]) {
         self.loaded_dirs.insert(directory.to_path_buf());
-
-        let new_paths: HashSet<&Path> = items.iter().map(|item| item.path.as_path()).collect();
-        let already_listed: HashSet<PathBuf> = self
-            .full_file_list
-            .iter()
-            .filter(|item| new_paths.contains(item.path.as_path()))
-            .map(|item| item.path.clone())
-            .collect();
-        for item in items {
-            if already_listed.contains(&item.path) {
-                continue;
-            }
-            // While a scan walks the project, the level is ahead of its walk.
-            if let Some(ahead_of_walk) = self.ahead_of_walk.as_mut() {
+        if let Some(ahead_of_walk) = self.ahead_of_walk.as_mut() {
+            for item in added {
                 ahead_of_walk.add(&item.path);
             }
-            self.full_file_list.push(item);
         }
     }
 
-    /// Makes `files` the complete content of the project: every directory in it is loaded.
-    pub fn replace_with_complete_file_list(&mut self, files: Vec<FileItem>) {
-        self.loaded_dirs = files
-            .iter()
-            .filter(|item| item.is_directory)
-            .map(|item| item.path.clone())
-            .collect();
-        self.full_file_list = files;
+    /// Makes `files` the complete content of the project: every directory in it is
+    /// loaded.
+    #[cfg(test)]
+    pub(crate) fn replace_with_complete_file_list(&mut self, files: Vec<FileItem>) {
+        self.loaded_dirs = directories_of(&files);
+        self.set_full_file_list(files);
     }
 
     /// `true` if the task of the current scan has been attached.
@@ -1154,13 +1355,119 @@ impl AppState {
         &self.filtered_file_list
     }
 
-    /// Replaces the filtered file list.
+    /// Replaces the filtered file list by what the filters have made of the file
+    /// list as it is now.
     ///
-    /// This is the only way to change the list, which guarantees that data derived from
-    /// it is never used with a different list than it was built from.
+    /// This and [`AppState::install_file_lists`] are the only ways to change the
+    /// list, which guarantees that data derived from it is never used with a
+    /// different list than it was built from.
     pub fn set_filtered_file_list(&mut self, items: Vec<FileItem>) {
-        self.filtered_file_list = items;
+        self.set_shared_filtered_file_list(Arc::new(items));
+    }
+
+    /// [`AppState::set_filtered_file_list`] for a list that is shared, which is how
+    /// the file list itself becomes the filtered list where the filters let
+    /// everything through. A list that already is the filtered list stays: what is
+    /// derived from it is kept.
+    pub(crate) fn set_shared_filtered_file_list(&mut self, items: Arc<Vec<FileItem>>) {
+        self.filtered_from = self.file_list_revision;
+        if !Arc::ptr_eq(&self.filtered_file_list, &items) {
+            self.filtered_file_list = items;
+            self.filtered_revision += 1;
+        }
+    }
+
+    /// Handles of the lists and of the hierarchy as they are now, for a caller that
+    /// is about to replace them while it holds the lock on the state: with these in
+    /// its hands, what it replaces is not dropped there and then (which takes time
+    /// for a large project) but when the caller drops them, after the lock.
+    pub(crate) fn lists_to_outlive_the_lock(&self) -> Discarded {
+        let mut kept = Discarded::default();
+        kept.add((
+            Arc::clone(&self.full_file_list),
+            Arc::clone(&self.filtered_file_list),
+            self.tree_index_cache.cached(),
+        ));
+        kept
+    }
+
+    /// `true` if the filtered list is the file list: not an equal list, but the
+    /// same one, made from the file list as it is now. Nothing has to be compared
+    /// or assumed for this; a file list that is changed stops being the same.
+    pub(crate) fn filtered_list_is_file_list(&self) -> bool {
+        self.filtered_from == self.file_list_revision
+            && Arc::ptr_eq(&self.filtered_file_list, &self.full_file_list)
+    }
+
+    /// Installs lists that were prepared without holding the lock on the state, see
+    /// [`FileLists`]. The filtered list comes with its hierarchy, so the next state
+    /// update does not have to build it.
+    ///
+    /// This is for a caller that has made sure, now that it holds the lock, that
+    /// the lists are what its change and the filters make of the state as it is:
+    /// that the file list they were made from still has the same revision, and that
+    /// the filters are the same.
+    pub(crate) fn install_file_lists(&mut self, lists: FileLists) -> Discarded {
+        let mut discarded = Discarded::default();
+        if let Some(full) = lists.full {
+            discarded.add(std::mem::replace(&mut self.full_file_list, full));
+            self.file_list_revision += 1;
+        }
+        self.filtered_from = self.file_list_revision;
+        let Some(filtered) = lists.filtered else {
+            return discarded;
+        };
+
+        let (items, root_path, index) = filtered.into_parts();
+        // The selection counts of a list that only grew follow from the ones the
+        // state has; everything else is counted when it is asked for.
+        let counts = lists
+            .appended_from
+            .filter(|_| root_path == Path::new(&self.current_path))
+            .and_then(|base_len| self.extended_selection_counts(&items, &index, base_len));
+        discarded.add(std::mem::replace(&mut self.filtered_file_list, items));
         self.filtered_revision += 1;
+        if let Some(counts) = counts {
+            self.selection_counts_cache.install(
+                self.filtered_revision,
+                &root_path,
+                self.selected_files.revision(),
+                counts,
+            );
+        }
+        discarded.add(
+            self.tree_index_cache
+                .install(self.filtered_revision, root_path, index),
+        );
+        discarded
+    }
+
+    /// The selection counts of `items`, which is the filtered list with items
+    /// appended from `base_len` on, and whose hierarchy is `index`: made from the
+    /// counts of the filtered list, if the state has them at hand.
+    fn extended_selection_counts(
+        &self,
+        items: &[FileItem],
+        index: &TreeIndex,
+        base_len: usize,
+    ) -> Option<DirectorySelection> {
+        let root_path = Path::new(&self.current_path);
+        if base_len != self.filtered_file_list.len()
+            || !self
+                .tree_index_cache
+                .holds(self.filtered_revision, root_path)
+        {
+            return None;
+        }
+        self.selection_counts_cache
+            .take_current(
+                self.filtered_revision,
+                root_path,
+                &self.filtered_file_list,
+                &self.file_tree(),
+                &self.selected_files,
+            )?
+            .extended(items, index, base_len, &self.selected_files)
     }
 
     /// The hierarchy of the filtered file list below the current path.
@@ -1228,7 +1535,7 @@ impl AppState {
         self.levels_before_walk = None;
 
         self.current_path = String::new();
-        self.full_file_list.clear();
+        self.set_full_file_list(Vec::new());
         self.set_filtered_file_list(Vec::new());
         self.selected_files.clear();
         self.expanded_dirs.clear();
@@ -1261,13 +1568,14 @@ impl AppState {
         let rules = crate::core::IgnoreRules::new(&self.current_path, &self.config.ignore_patterns);
 
         let path_info: std::collections::HashMap<_, _> = self
-            .full_file_list
+            .full_file_list()
             .iter()
             .map(|item| (item.path.clone(), item.is_directory))
             .collect();
 
-        self.full_file_list
-            .retain(|item| !rules.is_ignored(&item.path, item.is_directory));
+        self.edit_full_file_list(|list| {
+            list.retain(|item| !rules.is_ignored(&item.path, item.is_directory));
+        });
 
         self.selected_files.retain(|path| {
             let is_dir = path_info.get(path).copied().unwrap_or(false);
@@ -1480,7 +1788,7 @@ mod tests {
 
     fn listed_paths(state: &AppState) -> Vec<&str> {
         state
-            .full_file_list
+            .full_file_list()
             .iter()
             .map(|item| item.path.to_str().unwrap())
             .collect()
@@ -1500,6 +1808,164 @@ mod tests {
             vec![scanned_dir("/p/a"), scanned_file("/p/f.txt")],
         );
         (state, token)
+    }
+
+    /// The first half of a merge: the walk's items that are not listed yet are
+    /// handed back, the others are confirmed, and the list is left alone.
+    #[test]
+    fn test_confirming_scanned_items_tells_the_new_ones_without_listing_them() {
+        let (mut state, token) = state_after_shallow_phase();
+
+        let new_items = state
+            .confirm_scanned_items(
+                &token,
+                vec![scanned_dir("/p/a"), scanned_file("/p/a/x.txt")],
+            )
+            .unwrap();
+        assert_eq!(new_items.len(), 1);
+        assert_eq!(new_items[0].path, Path::new("/p/a/x.txt"));
+        assert_eq!(listed_paths(&state), ["/p/a", "/p/f.txt"]);
+
+        // `/p/a` is confirmed by this, `/p/f.txt` is not: the end of the walk
+        // removes it.
+        assert!(state.complete_scanned_file_list(&token, HashSet::new()));
+        assert_eq!(listed_paths(&state), ["/p/a"]);
+
+        let (mut state, token) = state_after_shallow_phase();
+        state.cancel_current_scan();
+        assert!(state
+            .confirm_scanned_items(&token, vec![scanned_file("/p/late.txt")])
+            .is_none());
+    }
+
+    /// Every way of changing the file list gives it a new revision, and a filtered
+    /// list is the file list only for as long as that revision stands.
+    #[test]
+    fn test_every_change_of_the_file_list_is_a_new_revision() {
+        let (mut state, token) = state_after_shallow_phase();
+        let mut revision = state.file_list_revision();
+        let mut assert_changed = |state: &AppState, what: &str| {
+            assert_ne!(state.file_list_revision(), revision, "{what}");
+            assert!(!state.filtered_list_is_file_list(), "{what}");
+            revision = state.file_list_revision();
+        };
+        let mirror = |state: &mut AppState| {
+            state.set_shared_filtered_file_list(state.shared_full_file_list());
+            assert!(state.filtered_list_is_file_list());
+        };
+
+        mirror(&mut state);
+        assert!(state.merge_scanned_items(&token, vec![scanned_file("/p/a/x.txt")]));
+        assert_changed(&state, "items of the walk");
+
+        mirror(&mut state);
+        let lazy_load = state.begin_lazy_load();
+        assert!(state.merge_directory_level(
+            &lazy_load,
+            Path::new("/p/a"),
+            vec![scanned_file("/p/a/y.txt")],
+            HashSet::new()
+        ));
+        assert_changed(&state, "a level loaded on demand");
+
+        mirror(&mut state);
+        assert!(state.complete_scanned_file_list(&token, HashSet::new()));
+        assert_changed(&state, "the completion, which removed an item");
+
+        mirror(&mut state);
+        state.config.ignore_patterns = HashSet::from(["y.txt".to_string()]);
+        state.apply_ignore_patterns();
+        assert_changed(&state, "ignore patterns");
+
+        // A list of the same length, and even an equal one, is another list.
+        mirror(&mut state);
+        state.edit_full_file_list(|list| list[0] = scanned_dir("/p/b"));
+        assert_changed(&state, "an item replaced");
+        mirror(&mut state);
+        state.set_full_file_list(state.full_file_list().to_vec());
+        assert_changed(&state, "the list replaced by an equal one");
+
+        mirror(&mut state);
+        state.replace_with_shallow_file_list(Path::new("/p"), vec![scanned_dir("/p/a")]);
+        assert_changed(&state, "the first level of a scan");
+        mirror(&mut state);
+        state.reset_directory_state();
+        assert_changed(&state, "the directory closed");
+
+        // A filtered list that was made from the file list is not the file list.
+        state.set_full_file_list(vec![scanned_dir("/p/a")]);
+        state.set_filtered_file_list(state.full_file_list().to_vec());
+        assert!(!state.filtered_list_is_file_list());
+    }
+
+    /// Lists that were prepared elsewhere are installed in one step, with the
+    /// hierarchy that came with the filtered list.
+    #[test]
+    fn test_installing_prepared_lists_installs_their_hierarchy() {
+        let (mut state, _token) = state_after_shallow_phase();
+        state.set_shared_filtered_file_list(state.shared_full_file_list());
+        let (file_revision, filtered_revision) =
+            (state.file_list_revision(), state.filtered_revision());
+
+        let mut longer = state.full_file_list().to_vec();
+        longer.push(scanned_file("/p/a/x.txt"));
+        let longer = Arc::new(longer);
+        drop(state.install_file_lists(FileLists {
+            full: Some(Arc::clone(&longer)),
+            filtered: Some(IndexedList::build(longer, PathBuf::from("/p"))),
+            appended_from: Some(2),
+        }));
+
+        assert_eq!(listed_paths(&state), ["/p/a", "/p/f.txt", "/p/a/x.txt"]);
+        assert_eq!(state.filtered_file_list().len(), 3);
+        assert_ne!(state.file_list_revision(), file_revision);
+        assert_ne!(state.filtered_revision(), filtered_revision);
+        assert!(state.filtered_list_is_file_list());
+        assert_eq!(state.file_tree().children(0), [2]);
+        assert_eq!(state.file_tree_build_count(), 0);
+
+        // Nothing to install: nothing changes.
+        let (file_revision, filtered_revision) =
+            (state.file_list_revision(), state.filtered_revision());
+        drop(state.install_file_lists(FileLists {
+            full: None,
+            filtered: None,
+            appended_from: None,
+        }));
+        assert_eq!(state.file_list_revision(), file_revision);
+        assert_eq!(state.filtered_revision(), filtered_revision);
+    }
+
+    /// The selection counts of a list that only grew are made from the ones that
+    /// were there: the tree is not counted again.
+    #[test]
+    fn test_installing_a_longer_list_extends_the_selection_counts() {
+        let (mut state, _token) = state_after_shallow_phase();
+        state.set_shared_filtered_file_list(state.shared_full_file_list());
+        state.selected_files.insert(PathBuf::from("/p/a/x.txt"));
+        state.directory_selection();
+        assert_eq!(state.selection_count_count(), 1);
+
+        let mut longer = state.full_file_list().to_vec();
+        longer.extend([scanned_file("/p/a/x.txt"), scanned_file("/p/a/y.txt")]);
+        let longer = Arc::new(longer);
+        drop(state.install_file_lists(FileLists {
+            full: Some(Arc::clone(&longer)),
+            filtered: Some(IndexedList::build(longer, PathBuf::from("/p"))),
+            appended_from: Some(2),
+        }));
+
+        let counts = state.directory_selection();
+        assert_eq!(state.selection_count_count(), 1, "not counted again");
+        assert_eq!(
+            counts.state_of(
+                state.filtered_file_list(),
+                &state.file_tree(),
+                &state.selected_files,
+                0
+            ),
+            crate::app::selection::SelectionState::Partial
+        );
     }
 
     #[test]
@@ -2038,7 +2504,7 @@ mod tests {
         // Arrange
         let mut state = AppState {
             current_path: "/test/project".to_string(),
-            full_file_list: vec![create_test_file_item("/test/project/file.txt", false)],
+            full_file_list: Arc::new(vec![create_test_file_item("/test/project/file.txt", false)]),
             selected_files: HashSet::from([PathBuf::from("/test/project/file.txt")]).into(),
             expanded_dirs: HashSet::from([PathBuf::from("/test/project")]).into(),
             loaded_dirs: HashSet::from([PathBuf::from("/test/project")]),
@@ -2046,7 +2512,7 @@ mod tests {
             is_fully_scanned: true,
             ..Default::default()
         };
-        state.set_filtered_file_list(state.full_file_list.clone());
+        state.set_filtered_file_list(state.full_file_list().to_vec());
         let scan = state.begin_scan();
         state.attach_scan_task(&scan, create_dummy_task());
         let generation = state.begin_generation();
@@ -2058,7 +2524,7 @@ mod tests {
 
         // Assert
         assert!(state.current_path.is_empty());
-        assert!(state.full_file_list.is_empty());
+        assert!(state.full_file_list().is_empty());
         assert!(state.filtered_file_list().is_empty());
         assert!(state.selected_files.is_empty());
         assert!(state.expanded_dirs.is_empty());
@@ -2087,11 +2553,11 @@ mod tests {
         let dir_to_ignore = create_test_file_item("/project/node_modules", true);
         let file_to_ignore = create_test_file_item("/project/node_modules/dep.js", false);
 
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             file_to_keep.clone(),
             dir_to_ignore.clone(),
             file_to_ignore.clone(),
-        ];
+        ]);
         state.selected_files =
             HashSet::from([file_to_keep.path.clone(), file_to_ignore.path.clone()]).into();
 
@@ -2103,12 +2569,13 @@ mod tests {
 
         // Assert
         assert_eq!(
-            state.full_file_list.len(),
+            state.full_file_list().len(),
             1,
             "Only one item should remain in the full list"
         );
         assert_eq!(
-            state.full_file_list[0].path, file_to_keep.path,
+            state.full_file_list()[0].path,
+            file_to_keep.path,
             "The remaining file should be main.rs"
         );
         assert_eq!(
@@ -2130,14 +2597,14 @@ mod tests {
         state.config.ignore_patterns.clear();
 
         let initial_file_list = vec![create_test_file_item("/project/file.txt", false)];
-        state.full_file_list = initial_file_list.clone();
+        state.set_full_file_list(initial_file_list.clone());
 
         // Act
         state.apply_ignore_patterns();
 
         // Assert
-        assert_eq!(state.full_file_list.len(), initial_file_list.len());
-        assert_eq!(state.full_file_list[0].path, initial_file_list[0].path);
+        assert_eq!(state.full_file_list().len(), initial_file_list.len());
+        assert_eq!(state.full_file_list()[0].path, initial_file_list[0].path);
     }
 
     #[tokio::test]
@@ -2152,27 +2619,25 @@ mod tests {
         assert!(state.finish_content_search(&newer, newer_matches.clone()));
         assert!(!state.finish_content_search(&older, older_matches));
 
-        assert_eq!(state.content_search_results, newer_matches);
+        assert_eq!(*state.content_search_results(), newer_matches);
         assert!(
             !state.finish_content_search(&newer, HashSet::new()),
             "A search can only publish once"
         );
-        assert_eq!(state.content_search_results, newer_matches);
+        assert_eq!(*state.content_search_results(), newer_matches);
     }
 
     #[tokio::test]
     async fn test_clear_content_search_discards_running_search() {
         let mut state = AppState::default();
-        state
-            .content_search_results
-            .insert(PathBuf::from("/p/old.txt"));
+        state.set_content_search_results(HashSet::from([PathBuf::from("/p/old.txt")]));
         let running = state.begin_content_search();
 
         state.clear_content_search();
 
-        assert!(state.content_search_results.is_empty());
+        assert!(state.content_search_results().is_empty());
         assert!(!state.finish_content_search(&running, HashSet::from([PathBuf::from("/p/a")])));
-        assert!(state.content_search_results.is_empty());
+        assert!(state.content_search_results().is_empty());
     }
 
     #[tokio::test]
@@ -2183,7 +2648,7 @@ mod tests {
         state.reset_directory_state();
 
         assert!(!state.finish_content_search(&running, HashSet::from([PathBuf::from("/p/a")])));
-        assert!(state.content_search_results.is_empty());
+        assert!(state.content_search_results().is_empty());
     }
 
     #[tokio::test]
@@ -2253,7 +2718,7 @@ mod tests {
         );
 
         assert_eq!(state.loaded_dirs, HashSet::from([root]));
-        assert_eq!(state.full_file_list.len(), 1);
+        assert_eq!(state.full_file_list().len(), 1);
     }
 
     // --- Preview requests ---
@@ -2299,12 +2764,12 @@ mod tests {
     fn state_with_loaded_directory() -> AppState {
         let mut state = AppState {
             current_path: "/old".to_string(),
-            full_file_list: vec![create_test_file_item("/old/a.rs", false)],
+            full_file_list: Arc::new(vec![create_test_file_item("/old/a.rs", false)]),
             selected_files: HashSet::from([PathBuf::from("/old/a.rs")]).into(),
             is_fully_scanned: true,
             ..AppState::default()
         };
-        state.set_filtered_file_list(state.full_file_list.clone());
+        state.set_filtered_file_list(state.full_file_list().to_vec());
         state
     }
 
@@ -2318,7 +2783,7 @@ mod tests {
         assert!(state.is_scanning() && state.is_opening());
         assert!(state.is_current_scan(&token));
         assert_eq!(state.current_path, "/old");
-        assert_eq!(state.full_file_list.len(), 1);
+        assert_eq!(state.full_file_list().len(), 1);
         assert_eq!(state.selected_files.len(), 1);
         assert!(state.is_fully_scanned);
         assert!(
@@ -2338,7 +2803,7 @@ mod tests {
         assert!(state.is_scanning() && !state.is_opening());
         assert!(state.is_current_scan(&token) && !token.is_cancelled());
         assert_eq!(state.current_path, "/new");
-        assert!(state.full_file_list.is_empty() && state.filtered_file_list().is_empty());
+        assert!(state.full_file_list().is_empty() && state.filtered_file_list().is_empty());
         assert!(state.selected_files.is_empty());
         assert!(!state.is_fully_scanned);
         assert!(lazy_load.is_cancelled());
@@ -2713,7 +3178,7 @@ mod tests {
         assert!(state.abandon_content_search(&newer));
         assert!(!state.abandon_content_search(&newer), "only once");
 
-        assert_eq!(state.content_search_results, found);
+        assert_eq!(*state.content_search_results(), found);
         assert_eq!(state.content_filter_matches(), Some(&found));
     }
 
