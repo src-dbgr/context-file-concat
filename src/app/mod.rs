@@ -443,6 +443,19 @@ mod tests {
             let mut state = AppState::default();
             state.config = AppConfig::default();
             state.current_path = "/repo".to_string();
+            // What the tree shows: commands that act on a row act on one of these.
+            state.set_full_file_list(
+                [("/repo/src", true), ("/repo/src/main.rs", false)]
+                    .map(|(path, is_directory)| crate::core::FileItem {
+                        path: PathBuf::from(path),
+                        is_directory,
+                        parent: Path::new(path).parent().map(Path::to_path_buf),
+                        depth: path.matches('/').count() - 1,
+                        ..Default::default()
+                    })
+                    .to_vec(),
+            );
+            filtering::apply_filters(&mut state);
             let dispatcher = CommandDispatcher::new();
             Self {
                 // The lanes of the dispatcher are the only tasks of an idle harness.
@@ -464,7 +477,12 @@ mod tests {
         /// A harness whose loaded directory is `project` (not scanned yet).
         async fn with_project(project: &Path) -> Self {
             let harness = Self::new().await;
-            harness.state.lock().current_path = project.to_string_lossy().to_string();
+            {
+                let mut state = harness.state.lock();
+                state.current_path = project.to_string_lossy().to_string();
+                state.set_full_file_list(Vec::new());
+                filtering::apply_filters(&mut state);
+            }
             harness
         }
 
@@ -897,9 +915,9 @@ mod tests {
     async fn a_message_without_a_number_is_answered_and_accounts_for_nothing() {
         use serde_json::json;
         let mut harness = Harness::new().await;
-        let before = harness.fingerprint();
         let seq = harness.send("selectAll", serde_json::Value::Null);
         assert_eq!(seqs_of(&harness.events(1).await), [seq]);
+        let before = harness.fingerprint();
 
         for message in [
             "not json".to_string(),
@@ -1236,6 +1254,107 @@ mod tests {
         assert_eq!(harness.fingerprint(), unloaded);
     }
 
+    /// `toggleSelection` selects a file of the tree and `setExpansion` expands or
+    /// collapses a directory of the tree. A path that names neither is refused: the
+    /// state stays as it is (no selected file that is none, no expansion kept for a
+    /// directory that might come), and the request is answered with the unchanged
+    /// snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_row_command_for_a_path_that_is_no_such_row_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("repo");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(project.join("a.txt"), "marker").unwrap();
+        std::fs::create_dir_all(parent.path().join("repository/src")).unwrap();
+        std::fs::write(parent.path().join("secret.txt"), "secret").unwrap();
+        let text = |path: &Path| path.to_string_lossy().into_owned();
+        let (file, directory) = (project.join("a.txt"), project.join("src"));
+
+        let mut harness = Harness::with_project(&project).await;
+        harness.send("rescanDirectory", serde_json::Value::Null);
+        harness.quiescence().await;
+        harness.sent_errors();
+        let before = harness.fingerprint();
+        let count = |harness: &Harness| harness.state.lock().selected_files.len();
+
+        // Paths that name no row at all.
+        let no_rows = [
+            format!("{}/../secret.txt", text(&project)),
+            format!("{}/src/../a.txt", text(&project)),
+            format!("{}/../repo/a.txt", text(&project)),
+            format!("{}/src/../src", text(&project)),
+            format!("{}/..", text(&project)),
+            text(&parent.path().join("secret.txt")),
+            text(&parent.path().join("repository/src")),
+            text(&project.join("not-listed.txt")),
+            text(&project.join("not-listed")),
+            // The loaded directory itself is no row of its tree.
+            text(&project),
+            "a.txt".to_string(),
+            String::new(),
+            // What the UI sends back for a name that is not valid Unicode: the
+            // lossy spelling, which is not the path of the entry.
+            text(&project.join("caf\u{fffd}.txt")),
+            text(&project.join("caf\u{fffd}")),
+        ];
+        // A row of the other kind: a directory is not selected like a file, a file
+        // is not expanded.
+        let selections = no_rows.iter().cloned().chain([text(&directory)]);
+        let expansions = no_rows.iter().cloned().chain([text(&file)]);
+
+        for path in selections {
+            let seq = harness.send("toggleSelection", serde_json::json!(path));
+            assert_eq!(seqs_of(&harness.events(1).await), [seq], "{path:?}");
+            assert_eq!(harness.fingerprint(), before, "select {path:?}");
+            assert_eq!(count(&harness), 0, "{path:?}");
+        }
+        for path in expansions {
+            for expanded in [true, false] {
+                let seq = harness.send(
+                    "setExpansion",
+                    serde_json::json!({ "path": path, "expanded": expanded }),
+                );
+                assert_eq!(seqs_of(&harness.events(1).await), [seq], "{path:?}");
+                assert_eq!(harness.fingerprint(), before, "expand {path:?}");
+                assert!(harness.state.lock().expanded_dirs.is_empty(), "{path:?}");
+            }
+        }
+
+        // The rows themselves are acted on, also when their path is written with
+        // `.` or doubled separators (that is the same path), and what is recorded
+        // is the path as the tree writes it.
+        harness.send(
+            "toggleSelection",
+            serde_json::json!(format!("{}/./a.txt", text(&project))),
+        );
+        harness.send(
+            "setExpansion",
+            serde_json::json!({ "path": format!("{}//src/", text(&project)), "expanded": true }),
+        );
+        let answers = harness.events(2).await;
+        let UserEvent::StateUpdate(last) = &answers[1] else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(last.selected_files_count, 1);
+        {
+            let state = harness.state.lock();
+            assert!(state.selected_files.contains(&file));
+            assert!(state
+                .expanded_dirs
+                .iter()
+                .all(|dir| dir.as_os_str() == directory.as_os_str()));
+            assert_eq!(state.expanded_dirs.len(), 1);
+        }
+
+        // Nothing is left behind that a rescan would bring to life.
+        harness.send("rescanDirectory", serde_json::Value::Null);
+        harness.quiescence().await;
+        let state = harness.state.lock();
+        assert_eq!(state.selected_files.len(), 1);
+        assert_eq!(state.expanded_dirs.len(), 1);
+    }
+
     /// The other commands that take a path of the UI do not reach beyond the loaded
     /// list either, whatever the path is: a preview reads listed files only, an
     /// ignore pattern is made of the names below the root, a directory selection
@@ -1293,13 +1412,15 @@ mod tests {
             harness.sent_errors();
         }
 
-        // A file that is selected by such a path is no file of the list, so it is
-        // not part of what is generated.
+        // Such a path selects nothing either, and what is generated is made of the
+        // files of the list in any case.
         for path in &outside {
             harness.send("toggleSelection", serde_json::json!(path));
         }
         harness.quiescence().await;
-        let plan = tasks::GenerationPlan::of(&harness.state.lock());
+        let state = harness.state.lock();
+        assert_eq!(state.selected_files.len(), 1);
+        let plan = tasks::GenerationPlan::of(&state);
         assert_eq!(plan.selected_files, [project.join("a.txt")]);
     }
 
@@ -1487,6 +1608,8 @@ mod tests {
         async fn with_scanned_project(project: &Path) -> Self {
             let mut harness = Self::with_project(project).await;
             harness.send("rescanDirectory", serde_json::Value::Null);
+            // The rows have to be there before they can be acted on.
+            harness.quiescence().await;
             harness.send("toggleSelection", serde_json::json!(project.join("a.txt")));
             harness.send(
                 "setExpansion",

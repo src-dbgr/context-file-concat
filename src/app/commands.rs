@@ -583,9 +583,44 @@ fn escape_pattern_characters(name: &str) -> String {
     escaped
 }
 
+/// What kind of entry of the tree a path names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowKind {
+    File,
+    Directory,
+}
+
+/// The entry of the tree that `path` names, as the tree writes its path, with its
+/// kind; `None` if the tree has no such entry.
+///
+/// The tree is the filtered list: the rows the UI shows and can act on. A command
+/// that acts on a row takes its path from the UI, and this is where that path is
+/// held against what the host knows: it is compared name by name with the entries
+/// (not resolved, and the file system is not asked), so a path with a `..` in it,
+/// one outside the loaded directory, or the lossy spelling of a name that is not
+/// valid Unicode names nothing. Looking it up costs no pass over the list.
+fn row_of(state: &AppState, path: &Path) -> Option<(PathBuf, RowKind)> {
+    let items = state.filtered_file_list();
+    let item = &items[state.file_tree().position(items, path)?];
+    let kind = if item.is_directory {
+        RowKind::Directory
+    } else {
+        RowKind::File
+    };
+    Some((item.path.clone(), kind))
+}
+
 /// Toggles the selection state of a single file.
+///
+/// Only a file of the tree can be selected. Any other path (a directory, a path the
+/// tree does not hold) would be counted as a selected file without being one: it is
+/// refused and answered with the unchanged snapshot.
 pub fn toggle_selection<P: EventProxy>(path: PathBuf, proxy: P, state: SharedState) {
     with_state_and_notify(&state, &proxy, |s| {
+        let Some((path, RowKind::File)) = row_of(s, &path) else {
+            tracing::warn!("Refusing to select {path:?}: not a file of the tree.");
+            return;
+        };
         if s.selected_files.contains(&path) {
             s.selected_files.remove(&path);
         } else {
@@ -636,12 +671,20 @@ pub(crate) struct SetExpansionPayload {
 /// a gesture that is delivered twice (key repeat, double click) before the UI has
 /// rendered the answer to the first one still ends in the state the user asked for.
 /// The state is always sent, also when nothing changed, so every request is answered.
+///
+/// Only a directory of the tree can be expanded or collapsed. Any other path (a
+/// file, a path the tree does not hold) is refused and answered with the unchanged
+/// snapshot; it is not remembered as expanded for a directory that might come.
 pub(crate) fn set_expansion<P: EventProxy>(
     SetExpansionPayload { path, expanded }: SetExpansionPayload,
     proxy: P,
     state: SharedState,
 ) {
     with_state_and_notify(&state, &proxy, |s| {
+        let Some((path, RowKind::Directory)) = row_of(s, &path) else {
+            tracing::warn!("Refusing to expand or collapse {path:?}: not a directory of the tree.");
+            return;
+        };
         if expanded {
             s.expand_directories([path]);
         } else {
