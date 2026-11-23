@@ -264,6 +264,7 @@ fn migrate_legacy_config(config_content: &str) -> Result<AppConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)] // Only the permission-based tests need it.
     use crate::utils::test_helpers::running_as_root;
     use serde::ser::{Error, Serializer};
     use serde::Serialize;
@@ -696,6 +697,7 @@ mod tests {
     // =========================================================================
 
     #[test]
+    #[cfg(unix)] // On Windows the read-only attribute of a directory does not stop file creation in it.
     fn test_io_failures_on_readonly_directory() {
         #[cfg(unix)]
         if running_as_root() {
