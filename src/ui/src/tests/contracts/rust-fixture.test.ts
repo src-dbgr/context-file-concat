@@ -13,7 +13,15 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { UiStateSchema, UiStateEnvelopeSchema } from "$lib/ipc/schema";
+import {
+  AnyCommandMessageSchema,
+  CommandSchemas,
+  ConfigOptionSchema,
+  UiConfigSchema,
+  UiStateSchema,
+  UiStateEnvelopeSchema,
+  type CommandName,
+} from "$lib/ipc/schema";
 import type { AppState, TreeNode } from "$lib/types";
 
 const fixturePath = fileURLToPath(
@@ -61,6 +69,17 @@ describe("[IPC Contracts] UiState serialized by the Rust backend", () => {
     // fail the parse. Compare the key sets explicitly instead.
     const known = Object.keys(UiStateSchema.shape).sort();
     const sent = Object.keys(fixture as Record<string, unknown>).sort();
+    expect(sent).toEqual(known);
+  });
+
+  it("sends exactly the config fields the schema knows", () => {
+    // UiConfigSchema drops unknown keys, so compare the key sets explicitly:
+    // the host must not send config the UI has no use for (it could come
+    // back outdated), and the UI must not expect what the host does not send.
+    const known = Object.keys(UiConfigSchema.shape).sort();
+    const sent = Object.keys(
+      (fixture as { config: Record<string, unknown> }).config,
+    ).sort();
     expect(sent).toEqual(known);
   });
 
@@ -137,5 +156,59 @@ describe("[IPC Contracts] UiState serialized by the Rust backend", () => {
       state.tree_files_count,
     );
     expect(state.selected_files_count).toBe(3);
+  });
+});
+
+// The other direction: `fixtures/commands.json` is written by the host from its
+// routing table (src/app/command_contract_tests.rs): every command name with
+// example payloads, serialized from the payload types of the handlers.
+const commandFixture = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("./fixtures/commands.json", import.meta.url)),
+    "utf8",
+  ),
+) as Record<string, unknown[]>;
+
+describe("[IPC Contracts] commands routed by the Rust backend", () => {
+  it("knows exactly the commands of the host", () => {
+    expect(Object.keys(CommandSchemas).sort()).toEqual(
+      Object.keys(commandFixture).sort(),
+    );
+  });
+
+  it("has at least one example payload per command", () => {
+    for (const [name, payloads] of Object.entries(commandFixture)) {
+      expect(Array.isArray(payloads) && payloads.length > 0, name).toBe(true);
+    }
+  });
+
+  it("accepts every example payload with the schema of its command", () => {
+    for (const [name, payloads] of Object.entries(commandFixture)) {
+      const schema = CommandSchemas[name as CommandName];
+      for (const payload of payloads) {
+        const label = `${name} ${JSON.stringify(payload)}`;
+        const result = schema.safeParse(payload);
+        expect(result.error?.issues ?? [], label).toEqual([]);
+        // Nothing is dropped or added on the way through the schema, so
+        // what `post()` sends in DEV is what the host has serialized.
+        expect(result.data, label).toEqual(payload);
+        expect(
+          AnyCommandMessageSchema.safeParse({ command: name, payload }).success,
+          label,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("covers every option of setConfigOption on both sides", () => {
+    const hostOptions = new Set(
+      commandFixture.setConfigOption.map(
+        (payload) => (payload as { option: string }).option,
+      ),
+    );
+    const uiOptions = new Set(
+      ConfigOptionSchema.options.map((o) => o.shape.option.value),
+    );
+    expect(hostOptions).toEqual(uiOptions);
   });
 });

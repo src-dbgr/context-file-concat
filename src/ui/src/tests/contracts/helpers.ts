@@ -4,7 +4,7 @@
 import type { z } from "zod";
 import {
   AnyCommandMessageSchema,
-  ConfigSchema,
+  UiConfigSchema,
   UiStateSchema,
   type CommandName,
   type PayloadFor,
@@ -17,13 +17,11 @@ export type IPCCommandMessage = {
 };
 
 /**
- * Payload type that matches what the wire/protocol expects for a given command.
- * For most commands this equals `PayloadFor<T>`, except `updateConfig` where the
- * runtime schema expects the full `ConfigSchema` shape.
+ * Payload type that the wire/protocol expects for a given command. There is no
+ * difference between what `post()` accepts and what is sent anymore; the alias
+ * is kept for the readability of the tests.
  */
-export type PayloadForWire<T extends CommandName> = T extends "updateConfig"
-  ? z.input<typeof ConfigSchema>
-  : PayloadFor<T>;
+export type PayloadForWire<T extends CommandName> = PayloadFor<T>;
 
 /**
  * Validate a command + payload against the runtime Zod union.
@@ -41,26 +39,19 @@ export function validateCommand<T extends CommandName>(
 }
 
 /**
- * Build a fully valid config payload for `updateConfig` according to the *wire* schema.
- * Note: This uses the *runtime* contract (ConfigSchema), not the UI's narrowed Config type.
+ * Build the config part of a snapshot as the host sends it (`UiConfigSchema`).
  */
 export function makeWireConfig(
-  overrides: Partial<z.input<typeof ConfigSchema>> = {},
-): z.input<typeof ConfigSchema> {
+  overrides: Partial<z.input<typeof UiConfigSchema>> = {},
+): z.input<typeof UiConfigSchema> {
   return {
     ignore_patterns: [],
-    tree_ignore_patterns: [],
-    last_directory: null,
     output_directory: null,
     output_filename: "output.txt",
     case_sensitive_search: false,
     include_tree_by_default: false,
     use_relative_paths: false,
     remove_empty_directories: false,
-    window_size: [1280, 800],
-    window_position: [100, 100],
-    auto_load_last_directory: false,
-    max_file_size_mb: 20,
     ...overrides,
   };
 }

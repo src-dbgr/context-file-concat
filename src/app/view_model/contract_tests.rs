@@ -54,7 +54,6 @@ fn representative_state() -> AppState {
         remove_empty_directories: false,
         window_size: (1200.0, 800.0),
         window_position: (100.0, 50.0),
-        auto_load_last_directory: true,
         max_file_size_mb: 20,
     };
     state.current_path = "/project".to_string();

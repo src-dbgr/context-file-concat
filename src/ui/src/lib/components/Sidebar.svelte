@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onDestroy, untrack } from "svelte";
   import { appState, patternFilter } from "$lib/stores/app";
+  import { HostDraft } from "$lib/modules/hostDraft";
   import { post } from "$lib/services/backend";
   import { COMMON_IGNORE_PATTERNS } from "$lib/config";
   import { t } from "$lib/i18n";
@@ -18,50 +20,90 @@
   );
   const activeSet = $derived(new Set($appState.active_ignore_patterns || []));
 
-  let filterTimer: ReturnType<typeof setTimeout> | null = null;
+  // --- Filters -------------------------------------------------------------
+  // The inputs show a local draft, not the app state: a snapshot that arrives
+  // while the user is typing (scan progress, the answer to another command)
+  // would otherwise reset the text. The host's values are adopted whenever
+  // the draft allows it, see HostDraft.
+  type Filters = {
+    searchQuery: string;
+    extensionFilter: string;
+    contentSearchQuery: string;
+  };
+  const FILTER_DEBOUNCE_MS = 300;
 
-  function pushFilters() {
-    if (!$appState.current_path) return;
-    post("updateFilters", {
+  function hostFilters(): Filters {
+    return {
       searchQuery: $appState.search_query,
       extensionFilter: $appState.extension_filter,
       contentSearchQuery: $appState.content_search_query,
+    };
+  }
+  const filterDraft = new HostDraft<Filters>(
+    (a, b) =>
+      a.searchQuery === b.searchQuery &&
+      a.extensionFilter === b.extensionFilter &&
+      a.contentSearchQuery === b.contentSearchQuery
+  );
+  let filters = $state(untrack(hostFilters));
+  let filterTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Runs for every snapshot of the host.
+  $effect(() => {
+    const host = hostFilters();
+    untrack(() => {
+      if (filterDraft.accepts(host)) filters = host;
     });
+  });
+
+  function pushFilters() {
+    filterTimer = null;
+    if (!$appState.current_path) {
+      // Nothing to filter anymore: the host's (reset) filters apply.
+      filterDraft.reset();
+      filters = hostFilters();
+      return;
+    }
+    const sent = { ...filters };
+    post("updateFilters", sent);
+    filterDraft.sent(sent);
   }
   function onFiltersInput() {
+    filterDraft.edit();
     if (filterTimer) clearTimeout(filterTimer);
-    filterTimer = setTimeout(pushFilters, 300);
+    filterTimer = setTimeout(pushFilters, FILTER_DEBOUNCE_MS);
   }
+  onDestroy(() => {
+    if (filterTimer) clearTimeout(filterTimer);
+  });
 
-  function onCaseSensitiveChange() {
-    post("updateConfig", $appState.config);
-    pushFilters();
-  }
-  function onRemoveEmptyDirsChange() {
-    post("updateConfig", $appState.config);
+  // --- Config ---------------------------------------------------------------
+  // Every edit is an intent: it names the one thing the user changed. The
+  // host applies it to its configuration and answers with a snapshot.
+  function setFlag(
+    option: "case_sensitive_search" | "remove_empty_directories",
+    e: Event
+  ) {
+    const value = (e.currentTarget as HTMLInputElement).checked;
+    post("setConfigOption", { option, value });
   }
 
   let newPattern = $state("");
 
-  function addPattern() {
+  function addPattern(pattern: string) {
+    post("addIgnorePattern", { pattern });
+  }
+  function addNewPattern() {
     const p = newPattern.trim();
     if (!p) return;
-    if (!$appState.config.ignore_patterns.includes(p)) {
-      post("updateConfig", {
-        ...$appState.config,
-        ignore_patterns: [...$appState.config.ignore_patterns, p],
-      });
-    }
+    addPattern(p);
     newPattern = "";
   }
-  function removePattern(p: string) {
-    post("updateConfig", {
-      ...$appState.config,
-      ignore_patterns: $appState.config.ignore_patterns.filter((x) => x !== p),
-    });
+  function removePattern(pattern: string) {
+    post("removeIgnorePattern", { pattern });
   }
   function deleteAllPatterns() {
-    post("updateConfig", { ...$appState.config, ignore_patterns: [] });
+    post("clearIgnorePatterns");
   }
 
   function handleRescan() {
@@ -113,7 +155,7 @@
     placeholder={searchEnabled
       ? $t("sidebar.ph.searchFileNames")
       : $t("sidebar.ph.selectDirFirst")}
-    bind:value={$appState.search_query}
+    bind:value={filters.searchQuery}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
   />
@@ -124,7 +166,7 @@
     placeholder={searchEnabled
       ? $t("sidebar.ph.extensionFilter")
       : $t("sidebar.ph.selectDirFirst")}
-    bind:value={$appState.extension_filter}
+    bind:value={filters.extensionFilter}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
   />
@@ -135,7 +177,7 @@
     placeholder={searchEnabled
       ? $t("sidebar.ph.contentSearch")
       : $t("sidebar.ph.selectDirFirst")}
-    bind:value={$appState.content_search_query}
+    bind:value={filters.contentSearchQuery}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
   />
@@ -144,8 +186,8 @@
     <input
       type="checkbox"
       id="case-sensitive"
-      bind:checked={$appState.config.case_sensitive_search}
-      onchange={onCaseSensitiveChange}
+      checked={$appState.config.case_sensitive_search}
+      onchange={(e) => setFlag("case_sensitive_search", e)}
     />
     {$t("sidebar.caseSensitive")}
   </label>
@@ -214,9 +256,9 @@
       id="new-ignore-pattern"
       placeholder={$t("sidebar.ph.addPattern")}
       bind:value={newPattern}
-      onkeydown={(e) => e.key === "Enter" && addPattern()}
+      onkeydown={(e) => e.key === "Enter" && addNewPattern()}
     />
-    <button id="add-pattern-btn" onclick={addPattern}>{$t("action.add")}</button
+    <button id="add-pattern-btn" onclick={addNewPattern}>{$t("action.add")}</button
     >
   </div>
 
@@ -233,8 +275,8 @@
         <input
           type="checkbox"
           id="remove-empty-dirs"
-          bind:checked={$appState.config.remove_empty_directories}
-          onchange={onRemoveEmptyDirsChange}
+          checked={$appState.config.remove_empty_directories}
+          onchange={(e) => setFlag("remove_empty_directories", e)}
         />
         {$t("sidebar.removeEmptyDirs")}
       </label>
@@ -258,11 +300,7 @@
       {#each availableCommon as pattern (pattern)}
         <button
           class="common-pattern-chip"
-          onclick={() =>
-            post("updateConfig", {
-              ...$appState.config,
-              ignore_patterns: [...$appState.config.ignore_patterns, pattern],
-            })}
+          onclick={() => addPattern(pattern)}
           title={`Click to add "${pattern}" to ignore patterns`}
         >
           {pattern}

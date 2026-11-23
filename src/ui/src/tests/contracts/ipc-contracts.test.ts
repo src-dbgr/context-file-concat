@@ -10,7 +10,6 @@ import {
 } from "$lib/ipc/schema";
 import {
   validateCommand,
-  makeWireConfig,
   makeWireUiState,
   type PayloadForWire,
 } from "./helpers";
@@ -35,6 +34,7 @@ const NULLARY_COMMANDS: readonly NullaryCommandName[] = [
   "pickOutputDirectory",
   "exportConfig",
   "importConfig",
+  "clearIgnorePatterns",
 ] as const;
 
 describe("IPC contracts – outgoing commands (positive)", () => {
@@ -103,15 +103,6 @@ describe("IPC contracts – outgoing commands (positive)", () => {
     expect(pTrue.command).toBe("expandCollapseAll");
     expect(pFalse.command).toBe("expandCollapseAll");
   });
-
-  it("accepts full wire config for updateConfig", () => {
-    const cfg = makeWireConfig({
-      output_filename: "cfc_output.txt",
-      ignore_patterns: ["node_modules/", "*.log"],
-    });
-    const parsed = validateCommand("updateConfig", cfg);
-    expect(parsed.command).toBe("updateConfig");
-  });
 });
 
 describe("IPC contracts – outgoing commands (negative)", () => {
@@ -127,23 +118,6 @@ describe("IPC contracts – outgoing commands (negative)", () => {
     const invalid = AnyCommandMessageSchema.safeParse({
       command: "expandCollapseAll",
       payload: "true", // invalid, must be boolean
-    });
-    expect(invalid.success).toBe(false);
-  });
-
-  it("rejects incomplete config for updateConfig", () => {
-    // Deliberately pass a *UI* style partial config to show that the wire schema is stricter.
-    const invalid = AnyCommandMessageSchema.safeParse({
-      command: "updateConfig",
-      payload: {
-        ignore_patterns: [],
-        output_filename: "x.txt",
-        case_sensitive_search: false,
-        include_tree_by_default: false,
-        use_relative_paths: false,
-        remove_empty_directories: false,
-        output_directory: "",
-      },
     });
     expect(invalid.success).toBe(false);
   });

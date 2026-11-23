@@ -3,7 +3,7 @@
 
 import type { z } from "zod";
 import {
-  ConfigSchema,
+  UiConfigSchema,
   TreeNodeSchema,
   UiStateSchema,
   type CommandName,
@@ -12,22 +12,16 @@ import {
 /** Valid path sample (POSIX-like) */
 export const VALID_PATH = "/repo/src/index.ts";
 
-/** Build a fully valid Config payload per ConfigSchema (backend-facing, richer than frontend's Config). */
-export function makeValidConfig(): z.input<typeof ConfigSchema> {
+/** Build a fully valid config as the host sends it (UiConfigSchema). */
+export function makeValidConfig(): z.input<typeof UiConfigSchema> {
   return {
     ignore_patterns: [],
-    tree_ignore_patterns: [], // default exists, but provide explicitly for clarity
-    last_directory: null,
-    output_directory: "",
+    output_directory: null,
     output_filename: "output.txt",
     case_sensitive_search: false,
     include_tree_by_default: false,
     use_relative_paths: false,
     remove_empty_directories: false,
-    window_size: [1280, 800],
-    window_position: [100, 100],
-    auto_load_last_directory: false,
-    max_file_size_mb: 20,
   };
 }
 
@@ -147,6 +141,7 @@ export function makeValidPayloadForCommand(name: CommandName): unknown {
     case "pickOutputDirectory":
     case "exportConfig":
     case "importConfig":
+    case "clearIgnorePatterns":
       return null;
 
     case "loadDirectoryLevel":
@@ -169,7 +164,11 @@ export function makeValidPayloadForCommand(name: CommandName): unknown {
       // Provide empty object to test default injection
       return {};
 
-    case "updateConfig":
-      return makeValidConfig();
+    case "addIgnorePattern":
+    case "removeIgnorePattern":
+      return { pattern: "*.log" };
+
+    case "setConfigOption":
+      return { option: "case_sensitive_search", value: true };
   }
 }

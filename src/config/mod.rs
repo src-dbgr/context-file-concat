@@ -9,7 +9,8 @@ use std::path::PathBuf;
 ///
 /// Fields that are not part of this struct are ignored when a configuration is read
 /// (deliberately no `deny_unknown_fields`), so files written by an older version keep
-/// loading after a setting has been retired, e.g. the former `scan_chunk_size`.
+/// loading after a setting has been retired, e.g. the former `scan_chunk_size` and
+/// `auto_load_last_directory`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
     pub ignore_patterns: HashSet<String>,
@@ -23,7 +24,6 @@ pub struct AppConfig {
     pub remove_empty_directories: bool,
     pub window_size: (f64, f64),
     pub window_position: (f64, f64),
-    pub auto_load_last_directory: bool,
     /// Size limit for files in MiB: larger files are not listed by the scan, not read
     /// by the content search and not inlined into the generated output.
     pub max_file_size_mb: u64,
@@ -101,7 +101,6 @@ impl Default for AppConfig {
             remove_empty_directories: false,
             window_size: (1200.0, 800.0),
             window_position: (100.0, 100.0),
-            auto_load_last_directory: false,
             max_file_size_mb: 20,
         }
     }

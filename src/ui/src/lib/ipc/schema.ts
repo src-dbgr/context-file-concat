@@ -6,27 +6,24 @@ import type { TreeNode } from "../types";
 
 /* ---------------------------------- Common --------------------------------- */
 export const PathString = z.string().min(1);
-/** (number, number) tuple */
-const Tuple2 = z.tuple([z.number(), z.number()]);
 
 /* --------------------------------- Config ---------------------------------- */
-export const ConfigSchema = z
-  .object({
-    ignore_patterns: z.array(z.string()),
-    tree_ignore_patterns: z.array(z.string()).default([]),
-    last_directory: z.string().nullable().optional(),
-    output_directory: z.string().nullable().optional(),
-    output_filename: z.string(),
-    case_sensitive_search: z.boolean(),
-    include_tree_by_default: z.boolean(),
-    use_relative_paths: z.boolean(),
-    remove_empty_directories: z.boolean(),
-    window_size: Tuple2,
-    window_position: Tuple2,
-    auto_load_last_directory: z.boolean(),
-    max_file_size_mb: z.number(),
-  })
-  .passthrough();
+/**
+ * The configuration as the host shows it to the UI (`UiConfig` in
+ * `src/app/view_model/ui_config.rs`): exactly the settings the UI displays.
+ * The UI never sends it back; every edit is an intent command (see
+ * `ConfigOptionSchema` and the ignore pattern commands below).
+ */
+export const UiConfigSchema = z.object({
+  ignore_patterns: z.array(z.string()),
+  case_sensitive_search: z.boolean(),
+  remove_empty_directories: z.boolean(),
+  include_tree_by_default: z.boolean(),
+  use_relative_paths: z.boolean(),
+  output_directory: z.string().nullable(),
+  output_filename: z.string(),
+});
+export type UiConfig = z.infer<typeof UiConfigSchema>;
 
 /* ---------------------------------- Tree ----------------------------------- */
 /**
@@ -64,30 +61,35 @@ export const ScanProgressSchema = z
   })
   .passthrough();
 
-export const UiStateSchema = z
-  .object({
-    config: ConfigSchema,
-    current_path: z.string(),
-    tree: z.array(TreeNodeSchema),
-    total_files_found: z.number(),
-    visible_files_count: z.number(),
-    // Totals of the complete filtered tree (the pruned `tree` cannot provide them).
-    tree_files_count: z.number().int().nonnegative(),
-    tree_dirs_count: z.number().int().nonnegative(),
-    selected_files_count: z.number(),
-    is_scanning: z.boolean(),
-    is_generating: z.boolean(),
-    is_fully_scanned: z.boolean(),
-    status_message: z.string(),
-    search_query: z.string(),
-    extension_filter: z.string(),
-    content_search_query: z.string(),
-    current_config_filename: z.string().nullable().optional(),
-    scan_progress: ScanProgressSchema,
-    active_ignore_patterns: z.array(z.string()),
-    patterns_need_rescan: z.boolean(),
-  })
-  .passthrough();
+const UiStateObject = z.object({
+  config: UiConfigSchema,
+  current_path: z.string(),
+  tree: z.array(TreeNodeSchema),
+  total_files_found: z.number(),
+  visible_files_count: z.number(),
+  // Totals of the complete filtered tree (the pruned `tree` cannot provide them).
+  tree_files_count: z.number().int().nonnegative(),
+  tree_dirs_count: z.number().int().nonnegative(),
+  selected_files_count: z.number(),
+  is_scanning: z.boolean(),
+  is_generating: z.boolean(),
+  is_fully_scanned: z.boolean(),
+  status_message: z.string(),
+  search_query: z.string(),
+  extension_filter: z.string(),
+  content_search_query: z.string(),
+  current_config_filename: z.string().nullable().optional(),
+  scan_progress: ScanProgressSchema,
+  active_ignore_patterns: z.array(z.string()),
+  patterns_need_rescan: z.boolean(),
+});
+
+export const UiStateSchema = UiStateObject.passthrough();
+/**
+ * The state the UI works with. Derived from the schema, so the type cannot
+ * drift from what is validated (unknown extra fields are not part of it).
+ */
+export type UiState = z.infer<typeof UiStateObject>;
 
 /**
  * Envelope-only variant of {@link UiStateSchema}: every top-level field is
@@ -141,11 +143,40 @@ const SetExpansionPayload = z
   })
   .strict();
 const SaveFilePayload = z.string();
-const UpdateConfigPayload = ConfigSchema;
+/** A pattern is set if it is not blank; the host ignores blank ones. */
+const IgnorePatternPayload = z
+  .object({
+    pattern: z.string().refine((p) => p.trim().length > 0, "blank pattern"),
+  })
+  .strict();
+
+const configOption = <N extends string, V extends z.ZodTypeAny>(
+  option: N,
+  value: V,
+) => z.object({ option: z.literal(option), value }).strict();
+
+/**
+ * One user-editable option together with its new value (`ConfigOption` in
+ * `src/app/commands.rs`). These are all the options the UI can set; the rest
+ * of the configuration belongs to the host.
+ */
+export const ConfigOptionSchema = z.discriminatedUnion("option", [
+  configOption("case_sensitive_search", z.boolean()),
+  configOption("remove_empty_directories", z.boolean()),
+  configOption("include_tree_by_default", z.boolean()),
+  configOption("use_relative_paths", z.boolean()),
+  configOption("output_filename", z.string()),
+  /** `null` or an empty text: no output directory is preset. */
+  configOption("output_directory", z.string().nullable()),
+]);
+export type ConfigOption = z.infer<typeof ConfigOptionSchema>;
 
 /**
  * Single source of truth: command → payload schema.
- * Names and shapes must match the Rust backend exactly.
+ * Names and shapes must match the Rust backend exactly. That is enforced: the
+ * host writes its routing table with example payloads into
+ * `tests/contracts/fixtures/commands.json`, and `rust-fixture.test.ts`
+ * compares the names with this map and validates every example with it.
  */
 export const CommandSchemas = {
   selectDirectory: NullPayload,
@@ -168,20 +199,20 @@ export const CommandSchemas = {
   pickOutputDirectory: NullPayload,
   exportConfig: NullPayload,
   importConfig: NullPayload,
-  updateConfig: UpdateConfigPayload,
   updateFilters: UpdateFiltersPayload,
+  addIgnorePattern: IgnorePatternPayload,
+  removeIgnorePattern: IgnorePatternPayload,
+  clearIgnorePatterns: NullPayload,
   addIgnorePath: PathPayload,
+  setConfigOption: ConfigOptionSchema,
 } as const satisfies Record<string, z.ZodTypeAny>;
 
 export type CommandName = keyof typeof CommandSchemas;
 
-type FrontendConfig = import("../types").Config;
-type _PayloadForBase<T extends CommandName> = z.input<
+/** What `post()` accepts for a command: the input type of its schema. */
+export type PayloadFor<T extends CommandName> = z.input<
   (typeof CommandSchemas)[T]
 >;
-export type PayloadFor<T extends CommandName> = T extends "updateConfig"
-  ? FrontendConfig
-  : _PayloadForBase<T>;
 
 type CommandsByOutput<TOut> = {
   [K in CommandName]: z.output<(typeof CommandSchemas)[K]> extends TOut

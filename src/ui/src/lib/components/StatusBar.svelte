@@ -2,6 +2,7 @@
   import { appState } from "$lib/stores/app";
   import { post } from "$lib/services/backend";
   import Spinner from "$lib/components/Spinner.svelte";
+  import HostTextInput from "$lib/components/HostTextInput.svelte";
   import { t } from "$lib/i18n";
 
   // Runes: derived indexing indicator
@@ -9,9 +10,14 @@
     $appState.is_scanning && !$appState.is_fully_scanned
   );
 
-  // Component-local handler for config changes
-  function handleConfigChange() {
-    post("updateConfig", $appState.config);
+  // Every edit is an intent that names the one option the user changed; the
+  // host applies it and answers with a snapshot.
+  function setFlag(
+    option: "include_tree_by_default" | "use_relative_paths",
+    e: Event
+  ) {
+    const value = (e.currentTarget as HTMLInputElement).checked;
+    post("setConfigOption", { option, value });
   }
 </script>
 
@@ -56,11 +62,14 @@
     <div class="settings-content">
       <div class="setting-row">
         <label for="output-dir">{$t("status.dir")}</label>
-        <input
-          type="text"
+        <HostTextInput
           id="output-dir"
-          bind:value={$appState.config.output_directory}
-          onchange={handleConfigChange}
+          value={$appState.config.output_directory ?? ""}
+          oncommit={(text) =>
+            post("setConfigOption", {
+              option: "output_directory",
+              value: text === "" ? null : text,
+            })}
         />
         <button onclick={() => post("pickOutputDirectory")}
           >{$t("action.browse")}</button
@@ -69,11 +78,11 @@
 
       <div class="setting-row">
         <label for="output-filename">{$t("status.filename")}</label>
-        <input
-          type="text"
+        <HostTextInput
           id="output-filename"
-          bind:value={$appState.config.output_filename}
-          onchange={handleConfigChange}
+          value={$appState.config.output_filename}
+          oncommit={(value) =>
+            post("setConfigOption", { option: "output_filename", value })}
         />
       </div>
 
@@ -82,8 +91,8 @@
           <input
             type="checkbox"
             id="include-tree"
-            bind:checked={$appState.config.include_tree_by_default}
-            onchange={handleConfigChange}
+            checked={$appState.config.include_tree_by_default}
+            onchange={(e) => setFlag("include_tree_by_default", e)}
           />
           {$t("status.includeTree")}
         </label>
@@ -91,8 +100,8 @@
           <input
             type="checkbox"
             id="relative-paths"
-            bind:checked={$appState.config.use_relative_paths}
-            onchange={handleConfigChange}
+            checked={$appState.config.use_relative_paths}
+            onchange={(e) => setFlag("use_relative_paths", e)}
           />
           {$t("status.relativePaths")}
         </label>

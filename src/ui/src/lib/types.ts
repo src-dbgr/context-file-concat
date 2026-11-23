@@ -1,3 +1,5 @@
+import type { UiConfig, UiState } from "./ipc/schema";
+
 /**
  * Defines the structure for a file or directory node in the tree.
  * This is the data contract between the Rust backend and the Svelte frontend.
@@ -32,41 +34,12 @@ export interface TreeNode {
 }
 
 /**
- * Defines the configuration settings for the application.
+ * The configuration and the application state as the host sends them. Both are
+ * derived from the runtime schemas in `ipc/schema.ts`, the single definition
+ * of the wire shapes, so the types cannot drift from what is validated.
  */
-export interface Config {
-  ignore_patterns: string[];
-  case_sensitive_search: boolean;
-  include_tree_by_default: boolean;
-  use_relative_paths: boolean;
-  remove_empty_directories: boolean;
-  output_directory: string;
-  output_filename: string;
-}
-
-/**
- * Represents the entire state of the frontend application.
- */
-export interface AppState {
-  is_scanning: boolean;
-  is_generating: boolean;
-  is_fully_scanned: boolean;
-  patterns_need_rescan: boolean;
-  tree: TreeNode[];
-  current_path: string | null;
-  current_config_filename: string | null;
-  status_message: string;
-  selected_files_count: number;
-  /** Files in the complete filtered tree, including the ones not sent. */
-  tree_files_count: number;
-  /** Directories in the complete filtered tree, including the ones not sent. */
-  tree_dirs_count: number;
-  search_query: string;
-  extension_filter: string;
-  content_search_query: string;
-  active_ignore_patterns: string[];
-  config: Config;
-}
+export type Config = UiConfig;
+export type AppState = UiState;
 
 /**
  * Represents the context of the currently focused UI element.

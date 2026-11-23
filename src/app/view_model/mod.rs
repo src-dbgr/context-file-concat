@@ -12,6 +12,7 @@
 
 mod status;
 mod tree_builder;
+mod ui_config;
 
 #[cfg(test)]
 mod cache_tests;
@@ -25,17 +26,18 @@ mod reference;
 use crate::app::selection::SelectionState;
 use crate::app::state::AppState;
 use crate::app::tree_index::TreeCounts;
-use crate::config::AppConfig;
 use crate::core::{is_blank, FileItem, FileNameMatcher};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tree_builder::{build_tree_nodes, TreeView};
 
+pub use ui_config::UiConfig;
+
 /// A serializable representation of the application state for the UI.
 #[derive(Serialize, Clone, Debug)]
 pub struct UiState {
-    pub config: AppConfig,
+    pub config: UiConfig,
     pub current_path: String,
     pub tree: Vec<TreeNode>,
     /// The number of items (files *and* directories) of the unfiltered list.
@@ -98,7 +100,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
     let tree = build_tree_snapshot(state);
 
     UiState {
-        config: state.config.clone(),
+        config: UiConfig::from(&state.config),
         current_path: state.current_path.clone(),
         tree: tree.nodes,
         total_files_found: state.full_file_list.len(),

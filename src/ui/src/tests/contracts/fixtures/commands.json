@@ -1,0 +1,119 @@
+{
+  "addIgnorePath": [
+    "/project/src"
+  ],
+  "addIgnorePattern": [
+    {
+      "pattern": "*.log"
+    }
+  ],
+  "cancelGeneration": [
+    null
+  ],
+  "cancelScan": [
+    null
+  ],
+  "clearDirectory": [
+    null
+  ],
+  "clearIgnorePatterns": [
+    null
+  ],
+  "clearPreviewState": [
+    null
+  ],
+  "deselectAll": [
+    null
+  ],
+  "expandCollapseAll": [
+    true,
+    false
+  ],
+  "exportConfig": [
+    null
+  ],
+  "generatePreview": [
+    null
+  ],
+  "importConfig": [
+    null
+  ],
+  "initialize": [
+    null
+  ],
+  "loadDirectoryLevel": [
+    "/project/src"
+  ],
+  "loadFilePreview": [
+    "/project/src"
+  ],
+  "pickOutputDirectory": [
+    null
+  ],
+  "removeIgnorePattern": [
+    {
+      "pattern": "*.log"
+    }
+  ],
+  "rescanDirectory": [
+    null
+  ],
+  "saveFile": [
+    "generated content"
+  ],
+  "selectAll": [
+    null
+  ],
+  "selectDirectory": [
+    null
+  ],
+  "setConfigOption": [
+    {
+      "option": "case_sensitive_search",
+      "value": true
+    },
+    {
+      "option": "remove_empty_directories",
+      "value": true
+    },
+    {
+      "option": "include_tree_by_default",
+      "value": false
+    },
+    {
+      "option": "use_relative_paths",
+      "value": false
+    },
+    {
+      "option": "output_filename",
+      "value": "context.txt"
+    },
+    {
+      "option": "output_directory",
+      "value": "/home/user/out"
+    },
+    {
+      "option": "output_directory",
+      "value": null
+    }
+  ],
+  "setExpansion": [
+    {
+      "expanded": true,
+      "path": "/project/src"
+    }
+  ],
+  "toggleDirectorySelection": [
+    "/project/src"
+  ],
+  "toggleSelection": [
+    "/project/src"
+  ],
+  "updateFilters": [
+    {
+      "contentSearchQuery": "needle",
+      "extensionFilter": "rs",
+      "searchQuery": "main"
+    }
+  ]
+}

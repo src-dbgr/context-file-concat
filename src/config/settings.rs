@@ -185,11 +185,6 @@ fn migrate_legacy_config(config_content: &str) -> Result<AppConfig> {
     )?;
     ensure_field_from_default(obj, "window_size", defaults.window_size)?;
     ensure_field_from_default(obj, "window_position", defaults.window_position)?;
-    ensure_field_from_default(
-        obj,
-        "auto_load_last_directory",
-        defaults.auto_load_last_directory,
-    )?;
     ensure_field_from_default(obj, "max_file_size_mb", defaults.max_file_size_mb)?;
 
     let migrated_config: AppConfig = serde_json::from_value(Value::Object(obj.clone()))?;
@@ -420,7 +415,8 @@ pub mod tests {
     // =========================================================================
 
     /// A complete configuration as an older version wrote it: with the retired
-    /// `scan_chunk_size` and with settings that differ from the defaults.
+    /// `scan_chunk_size` and `auto_load_last_directory` and with settings that differ
+    /// from the defaults.
     fn config_json_with_retired_field() -> (Value, AppConfig) {
         let expected = AppConfig {
             case_sensitive_search: true,
@@ -433,6 +429,10 @@ pub mod tests {
             .as_object_mut()
             .unwrap()
             .insert("scan_chunk_size".to_string(), json!(100));
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("auto_load_last_directory".to_string(), json!(true));
         (value, expected)
     }
 
