@@ -56,7 +56,7 @@ The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on
 | `saveFile`                      | `string` (content)                                      | Opens the save dialog; answers with `fileSaveStatus`                            |
 | `pickOutputDirectory`           | `null`                                                  | Opens the dialog, stores the choice as output directory and persists it         |
 | `addIgnorePattern`              | `{ pattern: string }` (not blank, no other fields)      | Adds one ignore pattern, see [Config changes](#config-changes)                  |
-| `removeIgnorePattern`           | `{ pattern: string }` (not blank, no other fields)      | Removes one ignore pattern                                                      |
+| `removeIgnorePattern`           | `{ pattern: string }` (any text, no other fields)       | Removes one ignore pattern                                                      |
 | `clearIgnorePatterns`           | `null`                                                  | Removes all ignore patterns                                                     |
 | `setConfigOption`               | `{ option, value }` (no other fields), see below        | Sets one user-editable option                                                   |
 | `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog, see [Config import](#config-import)            |
@@ -112,7 +112,10 @@ A snapshot replaces the whole store, so a text field bound to the store would be
 
 - While the user is editing (changed, not sent yet: the 300 ms debounce of the filters, an output field that still has the focus), the draft stays.
 - After the text has been sent, host values that differ from it are skipped until the host reports the sent text (its answer to the command).
-- If that answer does not arrive within 1.5 s, the host's value is shown again: the host is the source of truth, and something else has changed the value in the meantime.
+- If that answer does not arrive within 1.5 s, the host's value is shown again: the host is the source of truth, and something else has changed the value in the meantime. A timer ends the wait and the field then takes the latest host value; it does not depend on another snapshot arriving.
+- The filters belong to the directory they were typed for. When `current_path` changes (another directory, or none after `clearDirectory`), a pending debounce is cancelled, the draft is given up and the host's filters are shown.
+
+Changes made from script (word and line deletion with the keyboard, undo/redo, paste) dispatch an `input` event, so they are drafts like typed text.
 
 Checkboxes need no draft; they send their intent on `change` and show `config`.
 
@@ -244,16 +247,18 @@ Measured for a synthetic project of 50,000 files in 550 directories (`payload_of
 
 Every way of changing the expansion is therefore a command, and the result is visible with the next snapshot:
 
-| Gesture                                                                         | Command                                                                        |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Click on chevron or directory name, `Enter`                                     | `setExpansion` with the opposite of the rendered `is_expanded`                 |
-| `ArrowRight` on a collapsed directory                                           | `setExpansion { expanded: true }`                                              |
-| `ArrowLeft` on an expanded directory                                            | `setExpansion { expanded: false }`                                             |
-| Any of the above on a directory with `children_loaded: false` (no scan running) | `loadDirectoryLevel`; the host loads the level, marks it loaded and expands it |
-| "Expand all" / "Collapse all"                                                   | `expandCollapseAll`                                                            |
-| Typing into a filter                                                            | `updateFilters`; the host expands the ancestors of all matches                 |
+| Gesture                                                                    | Command                                                                        |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Click on chevron or directory name, `Enter`                                | `setExpansion` with the opposite of the rendered `is_expanded`                 |
+| `ArrowRight` on a collapsed directory                                      | `setExpansion { expanded: true }`                                              |
+| `ArrowLeft` on an expanded directory                                       | `setExpansion { expanded: false }`                                             |
+| A gesture that expands a directory with `children_loaded: false` (no scan) | `loadDirectoryLevel`; the host loads the level, marks it loaded and expands it |
+| "Expand all" / "Collapse all"                                              | `expandCollapseAll`                                                            |
+| Typing into a filter                                                       | `updateFilters`; the host expands the ancestors of all matches                 |
 
-The mapping from gesture to command lives in `src/ui/src/lib/modules/treeExpansion.ts`. While a scan is running the host refuses lazy loads (the scan delivers the children itself), so the UI sends `setExpansion` in that case.
+The mapping from gesture to command lives in `src/ui/src/lib/modules/treeExpansion.ts`. While a scan is running the host refuses lazy loads (the scan delivers the children itself), so the UI sends `setExpansion` in that case. Only expanding loads: a directory that is already expanded without loaded children (expanded during a scan that was cancelled) is collapsed with `setExpansion { expanded: false }` like any other, and is loaded when it is expanded the next time.
+
+Keys are handled in one place, the key handler of the tree in `FileTree.svelte` (roving focus): `Enter` toggles a directory or opens a file, `Space` toggles the selection, wherever the focus is inside the row. `TreeItem.svelte` handles the pointer only.
 
 There is no optimistic update: a row changes when the snapshot arrives. Snapshots are cheap enough for that, and it rules out the UI and the host disagreeing.
 

@@ -43,12 +43,9 @@
     post("addIgnorePath", node.path);
   }
 
-  function onActivate(e: KeyboardEvent, action: () => void) {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      action();
-    }
-  }
+  // Pointer only. Keys are handled once, by the tree (FileTree's key handler
+  // with the roving focus): a key pressed on a focused arrow or name bubbles
+  // up to it and acts on the row. A key handler here would act a second time.
 </script>
 
 {#if node.is_directory}
@@ -64,13 +61,13 @@
     tabindex={focused ? 0 : -1}
   >
     <span style="width: {indentWidth()}px; flex-shrink: 0;"></span>
+    <!-- svelte-ignore a11y_click_events_have_key_events (keys: see the script) -->
     <span
       class="arrow {node.is_expanded ? 'expanded' : ''}"
       data-type="directory"
       role="button"
       tabindex="0"
       onclick={toggleDir}
-      onkeydown={(e) => onActivate(e, toggleDir)}
     ></span>
     <input
       type="checkbox"
@@ -83,6 +80,7 @@
       aria-label="Toggle directory selection"
     />
     <div class="name-and-button">
+      <!-- svelte-ignore a11y_click_events_have_key_events (keys: see the script) -->
       <span
         class="file-name {node.is_match ? 'is-match' : ''}"
         data-path={node.path}
@@ -90,7 +88,6 @@
         role="button"
         tabindex="0"
         onclick={toggleDir}
-        onkeydown={(e) => onActivate(e, toggleDir)}
       >
         <svg class="icon" viewBox="0 0 24 24"
           ><path
@@ -139,6 +136,7 @@
       aria-label="Toggle file selection"
     />
     <div class="name-and-button">
+      <!-- svelte-ignore a11y_click_events_have_key_events (keys: see the script) -->
       <span
         class="file-name {node.is_match ? 'is-match' : ''}"
         data-path={node.path}
@@ -146,7 +144,6 @@
         role="button"
         tabindex="0"
         onclick={openFile}
-        onkeydown={(e) => onActivate(e, openFile)}
       >
         {#if node.is_binary}
           <svg class="icon" viewBox="0 0 24 24"

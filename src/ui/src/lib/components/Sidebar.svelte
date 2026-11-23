@@ -39,20 +39,41 @@
       contentSearchQuery: $appState.content_search_query,
     };
   }
-  const filterDraft = new HostDraft<Filters>(
-    (a, b) =>
+  // Shows the host's filters unless the draft holds them back.
+  function syncFiltersFromHost() {
+    const host = hostFilters();
+    if (filterDraft.accepts(host)) filters = host;
+  }
+  const filterDraft = new HostDraft<Filters>({
+    equals: (a, b) =>
       a.searchQuery === b.searchQuery &&
       a.extensionFilter === b.extensionFilter &&
-      a.contentSearchQuery === b.contentSearchQuery
-  );
+      a.contentSearchQuery === b.contentSearchQuery,
+    onAckTimeout: syncFiltersFromHost,
+  });
   let filters = $state(untrack(hostFilters));
   let filterTimer: ReturnType<typeof setTimeout> | null = null;
+  let filtersPath = untrack(() => $appState.current_path);
+
+  function cancelPendingFilters() {
+    if (filterTimer) clearTimeout(filterTimer);
+    filterTimer = null;
+  }
 
   // Runs for every snapshot of the host.
   $effect(() => {
-    const host = hostFilters();
+    const path = $appState.current_path;
+    hostFilters();
     untrack(() => {
-      if (filterDraft.accepts(host)) filters = host;
+      if (path !== filtersPath) {
+        // Another directory (or none): filters belong to the directory they
+        // were typed for. Text that has not been sent is not sent to the new
+        // one, and a sent text is no longer waited for.
+        filtersPath = path;
+        cancelPendingFilters();
+        filterDraft.reset();
+      }
+      syncFiltersFromHost();
     });
   });
 
@@ -70,11 +91,12 @@
   }
   function onFiltersInput() {
     filterDraft.edit();
-    if (filterTimer) clearTimeout(filterTimer);
+    cancelPendingFilters();
     filterTimer = setTimeout(pushFilters, FILTER_DEBOUNCE_MS);
   }
   onDestroy(() => {
-    if (filterTimer) clearTimeout(filterTimer);
+    cancelPendingFilters();
+    filterDraft.reset();
   });
 
   // --- Config ---------------------------------------------------------------

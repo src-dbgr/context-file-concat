@@ -12,26 +12,48 @@
  * - After the value has been sent, host values that differ from it are taken
  *   for snapshots from before the host has processed it and are skipped,
  *   until the host reports the sent value (the acknowledgement).
- * - The wait for the acknowledgement is limited. A host that keeps reporting
- *   something else has decided differently (another command changed the value
- *   in the meantime, or the directory was closed), and the host is the source
- *   of truth, so its value is shown again.
+ * - The wait for the acknowledgement is limited. A host that has not reported
+ *   the sent value by then has decided differently (another command changed
+ *   the value in the meantime), and the host is the source of truth, so its
+ *   value is shown again. The wait ends by a timer, not by the next snapshot:
+ *   the snapshot that carried the host's decision may have been the last one,
+ *   and it was skipped. `onAckTimeout` tells the field to look at the host's
+ *   current value again.
  *
- * The class holds no UI state and no timers; it only answers the question.
+ * The class holds no UI state; it only answers the question and reports the
+ * end of the wait.
  */
 
 /** How long a sent value is protected from differing host values. */
 export const ACK_TIMEOUT_MS = 1500;
 
+export type HostDraftOptions<T> = {
+  /** When a host value counts as the acknowledgement of a sent value. */
+  equals?: (a: T, b: T) => boolean;
+  /**
+   * The wait for an acknowledgement has run out. The field is to ask
+   * `accepts()` again with the latest host value.
+   */
+  onAckTimeout?: () => void;
+  ackTimeoutMs?: number;
+};
+
 export class HostDraft<T> {
   private editing = false;
-  private awaiting: { value: T; until: number } | null = null;
+  private awaiting: {
+    value: T;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
 
-  constructor(
-    private readonly equals: (a: T, b: T) => boolean = Object.is,
-    private readonly now: () => number = () => Date.now(),
-    private readonly ackTimeoutMs: number = ACK_TIMEOUT_MS,
-  ) {}
+  private readonly equals: (a: T, b: T) => boolean;
+  private readonly onAckTimeout: (() => void) | undefined;
+  private readonly ackTimeoutMs: number;
+
+  constructor(options: HostDraftOptions<T> = {}) {
+    this.equals = options.equals ?? Object.is;
+    this.onAckTimeout = options.onAckTimeout;
+    this.ackTimeoutMs = options.ackTimeoutMs ?? ACK_TIMEOUT_MS;
+  }
 
   /** The user has changed the field; the change has not been sent yet. */
   edit(): void {
@@ -41,13 +63,21 @@ export class HostDraft<T> {
   /** `value` has been sent to the host. */
   sent(value: T): void {
     this.editing = false;
-    this.awaiting = { value, until: this.now() + this.ackTimeoutMs };
+    this.stopWaiting();
+    const timer = setTimeout(() => {
+      this.awaiting = null;
+      this.onAckTimeout?.();
+    }, this.ackTimeoutMs);
+    this.awaiting = { value, timer };
   }
 
-  /** Gives up the local value: the next host value is shown. */
+  /**
+   * Gives up the local value: the next host value is shown. It also ends a
+   * running wait, which makes it the cleanup when the field goes away.
+   */
   reset(): void {
     this.editing = false;
-    this.awaiting = null;
+    this.stopWaiting();
   }
 
   /** Whether the user has changed the field without the change being sent. */
@@ -61,13 +91,14 @@ export class HostDraft<T> {
    */
   accepts(host: T): boolean {
     if (this.awaiting) {
-      const acknowledged = this.equals(host, this.awaiting.value);
-      if (acknowledged || this.now() >= this.awaiting.until) {
-        this.awaiting = null;
-      } else {
-        return false;
-      }
+      if (!this.equals(host, this.awaiting.value)) return false;
+      this.stopWaiting();
     }
     return !this.editing;
+  }
+
+  private stopWaiting(): void {
+    if (this.awaiting) clearTimeout(this.awaiting.timer);
+    this.awaiting = null;
   }
 }
