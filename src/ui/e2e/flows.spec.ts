@@ -400,6 +400,21 @@ test("A11y sanity on main screen (no critical issues)", async ({ page }) => {
   const results = await new AxeBuilder({ page }).analyze();
   const critical = results.violations.filter((v) => v.impact === "critical");
   expect(critical.length, "Expected no CRITICAL a11y violations").toBe(0);
+
+  // With a toast on screen (its list must only own list items).
+  await page.evaluate(() => {
+    (window as unknown as { showError: (m: string) => void }).showError(
+      "Something failed",
+    );
+  });
+  await expect(page.locator(".toast-list .toast")).toHaveCount(1);
+  const withToast = await new AxeBuilder({ page }).analyze();
+  expect(
+    withToast.violations
+      .filter((v) => v.impact === "critical")
+      .map((v) => v.id),
+    "Expected no CRITICAL a11y violations with a toast shown",
+  ).toEqual([]);
 });
 
 test.describe("Keyboard on the controls of a tree row", () => {
@@ -430,9 +445,6 @@ test.describe("Keyboard on the controls of a tree row", () => {
       ).__e2e.store.setAppState(next);
     }, withRepo());
     await expect(page.locator(".tree .tree-item-container")).toHaveCount(5);
-    // A tree that appears takes the focus to its first row, one frame later.
-    // Wait for that, or it can land after the focus a test sets itself.
-    await expect(page.locator('.tree [data-index="0"]')).toBeFocused();
   });
 
   /** Focus a control of a row, press a key on it, return what was posted. */

@@ -4,6 +4,12 @@
 import { z } from "zod";
 import type { TreeNode } from "../types";
 
+// Zod probes with `new Function` whether it may compile its parsers. Under the
+// CSP of the app (no `unsafe-eval`) that probe is reported as a violation, so
+// it is switched off before the first schema is used. This module is the only
+// one that imports zod.
+z.config({ jitless: true });
+
 /* ---------------------------------- Common --------------------------------- */
 export const PathString = z.string().min(1);
 

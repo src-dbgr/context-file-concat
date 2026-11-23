@@ -64,13 +64,10 @@
     aria-relevant="additions text"
   >
     {#each items as t (t.id)}
-      <li
-        class="toast {t.variant}"
-        role="status"
-        aria-atomic="true"
-        data-id={t.id}
-      >
-        <div class="content">
+      <!-- The item stays a listitem (a list may only own listitems); the
+           status role sits on its content. -->
+      <li class="toast {t.variant}" data-id={t.id}>
+        <div class="content" role="status" aria-atomic="true">
           <span class="icon" aria-hidden="true">
             {#if typeof pickIconKind(t.variant ?? "default", t.icon) === "string"}
               {#if pickIconKind(t.variant ?? "default", t.icon) === "check"}

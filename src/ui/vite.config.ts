@@ -8,23 +8,17 @@ import path from "path";
  */
 const E2E_OUT_DIR = "node_modules/.cfc-e2e-dist";
 
-/**
- * The build Playwright tests run against: `--mode e2e`, or anything run by
- * the npm script `preview:e2e` (its `vite build` and its `vite preview`).
- */
-function isE2EBuild(mode: string): boolean {
-  return mode === "e2e" || process.env.npm_lifecycle_event === "preview:e2e";
-}
-
 // https://vitejs.dev/config/
-export default defineConfig(({ mode }) => {
-  const e2e = isE2EBuild(mode);
+export default defineConfig(({ mode, command }) => {
+  // The build Playwright tests run against (`npm run preview:e2e`).
+  const e2e = mode === "e2e";
   return {
     plugins: [svelte()],
     define: {
-      // Test hooks (`window.__e2e`) exist in dev and e2e builds only. A
-      // build-time constant, so a production bundle has the code removed.
-      __CFC_TEST_HOOKS__: JSON.stringify(e2e || mode !== "production"),
+      // Test hooks (`window.__e2e`) exist in the e2e build and on the dev
+      // server only – not in a build of any other mode. A build-time
+      // constant, so every other bundle has the code removed.
+      __CFC_TEST_HOOKS__: JSON.stringify(e2e || command === "serve"),
     },
     base: "./", // relative URLs
     worker: { format: "iife" as const }, // <-- important for Safari/WKWebView stability

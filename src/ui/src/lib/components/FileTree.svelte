@@ -34,7 +34,9 @@
 
   function setFocusByIndex(
     next: number,
-    opts: { ensureView?: boolean } = { ensureView: true }
+    opts: { ensureView?: boolean; onlyIfUnfocused?: boolean } = {
+      ensureView: true,
+    }
   ) {
     if (!flatTree.length) {
       focusedIndex = -1;
@@ -52,6 +54,15 @@
       if (isInputFocused) {
         return;
       }
+      // An unrequested focus (the tree has just appeared) must not take the
+      // focus away from wherever the user has put it in the meantime.
+      if (
+        opts.onlyIfUnfocused &&
+        activeEl &&
+        activeEl !== document.body
+      ) {
+        return;
+      }
       const node = document.querySelector<HTMLElement>(
         `.tree [data-index="${clamped}"]`
       );
@@ -62,7 +73,7 @@
   // When tree content appears for the first time, focus the first item
   $effect(() => {
     if (flatTree.length && focusedIndex === -1)
-      setFocusByIndex(0, { ensureView: false });
+      setFocusByIndex(0, { ensureView: false, onlyIfUnfocused: true });
   });
 
   // Preserve focus by path across re-renders if possible

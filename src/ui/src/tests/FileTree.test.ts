@@ -917,3 +917,82 @@ describe("FileTree", () => {
     expect(post).toHaveBeenCalledWith("selectDirectory");
   });
 });
+
+describe("FileTree – focus when the tree appears", () => {
+  /** Lets the deferred focus (requestAnimationFrame) of the tree run. */
+  const nextFrame = () =>
+    new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+  const tree = () => [
+    dir("/repo/src", true, [file("/repo/src/a.ts")]),
+    file("/repo/README.md"),
+  ];
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // Let a deferred focus of a tree of an earlier test run out first.
+    await nextFrame();
+    await nextFrame();
+    document.body.innerHTML = "";
+    (document.activeElement as HTMLElement | null)?.blur?.();
+  });
+
+  it("focuses the first row when nothing else has the focus", async () => {
+    seedState([]);
+    const { container } = render(FileTree);
+    seedState(tree());
+    await tick();
+    await nextFrame();
+    await nextFrame();
+
+    expect(document.activeElement).toBe(row(container, "/repo/src"));
+  });
+
+  it("leaves the focus where the user has put it in the meantime", async () => {
+    const elsewhere = document.createElement("button");
+    document.body.appendChild(elsewhere);
+
+    seedState([]);
+    render(FileTree);
+    seedState(tree());
+    await tick();
+    // Before the deferred focus of the tree runs:
+    elsewhere.focus();
+    await nextFrame();
+    await nextFrame();
+
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it("leaves the focus on a control of a row", async () => {
+    seedState([]);
+    const { container } = render(FileTree);
+    seedState(tree());
+    await tick();
+    const ignore = row(container, "/repo/README.md").querySelector<HTMLElement>(
+      ".ignore-btn",
+    )!;
+    ignore.focus();
+    await nextFrame();
+    await nextFrame();
+
+    expect(document.activeElement).toBe(ignore);
+  });
+
+  it("still moves the focus on keyboard navigation", async () => {
+    seedState([]);
+    const { container } = render(FileTree);
+    seedState(tree());
+    await tick();
+    await nextFrame();
+    await nextFrame();
+    const first = row(container, "/repo/src");
+    expect(document.activeElement).toBe(first);
+
+    await fireEvent.keyDown(first, { key: "ArrowDown" });
+    await nextFrame();
+    await nextFrame();
+
+    expect(document.activeElement).toBe(row(container, "/repo/src/a.ts"));
+  });
+});
