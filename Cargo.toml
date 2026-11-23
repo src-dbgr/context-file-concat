@@ -79,19 +79,9 @@ long_description = "A desktop application to intelligently select, filter, and c
 icon = ["assets/icons/icon.icns"]  # macOS
 resources = ["assets/icons/"]
 category = "DeveloperTool"
+deb_depends = ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
 copyright = "Copyright © 2025 src-dbgr. All rights reserved."
 
 # macOS specific settings
 [package.metadata.bundle.osx]
 minimum_system_version = "10.15"
-frameworks = ["WebKit"]
-info_plist_path = "assets/Info.plist"
-
-# Windows specific settings
-[package.metadata.bundle.windows]
-wix_language = "en-US"
-wix_template = "assets/main.wxs"
-
-# Linux specific settings
-[package.metadata.bundle.linux]
-depends = ["libwebkit2gtk-4.1-dev", "libgtk-3-0"]
