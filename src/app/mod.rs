@@ -1090,8 +1090,17 @@ mod tests {
     }
 
     /// The ordered-lane guarantee holds for a drop as for a rescan: the cancel that
-    /// follows it cancels it. What was loaded before is still there.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    /// follows it cancels it. What was loaded before is still there, because the
+    /// cancel is there before the scan has looked at the dropped path.
+    ///
+    /// That last part is what the single-threaded runtime is for. Both commands are
+    /// queued before the lane runs, and the lane runs them back to back, so the task
+    /// of the scan gets its first turn after the cancel. With worker threads the
+    /// lane may start the drop before the cancel has been queued; the scan then has
+    /// time to find its path and enter the directory, and the cancel, which still
+    /// cancels it, leaves the dropped directory loaded (the other legal outcome, see
+    /// the test below).
+    #[tokio::test(flavor = "current_thread")]
     async fn a_cancel_sent_right_after_a_drop_cancels_the_drop() {
         for round in 0..20 {
             let project = project_on_disk("a.txt");
@@ -1108,6 +1117,61 @@ mod tests {
                 StatusNotice::ScanCancelled,
                 "round {round}"
             );
+        }
+    }
+
+    /// However a drop and the cancel behind it are timed: the scan ends cancelled,
+    /// and the directory that is loaded is whole. It is the previous one, untouched,
+    /// if the cancel came before the scan had found the dropped path, and the
+    /// dropped one (as far as the scan got) otherwise; never a mixture.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_cancel_after_a_drop_leaves_one_of_the_two_directories_loaded() {
+        for round in 0..20 {
+            let project = project_on_disk("a.txt");
+            let second = project_on_disk("second.txt");
+            let harness = Harness::with_scanned_project(project.path()).await;
+
+            harness.drop_path(second.path());
+            if round % 2 == 1 {
+                // Time for the scan to get somewhere.
+                tokio::task::yield_now().await;
+            }
+            harness.send("cancelScan", serde_json::Value::Null);
+            harness.quiescence().await;
+
+            let (loaded, status, is_scanning) = {
+                let state = harness.state.lock();
+                (
+                    PathBuf::from(&state.current_path),
+                    state.status.clone(),
+                    state.is_scanning(),
+                )
+            };
+            assert!(!is_scanning, "round {round}");
+            if loaded == project.path() {
+                assert_eq!(status, StatusNotice::ScanCancelled, "round {round}");
+                harness
+                    .assert_scanned_project_is_untouched(project.path(), &format!("round {round}"));
+            } else {
+                assert_eq!(loaded, second.path(), "round {round}");
+                let state = harness.state.lock();
+                // Cancelled, unless the scan was through before the cancel came.
+                assert!(
+                    state.status == StatusNotice::ScanCancelled || state.is_fully_scanned,
+                    "round {round}: {:?}",
+                    state.status
+                );
+                // Nothing of the previous directory is left.
+                assert!(state.selected_files.is_empty(), "round {round}");
+                assert!(state.search_query.is_empty(), "round {round}");
+                assert!(
+                    state
+                        .full_file_list
+                        .iter()
+                        .all(|item| item.path.starts_with(second.path())),
+                    "round {round}"
+                );
+            }
         }
     }
 
