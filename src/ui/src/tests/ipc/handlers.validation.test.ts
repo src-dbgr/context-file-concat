@@ -103,27 +103,14 @@ describe("ipc/handlers – validation paths with real Zod schemas", () => {
   });
 });
 
-describe("ipc/handlers – render() validation depth (DEV vs. production)", () => {
-  /** Valid envelope whose nested tree node violates TreeNodeSchema. */
-  function stateWithInvalidNestedNode(currentPath: string): AppState {
+describe("ipc/handlers – render() validates every row, in every build", () => {
+  /** A valid snapshot except for one row inside the window. */
+  function stateWithInvalidRow(currentPath: string): AppState {
     const state = makeValidUiState();
     return {
       ...state,
       current_path: currentPath,
-      tree: [
-        {
-          path: `${currentPath}/src`,
-          name: "src",
-          is_directory: true,
-          is_expanded: true,
-          is_binary: false,
-          is_match: true,
-          is_previewed: false,
-          selection_state: "none",
-          size: 0,
-          children: [{ path: 42 }],
-        },
-      ],
+      rows: [state.rows[0], { path: 42 }, state.rows[2]],
     } as unknown as AppState;
   }
 
@@ -144,39 +131,50 @@ describe("ipc/handlers – render() validation depth (DEV vs. production)", () =
     vi.unstubAllEnvs();
   });
 
-  it("DEV: validates the tree deeply and rejects an invalid nested node", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(import.meta.env.DEV).toBe(true);
+  for (const dev of [true, false]) {
+    describe(dev ? "DEV" : "production", () => {
+      beforeEach(() => {
+        vi.stubEnv("DEV", dev);
+      });
 
-    window.render(stateWithInvalidNestedNode("/dev-deep"));
+      it("accepts a valid payload", () => {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    expect(warn).toHaveBeenCalled();
-    expect(get(appState).current_path).not.toBe("/dev-deep");
-  });
+        window.render(validState("/valid"));
+
+        expect(warn).not.toHaveBeenCalled();
+        const state = get(appState);
+        expect(state.current_path).toBe("/valid");
+        expect(state.rows).toHaveLength(makeValidUiState().rows.length);
+        expect(state.rows_total).toBe(makeValidUiState().rows_total);
+      });
+
+      it("rejects a snapshot with an invalid row", () => {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        window.render(stateWithInvalidRow("/bad-row"));
+
+        expect(warn).toHaveBeenCalled();
+        expect(get(appState).current_path).not.toBe("/bad-row");
+      });
+
+      it("rejects a window that exceeds the list", () => {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        window.render({
+          ...validState("/bad-window"),
+          rows_total: 2,
+        });
+
+        expect(warn).toHaveBeenCalled();
+        expect(get(appState).current_path).not.toBe("/bad-window");
+      });
+    });
+  }
 
   describe("production", () => {
     beforeEach(() => {
       vi.stubEnv("DEV", false);
-    });
-
-    it("accepts a valid payload", () => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      window.render(validState("/prod-valid"));
-
-      expect(warn).not.toHaveBeenCalled();
-      const state = get(appState);
-      expect(state.current_path).toBe("/prod-valid");
-      expect(state.tree).toHaveLength(makeValidUiState().tree.length);
-    });
-
-    it("does not recurse into the tree (envelope-only validation)", () => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      window.render(stateWithInvalidNestedNode("/prod-shallow"));
-
-      expect(warn).not.toHaveBeenCalled();
-      expect(get(appState).current_path).toBe("/prod-shallow");
     });
 
     it("rejects an envelope with a missing config", () => {
@@ -206,16 +204,17 @@ describe("ipc/handlers – render() validation depth (DEV vs. production)", () =
       expect(get(appState).current_path).not.toMatch(/^\/prod-bad/);
     });
 
-    it("rejects a tree that is not an array of objects", () => {
+    it("rejects rows that are not an array of objects", () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       window.render({
         ...validState("/prod-badtree"),
-        tree: "nope",
+        rows: "nope",
       } as unknown as AppState);
       window.render({
         ...validState("/prod-badtree"),
-        tree: [1, null],
+        rows: [1, null],
+        rows_total: 2,
       } as unknown as AppState);
 
       expect(warn).toHaveBeenCalledTimes(2);

@@ -2,7 +2,7 @@
 // Keep this file framework-agnostic; only data shapes + type utilities live here.
 
 import { z } from "zod";
-import type { TreeNode } from "../types";
+import { MAX_WINDOW_ROWS } from "../modules/treeWindow";
 
 // Zod probes with `new Function` whether it may compile its parsers. Under the
 // CSP of the app (no `unsafe-eval`) that probe is reported as a violation, so
@@ -32,31 +32,50 @@ export const UiConfigSchema = z.object({
 export type UiConfig = z.infer<typeof UiConfigSchema>;
 
 /* ---------------------------------- Tree ----------------------------------- */
+const RowIndex = z.number().int().nonnegative();
+
 /**
- * The tree is a pruned snapshot: `children` is only filled for expanded
- * directories, so `has_children` and `children_loaded` are the only way to
- * tell what a collapsed directory holds. The backend always sends them
- * (guarded by the Rust fixture contract test) and they are required here: a
- * node without `children_loaded` would silently never be lazy-loaded.
+ * One row of the tree (`TreeRow` in `src/app/view_model/rows.rs`). The tree
+ * arrives as a flat list of rows, and of that list only a window, so a row
+ * carries everything it shows: its nesting level, and for a directory what it
+ * holds (`has_children`, `children_loaded`) and how much of it is selected.
+ * The host always sends every field (guarded by the Rust fixture contract
+ * test) and they are required here: a row without `children_loaded` would
+ * silently never be lazy-loaded.
  */
-export const TreeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>
-  z
-    .object({
-      path: z.string(),
-      name: z.string(),
-      is_directory: z.boolean(),
-      is_expanded: z.boolean(),
-      is_binary: z.boolean(),
-      is_match: z.boolean(),
-      is_previewed: z.boolean(),
-      selection_state: z.enum(["none", "partial", "full"]),
-      children: z.array(TreeNodeSchema),
-      size: z.number(),
-      has_children: z.boolean(),
-      children_loaded: z.boolean(),
-    })
-    .passthrough(),
-);
+const TreeRowObject = z.object({
+  path: z.string(),
+  name: z.string(),
+  /** 0 for the items directly below the loaded directory. */
+  depth: RowIndex,
+  is_directory: z.boolean(),
+  /** Authoritative expansion state, owned by the host. */
+  is_expanded: z.boolean(),
+  is_binary: z.boolean(),
+  is_match: z.boolean(),
+  is_previewed: z.boolean(),
+  /** For directories: made of all files below, wherever they are listed. */
+  selection_state: z.enum(["none", "partial", "full"]),
+  size: z.number(),
+  /** The directory has children in the filtered list, expanded or not. */
+  has_children: z.boolean(),
+  /**
+   * `false` for a directory whose children have not been scanned yet; they
+   * are fetched with `loadDirectoryLevel`. Always `true` for files.
+   */
+  children_loaded: z.boolean(),
+});
+export const TreeRowSchema = TreeRowObject.passthrough();
+export type TreeRow = z.infer<typeof TreeRowObject>;
+
+/** The answer to a `locateRow` request (`LocatedRow` on the host). */
+const LocatedRowObject = z.object({
+  /** The number the UI gave its request. */
+  request: RowIndex,
+  /** The row in the list of all rows; `null` if there is no such row. */
+  row: RowIndex.nullable(),
+});
+export type LocatedRow = z.infer<typeof LocatedRowObject>;
 
 /* --------------------------------- UiState --------------------------------- */
 export const ScanProgressSchema = z
@@ -70,10 +89,22 @@ export const ScanProgressSchema = z
 const UiStateObject = z.object({
   config: UiConfigSchema,
   current_path: z.string(),
-  tree: z.array(TreeNodeSchema),
+  /**
+   * The rows of the window the UI asked for (`setViewport`), in order. The
+   * host never sends more than its largest window.
+   */
+  rows: z.array(TreeRowSchema).max(MAX_WINDOW_ROWS),
+  /** The position of `rows[0]` in the list of all rows. */
+  rows_start: RowIndex,
+  /** The number of rows of the tree: what the scrollbar spans. */
+  rows_total: RowIndex,
+  /** Changes when the list of all rows does, and only then. */
+  rows_revision: RowIndex,
+  /** The answer to the most recent `locateRow`, `null` if there was none. */
+  located: LocatedRowObject.passthrough().nullable(),
   total_files_found: z.number(),
   visible_files_count: z.number(),
-  // Totals of the complete filtered tree (the pruned `tree` cannot provide them).
+  // Totals of the complete filtered tree (a window of rows cannot provide them).
   tree_files_count: z.number().int().nonnegative(),
   tree_dirs_count: z.number().int().nonnegative(),
   selected_files_count: z.number(),
@@ -90,28 +121,20 @@ const UiStateObject = z.object({
   patterns_need_rescan: z.boolean(),
 });
 
-export const UiStateSchema = UiStateObject.passthrough();
+/**
+ * The snapshot of the host. Every row is validated, in production as well: a
+ * snapshot holds a window of rows, never the tree, so the cost is bounded.
+ * The window has to lie inside the list it is a part of.
+ */
+export const UiStateSchema = UiStateObject.passthrough().refine(
+  (state) => state.rows_start + state.rows.length <= state.rows_total,
+  { message: "the window of rows exceeds rows_total", path: ["rows"] },
+);
 /**
  * The state the UI works with. Derived from the schema, so the type cannot
  * drift from what is validated (unknown extra fields are not part of it).
  */
 export type UiState = z.infer<typeof UiStateObject>;
-
-/**
- * Envelope-only variant of {@link UiStateSchema}: every top-level field is
- * validated exactly as in the full schema, but `tree` is only checked to be an
- * array of objects — no recursion into the nodes. The deep tree walk dominates
- * validation cost on large trees, so production validates the envelope only,
- * while DEV and tests keep the full schema.
- */
-const ShallowTreeNodeSchema = z.custom<TreeNode>(
-  (value) =>
-    typeof value === "object" && value !== null && !Array.isArray(value),
-);
-
-export const UiStateEnvelopeSchema = UiStateSchema.extend({
-  tree: z.array(ShallowTreeNodeSchema),
-});
 
 /* ------------------------------ Incoming API ------------------------------- */
 export const ShowPreviewArgsSchema = z.tuple([
@@ -147,6 +170,42 @@ const SetExpansionPayload = z
   .object({
     path: PathString,
     expanded: z.boolean(),
+  })
+  .strict();
+/**
+ * The part of the rows the UI shows, overscan included (`SetViewportPayload`
+ * on the host, which rejects unknown fields as well).
+ */
+const SetViewportPayload = z
+  .object({
+    start: RowIndex,
+    count: z.number().int().positive(),
+  })
+  .strict();
+/** The row a `locateRow` request asks for (`RowTarget` on the host). */
+const RowTargetSchema = z.discriminatedUnion("kind", [
+  /** The row of the item at `path`. */
+  z.object({ kind: z.literal("path"), path: PathString }).strict(),
+  /** The row of the directory the item at `path` lies in. */
+  z.object({ kind: z.literal("parent_of"), path: PathString }).strict(),
+  /**
+   * The first row from row `from` on (wrapping around) whose name starts with
+   * `prefix`, ignoring case.
+   */
+  z
+    .object({
+      kind: z.literal("typeahead"),
+      prefix: z.string().min(1),
+      from: RowIndex,
+    })
+    .strict(),
+]);
+export type RowTarget = z.infer<typeof RowTargetSchema>;
+const LocateRowPayload = z
+  .object({
+    /** Chosen by the UI; the answer (`located`) repeats it. */
+    request: RowIndex,
+    target: RowTargetSchema,
   })
   .strict();
 const SaveFilePayload = z.string();
@@ -203,6 +262,8 @@ export const CommandSchemas = {
   toggleDirectorySelection: PathPayload,
   setExpansion: SetExpansionPayload,
   expandCollapseAll: BoolPayload,
+  setViewport: SetViewportPayload,
+  locateRow: LocateRowPayload,
   selectAll: NullPayload,
   deselectAll: NullPayload,
   cancelGeneration: NullPayload,

@@ -1,9 +1,17 @@
 import { test, expect, Page } from "@playwright/test";
+import {
+  makeHugeTree,
+  setTree,
+  waitForBridge,
+  type AppState,
+} from "./support/tree";
 
 /**
  * Benchmarks (dev-only):
  * - Keine künstlichen Waits. Es wird nur auf deterministische Bedingungen gewartet.
- * - Nutzt window.__e2e.store.setAppState (siehe e2eBridge; nur im e2e-Build vorhanden).
+ * - Nutzt window.__e2e.host.setTree (siehe e2eBridge; nur im e2e-Build vorhanden):
+ *   die Bridge hält die Zeilen und liefert wie der Host nur das Fenster, das
+ *   die UI anfragt (setViewport).
  * - Misst mit Performance Marks/Measures im Browser.
  *
  * Thresholds via ENV:
@@ -11,51 +19,6 @@ import { test, expect, Page } from "@playwright/test";
  *   BMARK_FILTER_MS   (default 600)
  *   BMARK_SCROLL_MS   (default 300)
  */
-
-type TreeNode = {
-  path: string;
-  name: string;
-  is_directory: boolean;
-  is_expanded: boolean;
-  is_binary: boolean;
-  is_match: boolean;
-  is_previewed: boolean;
-  selection_state: "none" | "full" | "partial";
-  size: number;
-  /** Only expanded directories carry children (pruned snapshot). */
-  children: TreeNode[];
-  has_children: boolean;
-  children_loaded: boolean;
-};
-
-type AppConfig = {
-  ignore_patterns: string[];
-  case_sensitive_search: boolean;
-  include_tree_by_default: boolean;
-  use_relative_paths: boolean;
-  remove_empty_directories: boolean;
-  output_directory: string;
-  output_filename: string;
-};
-
-type AppState = {
-  is_scanning: boolean;
-  is_generating: boolean;
-  is_fully_scanned: boolean;
-  patterns_need_rescan: boolean;
-  tree: TreeNode[];
-  current_path: string | null;
-  current_config_filename: string | null;
-  status_message: string;
-  selected_files_count: number;
-  tree_files_count: number;
-  tree_dirs_count: number;
-  search_query: string;
-  extension_filter: string;
-  content_search_query: string;
-  active_ignore_patterns: string[];
-  config: AppConfig;
-};
 
 function shouldInstallBridge(page: Page) {
   return page.addInitScript(() => {
@@ -92,43 +55,6 @@ function baseState(): AppState {
   };
 }
 
-function makeHugeTree(filesCount: number): TreeNode[] {
-  const children: TreeNode[] = [];
-  for (let i = 0; i < filesCount; i++) {
-    const name = `file-${i}.txt`;
-    children.push({
-      path: `/repo/src/${name}`,
-      name,
-      is_directory: false,
-      is_expanded: false,
-      is_binary: false,
-      is_match: true,
-      is_previewed: false,
-      selection_state: "none",
-      size: 123,
-      has_children: false,
-      children_loaded: true,
-      children: [],
-    });
-  }
-  return [
-    {
-      path: "/repo/src",
-      name: "src",
-      is_directory: true,
-      is_expanded: true,
-      is_binary: false,
-      is_match: true,
-      is_previewed: false,
-      selection_state: "none",
-      size: 0,
-      has_children: true,
-      children_loaded: true,
-      children,
-    },
-  ];
-}
-
 async function waitForVirtualListReady(page: Page) {
   // „bereit“ = erste Reihe existiert und Virtual-Count ist plausibel begrenzt
   const rows = page.locator(".virtual-scroll-item");
@@ -150,12 +76,7 @@ test.describe("[@bench] 25k Benchmarks", () => {
     await page.goto("/?e2e=1");
 
     // Bridge verfügbar?
-    await page.waitForFunction(() => {
-      const w = window as unknown as {
-        __e2e?: { store?: { setAppState?: (s: unknown) => void } };
-      };
-      return typeof w.__e2e?.store?.setAppState === "function";
-    });
+    await waitForBridge(page);
 
     const huge = baseState();
     huge.tree = makeHugeTree(25_000);
@@ -163,14 +84,8 @@ test.describe("[@bench] 25k Benchmarks", () => {
     huge.tree_dirs_count = 1;
 
     // Start messen + apply
-    await page.evaluate((next) => {
-      performance.mark("bm_flatten_start");
-      (
-        window as unknown as {
-          __e2e: { store: { setAppState: (s: AppState) => void } };
-        }
-      ).__e2e.store.setAppState(next);
-    }, huge);
+    await page.evaluate(() => performance.mark("bm_flatten_start"));
+    await setTree(page, huge);
 
     await waitForVirtualListReady(page);
 
@@ -192,25 +107,14 @@ test.describe("[@bench] 25k Benchmarks", () => {
     const THRESH = Number(process.env.BMARK_FILTER_MS ?? 600);
 
     await page.goto("/?e2e=1");
-    await page.waitForFunction(() => {
-      const w = window as unknown as {
-        __e2e?: { store?: { setAppState?: (s: unknown) => void } };
-      };
-      return typeof w.__e2e?.store?.setAppState === "function";
-    });
+    await waitForBridge(page);
 
     // Zuerst 25k setzen
     const huge = baseState();
     huge.tree = makeHugeTree(25_000);
     huge.tree_files_count = 25_000;
     huge.tree_dirs_count = 1;
-    await page.evaluate((next) => {
-      (
-        window as unknown as {
-          __e2e: { store: { setAppState: (s: AppState) => void } };
-        }
-      ).__e2e.store.setAppState(next);
-    }, huge);
+    await setTree(page, huge);
     await waitForVirtualListReady(page);
 
     // Jetzt eine gefilterte Teilmenge (~1000 Dateien: "file-24xxx")
@@ -227,14 +131,8 @@ test.describe("[@bench] 25k Benchmarks", () => {
     filtered.tree_files_count = filtered.tree[0].children.length;
     filtered.tree_dirs_count = 1;
 
-    await page.evaluate((next) => {
-      performance.mark("bm_filter_start");
-      (
-        window as unknown as {
-          __e2e: { store: { setAppState: (s: AppState) => void } };
-        }
-      ).__e2e.store.setAppState(next);
-    }, filtered);
+    await page.evaluate(() => performance.mark("bm_filter_start"));
+    await setTree(page, filtered);
 
     // „bereit“, plus Sicherheits-Check: sichtbare Namen enthalten den Filter
     await waitForVirtualListReady(page);
@@ -262,24 +160,13 @@ test.describe("[@bench] 25k Benchmarks", () => {
     const THRESH = Number(process.env.BMARK_SCROLL_MS ?? 300);
 
     await page.goto("/?e2e=1");
-    await page.waitForFunction(() => {
-      const w = window as unknown as {
-        __e2e?: { store?: { setAppState?: (s: unknown) => void } };
-      };
-      return typeof w.__e2e?.store?.setAppState === "function";
-    });
+    await waitForBridge(page);
 
     const huge = baseState();
     huge.tree = makeHugeTree(25_000);
     huge.tree_files_count = 25_000;
     huge.tree_dirs_count = 1;
-    await page.evaluate((next) => {
-      (
-        window as unknown as {
-          __e2e: { store: { setAppState: (s: AppState) => void } };
-        }
-      ).__e2e.store.setAppState(next);
-    }, huge);
+    await setTree(page, huge);
     await waitForVirtualListReady(page);
 
     // Scroll-Jump messen: bis die letzte Datei sichtbar ist

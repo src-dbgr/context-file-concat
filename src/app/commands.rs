@@ -14,7 +14,8 @@ use super::state::{AppState, StatusNotice};
 use super::tasks::{
     self, refresh_content_search, search_for_new_query, start_lazy_load_scan, start_scan_on_path,
 };
-use super::view_model::generate_ui_state;
+use super::view_model::rows::typeahead_match;
+use super::view_model::{generate_ui_state, Viewport};
 use crate::app::file_dialog::DialogService;
 use crate::config::{self, AppConfig};
 use crate::core::is_blank;
@@ -344,9 +345,8 @@ fn apply_added_patterns_locally(state: &mut AppState, patterns_added: &HashSet<S
 
 /// Handles the initial request for state from the frontend when it loads.
 pub fn initialize<P: EventProxy>(proxy: P, state: SharedState) {
-    let state_guard = state.lock();
-    let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
-    proxy.send_event(event);
+    // A UI that has just started shows the top of the tree and has asked for no row.
+    with_state_and_notify(&state, &proxy, |s| s.tree_view.reset());
 }
 
 /// Payload of [`update_filters`]: the three filter texts as the user entered them.
@@ -559,9 +559,7 @@ pub fn toggle_directory_selection<P: EventProxy>(
 
             if subtree.state == super::selection::SelectionState::Full {
                 // If fully selected, deselect all
-                for file in &subtree.files {
-                    s.selected_files.remove(file);
-                }
+                s.selected_files.remove_all(&subtree.files);
             } else {
                 // If partially or not selected, select all
                 s.selected_files.extend(subtree.files);
@@ -602,6 +600,91 @@ pub fn set_expansion<P: EventProxy>(payload: serde_json::Value, proxy: P, state:
         }
         Err(e) => tracing::warn!("Failed to deserialize setExpansion payload: {e}"),
     }
+}
+
+/// Payload of [`set_viewport`]: the part of the tree's rows the UI shows.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetViewportPayload {
+    /// The first row of the window.
+    pub start: usize,
+    /// The number of rows of the window, overscan included. A window without rows
+    /// is not a viewport: 0 is refused, like by the UI's schema.
+    pub count: std::num::NonZeroUsize,
+}
+
+/// Stores the window of rows the UI looks at; the snapshot that answers it (and every
+/// one after it) carries the rows of that window.
+///
+/// The host caps the size of the window ([`Viewport::MAX_ROWS`]) and moves a window
+/// that lies behind the end of the list up to its end; the snapshot states where its
+/// rows start. A malformed payload changes nothing and is answered with the
+/// unchanged snapshot.
+pub fn set_viewport<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
+    let Some(SetViewportPayload { start, count }) = parse_payload("setViewport", payload) else {
+        return answer_unchanged(&proxy, &state);
+    };
+    with_state_and_notify(&state, &proxy, |s| {
+        s.tree_view.set_viewport(Viewport::new(start, count.get()));
+    });
+}
+
+/// Payload of [`locate_row`].
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LocateRowPayload {
+    /// Chosen by the UI; the answer repeats it.
+    pub request: u32,
+    pub target: RowTarget,
+}
+
+/// The row a [`locate_row`] request asks for.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RowTarget {
+    /// The row of the item at `path`.
+    Path { path: PathBuf },
+    /// The row of the directory the item at `path` lies in.
+    ParentOf { path: PathBuf },
+    /// The first row from row `from` on (wrapping around) whose name starts with
+    /// `prefix`, ignoring case. An empty prefix asks for nothing and is refused,
+    /// like by the UI's schema.
+    Typeahead { prefix: String, from: usize },
+}
+
+impl RowTarget {
+    /// `true` for a target the types allow but that is no lookup.
+    fn is_malformed(&self) -> bool {
+        matches!(self, Self::Typeahead { prefix, .. } if prefix.is_empty())
+    }
+}
+
+/// Answers where a row is in the list of all rows.
+///
+/// The UI holds a window of the rows only, so it cannot know the position of a row
+/// outside of it: the parent of the focused row, the next name that starts with what
+/// the user typed, the row that had the focus before the list changed. The host looks
+/// the row up and states it in `located` of the snapshot that answers the command,
+/// together with the number of the request. The window is not moved; the UI scrolls
+/// where it wants to and reports its viewport.
+///
+/// A malformed payload is answered with the unchanged snapshot.
+pub fn locate_row<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
+    let Some(LocateRowPayload { request, target }) = parse_payload("locateRow", payload) else {
+        return answer_unchanged(&proxy, &state);
+    };
+    if target.is_malformed() {
+        tracing::warn!("Refused a locateRow without anything to look for");
+        return answer_unchanged(&proxy, &state);
+    }
+    with_state_and_notify(&state, &proxy, |s| {
+        let path = match target {
+            RowTarget::Path { path } => Some(path),
+            RowTarget::ParentOf { path } => path.parent().map(Path::to_path_buf),
+            RowTarget::Typeahead { prefix, from } => typeahead_match(s, &prefix, from),
+        };
+        s.tree_view.answer_locate(request, path);
+    });
 }
 
 /// Expands or collapses all *currently visible* directories in the file tree, i.e.
@@ -1308,7 +1391,10 @@ mod tests {
         let final_state = harness.last_state_update().unwrap();
         assert!(!final_state.is_scanning, "No scan must have been started");
         assert_eq!(final_state.visible_files_count, 2);
-        assert!(!final_state.tree.iter().any(|n| n.name == "docs"));
+        assert!(!final_state
+            .root_rows()
+            .into_iter()
+            .any(|n| n.name == "docs"));
         let state = harness.state.lock();
         assert!(!state.is_scanning() && !state.is_fully_scanned);
         assert!(state.config.ignore_patterns.contains("docs/"));
@@ -1384,7 +1470,7 @@ mod tests {
                 assert!(!clean.is_scanning);
                 assert_eq!(clean.current_path, "");
                 assert_eq!(clean.selected_files_count, 0);
-                assert!(clean.tree.is_empty());
+                assert!(clean.rows.is_empty());
                 assert!(clean.config.case_sensitive_search);
                 assert_eq!(
                     clean.current_config_filename.as_deref(),
@@ -1444,7 +1530,7 @@ mod tests {
             Some(UserEvent::StateUpdate(clean)) => {
                 assert!(!clean.is_scanning);
                 assert_eq!(clean.current_path, "");
-                assert!(clean.tree.is_empty());
+                assert!(clean.rows.is_empty());
             }
             other => panic!("Expected the clean state, got {other:?}"),
         }
@@ -1758,7 +1844,7 @@ mod tests {
             Some(UserEvent::StateUpdate(clean)) => {
                 assert!(!clean.is_scanning);
                 assert_eq!(clean.current_path, "");
-                assert!(clean.tree.is_empty());
+                assert!(clean.rows.is_empty());
                 assert!(clean.config.case_sensitive_search);
             }
             other => panic!("Expected the clean state, got {other:?}"),
@@ -1906,10 +1992,10 @@ mod tests {
 
         // The command itself marks the directory as expanded and says so.
         let components_of = |ui_state: &UiState| {
-            let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
-            src_node
-                .children
-                .iter()
+            let src_node = ui_state.row_named("src").unwrap();
+            ui_state
+                .children_of(src_node)
+                .into_iter()
                 .find(|n| n.name == "components")
                 .cloned()
                 .unwrap()
@@ -1928,9 +2014,10 @@ mod tests {
         };
         let components_node = components_of(&final_state);
         assert!(components_node.children_loaded);
-        assert!(components_node
-            .children
-            .iter()
+        let components_row = final_state.row_named("components").unwrap();
+        assert!(final_state
+            .children_of(components_row)
+            .into_iter()
             .any(|n| n.name == "button.js"));
     }
 
@@ -1955,9 +2042,17 @@ mod tests {
 
         // The result of the load arrives.
         let loaded = harness
-            .wait_for_state(|s| s.tree.iter().any(|n| n.name == "src" && n.children_loaded))
+            .wait_for_state(|s| {
+                s.root_rows()
+                    .into_iter()
+                    .any(|n| n.name == "src" && n.children_loaded)
+            })
             .await;
-        let src_node = loaded.tree.iter().find(|n| n.name == "src").unwrap();
+        let src_node = loaded
+            .root_rows()
+            .into_iter()
+            .find(|n| n.name == "src")
+            .unwrap();
         assert!(src_node.has_children);
         assert!(!src_node.is_expanded, "Directory must stay collapsed");
         let state = harness.state.lock();
@@ -2007,6 +2102,168 @@ mod tests {
         assert_eq!(ui_state_deselect.selected_files_count, 0);
     }
 
+    /// A project of `files` files directly below the root.
+    fn harness_with_files(files: usize) -> TestHarness {
+        let harness = TestHarness::new();
+        {
+            let mut state = harness.state.lock();
+            let items: Vec<FileItem> = (0..files)
+                .map(|i| file_item(harness.root_path.join(format!("file{i:04}.rs")), false))
+                .collect();
+            state.full_file_list = items.clone();
+            state.set_filtered_file_list(items);
+        }
+        harness
+    }
+
+    #[tokio::test]
+    async fn test_set_viewport_answers_with_the_rows_of_the_window() {
+        let mut harness = harness_with_files(1_000);
+        initialize(harness.proxy.clone(), harness.state.clone());
+        let initial = harness.last_state_update().unwrap();
+        assert_eq!(initial.rows_total, 1_000);
+        assert_eq!(initial.rows_start, 0);
+        assert_eq!(initial.rows.len(), Viewport::DEFAULT_ROWS);
+
+        set_viewport(
+            json!({ "start": 600, "count": 40 }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        let scrolled = harness.last_state_update().unwrap();
+        assert_eq!((scrolled.rows_start, scrolled.rows.len()), (600, 40));
+        assert_eq!(scrolled.rows[0].name, "file0600.rs");
+        assert_eq!(scrolled.rows_revision, initial.rows_revision);
+
+        // Every later snapshot carries that window, whatever it answers.
+        toggle_selection(
+            json!(harness.root_path.join("file0601.rs")),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        let selected = harness.last_state_update().unwrap();
+        assert_eq!(selected.rows_start, 600);
+        assert_eq!(
+            selected.rows[1].selection_state,
+            crate::app::selection::SelectionState::Full
+        );
+
+        // The host bounds the window; a window behind the end is moved up.
+        set_viewport(
+            json!({ "start": 990, "count": 1_000_000 }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        let capped = harness.last_state_update().unwrap();
+        assert_eq!(capped.rows.len(), Viewport::MAX_ROWS);
+        assert_eq!(capped.rows_start, 1_000 - Viewport::MAX_ROWS);
+
+        // A new UI starts at the top.
+        initialize(harness.proxy.clone(), harness.state.clone());
+        assert_eq!(harness.last_state_update().unwrap().rows_start, 0);
+    }
+
+    #[tokio::test]
+    async fn test_malformed_viewport_and_locate_payloads_are_answered_unchanged() {
+        let mut harness = harness_with_files(300);
+        set_viewport(
+            json!({ "start": 200, "count": 10 }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        harness.last_state_update().unwrap();
+
+        for payload in [
+            json!(null),
+            json!({ "start": -1, "count": 10 }),
+            json!({ "start": 1 }),
+            json!({ "start": 1, "count": 0 }),
+            json!({ "start": 1, "count": 2, "extra": true }),
+        ] {
+            set_viewport(payload, harness.proxy.clone(), harness.state.clone());
+            let answer = harness.last_state_update().expect("answered");
+            assert_eq!((answer.rows_start, answer.rows.len()), (200, 10));
+        }
+        for payload in [
+            json!(null),
+            json!({ "request": 1 }),
+            json!({ "request": 1, "target": { "kind": "nope" } }),
+            json!({ "request": 1, "target": { "kind": "path", "path": "/x", "extra": 1 } }),
+            json!({ "request": -1, "target": { "kind": "path", "path": "/x" } }),
+            json!({ "request": 1, "target": { "kind": "typeahead", "prefix": "", "from": 0 } }),
+        ] {
+            locate_row(payload, harness.proxy.clone(), harness.state.clone());
+            let answer = harness.last_state_update().expect("answered");
+            assert_eq!(answer.located, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_locate_row_answers_with_the_row_of_the_target() {
+        let mut harness = TestHarness::new();
+        let src = harness.create_dir("src");
+        let main = harness.create_file("src/main.rs", "");
+        harness.create_file("src/mod.rs", "");
+        harness.create_file("readme.md", "");
+        harness.set_initial_files(&["src", "src/main.rs", "src/mod.rs", "readme.md"]);
+        set_expansion(
+            json!({ "path": src, "expanded": true }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        // 0 src, 1 main.rs, 2 mod.rs, 3 readme.md
+        let mut locate = |request: u32, target: serde_json::Value| {
+            locate_row(
+                json!({ "request": request, "target": target }),
+                harness.proxy.clone(),
+                harness.state.clone(),
+            );
+            let located = harness.last_state_update().unwrap().located;
+            let located = located.expect("the request is answered");
+            assert_eq!(located.request, request);
+            located.row
+        };
+
+        assert_eq!(locate(1, json!({ "kind": "path", "path": main })), Some(1));
+        assert_eq!(
+            locate(2, json!({ "kind": "parent_of", "path": main })),
+            Some(0)
+        );
+        // The parent of a row at the top is the loaded directory, which is no row.
+        assert_eq!(locate(3, json!({ "kind": "parent_of", "path": src })), None);
+        assert_eq!(
+            locate(4, json!({ "kind": "typeahead", "prefix": "MO", "from": 0 })),
+            Some(2)
+        );
+        // From the row after the focused one, wrapping around.
+        assert_eq!(
+            locate(5, json!({ "kind": "typeahead", "prefix": "m", "from": 2 })),
+            Some(2)
+        );
+        assert_eq!(
+            locate(6, json!({ "kind": "typeahead", "prefix": "m", "from": 3 })),
+            Some(1)
+        );
+        assert_eq!(
+            locate(7, json!({ "kind": "typeahead", "prefix": "zz", "from": 0 })),
+            None
+        );
+
+        // The answer stays true when the list changes: `main.rs` is no row any more.
+        assert_eq!(locate(8, json!({ "kind": "path", "path": main })), Some(1));
+        set_expansion(
+            json!({ "path": src, "expanded": false }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        let collapsed = harness.last_state_update().unwrap();
+        assert_eq!(
+            collapsed.located.as_ref().map(|located| located.row),
+            Some(None)
+        );
+        assert_eq!(collapsed.rows_total, 2);
+    }
+
     #[tokio::test]
     async fn test_set_expansion_is_idempotent() {
         let mut harness = TestHarness::new();
@@ -2019,14 +2276,14 @@ mod tests {
         for _ in 0..2 {
             set_expansion(set(true), harness.proxy.clone(), harness.state.clone());
             let ui_state = harness.last_state_update().unwrap();
-            assert!(ui_state.tree[0].is_expanded);
+            assert!(ui_state.root_rows()[0].is_expanded);
         }
         assert_eq!(harness.state.lock().expanded_dirs.len(), 1);
 
         for _ in 0..2 {
             set_expansion(set(false), harness.proxy.clone(), harness.state.clone());
             let ui_state = harness.last_state_update().unwrap();
-            assert!(!ui_state.tree[0].is_expanded);
+            assert!(!ui_state.root_rows()[0].is_expanded);
         }
         assert!(harness.state.lock().expanded_dirs.is_empty());
     }
@@ -2087,11 +2344,18 @@ mod tests {
 
         expand_collapse_all(json!(true), harness.proxy.clone(), harness.state.clone());
         let ui_state1 = harness.last_state_update().unwrap();
-        assert_eq!(ui_state1.tree.iter().filter(|n| n.is_expanded).count(), 1);
+        assert_eq!(
+            ui_state1
+                .root_rows()
+                .into_iter()
+                .filter(|n| n.is_expanded)
+                .count(),
+            1
+        );
 
         expand_collapse_all(json!(false), harness.proxy.clone(), harness.state.clone());
         let ui_state2 = harness.last_state_update().unwrap();
-        assert!(ui_state2.tree.iter().all(|n| !n.is_expanded));
+        assert!(ui_state2.root_rows().into_iter().all(|n| !n.is_expanded));
     }
 
     #[tokio::test]
@@ -2891,11 +3155,18 @@ mod tests {
 
         assert_eq!(expanded(&harness), HashSet::from([b.clone()]));
         let ui_state = harness.last_state_update().unwrap();
-        assert!(ui_state.tree.iter().all(|node| !node.is_expanded));
+        assert!(ui_state
+            .root_rows()
+            .into_iter()
+            .all(|node| !node.is_expanded));
 
         type_filter(&harness, "", "").await;
         let ui_state = harness.last_state_update().unwrap();
-        let b_node = ui_state.tree.iter().find(|node| node.path == b).unwrap();
+        let b_node = ui_state
+            .root_rows()
+            .into_iter()
+            .find(|node| node.path == b)
+            .unwrap();
         assert!(b_node.is_expanded, "expanded before the filter, and still");
     }
 
@@ -2929,7 +3200,11 @@ mod tests {
 
         assert!(!expanded(&harness).contains(&a), "must not be re-opened");
         let ui_state = harness.last_state_update().unwrap();
-        let a_node = ui_state.tree.iter().find(|node| node.path == a).unwrap();
+        let a_node = ui_state
+            .root_rows()
+            .into_iter()
+            .find(|node| node.path == a)
+            .unwrap();
         assert!(!a_node.is_expanded && a_node.has_children);
     }
 
@@ -3770,8 +4045,8 @@ mod tests {
             "Final count should be 5. The binary 'app.dat' is skipped by the scanner's default behavior."
         );
         assert!(final_state
-            .tree
-            .iter()
+            .root_rows()
+            .into_iter()
             .any(|node| node.name == artifact_dir_name));
     }
 
@@ -3855,7 +4130,10 @@ mod tests {
         let final_state = harness
             .wait_for_state(|ui_state| !ui_state.is_scanning && ui_state.is_fully_scanned)
             .await;
-        assert!(!final_state.tree.iter().any(|node| node.name == "docs"));
+        assert!(!final_state
+            .root_rows()
+            .into_iter()
+            .any(|node| node.name == "docs"));
         assert!(!final_state.patterns_need_rescan);
         let state = harness.state.lock();
         assert_eq!(
@@ -3888,7 +4166,10 @@ mod tests {
         let final_state = harness
             .wait_for_state(|ui_state| !ui_state.is_scanning && ui_state.is_fully_scanned)
             .await;
-        assert!(final_state.tree.iter().any(|node| node.name == "docs"));
+        assert!(final_state
+            .root_rows()
+            .into_iter()
+            .any(|node| node.name == "docs"));
         assert!(!final_state.patterns_need_rescan);
         let state = harness.state.lock();
         assert!(file_names(&state).contains("guide.md"));

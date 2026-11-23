@@ -1,57 +1,19 @@
 import { test, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+import {
+  setAppState,
+  waitForBridge,
+  type AppState,
+  type TreeNode,
+} from "./support/tree";
 
 /**
  * Deterministic E2E:
  * - The bridge (window.__e2e) is part of the e2e build only (see vite.config.ts, main.ts)
- * - State transitions via window.__e2e.store.setAppState (no timers)
+ * - State transitions via window.__e2e.store.setAppState (no timers); the
+ *   trees are written down nested and seeded as rows (see support/tree.ts)
  * - No "any", no artificial timeouts, no regression to production logic
  */
-
-type TreeNode = {
-  path: string;
-  name: string;
-  is_directory: boolean;
-  is_expanded: boolean;
-  is_binary: boolean;
-  is_match: boolean;
-  is_previewed: boolean;
-  selection_state: "none" | "full" | "partial";
-  size: number;
-  /** Only expanded directories carry children (pruned snapshot). */
-  children: TreeNode[];
-  has_children: boolean;
-  children_loaded: boolean;
-};
-
-type AppConfig = {
-  ignore_patterns: string[];
-  case_sensitive_search: boolean;
-  include_tree_by_default: boolean;
-  use_relative_paths: boolean;
-  remove_empty_directories: boolean;
-  output_directory: string;
-  output_filename: string;
-};
-
-type AppState = {
-  is_scanning: boolean;
-  is_generating: boolean;
-  is_fully_scanned: boolean;
-  patterns_need_rescan: boolean;
-  tree: TreeNode[];
-  current_path: string | null;
-  current_config_filename: string | null;
-  status_message: string;
-  selected_files_count: number;
-  tree_files_count: number;
-  tree_dirs_count: number;
-  search_query: string;
-  extension_filter: string;
-  content_search_query: string;
-  active_ignore_patterns: string[];
-  config: AppConfig;
-};
 
 function seedTree(): TreeNode[] {
   return [
@@ -264,21 +226,10 @@ test("Happy path: Select → Filter → Preview → Generate → Save", async ({
   await page.goto("/?e2e=1");
 
   // Ensure the dev bridge is available deterministically
-  await page.waitForFunction(() => {
-    const w = window as unknown as {
-      __e2e?: { store?: { setAppState?: (s: unknown) => void } };
-    };
-    return typeof w.__e2e?.store?.setAppState === "function";
-  });
+  await waitForBridge(page);
 
   // 1) Select directory
-  await page.evaluate((next) => {
-    (
-      window as unknown as {
-        __e2e: { store: { setAppState: (s: AppState) => void } };
-      }
-    ).__e2e.store.setAppState(next);
-  }, withRepo());
+  await setAppState(page, withRepo());
 
   const pathLabel = page.locator("#current-path");
   await expect(pathLabel).toContainText("/repo");
@@ -290,13 +241,7 @@ test("Happy path: Select → Filter → Preview → Generate → Save", async ({
   await expect(indexRow).toBeVisible();
 
   // 2) Filter to "index" deterministically (no debounce races) + Auswahl setzen
-  await page.evaluate((next) => {
-    (
-      window as unknown as {
-        __e2e: { store: { setAppState: (s: AppState) => void } };
-      }
-    ).__e2e.store.setAppState(next);
-  }, withFilter("index"));
+  await setAppState(page, withFilter("index"));
 
   // Debug-Snapshot anhängen
   const dbgAfterFilter = await page.evaluate(() => {
@@ -383,19 +328,8 @@ test("Happy path: Select → Filter → Preview → Generate → Save", async ({
 test("A11y sanity on main screen (no critical issues)", async ({ page }) => {
   await page.goto("/?e2e=1");
 
-  await page.waitForFunction(() => {
-    const w = window as unknown as {
-      __e2e?: { store?: { setAppState?: (s: unknown) => void } };
-    };
-    return typeof w.__e2e?.store?.setAppState === "function";
-  });
-  await page.evaluate((next) => {
-    (
-      window as unknown as {
-        __e2e: { store: { setAppState: (s: AppState) => void } };
-      }
-    ).__e2e.store.setAppState(next);
-  }, withRepo());
+  await waitForBridge(page);
+  await setAppState(page, withRepo());
 
   const results = await new AxeBuilder({ page }).analyze();
   const critical = results.violations.filter((v) => v.impact === "critical");
@@ -431,19 +365,8 @@ test.describe("Keyboard on the controls of a tree row", () => {
       w.ipc = { postMessage: (message) => w.__posted.push(message) };
     });
     await page.goto("/?e2e=1");
-    await page.waitForFunction(() => {
-      const w = window as unknown as {
-        __e2e?: { store?: { setAppState?: (s: unknown) => void } };
-      };
-      return typeof w.__e2e?.store?.setAppState === "function";
-    });
-    await page.evaluate((next) => {
-      (
-        window as unknown as {
-          __e2e: { store: { setAppState: (s: AppState) => void } };
-        }
-      ).__e2e.store.setAppState(next);
-    }, withRepo());
+    await waitForBridge(page);
+    await setAppState(page, withRepo());
     await expect(page.locator(".tree .tree-item-container")).toHaveCount(5);
   });
 

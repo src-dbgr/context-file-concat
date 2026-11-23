@@ -103,7 +103,7 @@ mod helpers {
                     Ok(Some(UserEvent::StateUpdate(ui_state))) => {
                         // The shallow scan is done when we get a state update
                         // where scanning is still true, but the file list is not empty.
-                        if ui_state.is_scanning && !ui_state.tree.is_empty() {
+                        if ui_state.is_scanning && ui_state.rows_total > 0 {
                             return;
                         }
                     }

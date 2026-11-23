@@ -16,7 +16,7 @@
 
 use crate::core::FileItem;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -29,8 +29,16 @@ pub(crate) struct TreeIndex {
     children: Vec<Vec<usize>>,
     /// Sorted items located directly below the root path.
     roots: Vec<usize>,
-    /// How many nodes the complete (unpruned) tree has.
+    /// How many nodes the complete tree has, whatever is expanded.
     counts: TreeCounts,
+    /// The number of files below each item, parallel to the item list: what
+    /// [`TreeIndex::files_in_subtree`] would list for a directory (0 for files).
+    files_below: Vec<u32>,
+    /// How often each item is listed as a child of its parent, parallel to the item
+    /// list, see [`TreeIndex::occurrences`].
+    occurrences: Vec<u32>,
+    /// Finds an item by its path without a second copy of every path.
+    paths: PathLookup,
 }
 
 /// The number of file and directory nodes of a tree.
@@ -47,21 +55,18 @@ impl TreeIndex {
     /// list. If a path occurs more than once, the last occurrence represents it.
     pub(crate) fn build(items: &[FileItem], root_path: &Path) -> Self {
         let names: Vec<String> = items.iter().map(display_name).collect();
-
-        let mut by_path: HashMap<&Path, usize> = HashMap::with_capacity(items.len());
-        for (index, item) in items.iter().enumerate() {
-            by_path.insert(item.path.as_path(), index);
-        }
+        let (paths, representatives) = PathLookup::build(items);
 
         let mut children: Vec<Vec<usize>> = vec![Vec::new(); items.len()];
+        let mut occurrences = vec![0u32; items.len()];
         let mut roots: Vec<usize> = Vec::new();
-        for item in items {
+        for (item, &index) in items.iter().zip(&representatives) {
             let Some(parent) = item.path.parent() else {
                 continue;
             };
-            let index = by_path[item.path.as_path()];
-            if let Some(&parent_index) = by_path.get(parent) {
+            if let Some(parent_index) = paths.position(items, parent) {
                 children[parent_index].push(index);
+                occurrences[index] = occurrences[index].saturating_add(1);
             }
             if parent == root_path {
                 roots.push(index);
@@ -75,12 +80,16 @@ impl TreeIndex {
         roots.sort_by(display_order);
 
         let counts = count_nodes(items, &children, &roots);
+        let files_below = count_files_below(items, &children);
 
         Self {
             names,
             children,
             roots,
             counts,
+            files_below,
+            occurrences,
+            paths,
         }
     }
 
@@ -115,12 +124,37 @@ impl TreeIndex {
 
     /// The position of the item that represents `path` in `items`, if it is listed.
     ///
-    /// `items` must be the list the index was built from. This is a linear search; the
-    /// index does not keep a second copy of every path just for the rare lookups.
+    /// `items` must be the list the index was built from. The lookup is a hash
+    /// lookup (constant time on average): a click on one row must not cost a pass
+    /// over the whole list.
     pub(crate) fn position(&self, items: &[FileItem], path: &Path) -> Option<usize> {
         debug_assert_eq!(self.len(), items.len());
-        // The last occurrence of a path is the one the tree is built from.
-        items.iter().rposition(|item| item.path == path)
+        self.paths.position(items, path)
+    }
+
+    /// The number of files below the directory at `index`, i.e. the number of files
+    /// its selection state is made of. 0 for a file.
+    pub(crate) fn files_below(&self, index: usize) -> usize {
+        self.files_below[index] as usize
+    }
+
+    /// The directory the item at `index` is listed in, if that directory is part of
+    /// the list.
+    ///
+    /// Only a *directory* counts as a parent here: a file is never descended into,
+    /// so whatever is listed below the path of a file belongs to no subtree.
+    pub(crate) fn parent_directory(&self, items: &[FileItem], index: usize) -> Option<usize> {
+        let parent = self.position(items, items[index].path.parent()?)?;
+        items[parent].is_directory.then_some(parent)
+    }
+
+    /// How often the item at `index` is listed among the children of its parent
+    /// (all occurrences of a path have the same parent). This is 1 for an item with
+    /// a listed parent, except in a list that names a path more than once: every
+    /// occurrence is a child of its own, all of them represented by the same item.
+    /// 0 for an item whose parent is not listed.
+    pub(crate) fn occurrences(&self, index: usize) -> usize {
+        self.occurrences[index] as usize
     }
 
     /// The files at or below the given item, in display order.
@@ -159,6 +193,149 @@ fn count_nodes(items: &[FileItem], children: &[Vec<usize>], roots: &[usize]) -> 
         }
     }
     counts
+}
+
+/// Counts, for every directory, the files of its subtree (see
+/// [`TreeIndex::files_in_subtree`]). Files are not descended into.
+fn count_files_below(items: &[FileItem], children: &[Vec<usize>]) -> Vec<u32> {
+    /// The count of one directory, computed after the counts of its subdirectories.
+    fn count(
+        dir: usize,
+        items: &[FileItem],
+        children: &[Vec<usize>],
+        counts: &mut [Option<u32>],
+    ) -> u32 {
+        if let Some(known) = counts[dir] {
+            return known;
+        }
+        let mut files = 0u32;
+        for &child in &children[dir] {
+            files = files.saturating_add(if items[child].is_directory {
+                count(child, items, children, counts)
+            } else {
+                1
+            });
+        }
+        counts[dir] = Some(files);
+        files
+    }
+
+    let mut counts: Vec<Option<u32>> = vec![None; items.len()];
+    for (index, item) in items.iter().enumerate() {
+        if item.is_directory {
+            count(index, items, children, &mut counts);
+        }
+    }
+    counts.into_iter().map(|count| count.unwrap_or(0)).collect()
+}
+
+/// Finds the position of a path in an item list.
+///
+/// A hash table of positions: the paths themselves stay in the item list, so the
+/// table costs a few bytes per item instead of a second copy of every path. If a path
+/// occurs more than once, the last occurrence represents it.
+#[derive(Debug)]
+struct PathLookup {
+    /// Open addressing with linear probing; the length is a power of two and at
+    /// least twice the number of items.
+    slots: Vec<Slot>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    /// The upper half of the hash of the path, to tell most other paths apart
+    /// without looking at them.
+    tag: u32,
+    /// The position of the item, [`Slot::EMPTY`] for a free slot.
+    position: u32,
+}
+
+impl Slot {
+    const EMPTY: u32 = u32::MAX;
+}
+
+impl PathLookup {
+    /// Builds the table. Also returns, parallel to `items`, the position of the item
+    /// that represents each item's path (its own position, unless the path is listed
+    /// again further down).
+    fn build(items: &[FileItem]) -> (Self, Vec<usize>) {
+        assert!(
+            items.len() < Slot::EMPTY as usize,
+            "the file list is too long to be indexed"
+        );
+        let capacity = (items.len() * 2).next_power_of_two().max(8);
+        let mut slots = vec![
+            Slot {
+                tag: 0,
+                position: Slot::EMPTY,
+            };
+            capacity
+        ];
+
+        let mut slot_of_item: Vec<usize> = Vec::with_capacity(items.len());
+        for (position, item) in items.iter().enumerate() {
+            let hash = hash_of(&item.path);
+            let tag = tag_of(hash);
+            let mut slot = hash as usize & (capacity - 1);
+            loop {
+                let entry = &mut slots[slot];
+                if entry.position == Slot::EMPTY {
+                    entry.tag = tag;
+                    entry.position = position as u32;
+                    break;
+                }
+                if entry.tag == tag && same_path(&items[entry.position as usize].path, &item.path) {
+                    // Listed before: the later occurrence takes over.
+                    entry.position = position as u32;
+                    break;
+                }
+                slot = (slot + 1) & (capacity - 1);
+            }
+            slot_of_item.push(slot);
+        }
+
+        let representatives = slot_of_item
+            .into_iter()
+            .map(|slot| slots[slot].position as usize)
+            .collect();
+        (Self { slots }, representatives)
+    }
+
+    fn position(&self, items: &[FileItem], path: &Path) -> Option<usize> {
+        let hash = hash_of(path);
+        let tag = tag_of(hash);
+        let mask = self.slots.len() - 1;
+        let mut slot = hash as usize & mask;
+        loop {
+            let entry = self.slots[slot];
+            if entry.position == Slot::EMPTY {
+                return None;
+            }
+            if entry.tag == tag && same_path(&items[entry.position as usize].path, path) {
+                return Some(entry.position as usize);
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+}
+
+fn tag_of(hash: u64) -> u32 {
+    (hash >> 32) as u32
+}
+
+/// `a == b`, decided by the bytes where they are the same (the usual case: the UI
+/// sends back the paths the host listed), and by the components otherwise.
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.as_os_str() == b.as_os_str() || a == b
+}
+
+/// The hash a path is looked up by. Equal paths have equal hashes (`Path` hashes its
+/// components, like it compares them), and the hasher has no random state, so the
+/// table is the same for the same list.
+fn hash_of(path: &Path) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The name shown for an item in the tree.
@@ -320,6 +497,94 @@ mod tests {
         assert_eq!(index.position(&items, Path::new("/r/a/f.rs")), Some(1));
         assert_eq!(index.position(&items, Path::new("/r")), None);
         assert_eq!(index.position(&items, Path::new("/r/unlisted")), None);
+        // A path is found by what it means, not by how it is spelled.
+        assert_eq!(index.position(&items, Path::new("/r/a/")), Some(2));
+        assert_eq!(index.position(&items, Path::new("/r/./a/f.rs")), Some(1));
+    }
+
+    #[test]
+    fn position_finds_every_item_of_a_long_list() {
+        let items: Vec<FileItem> = (0..5_000)
+            .map(|i| item(&format!("/r/dir{}/file{i}.rs", i % 70), false))
+            .collect();
+        let index = TreeIndex::build(&items, Path::new("/r"));
+
+        for (position, listed) in items.iter().enumerate() {
+            assert_eq!(index.position(&items, &listed.path), Some(position));
+        }
+        assert_eq!(index.position(&items, Path::new("/r/dir1/file0.rs")), None);
+        assert_eq!(
+            TreeIndex::build(&[], Path::new("/r")).position(&[], Path::new("/r/a")),
+            None
+        );
+    }
+
+    #[test]
+    fn files_below_counts_what_files_in_subtree_lists() {
+        let items = vec![
+            item("/r/a", true),
+            item("/r/a/z.rs", false),
+            item("/r/a/deep", true),
+            item("/r/a/deep/f.rs", false),
+            item("/r/a/deep/g.rs", false),
+            item("/r/a/empty", true),
+            item("/r/other.rs", false),
+            // A file is not descended into: what is listed below its path counts
+            // for no directory.
+            item("/r/a/z.rs/inside.rs", false),
+        ];
+        let index = TreeIndex::build(&items, Path::new("/r"));
+
+        for (position, listed) in items.iter().enumerate() {
+            let expected = if listed.is_directory {
+                index.files_in_subtree(&items, position).len()
+            } else {
+                0
+            };
+            assert_eq!(index.files_below(position), expected, "{:?}", listed.path);
+        }
+        assert_eq!(index.files_below(0), 3);
+    }
+
+    #[test]
+    fn parent_directory_is_the_listed_directory_an_item_lies_in() {
+        let items = vec![
+            item("/r/a", true),
+            item("/r/a/f.rs", false),
+            item("/r/a/f.rs/inside.rs", false),
+            item("/r/missing/orphan.rs", false),
+            item("/r/a", true),
+        ];
+        let index = TreeIndex::build(&items, Path::new("/r"));
+
+        assert_eq!(index.parent_directory(&items, 1), Some(4));
+        assert_eq!(index.parent_directory(&items, 4), None, "below the root");
+        assert_eq!(index.parent_directory(&items, 3), None, "not listed");
+        assert_eq!(
+            index.parent_directory(&items, 2),
+            None,
+            "a file is no parent"
+        );
+        assert_eq!(index.occurrences(1), 1);
+        assert_eq!(index.occurrences(3), 0, "its parent is not listed");
+        assert_eq!(index.occurrences(4), 0, "below the root");
+    }
+
+    #[test]
+    fn occurrences_count_how_often_a_path_is_listed_below_its_parent() {
+        let items = vec![
+            item("/r/a", true),
+            item("/r/a/f.rs", false),
+            item("/r/a/g.rs", false),
+            item("/r/a/f.rs", false),
+        ];
+        let index = TreeIndex::build(&items, Path::new("/r"));
+
+        // The last occurrence represents the path, and is a child twice.
+        assert_eq!(index.children(0), [3, 3, 2]);
+        assert_eq!(index.occurrences(3), 2);
+        assert_eq!(index.occurrences(2), 1);
+        assert_eq!(index.occurrences(1), 0, "represented by the item at 3");
     }
 
     #[test]

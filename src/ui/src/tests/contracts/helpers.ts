@@ -63,10 +63,11 @@ export function makeWireUiState(): z.input<typeof UiStateSchema> {
   return {
     config: makeWireConfig(),
     current_path: "/repo",
-    tree: [
+    rows: [
       {
         path: "/repo",
         name: "repo",
+        depth: 0,
         is_directory: true,
         is_expanded: true,
         is_binary: false,
@@ -74,11 +75,14 @@ export function makeWireUiState(): z.input<typeof UiStateSchema> {
         is_previewed: false,
         selection_state: "none",
         size: 0,
-        children: [],
         has_children: false,
         children_loaded: true,
       },
     ],
+    rows_start: 0,
+    rows_total: 1,
+    rows_revision: 1,
+    located: null,
     total_files_found: 1,
     visible_files_count: 1,
     tree_files_count: 0,

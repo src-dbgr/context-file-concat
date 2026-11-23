@@ -2,7 +2,7 @@
 
 // Cross-language contract test.
 //
-// `fixtures/ui_state_pruned.json` is written by the Rust backend
+// `fixtures/ui_state_window.json` is written by the Rust backend
 // (src/app/view_model/contract_tests.rs) and compared there against what
 // `generate_ui_state` really serializes. Here the same file must pass the full
 // runtime schema, so Rust and TypeScript cannot drift apart without CI failing
@@ -19,13 +19,13 @@ import {
   ConfigOptionSchema,
   UiConfigSchema,
   UiStateSchema,
-  UiStateEnvelopeSchema,
+  TreeRowSchema,
   type CommandName,
 } from "$lib/ipc/schema";
-import type { AppState, TreeNode } from "$lib/types";
+import type { TreeRow } from "$lib/types";
 
 const fixturePath = fileURLToPath(
-  new URL("./fixtures/ui_state_pruned.json", import.meta.url),
+  new URL("./fixtures/ui_state_window.json", import.meta.url),
 );
 const fixture: unknown = JSON.parse(readFileSync(fixturePath, "utf8"));
 
@@ -43,12 +43,8 @@ function keyPaths(value: unknown, prefix = "", out = new Set<string>()) {
   return out;
 }
 
-function allNodes(nodes: TreeNode[]): TreeNode[] {
-  return nodes.flatMap((n) => [n, ...allNodes(n.children)]);
-}
-
-function find(nodes: TreeNode[], path: string): TreeNode {
-  const hit = allNodes(nodes).find((n) => n.path === path);
+function find(rows: TreeRow[], path: string): TreeRow {
+  const hit = rows.find((row) => row.path === path);
   if (!hit) throw new Error(`${path} is not part of the fixture`);
   return hit;
 }
@@ -58,10 +54,6 @@ describe("[IPC Contracts] UiState serialized by the Rust backend", () => {
     const result = UiStateSchema.safeParse(fixture);
     expect(result.error?.issues ?? []).toEqual([]);
     expect(result.success).toBe(true);
-  });
-
-  it("passes the production envelope schema", () => {
-    expect(UiStateEnvelopeSchema.safeParse(fixture).success).toBe(true);
   });
 
   it("contains no top-level field the schema does not know", () => {
@@ -88,71 +80,93 @@ describe("[IPC Contracts] UiState serialized by the Rust backend", () => {
     expect([...keyPaths(parsed)].sort()).toEqual([...keyPaths(fixture)].sort());
   });
 
-  it("sends the pruning flags on every node", () => {
-    const { tree } = UiStateSchema.parse(fixture);
-    const nodes = allNodes(tree);
-    expect(nodes.length).toBeGreaterThan(0);
-    for (const node of nodes) {
-      expect(typeof node.has_children, node.path).toBe("boolean");
-      expect(typeof node.children_loaded, node.path).toBe("boolean");
+  it("sends exactly the fields of a row the schema knows", () => {
+    // TreeRowSchema is passthrough as well; compare the key sets explicitly.
+    const known = Object.keys(TreeRowSchema.shape).sort();
+    const { rows } = fixture as { rows: Record<string, unknown>[] };
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(Object.keys(row).sort(), String(row.path)).toEqual(known);
     }
   });
 
-  it("sends children only for expanded directories", () => {
-    const { tree } = UiStateSchema.parse(fixture);
-    for (const node of allNodes(tree)) {
-      if (!(node.is_directory && node.is_expanded)) {
-        expect(node.children, node.path).toEqual([]);
-      }
-    }
+  it("is a window of the list of rows, not the list", () => {
+    const state = UiStateSchema.parse(fixture);
+
+    expect(state.rows_total).toBe(9);
+    expect(state.rows_start).toBe(1);
+    expect(state.rows.map((row) => row.name)).toEqual([
+      "empty",
+      "src",
+      "core",
+      "lib.rs",
+      "main.rs",
+      "vendor",
+      "README.md",
+      "logo.png",
+    ]);
+    // The first row of the list is above the window.
+    expect(state.rows.some((row) => row.path === "/project/docs")).toBe(false);
+    expect(state.rows_revision).toBeGreaterThan(0);
   });
 
-  it("describes collapsed directories completely", () => {
-    const state = UiStateSchema.parse(fixture) as unknown as AppState;
+  it("states the nesting level of every row", () => {
+    const { rows } = UiStateSchema.parse(fixture);
+    expect(rows.map((row) => row.depth)).toEqual([0, 0, 1, 1, 1, 0, 0, 0]);
+  });
 
-    expect(find(state.tree, "/project/src")).toMatchObject({
+  it("answers the row lookup with a row of the whole list", () => {
+    const state = UiStateSchema.parse(fixture);
+    expect(state.located).toEqual({ request: 7, row: 5 });
+    expect(state.rows[5 - state.rows_start].path).toBe("/project/src/main.rs");
+  });
+
+  it("describes every kind of row completely", () => {
+    const { rows } = UiStateSchema.parse(fixture);
+
+    expect(find(rows, "/project/src")).toMatchObject({
+      is_directory: true,
       is_expanded: true,
       has_children: true,
       selection_state: "partial",
     });
-    expect(
-      find(state.tree, "/project/src").children.map((n) => n.name),
-    ).toEqual(["core", "lib.rs", "main.rs"]);
-    // Collapsed inside an expanded directory: all hidden files are selected.
-    expect(find(state.tree, "/project/src/core")).toMatchObject({
+    // Collapsed inside an expanded directory: its files are no rows, and all
+    // of them are selected.
+    expect(find(rows, "/project/src/core")).toMatchObject({
       is_expanded: false,
-      children: [],
       has_children: true,
       children_loaded: true,
       selection_state: "full",
     });
-    expect(find(state.tree, "/project/docs")).toMatchObject({
-      children: [],
-      has_children: true,
-      selection_state: "none",
-    });
-    expect(find(state.tree, "/project/vendor")).toMatchObject({
+    expect(rows.some((row) => row.path.startsWith("/project/src/core/"))).toBe(
+      false,
+    );
+    expect(find(rows, "/project/vendor")).toMatchObject({
       has_children: false,
       children_loaded: false,
     });
-    expect(find(state.tree, "/project/empty")).toMatchObject({
+    expect(find(rows, "/project/empty")).toMatchObject({
       has_children: false,
       children_loaded: true,
     });
-    expect(find(state.tree, "/project/src/main.rs")).toMatchObject({
+    expect(find(rows, "/project/src/main.rs")).toMatchObject({
+      is_directory: false,
       is_match: true,
       is_previewed: true,
       selection_state: "full",
     });
+    expect(find(rows, "/project/logo.png")).toMatchObject({
+      is_binary: true,
+      size: 65536,
+    });
   });
 
-  it("carries the totals of the complete tree, not of the pruned one", () => {
+  it("carries the totals of the complete tree, not of the window", () => {
     const state = UiStateSchema.parse(fixture);
-    const sent = allNodes(state.tree);
 
     expect(state.tree_files_count).toBe(7);
     expect(state.tree_dirs_count).toBe(5);
-    expect(sent.filter((n) => !n.is_directory).length).toBeLessThan(
+    expect(state.rows.filter((row) => !row.is_directory).length).toBeLessThan(
       state.tree_files_count,
     );
     expect(state.selected_files_count).toBe(3);
@@ -198,6 +212,22 @@ describe("[IPC Contracts] commands routed by the Rust backend", () => {
         ).toBe(true);
       }
     }
+  });
+
+  it("covers every kind of row lookup on both sides", () => {
+    const kindsOf = (targets: { kind: string }[]) =>
+      new Set(targets.map((target) => target.kind));
+    const hostKinds = kindsOf(
+      commandFixture.locateRow.map(
+        (payload) => (payload as { target: { kind: string } }).target,
+      ),
+    );
+    const uiKinds = new Set(
+      CommandSchemas.locateRow.shape.target.options.map(
+        (option) => option.shape.kind.value,
+      ),
+    );
+    expect(hostKinds).toEqual(uiKinds);
   });
 
   it("covers every option of setConfigOption on both sides", () => {

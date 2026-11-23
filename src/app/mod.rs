@@ -16,9 +16,12 @@ pub mod selection;
 pub mod shared_state;
 pub mod state;
 pub mod tasks;
+pub mod tracked;
 pub mod transport;
 pub mod tree_index;
 pub mod view_model;
+#[cfg(test)]
+mod window_contract_tests;
 pub mod window_geometry;
 
 use crate::app::file_dialog::DialogService;
@@ -109,6 +112,8 @@ pub(crate) enum OrderedCommand {
     LoadDirectoryLevel,
     SetExpansion,
     ExpandCollapseAll,
+    SetViewport,
+    LocateRow,
     ToggleSelection,
     ToggleDirectorySelection,
     SelectAll,
@@ -154,6 +159,8 @@ pub(crate) const COMMANDS: &[(&str, Command)] = {
             "expandCollapseAll",
             Ordered(OrderedCommand::ExpandCollapseAll),
         ),
+        ("setViewport", Ordered(OrderedCommand::SetViewport)),
+        ("locateRow", Ordered(OrderedCommand::LocateRow)),
         ("toggleSelection", Ordered(OrderedCommand::ToggleSelection)),
         (
             "toggleDirectorySelection",
@@ -254,6 +261,8 @@ async fn run_command<P: EventProxy>(
         C::ToggleDirectorySelection => commands::toggle_directory_selection(payload, proxy, state),
         C::SetExpansion => commands::set_expansion(payload, proxy, state),
         C::ExpandCollapseAll => commands::expand_collapse_all(payload, proxy, state),
+        C::SetViewport => commands::set_viewport(payload, proxy, state),
+        C::LocateRow => commands::locate_row(payload, proxy, state),
         C::SelectAll => commands::select_all(proxy, state),
         C::DeselectAll => commands::deselect_all(proxy, state),
         C::CancelGeneration => commands::cancel_generation(proxy, state),

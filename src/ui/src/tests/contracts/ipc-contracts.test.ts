@@ -13,8 +13,8 @@ import {
   makeWireUiState,
   type PayloadForWire,
 } from "./helpers";
-import { makeCollapsedDirNode } from "./factories";
-import type { TreeNode } from "$lib/types";
+import { makeCollapsedDirRow, makeValidRows } from "./factories";
+import type { TreeRow } from "$lib/types";
 
 /**
  * Positive cases: commands that accept `null` payloads.
@@ -97,6 +97,79 @@ describe("IPC contracts – outgoing commands (positive)", () => {
     }
   });
 
+  it("accepts the window of rows the UI shows", () => {
+    expect(validateCommand("setViewport", { start: 120, count: 90 })).toEqual({
+      command: "setViewport",
+      payload: { start: 120, count: 90 },
+    });
+  });
+
+  it("rejects setViewport payloads the backend would not accept", () => {
+    const invalid: unknown[] = [
+      null,
+      7,
+      {},
+      { start: 0 },
+      { count: 10 },
+      { start: -1, count: 10 },
+      { start: 0, count: 0 },
+      { start: 0.5, count: 10 },
+      { start: 0, count: 10.5 },
+      { start: "0", count: 10 },
+      { start: 0, count: 10, extra: 1 },
+    ];
+    for (const payload of invalid) {
+      const result = AnyCommandMessageSchema.safeParse({
+        command: "setViewport",
+        payload,
+      });
+      expect(result.success, JSON.stringify(payload)).toBe(false);
+    }
+  });
+
+  it("accepts every kind of row lookup", () => {
+    const targets = [
+      { kind: "path", path: "/repo/src/main.rs" },
+      { kind: "parent_of", path: "/repo/src/main.rs" },
+      { kind: "typeahead", prefix: "ma", from: 0 },
+    ] as const;
+    for (const target of targets) {
+      const payload = { request: 4, target };
+      expect(validateCommand("locateRow", payload)).toEqual({
+        command: "locateRow",
+        payload,
+      });
+    }
+  });
+
+  it("rejects locateRow payloads the backend would not accept", () => {
+    const path = { kind: "path", path: "/repo/a" };
+    const invalid: unknown[] = [
+      null,
+      path,
+      { request: 1 },
+      { target: path },
+      { request: -1, target: path },
+      { request: 1.5, target: path },
+      { request: 1, target: path, extra: 1 },
+      { request: 1, target: { kind: "path" } },
+      { request: 1, target: { kind: "path", path: "" } },
+      { request: 1, target: { ...path, extra: 1 } },
+      { request: 1, target: { kind: "parent", path: "/repo/a" } },
+      { request: 1, target: { kind: "typeahead", prefix: "a" } },
+      { request: 1, target: { kind: "typeahead", prefix: "", from: 0 } },
+      { request: 1, target: { kind: "typeahead", prefix: "a", from: -1 } },
+      { request: 1, target: { kind: "typeahead", prefix: "a", from: 0, x: 1 } },
+    ];
+    for (const payload of invalid) {
+      const result = AnyCommandMessageSchema.safeParse({
+        command: "locateRow",
+        payload,
+      });
+      expect(result.success, JSON.stringify(payload)).toBe(false);
+    }
+  });
+
   it("accepts boolean payload for expandCollapseAll", () => {
     const pTrue = validateCommand("expandCollapseAll", true);
     const pFalse = validateCommand("expandCollapseAll", false);
@@ -130,7 +203,7 @@ describe("IPC contracts – inbound events/state", () => {
     expect(parsed.visible_files_count).toBe(1);
   });
 
-  it("requires the tree totals the pruned tree cannot provide", () => {
+  it("requires the tree totals a window of rows cannot provide", () => {
     for (const counter of ["tree_files_count", "tree_dirs_count"] as const) {
       const missing: Record<string, unknown> = { ...makeWireUiState() };
       delete missing[counter];
@@ -144,58 +217,120 @@ describe("IPC contracts – inbound events/state", () => {
     expect(parsed.tree_dirs_count).toBe(1);
   });
 
-  it("accepts a collapsed directory without children (pruned snapshot)", () => {
-    const collapsed = makeCollapsedDirNode("/repo/docs", {
+  it("accepts the row of a collapsed directory", () => {
+    const collapsed = makeCollapsedDirRow("/repo/docs", {
       selection_state: "partial",
     });
     const parsed = UiStateSchema.parse({
       ...makeWireUiState(),
-      tree: [collapsed],
+      rows: [collapsed],
     });
-    expect(parsed.tree[0]).toMatchObject({
+    expect(parsed.rows[0]).toMatchObject({
+      depth: 0,
       is_expanded: false,
-      children: [],
       has_children: true,
       children_loaded: true,
       selection_state: "partial",
     });
   });
 
-  it("rejects a tree node without the pruning flags", () => {
-    for (const flag of ["has_children", "children_loaded"] as const) {
-      const node: Partial<TreeNode> = makeCollapsedDirNode();
-      delete node[flag];
+  it("rejects a row without one of its fields", () => {
+    const complete = makeCollapsedDirRow();
+    for (const field of Object.keys(complete) as (keyof TreeRow)[]) {
+      const row: Partial<TreeRow> = { ...complete };
+      delete row[field];
       const result = UiStateSchema.safeParse({
         ...makeWireUiState(),
-        tree: [node],
+        rows: [row],
       });
-      expect(result.success, flag).toBe(false);
+      expect(result.success, field).toBe(false);
     }
   });
 
-  it("rejects a nested tree node without the pruning flags", () => {
-    const child: Partial<TreeNode> = makeCollapsedDirNode("/repo/src/app");
-    delete child.children_loaded;
-    const parent = {
-      ...makeCollapsedDirNode("/repo/src"),
-      is_expanded: true,
-      children: [child],
-    };
+  it("rejects an invalid row anywhere in the window", () => {
+    const rows: unknown[] = makeValidRows();
+    rows[2] = { ...makeCollapsedDirRow("/repo/src/app"), depth: -1 };
     const result = UiStateSchema.safeParse({
       ...makeWireUiState(),
-      tree: [parent],
+      rows,
+      rows_total: 3,
     });
     expect(result.success).toBe(false);
   });
 
-  it("rejects non-boolean pruning flags on a tree node", () => {
-    for (const flag of ["has_children", "children_loaded"] as const) {
-      const node = { ...makeCollapsedDirNode(), [flag]: "yes" };
+  it("rejects wrongly typed fields of a row", () => {
+    const wrong: Record<string, unknown> = {
+      has_children: "yes",
+      children_loaded: "yes",
+      depth: 1.5,
+      selection_state: "some",
+      path: 7,
+    };
+    for (const [field, value] of Object.entries(wrong)) {
+      const row = { ...makeCollapsedDirRow(), [field]: value };
       const result = UiStateSchema.safeParse({
         ...makeWireUiState(),
-        tree: [node],
+        rows: [row],
       });
-      expect(result.success).toBe(false);
+      expect(result.success, field).toBe(false);
+    }
+  });
+
+  it("requires the description of the window", () => {
+    for (const field of [
+      "rows",
+      "rows_start",
+      "rows_total",
+      "rows_revision",
+      "located",
+    ] as const) {
+      const missing: Record<string, unknown> = { ...makeWireUiState() };
+      delete missing[field];
+      expect(UiStateSchema.safeParse(missing).success, field).toBe(false);
+    }
+    for (const field of ["rows_start", "rows_total", "rows_revision"]) {
+      for (const value of [-1, 0.5, "1", null]) {
+        const wrong = { ...makeWireUiState(), [field]: value };
+        expect(UiStateSchema.safeParse(wrong).success, field).toBe(false);
+      }
+    }
+  });
+
+  it("rejects a window that does not lie inside the list", () => {
+    const window = (rows_start: number, rows_total: number) =>
+      UiStateSchema.safeParse({
+        ...makeWireUiState(),
+        rows: makeValidRows(),
+        rows_start,
+        rows_total,
+      }).success;
+
+    expect(window(0, 3)).toBe(true);
+    expect(window(7, 10)).toBe(true);
+    expect(window(40, 1000)).toBe(true);
+    expect(window(0, 2)).toBe(false);
+    expect(window(8, 10)).toBe(false);
+  });
+
+  it("accepts the answer to a row lookup, found or not", () => {
+    for (const located of [
+      null,
+      { request: 3, row: 17 },
+      { request: 3, row: null },
+    ]) {
+      const parsed = UiStateSchema.parse({ ...makeWireUiState(), located });
+      expect(parsed.located).toEqual(located);
+    }
+    for (const located of [
+      { request: 3 },
+      { row: 1 },
+      { request: -1, row: 1 },
+      { request: 1, row: -1 },
+      { request: "1", row: 1 },
+      7,
+    ]) {
+      const result = UiStateSchema.safeParse({ ...makeWireUiState(), located });
+      expect(result.success, JSON.stringify(located)).toBe(false);
     }
   });
 

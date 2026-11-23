@@ -1,6 +1,6 @@
 //! Cross-language contract test for the `UiState` payload.
 //!
-//! This test serializes a representative, pruned `UiState` and compares it with a JSON
+//! This test serializes a representative `UiState` (a window of rows) and compares it with a JSON
 //! fixture that is committed inside the UI's test directory. The UI parses that exact
 //! file with its full runtime schema (`src/ui/src/tests/contracts/rust-fixture.test.ts`),
 //! so the Rust structs and the TypeScript schema cannot drift apart unnoticed.
@@ -8,7 +8,7 @@
 //! After an intentional change of the payload, regenerate the fixture with
 //! `UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture` and adapt the UI schema.
 
-use super::{generate_ui_state, UiState};
+use super::{generate_ui_state, LocatedRow, UiState, Viewport};
 use crate::app::selection::SelectionState;
 use crate::app::state::{AppState, StatusNotice};
 use crate::config::{AppConfig, GeometryUnits};
@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/src/ui/src/tests/contracts/fixtures/ui_state_pruned.json"
+    "/src/ui/src/tests/contracts/fixtures/ui_state_window.json"
 );
 const UPDATE_ENV: &str = "UPDATE_CONTRACT_FIXTURES";
 
@@ -81,7 +81,7 @@ fn representative_state() -> AppState {
     let listed = state.full_file_list.clone();
     state.set_filtered_file_list(listed);
 
-    state.expanded_dirs = paths(&["/project/src"]);
+    state.expanded_dirs = paths(&["/project/src"]).into();
     state.loaded_dirs = paths(&[
         "/project",
         "/project/src",
@@ -93,7 +93,13 @@ fn representative_state() -> AppState {
         "/project/src/core/mod.rs",
         "/project/src/core/scanner.rs",
         "/project/src/main.rs",
-    ]);
+    ])
+    .into();
+    // The UI has scrolled one row down and asked where the previewed file is.
+    state.tree_view.set_viewport(Viewport::new(1, 8));
+    state
+        .tree_view
+        .answer_locate(7, Some(PathBuf::from("/project/src/main.rs")));
     state.previewed_file_path = Some(PathBuf::from("/project/src/main.rs"));
     state.search_query = "main".to_string();
     state.current_config_filename = Some("project.cfc.json".to_string());
@@ -130,40 +136,51 @@ fn contract_fixture_matches_the_serialized_ui_state() {
     );
 }
 
-/// The fixture is only worth sharing if it really covers the pruned shapes.
+/// The fixture is only worth sharing if it really covers the shapes of a row and a
+/// window that is not the whole list.
 #[test]
-fn contract_fixture_state_covers_the_pruned_shapes() {
+fn contract_fixture_state_covers_the_shapes_of_rows_and_window() {
     let ui_state = generate_ui_state(&representative_state());
-    let root = |name: &str| {
+    let row = |name: &str| {
         ui_state
-            .tree
-            .iter()
-            .find(|node| node.name == name)
+            .row_named(name)
             .unwrap_or_else(|| panic!("{name} is missing"))
     };
 
-    let src = root("src");
+    // docs, empty, src, [core, lib.rs, main.rs], vendor, logo.png, README.md
+    assert_eq!(ui_state.rows_total, 9);
+    assert_eq!(ui_state.rows_start, 1);
+    assert_eq!(ui_state.rows.len(), 8);
+    assert!(ui_state.row_named("docs").is_none(), "above the window");
+    assert_eq!(
+        ui_state.located,
+        Some(LocatedRow {
+            request: 7,
+            row: Some(5)
+        })
+    );
+    assert_eq!(ui_state.rows[5 - ui_state.rows_start].name, "main.rs");
+
+    let src = row("src");
     assert!(src.is_expanded && src.has_children && src.children_loaded);
     assert_eq!(src.selection_state, SelectionState::Partial);
-    assert_eq!(src.children.len(), 3);
+    assert_eq!(src.depth, 0);
+    assert_eq!(ui_state.children_of(src).len(), 3);
 
-    let core = &src.children[0];
-    assert_eq!(core.name, "core");
-    assert!(!core.is_expanded && core.has_children && core.children.is_empty());
+    let core = row("core");
+    assert_eq!(core.depth, 1);
+    assert!(!core.is_expanded && core.has_children);
+    assert!(ui_state.children_of(core).is_empty());
     assert_eq!(core.selection_state, SelectionState::Full);
 
-    let main = &src.children[2];
+    let main = row("main.rs");
     assert!(main.is_match && main.is_previewed);
     assert_eq!(main.selection_state, SelectionState::Full);
 
-    let docs = root("docs");
-    assert!(docs.has_children && docs.children.is_empty());
-    assert_eq!(docs.selection_state, SelectionState::None);
-
-    let vendor = root("vendor");
+    let vendor = row("vendor");
     assert!(!vendor.children_loaded && !vendor.has_children);
-    assert!(!root("empty").has_children && root("empty").children_loaded);
-    assert!(root("logo.png").is_binary);
+    assert!(!row("empty").has_children && row("empty").children_loaded);
+    assert!(row("logo.png").is_binary);
 
     assert_eq!(ui_state.tree_files_count, 7);
     assert_eq!(ui_state.tree_dirs_count, 5);

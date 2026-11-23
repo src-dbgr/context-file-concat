@@ -1,11 +1,12 @@
 //! Tests for the cached tree: equivalence with the original algorithm and invalidation.
 //!
-//! The original algorithm builds the complete tree. The snapshot sent to the UI is that
-//! tree with the subtrees of collapsed directories cut off, so the oracle is the
-//! reference output pruned by exactly this rule.
+//! The original algorithm builds the complete, nested tree. The rows the UI can show
+//! are that tree with the subtrees of collapsed directories cut off, listed top to
+//! bottom. So the oracle is the reference output pruned by exactly this rule, and it
+//! is compared with the rows put back into nested form (`reference::nest`).
 
-use super::reference::{self, BuildTreeArgs};
-use super::{generate_ui_state, TreeNode};
+use super::reference::{self, snapshot, snapshot_tree, BuildTreeArgs, TreeNode};
+use super::{generate_ui_state, rows};
 use crate::app::filtering;
 use crate::app::selection::{self, SelectionState};
 use crate::app::state::AppState;
@@ -240,13 +241,19 @@ fn toggle(set: &mut HashSet<PathBuf>, path: PathBuf) {
     }
 }
 
+fn toggle_selected(state: &mut AppState, path: PathBuf) {
+    if !state.selected_files.remove(&path) {
+        state.selected_files.insert(path);
+    }
+}
+
 fn apply(state: &mut AppState, op: Op) {
     match op {
         Op::SetList(items) => state.set_filtered_file_list(items),
         Op::SetRoot(root) => state.current_path = root.to_string(),
         Op::ToggleSelected(target) => {
             let path = target.resolve(state);
-            toggle(&mut state.selected_files, path);
+            toggle_selected(state, path);
         }
         Op::SelectAllFiles => {
             state.selected_files = state
@@ -281,9 +288,12 @@ fn apply(state: &mut AppState, op: Op) {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Across arbitrary sequences of state changes, the snapshot is identical to the
-    /// pruned tree of the original algorithm, down to the serialized payload, and its
-    /// counters describe the complete tree.
+    /// Across arbitrary sequences of state changes, the rows are identical to the
+    /// pruned tree of the original algorithm, the snapshot carries exactly these
+    /// rows, and its counters describe the complete tree. The selection changes go
+    /// through the journal of `SelectedFiles`, so this also holds the incrementally
+    /// kept selection counts against a count from scratch, for lists with orphans,
+    /// duplicates and files that have children.
     #[test]
     fn cached_tree_equals_pruned_reference_tree(
         initial in list_strategy(),
@@ -299,14 +309,16 @@ proptest! {
             let (files, dirs) = count_nodes(&complete);
             let expected = prune_collapsed(complete);
             let ui_state = generate_ui_state(&state);
-            let actual = &ui_state.tree;
+            let actual = &snapshot_tree(&state);
 
             prop_assert_eq!(actual, &expected, "after {:?}", op);
-            prop_assert_eq!(
-                serde_json::to_string(actual).unwrap(),
-                serde_json::to_string(&expected).unwrap()
-            );
             prop_assert!(is_pruned(actual));
+            // The snapshot carries these rows (the lists generated here fit into
+            // the default window).
+            let all_rows = rows::all_rows(&state);
+            prop_assert_eq!(ui_state.rows_total, all_rows.len());
+            prop_assert_eq!(ui_state.rows_start, 0);
+            prop_assert_eq!(&ui_state.rows, &all_rows);
             prop_assert_eq!(
                 (ui_state.tree_files_count, ui_state.tree_dirs_count),
                 (files, dirs),
@@ -321,7 +333,7 @@ proptest! {
             .iter()
             .map(|item| item.path.clone())
             .collect();
-        prop_assert_eq!(generate_ui_state(&state).tree, reference_tree(&state));
+        prop_assert_eq!(snapshot_tree(&state), reference_tree(&state));
     }
 
     /// Pruning never changes what is reported about a node that is part of the
@@ -344,7 +356,7 @@ proptest! {
         }
 
         let complete = reference_tree(&state);
-        let snapshot = generate_ui_state(&state).tree;
+        let snapshot = snapshot_tree(&state);
 
         fn check(snapshot: &[TreeNode], complete: &[TreeNode]) -> Result<(), TestCaseError> {
             prop_assert_eq!(snapshot.len(), complete.len());
@@ -385,7 +397,7 @@ proptest! {
             .collect();
 
         let index = state.file_tree();
-        let mut pending = generate_ui_state(&state).tree;
+        let mut pending = snapshot_tree(&state);
         while let Some(node) = pending.pop() {
             let subtree = selection::subtree_selection(
                 state.filtered_file_list(),
@@ -424,7 +436,7 @@ fn scanned_state() -> AppState {
 }
 
 fn root_names(state: &AppState) -> Vec<String> {
-    generate_ui_state(state)
+    snapshot(state)
         .tree
         .into_iter()
         .map(|node| node.name)
@@ -443,7 +455,7 @@ fn index_is_reused_while_only_dynamic_state_changes() {
     state.expanded_dirs.insert(PathBuf::from("/root/src"));
     state.loaded_dirs.insert(PathBuf::from("/root/src"));
     state.previewed_file_path = Some(PathBuf::from("/root/readme.md"));
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
 
     assert_eq!(builds(&state), 1);
     let src = &ui_state.tree[0];
@@ -489,7 +501,7 @@ fn index_is_rebuilt_after_lazy_load_merge() {
     state.loaded_dirs.insert(PathBuf::from("/root/src"));
     state.expanded_dirs.insert(PathBuf::from("/root/src"));
     filtering::apply_filters(&mut state);
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
 
     let children: Vec<_> = ui_state.tree[0].children.iter().map(|n| &n.name).collect();
     assert_eq!(children, ["lib.rs", "main.rs"]);
@@ -502,7 +514,7 @@ fn index_is_rebuilt_after_reset_directory_state() {
     generate_ui_state(&state);
 
     state.reset_directory_state();
-    assert!(generate_ui_state(&state).tree.is_empty());
+    assert!(snapshot(&state).tree.is_empty());
 
     // Same list and root as before the reset: the old index must not be picked up
     // unseen, the revision has moved on.
