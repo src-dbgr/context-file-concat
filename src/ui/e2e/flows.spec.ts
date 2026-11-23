@@ -641,7 +641,9 @@ test("A11y sanity on main screen (no critical issues)", async ({ page }) => {
   await setAppState(page, withRepo());
 
   const results = await new AxeBuilder({ page }).analyze();
-  const critical = results.violations.filter((v) => v.impact === "critical");
+  const critical = results.violations.filter(
+    (v) => v.impact === "critical" || v.impact === "serious",
+  );
   expect(critical.length, "Expected no CRITICAL a11y violations").toBe(0);
 
   // With a toast on screen (its list must only own list items).
@@ -654,7 +656,7 @@ test("A11y sanity on main screen (no critical issues)", async ({ page }) => {
   const withToast = await new AxeBuilder({ page }).analyze();
   expect(
     withToast.violations
-      .filter((v) => v.impact === "critical")
+      .filter((v) => v.impact === "critical" || v.impact === "serious")
       .map((v) => v.id),
     "Expected no CRITICAL a11y violations with a toast shown",
   ).toEqual([]);

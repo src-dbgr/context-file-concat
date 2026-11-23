@@ -375,6 +375,8 @@ test("the tree has no critical a11y issue in the middle of a long list", async (
   await expect(rowAt(page, 2_505)).toBeVisible();
 
   const results = await new AxeBuilder({ page }).include(".tree").analyze();
-  const critical = results.violations.filter((v) => v.impact === "critical");
+  const critical = results.violations.filter(
+    (v) => v.impact === "critical" || v.impact === "serious",
+  );
   expect(critical.map((violation) => violation.id)).toEqual([]);
 });

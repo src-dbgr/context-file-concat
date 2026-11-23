@@ -156,7 +156,7 @@
 
 <div class="panel">
   <div class="panel-header">
-    <h3>
+    <h2>
       <svg
         class="icon"
         viewBox="0 0 24 24"
@@ -168,7 +168,7 @@
         <path d="m21 21-4.35-4.35" />
       </svg>
       {$t("sidebar.title")}
-    </h3>
+    </h2>
   </div>
 
   <input
@@ -217,7 +217,7 @@
 
 <div class="panel ignore-patterns-panel">
   <div class="panel-header">
-    <h3>
+    <h2>
       <svg
         class="icon"
         viewBox="0 0 24 24"
@@ -229,7 +229,7 @@
         <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
       </svg>
       {$t("sidebar.ignoreTitle")}
-    </h3>
+    </h2>
 
     <button
       id="rescan-btn"
@@ -237,7 +237,7 @@
       disabled={$appState.is_scanning || !$appState.current_path}
       onclick={handleRescan}
       title={$appState.patterns_need_rescan
-        ? "Re-scan recommended after removing patterns"
+        ? $t("sidebar.rescanRecommended")
         : $t("action.rescan")}
     >
       {#if $appState.is_scanning}
@@ -323,7 +323,7 @@
         <button
           class="common-pattern-chip"
           onclick={() => addPattern(pattern)}
-          title={`Click to add "${pattern}" to ignore patterns`}
+          title={$t("sidebar.addCommonPattern", { pattern })}
         >
           {pattern}
         </button>
@@ -344,7 +344,7 @@
       <div
         class="current-pattern-chip {activeSet.has(p) ? 'active-pattern' : ''}"
         title={activeSet.has(p)
-          ? "This pattern was active and matched one or more files/directories."
+          ? $t("sidebar.patternActive")
           : ""}
         role="listitem"
       >
@@ -352,7 +352,7 @@
         <button
           class="remove-pattern-btn"
           onclick={() => removePattern(p)}
-          aria-label={`Remove pattern ${p}`}
+          aria-label={$t("aria.removePattern", { pattern: p })}
         >
           <svg
             class="icon"

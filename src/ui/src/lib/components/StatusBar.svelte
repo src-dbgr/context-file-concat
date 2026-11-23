@@ -21,7 +21,8 @@
   }
 </script>
 
-<div id="status-bar" class:indexing={isIndexingInProgress}>
+<!-- A landmark (contentinfo): the bar is outside of <main>. -->
+<footer id="status-bar" class:indexing={isIndexingInProgress}>
   <details class="status-output-settings">
     <summary>
       <svg
@@ -120,4 +121,4 @@
     <Spinner size={16} ariaLabel={$t("status.indexing")} />
     <span>{$t("status.indexing")}</span>
   </div>
-</div>
+</footer>

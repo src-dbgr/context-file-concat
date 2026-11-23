@@ -3,6 +3,7 @@
   import { post } from "$lib/services/backend";
   import { formatFileSize } from "$lib/utils";
   import { toggleDirectory } from "$lib/modules/treeExpansion";
+  import { t } from "$lib/i18n";
 
   // Runes props (no `export let` in Svelte 5)
   // A pure row: it shows the row the host sent and posts commands, nothing
@@ -72,17 +73,21 @@
       data-type="directory"
       role="button"
       tabindex="0"
+      aria-label={$t(
+        node.is_expanded ? "aria.collapseDirectory" : "aria.expandDirectory",
+        { name: node.name }
+      )}
       onclick={toggleDir}
     ></span>
     <input
       type="checkbox"
       checked={isDirFull}
+      indeterminate={isDirPartial}
       data-indeterminate={isDirPartial ? "true" : "false"}
-      aria-checked={isDirPartial ? "mixed" : isDirFull ? "true" : "false"}
       onclick={toggleDirCheckbox}
       data-path={node.path}
       data-type="dir-checkbox"
-      aria-label="Toggle directory selection"
+      aria-label={$t("aria.toggleDirectorySelection")}
     />
     <div class="name-and-button">
       <!-- svelte-ignore a11y_click_events_have_key_events (keys: see the script) -->
@@ -103,8 +108,8 @@
       </span>
       <button
         class="ignore-btn"
-        title="Add this directory to ignore patterns"
-        aria-label="Add directory to ignore patterns"
+        title={$t("filetree.ignoreDirectoryTitle")}
+        aria-label={$t("aria.ignoreDirectory")}
         onclick={addIgnore}
         data-path={node.path}
         data-type="ignore"
@@ -138,7 +143,7 @@
       onclick={toggleFileCheckbox}
       data-path={node.path}
       data-type="file-checkbox"
-      aria-label="Toggle file selection"
+      aria-label={$t("aria.toggleFileSelection")}
     />
     <div class="name-and-button">
       <!-- svelte-ignore a11y_click_events_have_key_events (keys: see the script) -->
@@ -174,8 +179,8 @@
       </span>
       <button
         class="ignore-btn"
-        title="Add this file to ignore patterns"
-        aria-label="Add file to ignore patterns"
+        title={$t("filetree.ignoreFileTitle")}
+        aria-label={$t("aria.ignoreFile")}
         onclick={addIgnore}
         data-path={node.path}
         data-type="ignore"

@@ -152,11 +152,10 @@ describe("FileTree", () => {
     const chevron = src.querySelector(".arrow");
     expect(chevron).not.toBeNull();
     expect(chevron).not.toHaveClass("expanded");
+    // It is a control without text; its name says what it does to which row.
+    expect(chevron).toHaveAttribute("aria-label", "Expand src");
     // ...and the selection of the hidden descendants is shown.
-    expect(src.querySelector("input[type=checkbox]")).toHaveAttribute(
-      "aria-checked",
-      "mixed",
-    );
+    expect(src.querySelector("input[type=checkbox]")).toBePartiallyChecked();
   });
 
   it("shows the selection state the backend computed for collapsed directories", async () => {
@@ -169,13 +168,19 @@ describe("FileTree", () => {
     const { container } = render(FileTree);
     await screen.findByRole("tree");
 
-    const checked = (path: string) =>
-      row(container, path)
-        .querySelector("input[type=checkbox]")
-        ?.getAttribute("aria-checked");
-    expect(checked("/repo/all")).toBe("true");
-    expect(checked("/repo/some")).toBe("mixed");
-    expect(checked("/repo/none")).toBe("false");
+    // A native checkbox: its own state is what a screen reader is told.
+    const checkbox = (path: string) =>
+      row(container, path).querySelector<HTMLInputElement>(
+        "input[type=checkbox]",
+      )!;
+    expect(checkbox("/repo/all")).toBeChecked();
+    expect(checkbox("/repo/all")).not.toBePartiallyChecked();
+    expect(checkbox("/repo/some")).toBePartiallyChecked();
+    expect(checkbox("/repo/none")).not.toBeChecked();
+    expect(checkbox("/repo/none")).not.toBePartiallyChecked();
+    for (const path of ["/repo/all", "/repo/some", "/repo/none"]) {
+      expect(checkbox(path)).not.toHaveAttribute("aria-checked");
+    }
   });
 
   it("expanding a collapsed directory asks the backend and changes nothing locally", async () => {

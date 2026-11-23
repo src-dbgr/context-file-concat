@@ -725,7 +725,7 @@
   {#if $appState.current_path}
     <div class="panel-header files-header">
       <div class="files-title-section">
-        <h3>{$t("filetree.title")}</h3>
+        <h2>{$t("filetree.title")}</h2>
         <div class="button-group">
           <button
             onclick={onSelectAll}
@@ -779,7 +779,7 @@
         onkeydown={onTreeKeyDown}
         style="overflow:auto; height:100%; min-height:0; flex:1 1 auto;"
         role="tree"
-        aria-label="Project files"
+        aria-label={$t("aria.projectFiles")}
         aria-multiselectable="true"
         aria-busy={awaitingRows ? "true" : "false"}
         tabindex="0"

@@ -9,13 +9,17 @@
 
 /**
  * Whether `key` (a `KeyboardEvent.key`) activates `target` natively: a button
- * on Enter and Space, a checkbox or radio button on Space.
+ * on Enter and Space, a checkbox or radio button on Space, the summary of a
+ * `<details>` on Enter and Space.
  */
 export function activatesNatively(
   target: EventTarget | null,
   key: string,
 ): boolean {
-  if (target instanceof HTMLButtonElement) {
+  if (
+    target instanceof HTMLButtonElement ||
+    (target instanceof HTMLElement && target.tagName === "SUMMARY")
+  ) {
     return key === "Enter" || key === " ";
   }
   if (target instanceof HTMLInputElement) {

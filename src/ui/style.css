@@ -161,7 +161,7 @@ body.vertical-resizing {
 }
 
 .config-filename {
-  color: var(--color-accent);
+  color: var(--color-accent-text);
   font-size: 0.85em;
   font-weight: 500;
   font-style: italic;
@@ -366,7 +366,7 @@ body.vertical-resizing {
 .status-output-settings[open] summary {
   background-color: var(--surface-1);
   border-color: var(--color-accent);
-  color: var(--color-accent);
+  color: var(--color-accent-text);
 }
 
 .status-output-settings .setting-row {
@@ -426,7 +426,7 @@ body.vertical-resizing {
   overflow: hidden;
 }
 
-.panel-header h3 {
+.panel-header h2 {
   margin: 0;
   font-size: 1em;
   white-space: nowrap;
@@ -451,7 +451,7 @@ body.vertical-resizing {
   gap: var(--space-5);
 }
 
-.files-title-section h3 {
+.files-title-section h2 {
   margin: 0;
   font-size: 1em;
   white-space: nowrap;
@@ -549,7 +549,7 @@ input[type="text"] {
   width: 100%;
   padding: var(--space-4) var(--space-6);
   background-color: var(--color-bg);
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-control-border);
   color: var(--color-text);
   border-radius: var(--radius-md);
   margin-bottom: var(--space-4);
@@ -657,7 +657,7 @@ button:disabled:hover {
 
 .button-scanning {
   background-color: var(--color-info) !important;
-  color: var(--color-bg) !important;
+  color: var(--color-on-info) !important;
   cursor: not-allowed !important;
   animation: scanPulse 2s ease-in-out infinite;
 }
@@ -672,24 +672,28 @@ button:disabled:hover {
 }
 
 .button-cta {
-  background-color: var(--color-success);
-  border-color: var(--color-success);
-  color: #ffffff;
+  background-color: var(--color-success-solid);
+  border-color: var(--color-success-solid);
+  color: var(--color-on-solid);
   font-weight: 600;
 }
 .button-cta:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--color-success) 85%, black 15%);
-  border-color: color-mix(in srgb, var(--color-success) 85%, black 15%);
+  background-color: color-mix(
+    in srgb,
+    var(--color-success-solid) 85%,
+    black 15%
+  );
+  border-color: color-mix(in srgb, var(--color-success-solid) 85%, black 15%);
 }
 
 .button-cancel-action {
-  background-color: var(--color-error);
-  border-color: var(--color-error);
-  color: #ffffff;
+  background-color: var(--color-error-solid);
+  border-color: var(--color-error-solid);
+  color: var(--color-on-solid);
 }
 .button-cancel-action:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--color-error) 85%, black 15%);
-  border-color: color-mix(in srgb, var(--color-error) 85%, black 15%);
+  background-color: color-mix(in srgb, var(--color-error-solid) 85%, black 15%);
+  border-color: color-mix(in srgb, var(--color-error-solid) 85%, black 15%);
 }
 
 .button-secondary {
@@ -722,20 +726,20 @@ button#generate-btn {
   display: flex;
   align-items: center;
   gap: var(--space-4);
-  color: var(--color-error);
+  color: var(--color-error-text);
   font-weight: 600;
 }
 #generate-btn.is-generating .generating-content .icon {
   animation: pulse 1.5s ease-in-out infinite;
-  color: var(--color-warning);
+  color: var(--color-warning-text);
 }
 #generate-btn.is-generating .cancel-content {
   display: none;
 }
 #generate-btn.is-generating:hover {
-  background-color: var(--color-error);
-  border-color: var(--color-error);
-  color: #ffffff;
+  background-color: var(--color-error-solid);
+  border-color: var(--color-error-solid);
+  color: var(--color-on-solid);
 }
 #generate-btn.is-generating:hover .generating-content {
   display: none;
@@ -793,14 +797,14 @@ button#generate-btn {
   transition: all 0.2s ease;
 }
 .remove-pattern-btn:hover {
-  color: var(--color-error);
+  color: var(--color-error-text);
   background-color: color-mix(in srgb, var(--color-error) 15%, transparent);
 }
 .current-pattern-chip.active-pattern {
   border-color: var(--color-success);
   background-color: color-mix(in srgb, var(--color-success) 15%, transparent);
   font-weight: 500;
-  color: var(--color-success);
+  color: var(--color-success-text);
 }
 
 .common-patterns-section {
@@ -870,15 +874,15 @@ button#generate-btn {
   margin-top: var(--space-3);
   font-size: 0.8em;
   padding: var(--space-4) var(--space-6);
-  background-color: var(--color-error);
-  border-color: var(--color-error);
-  color: #ffffff;
+  background-color: var(--color-error-solid);
+  border-color: var(--color-error-solid);
+  color: var(--color-on-solid);
   min-height: 32px;
   font-weight: 500;
 }
 #delete-all-patterns-btn:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--color-error) 85%, black 15%);
-  border-color: color-mix(in srgb, var(--color-error) 85%, black 15%);
+  background-color: color-mix(in srgb, var(--color-error-solid) 85%, black 15%);
+  border-color: color-mix(in srgb, var(--color-error-solid) 85%, black 15%);
 }
 
 #filter-patterns {
@@ -917,7 +921,7 @@ button#generate-btn {
 .file-tree-container.drag-over .placeholder {
   background-color: var(--alpha-accent-10);
   border-color: var(--color-accent);
-  color: var(--color-accent);
+  color: var(--color-accent-text);
   border-style: solid;
   transform: scale(1.02);
   box-shadow: 0 8px 24px var(--alpha-accent-20);
@@ -931,7 +935,7 @@ button#generate-btn {
 
 .file-tree-container.drag-over .placeholder::after {
   content: "Drop your directory here!";
-  color: var(--color-accent);
+  color: var(--color-accent-text);
   font-weight: 600;
 }
 
@@ -943,7 +947,7 @@ input[type="checkbox"] {
   width: 16px;
   height: 16px;
   background-color: var(--color-bg);
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-control-border);
   border-radius: var(--radius-sm);
   cursor: pointer;
   position: relative;
@@ -1032,6 +1036,13 @@ input[type="checkbox"][data-indeterminate="true"]::before {
   background: none;
 }
 
+/* The row the keyboard is on: the focus ring, drawn inside the row. */
+.tree .tree-item-container:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color) !important;
+  outline-offset: calc(-1 * var(--focus-ring-width));
+  box-shadow: none;
+}
+
 .tree .tree-item-container.previewed,
 .tree .tree-item-container.previewed:hover {
   background-color: color-mix(in srgb, var(--color-accent) 20%, transparent);
@@ -1079,7 +1090,7 @@ input[type="checkbox"][data-indeterminate="true"]::before {
   gap: var(--space-4);
 }
 .tree .file-name.is-match {
-  color: var(--color-warning);
+  color: var(--color-warning-text);
   font-weight: bold;
 }
 
@@ -1115,6 +1126,12 @@ input[type="checkbox"][data-indeterminate="true"]::before {
   color: var(--color-text);
 }
 
+/* `all: unset` above also unsets the global focus ring (utilities.css). */
+.ignore-btn:focus-visible,
+.remove-pattern-btn:focus-visible {
+  box-shadow: var(--focus-ring-shadow);
+}
+
 .virtual-scroll-container {
   position: relative;
   overflow-y: auto;
@@ -1140,6 +1157,9 @@ input[type="checkbox"][data-indeterminate="true"]::before {
 
 /* Search highlight uses warning color with alpha */
 .search-highlight {
+  /* The text of a match is plain text: a syntax color has no contrast that
+     can be relied on over the fill of the highlight. */
+  color: var(--color-text) !important;
   background-color: var(--alpha-warning-30) !important;
   border: 1px solid var(--alpha-warning-70) !important;
   border-radius: 2px !important;
@@ -1201,7 +1221,7 @@ input[type="checkbox"][data-indeterminate="true"]::before {
 
 .cancel-scan-btn {
   background-color: var(--color-bg);
-  color: var(--color-error);
+  color: var(--color-error-text);
   border: 1px solid var(--color-border);
   padding: var(--space-4) var(--space-6);
   border-radius: var(--radius-md);
@@ -1217,9 +1237,9 @@ input[type="checkbox"][data-indeterminate="true"]::before {
   min-height: var(--size-input-min-height);
 }
 .cancel-scan-btn:hover:not(:disabled) {
-  background-color: var(--color-error);
-  color: #ffffff;
-  border-color: var(--color-error);
+  background-color: var(--color-error-solid);
+  color: var(--color-on-solid);
+  border-color: var(--color-error-solid);
   transform: translateY(-1px);
   box-shadow: var(--shadow-1);
 }
@@ -1276,7 +1296,7 @@ input[type="checkbox"][data-indeterminate="true"]::before {
   gap: var(--space-3);
 }
 #scan-files-count {
-  color: var(--color-accent);
+  color: var(--color-accent-text);
   font-weight: 500;
 }
 #scan-current-path {
@@ -1360,7 +1380,7 @@ input[type="checkbox"][data-indeterminate="true"]::before {
 }
 .placeholder:hover::after {
   opacity: 1;
-  color: var(--color-accent);
+  color: var(--color-accent-text);
 }
 
 /* ---------- Animations ---------- */
