@@ -17,13 +17,12 @@ describe("ipc/schema under a CSP without unsafe-eval", () => {
     vi.stubGlobal("Function", FunctionSpy);
 
     const schema = await import("$lib/ipc/schema");
-    const fixture = (await import("../contracts/fixtures/ui_state_pruned.json"))
+    const fixture = (await import("../contracts/fixtures/ui_state_window.json"))
       .default;
 
     expect(z.config().jitless).toBe(true);
     expect(schema.UiStateSchema.safeParse(fixture).success).toBe(true);
-    expect(schema.UiStateEnvelopeSchema.safeParse(fixture).success).toBe(true);
-    expect(schema.UiStateSchema.safeParse({ tree: 1 }).success).toBe(false);
+    expect(schema.UiStateSchema.safeParse({ rows: 1 }).success).toBe(false);
     expect(
       schema.ScanProgressSchema.safeParse({
         files_scanned: 1,

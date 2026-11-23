@@ -11,7 +11,8 @@
 //! `UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture` and adapt the UI schema.
 
 use super::commands::{
-    ConfigOption, IgnorePatternPayload, SetExpansionPayload, UpdateFiltersPayload,
+    ConfigOption, IgnorePatternPayload, LocateRowPayload, RowTarget, SetExpansionPayload,
+    SetViewportPayload, UpdateFiltersPayload,
 };
 use super::{Command, DialogCommand, OrderedCommand, COMMANDS};
 use serde_json::{json, Value};
@@ -48,6 +49,29 @@ fn config_option_examples() -> Vec<ConfigOption> {
             | ConfigOption::UseRelativePaths(_)
             | ConfigOption::OutputFilename(_)
             | ConfigOption::OutputDirectory(_) => {}
+        }
+    }
+    examples
+}
+
+/// One example per kind of target. The `match` does not compile once a kind is added
+/// without being listed here.
+fn row_target_examples() -> Vec<RowTarget> {
+    let examples = vec![
+        RowTarget::Path {
+            path: PathBuf::from("/project/src/main.rs"),
+        },
+        RowTarget::ParentOf {
+            path: PathBuf::from("/project/src/main.rs"),
+        },
+        RowTarget::Typeahead {
+            prefix: "ma".to_string(),
+            from: 3,
+        },
+    ];
+    for example in &examples {
+        match example {
+            RowTarget::Path { .. } | RowTarget::ParentOf { .. } | RowTarget::Typeahead { .. } => {}
         }
     }
     examples
@@ -92,6 +116,20 @@ fn example_payloads(command: Command) -> Vec<Value> {
                 expanded: true,
             })],
             C::ExpandCollapseAll => vec![json!(true), json!(false)],
+            C::SetViewport => vec![to_json(SetViewportPayload {
+                start: 120,
+                count: 90,
+            })],
+            C::LocateRow => row_target_examples()
+                .into_iter()
+                .enumerate()
+                .map(|(request, target)| {
+                    to_json(LocateRowPayload {
+                        request: request as u32 + 1,
+                        target,
+                    })
+                })
+                .collect(),
             C::UpdateFilters => vec![
                 to_json(UpdateFiltersPayload {
                     search_query: "main".to_string(),
@@ -165,6 +203,14 @@ fn typed_example_payloads_are_accepted_by_the_host() {
     }
     for payload in example_payloads(Command::Ordered(OrderedCommand::SetExpansion)) {
         serde_json::from_value::<SetExpansionPayload>(payload).unwrap();
+    }
+    for payload in example_payloads(Command::Ordered(OrderedCommand::SetViewport)) {
+        let parsed: SetViewportPayload = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(to_json(parsed), payload);
+    }
+    for payload in example_payloads(Command::Ordered(OrderedCommand::LocateRow)) {
+        let parsed: LocateRowPayload = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(to_json(parsed), payload);
     }
     for payload in example_payloads(Command::Ordered(OrderedCommand::UpdateFilters)) {
         let parsed: UpdateFiltersPayload = serde_json::from_value(payload.clone()).unwrap();

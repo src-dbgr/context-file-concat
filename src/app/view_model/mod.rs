@@ -1,20 +1,21 @@
 //! Responsible for transforming the `AppState` into a `UiState` view model.
 //!
 //! This module acts as a presentation layer, preparing data specifically for consumption
-//! by the UI. It builds the file tree structure and computes various
+//! by the UI. It lists the rows of the file tree and computes various
 //! display-related properties. It is purely for data transformation and does not
 //! mutate the application state: every function here takes the state by shared
 //! reference. (State changes that go with filtering, such as expanding the directories
 //! of matches, live in `app::filtering`.)
 //!
-//! Every `UiState` is a complete, self-contained snapshot of what the UI shows. The
-//! tree is pruned to the visible part: children are only sent for expanded directories
-//! (`AppState::expanded_dirs` is the single source of truth for expansion). Totals that
-//! would otherwise require the whole tree are sent as counters.
+//! Every `UiState` is a complete, self-contained snapshot of what the UI shows. Of the
+//! tree it carries a window: the rows the UI has on screen (see [`rows`]), out of the
+//! list of all rows that `AppState::expanded_dirs`, the single source of truth for
+//! expansion, makes visible. Totals that would otherwise require the whole tree are
+//! sent as counters.
 
 pub(crate) mod lossy_path;
+pub(crate) mod rows;
 mod status;
-mod tree_builder;
 mod ui_config;
 
 #[cfg(test)]
@@ -25,15 +26,15 @@ mod contract_tests;
 mod pruning_tests;
 #[cfg(test)]
 mod reference;
+#[cfg(test)]
+mod windowing_tests;
 
-use crate::app::selection::SelectionState;
 use crate::app::state::AppState;
 use crate::app::tree_index::TreeCounts;
 use serde::Serialize;
 use std::collections::HashSet;
-use std::path::PathBuf;
-use tree_builder::{build_tree_nodes, TreeView};
 
+pub use rows::{LocatedRow, TreeRow, TreeViewState, Viewport};
 pub use ui_config::UiConfig;
 
 /// A serializable representation of the application state for the UI.
@@ -41,16 +42,28 @@ pub use ui_config::UiConfig;
 pub struct UiState {
     pub config: UiConfig,
     pub current_path: String,
-    pub tree: Vec<TreeNode>,
+    /// The rows of the tree inside the window the UI looks at, in display order.
+    pub rows: Vec<TreeRow>,
+    /// The position of `rows[0]` in the list of all rows.
+    pub rows_start: usize,
+    /// The number of rows of the tree: every item whose ancestors are all expanded.
+    pub rows_total: usize,
+    /// Identifies the list of all rows. It changes when the list does (another file
+    /// list, a directory expanded or collapsed), and only then: positions in the
+    /// list keep their meaning for as long as it stays the same.
+    pub rows_revision: u64,
+    /// The answer to the most recent `locateRow` request, `None` if there was none
+    /// for the tree that is shown.
+    pub located: Option<LocatedRow>,
     /// The number of items (files *and* directories) of the unfiltered list.
     pub total_files_found: usize,
     /// The number of items (files *and* directories) of the filtered list.
     pub visible_files_count: usize,
     /// The number of files in the complete filtered tree, including those below
-    /// collapsed directories that are not part of `tree`.
+    /// collapsed directories, which are no rows.
     pub tree_files_count: usize,
     /// The number of directories in the complete filtered tree, including those below
-    /// collapsed directories that are not part of `tree`.
+    /// collapsed directories, which are no rows.
     pub tree_dirs_count: usize,
     pub selected_files_count: usize,
     pub is_scanning: bool,
@@ -66,52 +79,27 @@ pub struct UiState {
     pub patterns_need_rescan: bool,
 }
 
-/// A serializable representation of a single node in the file tree for the UI.
-///
-/// The tree is pruned to what is visible: only expanded directories carry their
-/// children. Everything else a row needs is part of the node itself.
-#[derive(Serialize, Clone, Debug, PartialEq)]
-pub struct TreeNode {
-    pub name: String,
-    /// Written lossily, so that a name that is not valid Unicode cannot make the
-    /// snapshot unserializable (see [`lossy_path`]).
-    #[serde(serialize_with = "lossy_path::serialize")]
-    pub path: PathBuf,
-    pub is_directory: bool,
-    pub is_binary: bool,
-    pub size: u64,
-    /// The child nodes. Always empty for files and for collapsed directories.
-    pub children: Vec<TreeNode>,
-    /// Whether the directory has children in the filtered list, even if they are not
-    /// part of `children` because the directory is collapsed. Always `false` for files.
-    pub has_children: bool,
-    pub selection_state: SelectionState,
-    pub is_expanded: bool,
-    pub is_match: bool,
-    pub is_previewed: bool,
-    /// Indicates if the children of this directory have been loaded.
-    /// This is used for the lazy-loading UI.
-    pub children_loaded: bool,
-}
-
-/// The visible part of the tree together with the totals of the complete tree.
-struct TreeSnapshot {
-    nodes: Vec<TreeNode>,
-    counts: TreeCounts,
-}
-
 /// Creates the complete `UiState` from the current `AppState`.
 pub fn generate_ui_state(state: &AppState) -> UiState {
-    let tree = build_tree_snapshot(state);
+    let tree = rows::tree_snapshot(state);
+    let counts = if tree.is_shown {
+        state.file_tree().counts()
+    } else {
+        TreeCounts::default()
+    };
 
     UiState {
         config: UiConfig::from(&state.config),
         current_path: state.current_path.clone(),
-        tree: tree.nodes,
+        rows: tree.rows,
+        rows_start: tree.rows_start,
+        rows_total: tree.rows_total,
+        rows_revision: tree.rows_revision,
+        located: tree.located,
         total_files_found: state.full_file_list.len(),
         visible_files_count: state.filtered_file_list().len(),
-        tree_files_count: tree.counts.files,
-        tree_dirs_count: tree.counts.dirs,
+        tree_files_count: counts.files,
+        tree_dirs_count: counts.dirs,
         selected_files_count: state.selected_files.len(),
         is_scanning: state.is_scanning(),
         is_generating: state.is_generating(),
@@ -127,40 +115,37 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
     }
 }
 
-/// Builds the pruned tree for the current state.
-fn build_tree_snapshot(state: &AppState) -> TreeSnapshot {
-    if (state.is_scanning() && state.full_file_list.is_empty())
-        // A content filter without matches leaves nothing to show. (While the first
-        // search for a query is still running there is no content filter yet.)
-        || state
-            .content_filter_matches()
-            .is_some_and(|matches| matches.is_empty())
-    {
-        return TreeSnapshot {
-            nodes: Vec::new(),
-            counts: TreeCounts::default(),
-        };
+#[cfg(test)]
+impl UiState {
+    /// The rows directly below the loaded directory.
+    pub(crate) fn root_rows(&self) -> Vec<&TreeRow> {
+        self.rows.iter().filter(|row| row.depth == 0).collect()
     }
 
-    let items = state.filtered_file_list();
-    let index = state.file_tree();
-    let view = TreeView {
-        selected: &state.selected_files,
-        expanded: &state.expanded_dirs,
-        loaded_dirs: &state.loaded_dirs,
-        content_search_matches: &state.content_search_results,
-        name_matcher: &state.file_name_matcher(),
-        previewed_path: state.previewed_file_path.as_deref(),
-    };
-    TreeSnapshot {
-        nodes: build_tree_nodes(items, &index, &view),
-        counts: index.counts(),
+    /// The first row with the given name.
+    pub(crate) fn row_named(&self, name: &str) -> Option<&TreeRow> {
+        self.rows.iter().find(|row| row.name == name)
+    }
+
+    /// The rows directly below `parent`, which must be a row of this snapshot.
+    pub(crate) fn children_of(&self, parent: &TreeRow) -> Vec<&TreeRow> {
+        let position = self
+            .rows
+            .iter()
+            .position(|row| std::ptr::eq(row, parent))
+            .expect("the row belongs to this snapshot");
+        self.rows[position + 1..]
+            .iter()
+            .take_while(|row| row.depth > parent.depth)
+            .filter(|row| row.depth == parent.depth + 1)
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::selection::SelectionState;
     use crate::app::state::AppState;
     use crate::config::AppConfig;
     use std::collections::HashSet;
@@ -191,7 +176,7 @@ mod tests {
         let state = AppState::default();
         let ui_state = generate_ui_state(&state);
 
-        assert!(ui_state.tree.is_empty());
+        assert!(ui_state.rows.is_empty());
         assert_eq!(ui_state.total_files_found, 0);
         assert_eq!(ui_state.status_message, "Ready.");
     }
@@ -209,21 +194,27 @@ mod tests {
 
         let ui_state = generate_ui_state(&state);
 
-        assert_eq!(ui_state.tree.len(), 2); // src dir and Cargo.toml file
-        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
+        assert_eq!(ui_state.root_rows().len(), 2); // src dir and Cargo.toml file
+        let src_node = ui_state
+            .root_rows()
+            .into_iter()
+            .find(|n| n.name == "src")
+            .unwrap();
         assert!(src_node.is_directory);
         assert!(src_node.children_loaded);
         // Collapsed: the children are known but not part of the snapshot.
         assert!(src_node.has_children);
-        assert!(src_node.children.is_empty());
+        assert!(ui_state.children_of(src_node).is_empty());
         assert_eq!(ui_state.tree_files_count, 2);
         assert_eq!(ui_state.tree_dirs_count, 1);
 
         state.expanded_dirs.insert(PathBuf::from("/project/src"));
         let ui_state = generate_ui_state(&state);
-        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
-        assert_eq!(src_node.children.len(), 1);
-        assert_eq!(src_node.children[0].name, "main.rs");
+        let src_node = ui_state.row_named("src").unwrap();
+        let children = ui_state.children_of(src_node);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "main.rs");
+        assert_eq!((src_node.depth, children[0].depth), (0, 1));
     }
 
     #[test]
@@ -239,19 +230,23 @@ mod tests {
             create_test_file_item("/project/src", true),
             create_test_file_item("/project/src/main.rs", false),
         ]);
-        state.selected_files = HashSet::from([main_rs_path.clone()]);
-        state.expanded_dirs = HashSet::from([src_path.clone()]);
+        state.selected_files = HashSet::from([main_rs_path.clone()]).into();
+        state.expanded_dirs = HashSet::from([src_path.clone()]).into();
         state.loaded_dirs = HashSet::from([src_path.clone()]);
         state.previewed_file_path = Some(preview_path);
 
         let ui_state = generate_ui_state(&state);
 
         assert_eq!(ui_state.selected_files_count, 1);
-        let src_node = ui_state.tree.iter().find(|n| n.path == src_path).unwrap();
+        let src_node = ui_state
+            .root_rows()
+            .into_iter()
+            .find(|n| n.path == src_path)
+            .unwrap();
         assert!(src_node.is_expanded);
-        let main_rs_node = src_node
-            .children
-            .iter()
+        let main_rs_node = ui_state
+            .children_of(src_node)
+            .into_iter()
             .find(|n| n.path == main_rs_path)
             .unwrap();
         assert!(main_rs_node.is_previewed);

@@ -161,11 +161,12 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     });
   });
 
-  it("render takes the backend's expansion state as is", () => {
+  it("render takes the backend's rows and expansion state as they are", () => {
     const base = get(appState);
-    const dir = (path: string, is_expanded: boolean, children: unknown[]) => ({
+    const dir = (path: string, depth: number, is_expanded: boolean) => ({
       path,
       name: path,
+      depth,
       is_directory: true,
       is_expanded,
       is_binary: false,
@@ -173,34 +174,44 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
       is_previewed: false,
       selection_state: "none",
       size: 0,
-      children,
       has_children: true,
       children_loaded: true,
     });
-    const snapshot = (tree: unknown[]) =>
+    const snapshot = (
+      rows: unknown[],
+      rows_start = 0,
+      rows_total = rows.length,
+    ) =>
       ({
         ...base,
         current_path: "/a",
-        tree,
+        rows,
+        rows_start,
+        rows_total,
         status_message: "Ready.",
       }) as Parameters<typeof window.render>[0];
 
-    // Expanded by the backend: the children arrive with the snapshot.
-    const expanded = [dir("/a/src", true, [dir("/a/src/core", false, [])])];
+    // Expanded by the backend: the children are rows of the snapshot.
+    const expanded = [dir("/a/src", 0, true), dir("/a/src/core", 1, false)];
     window.render(snapshot(expanded));
-    expect(get(appState).tree).toBe(expanded);
-    expect(get(appState).tree[0].is_expanded).toBe(true);
+    expect(get(appState).rows).toBe(expanded);
+    expect(get(appState).rows[0].is_expanded).toBe(true);
 
     // Collapsed by a later snapshot: nothing in the UI keeps it open.
-    window.render(snapshot([dir("/a/src", false, [])]));
-    const [src] = get(appState).tree;
-    expect(src.is_expanded).toBe(false);
-    expect(src.children).toEqual([]);
+    window.render(snapshot([dir("/a/src", 0, false)]));
+    const collapsed = get(appState).rows;
+    expect(collapsed).toHaveLength(1);
+    expect(collapsed[0].is_expanded).toBe(false);
 
     // ...and nothing keeps it closed either (e.g. search auto-expansion).
     window.render(snapshot(expanded));
-    expect(get(appState).tree[0].is_expanded).toBe(true);
-    expect(get(appState).tree[0].children).toHaveLength(1);
+    expect(get(appState).rows[0].is_expanded).toBe(true);
+    expect(get(appState).rows).toHaveLength(2);
+
+    // A window in the middle of a long list replaces what was held before.
+    window.render(snapshot(expanded, 500, 2000));
+    expect(get(appState)).toMatchObject({ rows_start: 500, rows_total: 2000 });
+    expect(get(appState).rows).toBe(expanded);
   });
 
   it("render clears preview when the directory is closed", () => {
@@ -213,7 +224,9 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     const p = {
       ...base,
       current_path: "",
-      tree: Array.isArray(base.tree) ? base.tree : [],
+      rows: [],
+      rows_start: 0,
+      rows_total: 0,
       status_message: "Ready.",
     } as Parameters<typeof window.render>[0];
 

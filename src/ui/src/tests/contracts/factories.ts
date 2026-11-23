@@ -4,7 +4,7 @@
 import type { z } from "zod";
 import {
   UiConfigSchema,
-  TreeNodeSchema,
+  TreeRowSchema,
   UiStateSchema,
   type CommandName,
 } from "$lib/ipc/schema";
@@ -25,75 +25,60 @@ export function makeValidConfig(): z.input<typeof UiConfigSchema> {
   };
 }
 
-/** Minimal TreeNode that still satisfies runtime schema. */
-export function makeValidTreeNode(path = "/repo/README.md") {
+/** Minimal row of a file that satisfies the runtime schema. */
+export function makeValidTreeRow(
+  path = "/repo/README.md",
+  overrides: Partial<z.input<typeof TreeRowSchema>> = {},
+) {
   // Let Zod derive the correct output shape; we construct an input matching its requirements.
-  const input: z.input<typeof TreeNodeSchema> = {
+  const input: z.input<typeof TreeRowSchema> = {
     path,
     name: path.split(/[\\/]/).pop() ?? path,
+    depth: 0,
     is_directory: false,
     is_expanded: false,
     is_binary: false,
     is_match: true,
     is_previewed: false,
     selection_state: "none",
-    children: [],
     size: 256,
     has_children: false,
     children_loaded: true,
+    ...overrides,
   };
   // Ensure it conforms – throws if invalid
-  return TreeNodeSchema.parse(input);
+  return TreeRowSchema.parse(input);
 }
 
-/** Valid UI tree: one directory with two files. */
-export function makeValidTree() {
-  const dir = {
-    path: "/repo/src",
-    name: "src",
-    is_directory: true,
-    is_expanded: true,
-    is_binary: false,
-    is_match: true,
-    is_previewed: false,
-    selection_state: "none",
-    size: 0,
-    has_children: true,
-    children_loaded: true,
-    children: [
-      makeValidTreeNode("/repo/src/index.ts"),
-      makeValidTreeNode("/repo/src/util.ts"),
-    ],
-  } as const;
-
-  // Coerce via schema to ensure shape
-  return [TreeNodeSchema.parse(dir)];
+/** Valid rows: one expanded directory and its two files. */
+export function makeValidRows() {
+  return [
+    makeValidTreeRow("/repo/src", {
+      is_directory: true,
+      is_expanded: true,
+      size: 0,
+      has_children: true,
+    }),
+    makeValidTreeRow("/repo/src/index.ts", { depth: 1 }),
+    makeValidTreeRow("/repo/src/util.ts", { depth: 1 }),
+  ];
 }
 
 /**
- * A collapsed directory as the backend sends it in a pruned snapshot: no
- * children, but the flags a row needs to render and to request them.
+ * The row of a collapsed directory: its children are no rows, the flags say
+ * what the row needs to render and to request them.
  */
-export function makeCollapsedDirNode(
+export function makeCollapsedDirRow(
   path = "/repo/docs",
-  overrides: Partial<z.input<typeof TreeNodeSchema>> = {},
+  overrides: Partial<z.input<typeof TreeRowSchema>> = {},
 ) {
-  const input: z.input<typeof TreeNodeSchema> = {
-    path,
-    name: path.split(/[\\/]/).pop() ?? path,
+  return makeValidTreeRow(path, {
     is_directory: true,
-    is_expanded: false,
-    is_binary: false,
     is_match: false,
-    is_previewed: false,
-    selection_state: "none",
-    children: [],
     size: 0,
     has_children: true,
-    children_loaded: true,
     ...overrides,
-  };
-  return TreeNodeSchema.parse(input);
+  });
 }
 
 /** Fully valid UiState payload per UiStateSchema. */
@@ -101,7 +86,11 @@ export function makeValidUiState(): z.input<typeof UiStateSchema> {
   return {
     config: makeValidConfig(),
     current_path: "/repo",
-    tree: makeValidTree(),
+    rows: makeValidRows(),
+    rows_start: 0,
+    rows_total: 3,
+    rows_revision: 1,
+    located: null,
     total_files_found: 3,
     visible_files_count: 3,
     tree_files_count: 2,
@@ -156,6 +145,12 @@ export function makeValidPayloadForCommand(name: CommandName): unknown {
 
     case "expandCollapseAll":
       return true;
+
+    case "setViewport":
+      return { start: 0, count: 90 };
+
+    case "locateRow":
+      return { request: 1, target: { kind: "path", path: VALID_PATH } };
 
     case "saveFile":
       return "// content to save";

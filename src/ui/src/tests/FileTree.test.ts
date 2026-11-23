@@ -5,7 +5,16 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import { tick } from "svelte";
 import FileTree from "$lib/components/FileTree.svelte";
 import { appState } from "$lib/stores/app";
-import type { TreeNode } from "$lib/types";
+import type { AppState } from "$lib/types";
+import {
+  baseAppState,
+  collapsedDir,
+  dir,
+  file,
+  rowsOf,
+  treeFields,
+  type TestNode,
+} from "./helpers/tree";
 
 // Mock backend IPC post() to assert commands fired by UI
 vi.mock("$lib/services/backend", () => ({
@@ -14,61 +23,8 @@ vi.mock("$lib/services/backend", () => ({
 import { post } from "$lib/services/backend";
 
 // ---- Helpers ----------------------------------------------------------------
-function file(path: string, size = 123): TreeNode {
-  const name = path.split(/[\\/]/).pop() || path;
-  return {
-    path,
-    name,
-    is_directory: false,
-    is_expanded: false,
-    is_binary: false,
-    is_match: true,
-    is_previewed: false,
-    selection_state: "none",
-    children: [],
-    size,
-    has_children: false,
-    children_loaded: true,
-  };
-}
-
-function dir(
-  path: string,
-  expanded = true,
-  children: TreeNode[] = [],
-): TreeNode {
-  const name = path.split(/[\\/]/).pop() || path;
-  return {
-    path,
-    name,
-    is_directory: true,
-    is_expanded: expanded,
-    is_binary: false,
-    is_match: true,
-    is_previewed: false,
-    selection_state: "none",
-    children,
-    size: 0,
-    has_children: children.length > 0,
-    children_loaded: true,
-  };
-}
-
-/**
- * A collapsed directory as the backend sends it: its children are not part
- * of the snapshot, only the flags describing them.
- */
-function collapsedDir(
-  path: string,
-  overrides: Partial<TreeNode> = {},
-): TreeNode {
-  return {
-    ...dir(path, false, []),
-    has_children: true,
-    ...overrides,
-  };
-}
-
+// Trees are written down nested and seeded as the rows the host lists for
+// them (see helpers/tree.ts): all of them, unless a test is about the window.
 function row(container: HTMLElement, path: string): HTMLElement {
   const el = container.querySelector<HTMLElement>(
     `.tree-item-container[data-path="${path}"]`,
@@ -93,44 +49,8 @@ function expansionCommands(): unknown[][] {
     );
 }
 
-function seedState(
-  tree: TreeNode[],
-  overrides: Partial<Parameters<typeof appState.set>[0]> = {},
-) {
-  appState.set({
-    is_scanning: false,
-    is_generating: false,
-    is_fully_scanned: true,
-    patterns_need_rescan: false,
-    tree,
-    current_path: "/repo",
-    current_config_filename: null,
-    status_message: "Status: Ready.",
-    total_files_found: 0,
-    visible_files_count: 0,
-    scan_progress: {
-      files_scanned: 0,
-      large_files_skipped: 0,
-      current_scanning_path: "",
-    },
-    selected_files_count: 0,
-    tree_files_count: 0,
-    tree_dirs_count: 0,
-    search_query: "",
-    extension_filter: "",
-    content_search_query: "",
-    active_ignore_patterns: [],
-    config: {
-      ignore_patterns: [],
-      case_sensitive_search: false,
-      include_tree_by_default: false,
-      use_relative_paths: false,
-      remove_empty_directories: false,
-      output_directory: "",
-      output_filename: "output.txt",
-    },
-    ...overrides,
-  });
+function seedState(tree: TestNode[], overrides: Partial<AppState> = {}) {
+  appState.set(baseAppState({ ...treeFields(rowsOf(tree)), ...overrides }));
 }
 
 // ---- Tests ------------------------------------------------------------------
@@ -140,7 +60,7 @@ describe("FileTree", () => {
   });
 
   it("virtualizes long lists (renders fewer DOM rows than total items)", async () => {
-    const manyFiles: TreeNode[] = [];
+    const manyFiles: TestNode[] = [];
     for (let i = 0; i < 120; i++)
       manyFiles.push(file(`/repo/src/file-${i}.txt`));
     const root = dir("/repo/src", true, manyFiles);
@@ -214,7 +134,7 @@ describe("FileTree", () => {
     expect(commands).not.toContain("setExpansion");
   });
 
-  // ---- Pruned snapshot: collapsed directories arrive without children -------
+  // ---- Collapsed directories: their children are no rows -------------------
 
   it("renders a collapsed directory without children as an expandable row", async () => {
     seedState([
@@ -467,7 +387,7 @@ describe("FileTree", () => {
   // ---- Keyboard ------------------------------------------------------------
 
   describe("keyboard expansion", () => {
-    async function mountFocusedOn(tree: TreeNode[], overrides = {}) {
+    async function mountFocusedOn(tree: TestNode[], overrides = {}) {
       seedState(tree, overrides);
       const view = render(FileTree);
       const treeEl = await screen.findByRole("tree");
@@ -581,7 +501,7 @@ describe("FileTree", () => {
     });
 
     describe("on a directory that is expanded but not loaded", () => {
-      const expandedUnloaded = (): TreeNode[] => [
+      const expandedUnloaded = (): TestNode[] => [
         {
           ...dir("/repo/vendor", true, []),
           has_children: true,
@@ -620,7 +540,7 @@ describe("FileTree", () => {
         // The host answers: collapsed, still not loaded.
         appState.update((s) => ({
           ...s,
-          tree: s.tree.map((n) => ({ ...n, is_expanded: false })),
+          rows: s.rows.map((n) => ({ ...n, is_expanded: false })),
         }));
         await tick();
         await fireEvent.keyDown(treeEl, { key: "Enter" });
@@ -633,7 +553,7 @@ describe("FileTree", () => {
     });
 
     describe("a key is handled once, wherever the focus is inside the row", () => {
-      const tree = (): TreeNode[] => [
+      const tree = (): TestNode[] => [
         file("/repo/a.txt"),
         collapsedDir("/repo/src"),
         file("/repo/z.txt"),

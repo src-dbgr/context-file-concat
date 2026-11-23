@@ -12,7 +12,11 @@ export const appState = writable<AppState>({
   is_generating: false,
   is_fully_scanned: false,
   patterns_need_rescan: false,
-  tree: [],
+  rows: [],
+  rows_start: 0,
+  rows_total: 0,
+  rows_revision: 0,
+  located: null,
   current_path: "",
   current_config_filename: null,
   status_message: "Ready.",
@@ -55,7 +59,7 @@ export const hasSelection = derived(
 
 export const hasVisibleItems = derived(
   appState,
-  ($appState) => $appState.tree.length > 0,
+  ($appState) => $appState.rows_total > 0,
 );
 
 // --- Global State for UI elements not part of the backend state ---

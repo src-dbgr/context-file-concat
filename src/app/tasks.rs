@@ -2166,7 +2166,8 @@ mod tests {
         let project = harness.root_path.join("project");
         std::fs::create_dir_all(&project).unwrap();
         let previous = harness.root_path.to_string_lossy().to_string();
-        harness.state.lock().selected_files = HashSet::from([harness.root_path.join("a.rs")]);
+        harness.state.lock().selected_files =
+            HashSet::from([harness.root_path.join("a.rs")]).into();
 
         start_scan_on_path(
             project.clone(),
@@ -2211,8 +2212,8 @@ mod tests {
         {
             let mut state = harness.state.lock();
             state.full_file_list = vec![file_item(Path::new("/old/a.rs"), 1)];
-            state.selected_files = HashSet::from([PathBuf::from("/old/a.rs")]);
-            state.expanded_dirs = HashSet::from([PathBuf::from("/old/src")]);
+            state.selected_files = HashSet::from([PathBuf::from("/old/a.rs")]).into();
+            state.expanded_dirs = HashSet::from([PathBuf::from("/old/src")]).into();
             state.search_query = "a".to_string();
             state.is_fully_scanned = true;
             filtering::apply_filters(&mut state);
@@ -2232,7 +2233,7 @@ mod tests {
         assert!(entered.is_scanning);
         assert_eq!(entered.selected_files_count, 0);
         assert_eq!(entered.search_query, "");
-        assert!(entered.tree.is_empty() && !entered.is_fully_scanned);
+        assert!(entered.rows.is_empty() && !entered.is_fully_scanned);
 
         let completed = harness.wait_for_state_update(|s| !s.is_scanning).await;
         assert!(completed.is_fully_scanned);
@@ -2285,8 +2286,8 @@ mod tests {
                 dir_item(&harness.root_path.join("src"), 1),
                 file_item(&file, 2),
             ];
-            state.selected_files = HashSet::from([file.clone()]);
-            state.expanded_dirs = HashSet::from([harness.root_path.join("src")]);
+            state.selected_files = HashSet::from([file.clone()]).into();
+            state.expanded_dirs = HashSet::from([harness.root_path.join("src")]).into();
             state.loaded_dirs = HashSet::from([harness.root_path.join("src")]);
             state.search_query = "a".to_string();
             state.is_fully_scanned = true;
@@ -2309,7 +2310,7 @@ mod tests {
             UserEvent::StateUpdate(s) => {
                 assert!(s.is_scanning);
                 assert_eq!(s.current_path, loaded);
-                assert_eq!(s.tree.len(), 1, "the previous list stays visible");
+                assert_eq!(s.root_rows().len(), 1, "the previous list stays visible");
             }
             other => panic!("Expected the announcement of the scan, got {other:?}"),
         }
@@ -2324,8 +2325,9 @@ mod tests {
                 assert_eq!(s.selected_files_count, 1);
                 assert_eq!(s.search_query, "a");
                 assert!(s.is_fully_scanned);
-                assert_eq!(s.tree.len(), 1);
-                assert!(s.tree[0].is_expanded && s.tree[0].children.len() == 1);
+                assert_eq!(s.root_rows().len(), 1);
+                let directory = s.root_rows()[0];
+                assert!(directory.is_expanded && s.children_of(directory).len() == 1);
                 assert_eq!(
                     s.status_message,
                     "Indexing complete. Found 2 visible items."
@@ -2351,7 +2353,8 @@ mod tests {
         std::fs::create_dir_all(harness.root_path.join("src")).unwrap();
         std::fs::write(harness.root_path.join("src").join("a.rs"), "").unwrap();
         let loaded = harness.root_path.clone();
-        harness.state.lock().selected_files = HashSet::from([loaded.join("src").join("a.rs")]);
+        harness.state.lock().selected_files =
+            HashSet::from([loaded.join("src").join("a.rs")]).into();
 
         // A scan of the loaded directory is running (its task has not had the chance
         // to run yet: there is no `.await` before the next call) ...
@@ -3439,7 +3442,11 @@ mod tests {
 
         // Assert
         let ui_state = harness.last_state_update().unwrap();
-        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
+        let src_node = ui_state
+            .root_rows()
+            .into_iter()
+            .find(|n| n.name == "src")
+            .unwrap();
         assert!(src_node.children_loaded && src_node.has_children);
         assert!(!src_node.is_expanded, "Directory must stay collapsed");
         let state = harness.state.lock();
@@ -3479,8 +3486,12 @@ mod tests {
 
         // Assert
         let ui_state = harness.last_state_update().unwrap();
-        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
-        let child_names: Vec<&str> = src_node.children.iter().map(|n| n.name.as_str()).collect();
+        let src_node = ui_state.row_named("src").unwrap();
+        let child_names: Vec<&str> = ui_state
+            .children_of(src_node)
+            .into_iter()
+            .map(|n| n.name.as_str())
+            .collect();
         assert_eq!(child_names, vec!["main.rs"]);
 
         let state = harness.state.lock();
@@ -3566,7 +3577,11 @@ mod tests {
         let state = harness.state.lock();
         assert_eq!(state.loaded_dirs, HashSet::from([root]));
         let ui_state = generate_ui_state(&state);
-        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
+        let src_node = ui_state
+            .root_rows()
+            .into_iter()
+            .find(|n| n.name == "src")
+            .unwrap();
         assert!(
             !src_node.children_loaded,
             "`src` must be lazily loadable after the cancelled rescan"
@@ -4342,16 +4357,16 @@ mod tests {
         {
             let mut state = harness.state.lock();
             assert_eq!(state.content_filter_matches(), None);
-            assert_eq!(generate_ui_state(&state).tree.len(), 2);
+            assert_eq!(generate_ui_state(&state).root_rows().len(), 2);
             filtering::apply_filters(&mut state);
-            assert_eq!(generate_ui_state(&state).tree.len(), 2);
+            assert_eq!(generate_ui_state(&state).root_rows().len(), 2);
         }
 
         release.send(()).unwrap();
         search.await.unwrap();
         let filtered = harness.last_state_update().unwrap();
-        assert_eq!(filtered.tree.len(), 1);
-        assert_eq!(filtered.tree[0].path, matching);
+        assert_eq!(filtered.root_rows().len(), 1);
+        assert_eq!(filtered.root_rows()[0].path, matching);
     }
 
     /// Once a search has answered, its answer applies until the next one arrives:
@@ -4370,7 +4385,7 @@ mod tests {
             MockFileSearcher::default(),
         )
         .await;
-        assert!(harness.last_state_update().unwrap().tree.is_empty());
+        assert!(harness.last_state_update().unwrap().rows.is_empty());
 
         harness.state.lock().content_search_query = "needles".to_string();
         let (searcher, started, release) = GatedFileSearcher::new(HashSet::new());
@@ -4383,7 +4398,7 @@ mod tests {
         {
             let state = harness.state.lock();
             assert_eq!(state.content_filter_matches(), Some(&HashSet::new()));
-            assert!(generate_ui_state(&state).tree.is_empty());
+            assert!(generate_ui_state(&state).rows.is_empty());
         }
         release.send(()).unwrap();
         search.await.unwrap();

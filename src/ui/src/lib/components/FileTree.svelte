@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from "svelte";
+  import { onMount, onDestroy, tick, untrack } from "svelte";
   import { appState } from "$lib/stores/app";
   import { post } from "$lib/services/backend";
   import { activatesNatively } from "$lib/modules/nativeActivation";
-  import type { AppState, TreeNode } from "$lib/types";
+  import type { AppState, TreeRow } from "$lib/types";
+  import type { RowTarget } from "$lib/ipc/schema";
   import TreeItem from "./TreeItem.svelte";
   import {
     collapseDirectory,
@@ -11,26 +12,119 @@
     setAllExpanded,
     toggleDirectory,
   } from "$lib/modules/treeExpansion";
+  import {
+    ITEM_HEIGHT,
+    renderRange,
+    windowToRequest,
+    type RowWindow,
+  } from "$lib/modules/treeWindow";
   import ScanProgress from "$lib/components/ScanProgress.svelte";
   import { t } from "$lib/i18n";
-
-  // Virtualization constants
-  const ITEM_HEIGHT = 28;
-  const OVERSCAN = 5;
 
   // Local virtualization state (Runes)
   let scrollEl = $state<HTMLDivElement | null>(null);
   let scrollTop = $state(0);
   let viewportHeight = $state(0);
 
-  // Track last path & filters to reset scroll when needed
-  let lastPath = $state<string | null>(null);
-  let lastFilterKey = $state("");
+  // --- The rows ---------------------------------------------------------------
+  // The host owns the list of all rows. The UI knows its length (the height of
+  // the scroller) and holds the window of it that the host sent last; a row is
+  // addressed by its index in the whole list.
+  const totalRows = $derived($appState.rows_total);
 
-  // Roving tabindex / keyboard a11y -------------------------------------------
-  let focusedIndex = $state<number>(-1); // index in flatTree
+  /** The row at `index` of the list, if the window at hand holds it. */
+  function rowAt(index: number): TreeRow | undefined {
+    const state = $appState;
+    return state.rows[index - state.rows_start];
+  }
+
+  // Total virtual height
+  const totalHeight = $derived(totalRows * ITEM_HEIGHT);
+
+  // The rows to render: the visible ones (plus overscan) that have arrived.
+  // A row the host has not sent yet leaves its place empty until it has.
+  type RenderedRow = { row: TreeRow; index: number };
+  const visibleSlice = $derived(
+    (() => {
+      const state = $appState;
+      const range = renderRange(scrollTop, viewportHeight, state.rows_total);
+      const from = Math.max(range.start, state.rows_start);
+      const to = Math.min(range.end, state.rows_start + state.rows.length);
+      const rendered: RenderedRow[] = [];
+      for (let index = from; index < to; index++) {
+        rendered.push({ row: state.rows[index - state.rows_start], index });
+      }
+      return rendered;
+    })()
+  );
+
+  // Tell the host which rows the viewport needs. The answer is the next
+  // snapshot; until then the request is not repeated.
+  let asked: (RowWindow & { answeredBy: AppState }) | null = null;
+  $effect(() => {
+    const state = $appState;
+    const request = windowToRequest(
+      scrollTop,
+      viewportHeight,
+      { start: state.rows_start, count: state.rows.length },
+      state.rows_total
+    );
+    if (!request) return;
+    if (
+      asked &&
+      asked.answeredBy === state &&
+      asked.start === request.start &&
+      asked.count === request.count
+    ) {
+      return;
+    }
+    asked = { ...request, answeredBy: state };
+    post("setViewport", request);
+  });
+
+  // --- Roving tabindex / keyboard a11y ----------------------------------------
+  // The focused row is known by its index in the list and, once the row has
+  // arrived, by its path. The index moves the focus; the path finds the row
+  // again when the list changes.
+  let focusedIndex = $state<number>(-1);
+  let focusedPath: string | null = null;
   let typeaheadBuffer = $state<string>("");
   let typeaheadTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** The row whose element is to get the DOM focus once it is rendered. */
+  let domFocusWanted: { index: number; onlyIfUnfocused: boolean } | null =
+    null;
+
+  function applyDomFocus() {
+    const wanted = domFocusWanted;
+    if (!wanted) return;
+    if (wanted.index !== focusedIndex) {
+      domFocusWanted = null;
+      return;
+    }
+    const activeEl = document.activeElement;
+    const isInputFocused =
+      activeEl?.tagName === "INPUT" && activeEl.closest(".sidebar");
+    // An unrequested focus (the tree has just appeared) must not take the
+    // focus away from wherever the user has put it in the meantime.
+    const userHasFocusElsewhere =
+      wanted.onlyIfUnfocused && activeEl && activeEl !== document.body;
+    if (isInputFocused || userHasFocusElsewhere) {
+      domFocusWanted = null;
+      return;
+    }
+    const node = document.querySelector<HTMLElement>(
+      `.tree [data-index="${wanted.index}"]`
+    );
+    if (node) {
+      domFocusWanted = null;
+      node.focus();
+    } else if (rowAt(wanted.index)) {
+      // The row is here but not on screen: the user has scrolled on.
+      domFocusWanted = null;
+    }
+    // Otherwise the row is on its way from the host; see the effect below.
+  }
 
   function setFocusByIndex(
     next: number,
@@ -38,67 +132,149 @@
       ensureView: true,
     }
   ) {
-    if (!flatTree.length) {
+    if (!totalRows) {
       focusedIndex = -1;
+      focusedPath = null;
       return;
     }
-    const clamped = Math.max(0, Math.min(flatTree.length - 1, next | 0));
+    const clamped = Math.max(0, Math.min(totalRows - 1, next | 0));
     focusedIndex = clamped;
+    // Unknown until the row arrives, if it is outside the window.
+    focusedPath = rowAt(clamped)?.path ?? null;
     if (opts.ensureView) ensureItemVisible(clamped);
+    domFocusWanted = {
+      index: clamped,
+      onlyIfUnfocused: !!opts.onlyIfUnfocused,
+    };
     // Focus DOM target after the next frame (virtualization might re-render)
-    requestAnimationFrame(() => {
-      const activeEl = document.activeElement;
-      const isInputFocused =
-        activeEl?.tagName === "INPUT" && activeEl.closest(".sidebar");
-
-      if (isInputFocused) {
-        return;
-      }
-      // An unrequested focus (the tree has just appeared) must not take the
-      // focus away from wherever the user has put it in the meantime.
-      if (
-        opts.onlyIfUnfocused &&
-        activeEl &&
-        activeEl !== document.body
-      ) {
-        return;
-      }
-      const node = document.querySelector<HTMLElement>(
-        `.tree [data-index="${clamped}"]`
-      );
-      node?.focus();
-    });
+    requestAnimationFrame(applyDomFocus);
   }
 
-  // When tree content appears for the first time, focus the first item
+  // A row that was to be focused before the host had sent it gets the focus
+  // when it has been rendered.
   $effect(() => {
-    if (flatTree.length && focusedIndex === -1)
-      setFocusByIndex(0, { ensureView: false, onlyIfUnfocused: true });
+    void visibleSlice;
+    if (domFocusWanted) void tick().then(applyDomFocus);
   });
 
-  // Preserve focus by path across re-renders if possible
-  let lastFocusedPath = $state<string | null>(null);
-  $effect(() => {
-    const idx = focusedIndex;
-    if (idx >= 0 && idx < flatTree.length) {
-      lastFocusedPath = flatTree[idx].node.path;
+  // --- Asking the host for a row ------------------------------------------------
+  // The UI cannot know where a row outside its window is. It asks
+  // (`locateRow`); the answer is `located` of a later snapshot.
+  let locateRequests = 0;
+  let awaitedLocate: { request: number; purpose: "focus" | "restore" } | null =
+    null;
+
+  function locate(target: RowTarget, purpose: "focus" | "restore") {
+    locateRequests += 1;
+    awaitedLocate = { request: locateRequests, purpose };
+    post("locateRow", { request: locateRequests, target });
+  }
+
+  function takeLocateAnswer(state: AppState) {
+    const answer = state.located;
+    if (!awaitedLocate || !answer || answer.request !== awaitedLocate.request) {
+      return;
     }
-  });
-  $effect(() => {
-    // Try to restore focus to the same path after tree changes
-    const path = lastFocusedPath;
-    if (!path) return;
-    const idx = flatTree.findIndex((it) => it.node.path === path);
-    if (idx !== -1) {
-      focusedIndex = idx;
-    } else if (flatTree.length) {
-      focusedIndex = Math.min(focusedIndex, flatTree.length - 1);
+    const { purpose } = awaitedLocate;
+    awaitedLocate = null;
+    if (purpose === "focus") {
+      if (answer.row !== null) setFocusByIndex(answer.row);
+    } else if (answer.row !== null) {
+      // The focused row has moved; it keeps the focus where it is now.
+      focusedIndex = answer.row;
     } else {
-      focusedIndex = -1;
+      // The focused row is gone (collapsed, filtered out).
+      focusedPath = null;
     }
+  }
+
+  // --- Following the snapshots ---------------------------------------------------
+  let lastPath: string | null = null;
+  let lastFilterKey = "";
+  let lastHadItems = false;
+  let lastRowsRevision = -1;
+
+  function filterKeyOf(s: AppState): string {
+    return (
+      (s.search_query ?? "") +
+      "|" +
+      (s.extension_filter ?? "") +
+      "|" +
+      (s.content_search_query ?? "")
+    );
+  }
+
+  function followSnapshot(state: AppState) {
+    const total = state.rows_total;
+    // Nothing had the focus and there are rows now: the tree has appeared.
+    const appeared = total > 0 && focusedIndex === -1;
+
+    // Another directory (handles Clear → Select Directory) or other filters:
+    // start at the top, with the focus on the first row.
+    const filterKey = filterKeyOf(state);
+    if (state.current_path !== lastPath || filterKey !== lastFilterKey) {
+      lastPath = state.current_path;
+      lastFilterKey = filterKey;
+      resetScroll();
+      focusedIndex = total ? 0 : -1;
+      focusedPath = null;
+      awaitedLocate = null;
+      domFocusWanted = null;
+    }
+
+    // If the list goes from 0 → >0 rows (e.g., filters cleared), scroll to start
+    if (total > 0 && !lastHadItems) resetScroll();
+    lastHadItems = total > 0;
+
+    const listChanged = state.rows_revision !== lastRowsRevision;
+    lastRowsRevision = state.rows_revision;
+
+    takeLocateAnswer(state);
+
+    if (!total) {
+      focusedIndex = -1;
+      focusedPath = null;
+      return;
+    }
+
+    if (appeared) {
+      // Focus the first row, unless the user has the focus somewhere else.
+      setFocusByIndex(0, { ensureView: false, onlyIfUnfocused: true });
+      return;
+    }
+    if (focusedIndex >= total) focusedIndex = total - 1;
+
+    const windowEnd = state.rows_start + state.rows.length;
+    const focusedRowIsHere =
+      focusedIndex >= state.rows_start && focusedIndex < windowEnd;
+
+    if (focusedPath === null) {
+      // The focused row is known by its index only; take its path when it
+      // has arrived.
+      if (focusedRowIsHere) focusedPath = state.rows[focusedIndex - state.rows_start].path;
+      return;
+    }
+
+    // Keep the focus on the same item when the list has changed around it.
+    const offset = state.rows.findIndex((row) => row.path === focusedPath);
+    if (offset !== -1) {
+      focusedIndex = state.rows_start + offset;
+      return;
+    }
+    // It is not in the window. If the list has changed (or another row is at
+    // its index), only the host knows where it is now.
+    const alreadyAsked = awaitedLocate?.purpose === "restore" && !listChanged;
+    if ((listChanged || focusedRowIsHere) && !alreadyAsked) {
+      locate({ kind: "path", path: focusedPath }, "restore");
+    }
+  }
+
+  $effect(() => {
+    const state = $appState;
+    untrack(() => followSnapshot(state));
   });
 
-  // Typeahead search within the tree
+  // Typeahead search within the tree. It covers all rows, so the host looks.
   function pushTypeahead(char: string) {
     const c = char.toLowerCase();
     if (!/^[a-z0-9._-]$/i.test(c)) return;
@@ -106,43 +282,16 @@
     typeaheadBuffer = (typeaheadBuffer + c).slice(0, 40);
     typeaheadTimer = setTimeout(() => (typeaheadBuffer = ""), 800);
 
-    const start = Math.max(0, focusedIndex) + 1;
-    const matchFrom = (from: number, to: number) => {
-      for (let i = from; i < to; i++) {
-        const name = flatTree[i].node.name.toLowerCase();
-        if (name.startsWith(typeaheadBuffer)) return i;
-      }
-      return -1;
-    };
-    let idx = matchFrom(start, flatTree.length);
-    if (idx === -1) idx = matchFrom(0, start);
-    if (idx !== -1) setFocusByIndex(idx);
+    if (!totalRows) return;
+    locate(
+      {
+        kind: "typeahead",
+        prefix: typeaheadBuffer,
+        from: Math.max(0, focusedIndex) + 1,
+      },
+      "focus"
+    );
   }
-
-  type FlatItem = { node: TreeNode; level: number; index: number };
-
-  // The backend sends a pruned tree: children exist only below expanded
-  // directories, so this walk is bounded by the number of visible rows.
-  function flattenTree(
-    nodes: TreeNode[],
-    level = 0,
-    acc: FlatItem[] = []
-  ): FlatItem[] {
-    if (!nodes) return acc;
-    for (const n of nodes) {
-      acc.push({ node: n, level, index: acc.length });
-      if (n.is_directory && n.is_expanded && n.children?.length) {
-        flattenTree(n.children, level + 1, acc);
-      }
-    }
-    return acc;
-  }
-
-  // Reactive flatten (Runes)
-  const flatTree = $derived(flattenTree($appState.tree));
-
-  // Total virtual height
-  const totalHeight = $derived(flatTree.length * ITEM_HEIGHT);
 
   /** Clamp and synchronize the scroll position with the DOM. */
   function clampAndSyncScroll() {
@@ -154,35 +303,6 @@
     if (scrollTop !== el.scrollTop) scrollTop = el.scrollTop;
   }
 
-  // Visible slice (robust: disable virtualization when viewport >= content)
-  const visibleSlice = $derived(
-    (() => {
-      const contentPx = totalHeight;
-      const vp = Math.max(0, viewportHeight);
-
-      if (vp >= contentPx) {
-        return flatTree.map((it, i) => ({
-          node: it.node,
-          level: it.level,
-          index: i,
-        }));
-      }
-
-      const rawStart = Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN;
-      const rawEnd = Math.ceil((scrollTop + vp) / ITEM_HEIGHT) + OVERSCAN;
-
-      const maxIndex = Math.max(0, flatTree.length - 1);
-      const startIndex = Math.max(0, Math.min(maxIndex, rawStart | 0));
-      const endIndex = Math.max(startIndex, Math.min(maxIndex, rawEnd | 0));
-
-      return flatTree.slice(startIndex, endIndex + 1).map((it, i) => ({
-        node: it.node,
-        level: it.level,
-        index: startIndex + i,
-      }));
-    })()
-  );
-
   function onScroll() {
     if (!scrollEl) return;
     scrollTop = scrollEl.scrollTop;
@@ -193,43 +313,6 @@
     scrollTop = 0;
     if (scrollEl) scrollEl.scrollTop = 0;
   }
-
-  // Reset scroll when directory path changes (handles Clear → Select Directory)
-  $effect(() => {
-    const p = $appState.current_path;
-    if (p !== lastPath) {
-      lastPath = p;
-      resetScroll();
-      // place focus at the top when path changes
-      focusedIndex = flatTree.length ? 0 : -1;
-    }
-  });
-
-  // Reset scroll whenever filters change (filename/extension/content)
-  const currentFilterKey = $derived(
-    ($appState.search_query ?? "") +
-      "|" +
-      ($appState.extension_filter ?? "") +
-      "|" +
-      ($appState.content_search_query ?? "")
-  );
-  $effect(() => {
-    const k = currentFilterKey;
-    if (k !== lastFilterKey) {
-      lastFilterKey = k;
-      resetScroll();
-      // Reset roving focus to the first result when filters change
-      focusedIndex = flatTree.length ? 0 : -1;
-    }
-  });
-
-  // If result list goes from 0 → >0 (e.g., filters cleared), scroll to start
-  let lastHadItems = $state(false);
-  $effect(() => {
-    const hasItems = flatTree.length > 0;
-    if (hasItems && !lastHadItems) resetScroll();
-    lastHadItems = hasItems;
-  });
 
   // Keep DOM scroller in sync if we programmatically change scrollTop
   $effect(() => {
@@ -262,9 +345,9 @@
     step();
   }
 
-  // Re-measure on tree changes
+  // Re-measure when the list changes its length
   $effect(() => {
-    void flatTree.length;
+    void totalRows;
     requestAnimationFrame(() => measureViewportDeferred(2));
   });
 
@@ -286,6 +369,7 @@
   onDestroy(() => {
     if (ro && scrollEl) ro.unobserve(scrollEl);
     ro = null;
+    if (typeaheadTimer) clearTimeout(typeaheadTimer);
     window.removeEventListener("resize", onWindowResize);
     window.removeEventListener("cfc:layout", onLayout);
   });
@@ -316,8 +400,8 @@
   // --- Stats ------------------------------------------------
   type TreeCounts = { files: number; folders: number };
 
-  // Totals of the filtered tree. They come from the backend: the tree itself
-  // only contains what is expanded and cannot be counted here.
+  // Totals of the filtered tree. They come from the backend: the UI holds a
+  // window of the rows and cannot count the tree.
   const visibleFiles = $derived($appState.tree_files_count);
   const visibleFolders = $derived($appState.tree_dirs_count);
 
@@ -355,11 +439,7 @@
   }
 
   // Center only the body (not the header) when showing placeholder/empty/scan states
-  const centerBody = $derived(
-    !$appState.current_path ||
-      $appState.tree.length === 0 ||
-      ($appState.is_scanning && $appState.tree.length === 0)
-  );
+  const centerBody = $derived(!$appState.current_path || totalRows === 0);
 
   // Ensure an item is visible in the viewport (adjust scrollTop if needed)
   function ensureItemVisible(index: number) {
@@ -379,14 +459,19 @@
     }
   }
 
-  // Find parent index by walking backwards to the first node with a smaller level
-  function findParentIndex(idx: number): number {
-    if (idx <= 0 || idx >= flatTree.length) return -1;
-    const level = flatTree[idx].level;
-    for (let i = idx - 1; i >= 0; i--) {
-      if (flatTree[i].level < level) return i;
+  // Move the focus to the directory a row lies in: the nearest row above it
+  // that is less deep. If the window does not reach that far, the host knows.
+  function focusParentOf(index: number, row: TreeRow) {
+    if (row.depth === 0) return;
+    for (let i = index - 1; i >= 0; i--) {
+      const above = rowAt(i);
+      if (!above) break;
+      if (above.depth < row.depth) {
+        setFocusByIndex(i);
+        return;
+      }
     }
-    return -1;
+    locate({ kind: "parent_of", path: row.path }, "focus");
   }
 
   function itemsPerPage(): number {
@@ -402,7 +487,14 @@
     const idxAttr = target.getAttribute("data-index");
     if (idxAttr) {
       const idx = Number(idxAttr);
-      if (Number.isFinite(idx)) focusedIndex = idx;
+      if (Number.isFinite(idx)) {
+        focusedIndex = idx;
+        focusedPath = rowAt(idx)?.path ?? null;
+        // The user has put the focus somewhere; a pending one gives way.
+        if (domFocusWanted && domFocusWanted.index !== idx) {
+          domFocusWanted = null;
+        }
+      }
     }
   }
 
@@ -414,7 +506,7 @@
     // a control, and every key on the arrow and the name, are the tree's.
     if (activatesNatively(e.target, e.key)) return;
 
-    if (focusedIndex < 0 || focusedIndex >= flatTree.length) {
+    if (focusedIndex < 0 || focusedIndex >= totalRows) {
       // allow starting typeahead even if nothing focused
       if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
         pushTypeahead(e.key);
@@ -423,10 +515,7 @@
       return;
     }
 
-    const item = flatTree[focusedIndex];
-    const node = item.node;
-
-    // Navigation
+    // Navigation: by index, so it also reaches rows the host has not sent.
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setFocusByIndex(focusedIndex + 1);
@@ -444,7 +533,7 @@
     }
     if (e.key === "End") {
       e.preventDefault();
-      setFocusByIndex(flatTree.length - 1);
+      setFocusByIndex(totalRows - 1);
       return;
     }
     if (e.key === "PageDown") {
@@ -458,21 +547,43 @@
       return;
     }
 
+    // Typeahead
+    const isActionKey =
+      e.key === "ArrowRight" ||
+      e.key === "ArrowLeft" ||
+      e.key === "Enter" ||
+      e.key === " ";
+    if (!isActionKey) {
+      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        pushTypeahead(e.key);
+        e.preventDefault();
+      }
+      return;
+    }
+
+    // The remaining keys act on the focused row itself.
+    e.preventDefault();
+    const node = rowAt(focusedIndex);
+    if (!node) {
+      // It is outside the window (scrolled far away): bring it back first.
+      setFocusByIndex(focusedIndex);
+      return;
+    }
+
     // Expand/Collapse per WAI-ARIA Tree pattern
     if (e.key === "ArrowRight") {
-      e.preventDefault();
       if (node.is_directory) {
         if (!node.is_expanded) {
           expandDirectory(node);
         } else {
-          // move to first child
-          const next = focusedIndex + 1;
-          if (
-            next < flatTree.length &&
-            flatTree[next].level === item.level + 1
-          ) {
-            setFocusByIndex(next);
-          }
+          // Move to the first child: the row right below an expanded
+          // directory, one level deeper. If that row is outside the window,
+          // the directory's own flag says whether it exists.
+          const below = rowAt(focusedIndex + 1);
+          const hasChildRow = below
+            ? below.depth === node.depth + 1
+            : node.has_children && focusedIndex + 1 < totalRows;
+          if (hasChildRow) setFocusByIndex(focusedIndex + 1);
         }
       } else {
         post("loadFilePreview", node.path);
@@ -481,19 +592,16 @@
     }
 
     if (e.key === "ArrowLeft") {
-      e.preventDefault();
       if (node.is_directory && node.is_expanded) {
         collapseDirectory(node);
       } else {
-        const parent = findParentIndex(focusedIndex);
-        if (parent !== -1) setFocusByIndex(parent);
+        focusParentOf(focusedIndex, node);
       }
       return;
     }
 
     // Activate / select
     if (e.key === "Enter") {
-      e.preventDefault();
       if (node.is_directory) {
         toggleDirectory(node);
       } else {
@@ -502,18 +610,8 @@
       return;
     }
 
-    if (e.key === " ") {
-      e.preventDefault();
-      if (node.is_directory) post("toggleDirectorySelection", node.path);
-      else post("toggleSelection", node.path);
-      return;
-    }
-
-    // Typeahead
-    if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
-      pushTypeahead(e.key);
-      e.preventDefault();
-    }
+    if (node.is_directory) post("toggleDirectorySelection", node.path);
+    else post("toggleSelection", node.path);
   }
 </script>
 
@@ -525,22 +623,22 @@
         <div class="button-group">
           <button
             onclick={onSelectAll}
-            disabled={$appState.is_scanning || !$appState.tree.length}
+            disabled={$appState.is_scanning || !totalRows}
             >{$t("filetree.selectAll")}</button
           >
           <button
             onclick={onDeselectAll}
-            disabled={$appState.is_scanning || !$appState.tree.length}
+            disabled={$appState.is_scanning || !totalRows}
             >{$t("filetree.deselectAll")}</button
           >
           <button
             onclick={onExpandAll}
-            disabled={$appState.is_scanning || !$appState.tree.length}
+            disabled={$appState.is_scanning || !totalRows}
             >{$t("filetree.expandAll")}</button
           >
           <button
             onclick={onCollapseAll}
-            disabled={$appState.is_scanning || !$appState.tree.length}
+            disabled={$appState.is_scanning || !totalRows}
             >{$t("filetree.collapseAll")}</button
           >
         </div>
@@ -552,7 +650,7 @@
   {/if}
 
   <div class="file-tree-body" class:centered={centerBody}>
-    {#if $appState.is_scanning && $appState.tree.length === 0}
+    {#if $appState.is_scanning && totalRows === 0}
       <ScanProgress />
     {:else if !$appState.current_path}
       <button
@@ -563,7 +661,7 @@
       >
         {$t("filetree.placeholder.chooseDir")}
       </button>
-    {:else if $appState.tree.length > 0}
+    {:else if totalRows > 0}
       <div
         class="tree"
         bind:this={scrollEl}
@@ -580,15 +678,14 @@
           class="virtual-scroll-sizer"
           style="height:{totalHeight}px; position:relative;"
         >
-          {#each visibleSlice as item (item.node.path)}
+          {#each visibleSlice as item (item.row.path)}
             <div
               class="virtual-scroll-item"
               style="position:absolute; left:0; right:0; top:{item.index *
                 ITEM_HEIGHT}px; height:{ITEM_HEIGHT}px;"
             >
               <TreeItem
-                node={item.node}
-                level={item.level}
+                node={item.row}
                 index={item.index}
                 focused={item.index === focusedIndex}
               />

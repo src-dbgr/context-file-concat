@@ -230,6 +230,133 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
       "additionalProperties": false,
       "properties": {
         "command": {
+          "const": "setViewport",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer",
+            },
+            "start": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "start",
+            "count",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "locateRow",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "request": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer",
+            },
+            "target": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "path",
+                      "type": "string",
+                    },
+                    "path": {
+                      "minLength": 1,
+                      "type": "string",
+                    },
+                  },
+                  "required": [
+                    "kind",
+                    "path",
+                  ],
+                  "type": "object",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "parent_of",
+                      "type": "string",
+                    },
+                    "path": {
+                      "minLength": 1,
+                      "type": "string",
+                    },
+                  },
+                  "required": [
+                    "kind",
+                    "path",
+                  ],
+                  "type": "object",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "from": {
+                      "maximum": 9007199254740991,
+                      "minimum": 0,
+                      "type": "integer",
+                    },
+                    "kind": {
+                      "const": "typeahead",
+                      "type": "string",
+                    },
+                    "prefix": {
+                      "minLength": 1,
+                      "type": "string",
+                    },
+                  },
+                  "required": [
+                    "kind",
+                    "prefix",
+                    "from",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+          },
+          "required": [
+            "request",
+            "target",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
           "const": "selectAll",
           "type": "string",
         },
@@ -661,72 +788,6 @@ exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
 
 exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
 {
-  "$defs": {
-    "__schema0": {
-      "additionalProperties": {},
-      "properties": {
-        "children": {
-          "items": {
-            "$ref": "#/$defs/__schema0",
-          },
-          "type": "array",
-        },
-        "children_loaded": {
-          "type": "boolean",
-        },
-        "has_children": {
-          "type": "boolean",
-        },
-        "is_binary": {
-          "type": "boolean",
-        },
-        "is_directory": {
-          "type": "boolean",
-        },
-        "is_expanded": {
-          "type": "boolean",
-        },
-        "is_match": {
-          "type": "boolean",
-        },
-        "is_previewed": {
-          "type": "boolean",
-        },
-        "name": {
-          "type": "string",
-        },
-        "path": {
-          "type": "string",
-        },
-        "selection_state": {
-          "enum": [
-            "none",
-            "partial",
-            "full",
-          ],
-          "type": "string",
-        },
-        "size": {
-          "type": "number",
-        },
-      },
-      "required": [
-        "path",
-        "name",
-        "is_directory",
-        "is_expanded",
-        "is_binary",
-        "is_match",
-        "is_previewed",
-        "selection_state",
-        "children",
-        "size",
-        "has_children",
-        "children_loaded",
-      ],
-      "type": "object",
-    },
-  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": {},
   "properties": {
@@ -802,8 +863,123 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
     "is_scanning": {
       "type": "boolean",
     },
+    "located": {
+      "anyOf": [
+        {
+          "additionalProperties": {},
+          "properties": {
+            "request": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer",
+            },
+            "row": {
+              "anyOf": [
+                {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+          },
+          "required": [
+            "request",
+            "row",
+          ],
+          "type": "object",
+        },
+        {
+          "type": "null",
+        },
+      ],
+    },
     "patterns_need_rescan": {
       "type": "boolean",
+    },
+    "rows": {
+      "items": {
+        "additionalProperties": {},
+        "properties": {
+          "children_loaded": {
+            "type": "boolean",
+          },
+          "depth": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer",
+          },
+          "has_children": {
+            "type": "boolean",
+          },
+          "is_binary": {
+            "type": "boolean",
+          },
+          "is_directory": {
+            "type": "boolean",
+          },
+          "is_expanded": {
+            "type": "boolean",
+          },
+          "is_match": {
+            "type": "boolean",
+          },
+          "is_previewed": {
+            "type": "boolean",
+          },
+          "name": {
+            "type": "string",
+          },
+          "path": {
+            "type": "string",
+          },
+          "selection_state": {
+            "enum": [
+              "none",
+              "partial",
+              "full",
+            ],
+            "type": "string",
+          },
+          "size": {
+            "type": "number",
+          },
+        },
+        "required": [
+          "path",
+          "name",
+          "depth",
+          "is_directory",
+          "is_expanded",
+          "is_binary",
+          "is_match",
+          "is_previewed",
+          "selection_state",
+          "size",
+          "has_children",
+          "children_loaded",
+        ],
+        "type": "object",
+      },
+      "type": "array",
+    },
+    "rows_revision": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "rows_start": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "rows_total": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
     },
     "scan_progress": {
       "additionalProperties": {},
@@ -841,12 +1017,6 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
     "total_files_found": {
       "type": "number",
     },
-    "tree": {
-      "items": {
-        "$ref": "#/$defs/__schema0",
-      },
-      "type": "array",
-    },
     "tree_dirs_count": {
       "maximum": 9007199254740991,
       "minimum": 0,
@@ -864,7 +1034,11 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
   "required": [
     "config",
     "current_path",
-    "tree",
+    "rows",
+    "rows_start",
+    "rows_total",
+    "rows_revision",
+    "located",
     "total_files_found",
     "visible_files_count",
     "tree_files_count",

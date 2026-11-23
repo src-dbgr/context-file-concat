@@ -14,7 +14,6 @@ import { get } from "svelte/store";
 
 import {
   UiStateSchema,
-  UiStateEnvelopeSchema,
   ScanProgressSchema,
   ShowPreviewArgsSchema,
   ShowGeneratedArgsSchema,
@@ -70,10 +69,9 @@ export function installWindowIPCHandlers(): void {
   }
 
   window.render = (incoming: AppState) => {
-    // Dev/tests: full deep validation. Prod: envelope only, so the recursive
-    // tree walk stays off the hot path (same DEV switch as backend.post()).
-    const schema = import.meta.env.DEV ? UiStateSchema : UiStateEnvelopeSchema;
-    const parsed = schema.safeParse(incoming);
+    // The whole snapshot is validated, rows included, in every build: it
+    // holds a window of rows, so the cost does not grow with the project.
+    const parsed = UiStateSchema.safeParse(incoming);
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid render() payload:",
@@ -95,7 +93,7 @@ export function installWindowIPCHandlers(): void {
       }
 
       // The snapshot is taken as is. In particular the backend's `is_expanded`
-      // is authoritative: it decides which children are part of the tree.
+      // is authoritative: it decides which rows the tree has.
       appState.set(input);
 
       // The progress shown belongs to one scan: forget it when none is

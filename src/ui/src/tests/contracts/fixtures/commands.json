@@ -47,6 +47,30 @@
   "loadFilePreview": [
     "/project/src"
   ],
+  "locateRow": [
+    {
+      "request": 1,
+      "target": {
+        "kind": "path",
+        "path": "/project/src/main.rs"
+      }
+    },
+    {
+      "request": 2,
+      "target": {
+        "kind": "parent_of",
+        "path": "/project/src/main.rs"
+      }
+    },
+    {
+      "request": 3,
+      "target": {
+        "from": 3,
+        "kind": "typeahead",
+        "prefix": "ma"
+      }
+    }
+  ],
   "pickOutputDirectory": [
     null
   ],
@@ -101,6 +125,12 @@
     {
       "expanded": true,
       "path": "/project/src"
+    }
+  ],
+  "setViewport": [
+    {
+      "count": 90,
+      "start": 120
     }
   ],
   "toggleDirectorySelection": [

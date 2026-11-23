@@ -1,11 +1,12 @@
 // Directory expansion intents.
 //
 // The backend is the single source of truth for which directories are expanded
-// (`expanded_dirs`). It only sends the children of expanded directories, so an
-// expansion that existed in the UI alone would show an empty directory. This
-// module therefore keeps no state: it translates a user gesture into the one
-// backend command that changes the expansion, and the next `render()` snapshot
-// carries the result (`is_expanded` plus the now visible children).
+// (`expanded_dirs`). The children of a directory are rows only while it is
+// expanded there, so an expansion that existed in the UI alone would show an
+// empty directory. This module therefore keeps no state: it translates a user
+// gesture into the one backend command that changes the expansion, and the
+// next `render()` snapshot carries the result (`is_expanded` plus the rows
+// that are now part of the list).
 //
 // Every gesture is sent as the state it should lead to (`setExpansion`), never
 // as "flip it". A gesture can fire again before the snapshot
@@ -15,11 +16,11 @@
 
 import { post } from "$lib/services/backend";
 import { getState } from "$lib/stores/app";
-import type { TreeNode } from "$lib/types";
+import type { TreeRow } from "$lib/types";
 
-/** The part of a directory node the expansion intents depend on. */
+/** The part of a directory row the expansion intents depend on. */
 export type ExpandableNode = Pick<
-  TreeNode,
+  TreeRow,
   "path" | "is_expanded" | "children_loaded"
 >;
 

@@ -1,8 +1,10 @@
-//! Tests for the pruned snapshot: only expanded directories carry their children, and
-//! everything the UI needs for the rest is part of the collapsed node or a counter.
+//! Tests for what is a row: only expanded directories show their children, and
+//! everything the UI needs for the rest is part of the collapsed row or a counter.
+//!
+//! The rows are looked at in nested form (see `reference::nest`), which states the
+//! rule directly: a collapsed directory has no children.
 
-use super::reference::{self, BuildTreeArgs};
-use super::{generate_ui_state, TreeNode, UiState};
+use super::reference::{self, snapshot, BuildTreeArgs, Snapshot, TreeNode};
 use crate::app::filtering;
 use crate::app::filtering::auto_expand_for_matches;
 use crate::app::selection::SelectionState;
@@ -67,6 +69,14 @@ fn select(state: &mut AppState, paths: &[&str]) {
     state.selected_files = paths.iter().map(PathBuf::from).collect();
 }
 
+/// Like [`select`], but file by file, the way clicks change the selection.
+fn click(state: &mut AppState, path: &str) {
+    let path = PathBuf::from(path);
+    if !state.selected_files.remove(&path) {
+        state.selected_files.insert(path);
+    }
+}
+
 fn find<'a>(nodes: &'a [TreeNode], path: &str) -> Option<&'a TreeNode> {
     nodes.iter().find_map(|node| {
         if node.path.as_path() == std::path::Path::new(path) {
@@ -77,7 +87,7 @@ fn find<'a>(nodes: &'a [TreeNode], path: &str) -> Option<&'a TreeNode> {
     })
 }
 
-fn node<'a>(ui_state: &'a UiState, path: &str) -> &'a TreeNode {
+fn node<'a>(ui_state: &'a Snapshot, path: &str) -> &'a TreeNode {
     find(&ui_state.tree, path).unwrap_or_else(|| panic!("{path} is not part of the snapshot"))
 }
 
@@ -94,7 +104,7 @@ fn node_count(nodes: &[TreeNode]) -> usize {
 
 #[test]
 fn collapsed_directories_are_sent_without_children() {
-    let ui_state = generate_ui_state(&project());
+    let ui_state = snapshot(&project());
 
     assert_eq!(names(&ui_state.tree), ["docs", "empty", "src", "readme.md"]);
     for dir in ["/root/src", "/root/docs", "/root/empty"] {
@@ -108,7 +118,7 @@ fn collapsed_directories_are_sent_without_children() {
 #[test]
 fn has_children_tells_collapsed_directories_with_content_from_empty_ones() {
     let mut state = project();
-    let collapsed = generate_ui_state(&state);
+    let collapsed = snapshot(&state);
 
     assert!(node(&collapsed, "/root/src").has_children);
     assert!(node(&collapsed, "/root/docs").has_children);
@@ -117,7 +127,7 @@ fn has_children_tells_collapsed_directories_with_content_from_empty_ones() {
 
     // Expansion does not change the flag.
     expand(&mut state, &["/root/src", "/root/empty"]);
-    let expanded = generate_ui_state(&state);
+    let expanded = snapshot(&state);
     assert!(node(&expanded, "/root/src").has_children);
     assert!(!node(&expanded, "/root/empty").has_children);
     assert!(node(&expanded, "/root/src/core").has_children);
@@ -128,7 +138,7 @@ fn has_children_tells_collapsed_directories_with_content_from_empty_ones() {
 fn collapsed_directory_reports_selection_of_its_hidden_descendants() {
     let mut state = project();
     let selection_of_src = |state: &AppState| {
-        let ui_state = generate_ui_state(state);
+        let ui_state = snapshot(state);
         let src = node(&ui_state, "/root/src");
         assert!(src.children.is_empty(), "src must stay collapsed");
         src.selection_state
@@ -154,7 +164,7 @@ fn collapsed_directory_reports_selection_of_its_hidden_descendants() {
     select(&mut state, &["/root/docs/guide.md"]);
     assert_eq!(selection_of_src(&state), SelectionState::None);
     assert_eq!(
-        node(&generate_ui_state(&state), "/root/docs").selection_state,
+        node(&snapshot(&state), "/root/docs").selection_state,
         SelectionState::Full
     );
 }
@@ -165,7 +175,7 @@ fn collapsed_directory_inside_an_expanded_one_keeps_its_selection_state() {
     expand(&mut state, &["/root/src"]);
     select(&mut state, &["/root/src/core/a.rs"]);
 
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
 
     assert_eq!(
         node(&ui_state, "/root/src").selection_state,
@@ -185,7 +195,7 @@ fn expanded_chain_is_complete() {
     let mut state = project();
     expand(&mut state, &["/root/src", "/root/src/core"]);
 
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
 
     let src = node(&ui_state, "/root/src");
     assert!(src.is_expanded);
@@ -206,7 +216,7 @@ fn fully_expanded_snapshot_is_the_complete_tree() {
         &["/root/src", "/root/src/core", "/root/docs", "/root/empty"],
     );
 
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
 
     let complete = reference::build_tree_nodes(BuildTreeArgs {
         items: state.filtered_file_list(),
@@ -229,14 +239,14 @@ fn expanded_directory_below_a_collapsed_one_is_not_sent() {
     let mut state = project();
     expand(&mut state, &["/root/src/core"]);
 
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
 
     assert!(node(&ui_state, "/root/src").children.is_empty());
     assert!(find(&ui_state.tree, "/root/src/core").is_none());
 
     // Expanding the parent reveals the remembered expansion of the child.
     expand(&mut state, &["/root/src"]);
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
     assert_eq!(
         names(&node(&ui_state, "/root/src/core").children),
         ["a.rs", "b.rs"]
@@ -248,7 +258,7 @@ fn unloaded_directory_is_marked_for_lazy_loading() {
     let mut state = project();
     state.loaded_dirs.remove(&PathBuf::from("/root/docs"));
 
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
 
     assert!(!node(&ui_state, "/root/docs").children_loaded);
     assert!(node(&ui_state, "/root/src").children_loaded);
@@ -258,14 +268,14 @@ fn unloaded_directory_is_marked_for_lazy_loading() {
 #[test]
 fn counters_describe_the_complete_tree_regardless_of_expansion() {
     let mut state = project();
-    let collapsed = generate_ui_state(&state);
+    let collapsed = snapshot(&state);
 
     assert_eq!(collapsed.tree_files_count, 5);
     assert_eq!(collapsed.tree_dirs_count, 4);
     assert_eq!(collapsed.visible_files_count, 9);
 
     expand(&mut state, &["/root/src", "/root/src/core"]);
-    let expanded = generate_ui_state(&state);
+    let expanded = snapshot(&state);
     assert_eq!(expanded.tree_files_count, 5);
     assert_eq!(expanded.tree_dirs_count, 4);
 }
@@ -276,7 +286,7 @@ fn counters_follow_the_filters() {
     state.search_query = "a.rs".to_string();
     filtering::apply_filters(&mut state);
 
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
 
     // /root/src/core/a.rs and its two ancestors.
     assert_eq!(ui_state.tree_files_count, 1);
@@ -289,7 +299,7 @@ fn counters_are_zero_when_the_tree_is_suppressed() {
     // A content search without results shows an empty tree.
     state.content_search_query = "needle".to_string();
 
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
 
     assert!(ui_state.tree.is_empty());
     assert_eq!(ui_state.tree_files_count, 0);
@@ -299,75 +309,67 @@ fn counters_are_zero_when_the_tree_is_suppressed() {
 #[test]
 fn search_auto_expansion_makes_matches_part_of_the_snapshot() {
     let mut state = project();
-    assert!(find(&generate_ui_state(&state).tree, "/root/src/core/b.rs").is_none());
+    assert!(find(&snapshot(&state).tree, "/root/src/core/b.rs").is_none());
 
     state.search_query = "b.rs".to_string();
     filtering::apply_filters(&mut state);
     auto_expand_for_matches(&mut state);
 
-    let ui_state = generate_ui_state(&state);
+    let ui_state = snapshot(&state);
     let hit = node(&ui_state, "/root/src/core/b.rs");
     assert!(hit.is_match);
     assert!(node(&ui_state, "/root/src").is_expanded);
     assert!(node(&ui_state, "/root/src/core").is_expanded);
 }
 
-// --- Payload size --------------------------------------------------------------
-
-/// 50 modules with 10 packages of 100 files each: 50,000 files in 550 directories.
-fn large_project() -> AppState {
-    let mut paths: Vec<(String, bool)> = Vec::new();
-    for module in 0..50 {
-        let module_path = format!("/root/module_{module:02}");
-        paths.push((module_path.clone(), true));
-        for package in 0..10 {
-            let package_path = format!("{module_path}/package_{package}");
-            paths.push((package_path.clone(), true));
-            for file in 0..100 {
-                paths.push((format!("{package_path}/source_file_{file:03}.rs"), false));
-            }
-        }
-    }
-    let borrowed: Vec<(&str, bool)> = paths.iter().map(|(p, d)| (p.as_str(), *d)).collect();
-    test_state(&borrowed)
-}
-
-fn payload_bytes(state: &AppState) -> usize {
-    serde_json::to_string(&generate_ui_state(state))
-        .expect("UiState is serializable")
-        .len()
-}
-
-/// Guards the point of pruning and prints the numbers (`cargo test payload -- --nocapture`).
 #[test]
-fn payload_of_a_large_project_is_proportional_to_what_is_expanded() {
-    let mut state = large_project();
+fn selection_states_follow_single_clicks_without_counting_the_tree_again() {
+    let mut state = project();
+    expand(&mut state, &["/root/src"]);
+    let selection_of = |state: &AppState, path: &str| node(&snapshot(state), path).selection_state;
 
-    let collapsed = payload_bytes(&state);
+    assert_eq!(selection_of(&state, "/root/src"), SelectionState::None);
+    let counted = state.selection_count_count();
 
-    expand(
-        &mut state,
-        &["/root/module_07", "/root/module_07/package_3"],
+    click(&mut state, "/root/src/core/a.rs");
+    assert_eq!(selection_of(&state, "/root/src"), SelectionState::Partial);
+    assert_eq!(
+        selection_of(&state, "/root/src/core"),
+        SelectionState::Partial
     );
-    let one_expanded = payload_bytes(&state);
+    assert_eq!(selection_of(&state, "/root/docs"), SelectionState::None);
 
-    // What used to be sent on every update: the complete tree.
-    state.expanded_dirs = state
-        .filtered_file_list()
-        .iter()
-        .filter(|item| item.is_directory)
-        .map(|item| item.path.clone())
-        .collect();
-    let complete = payload_bytes(&state);
+    click(&mut state, "/root/src/core/b.rs");
+    assert_eq!(selection_of(&state, "/root/src/core"), SelectionState::Full);
+    click(&mut state, "/root/src/main.rs");
+    assert_eq!(selection_of(&state, "/root/src"), SelectionState::Full);
 
-    println!(
-        "UiState payload for 50,000 files: complete tree {complete} B, \
-         all collapsed {collapsed} B, one directory chain expanded {one_expanded} B"
+    click(&mut state, "/root/src/core/a.rs");
+    assert_eq!(selection_of(&state, "/root/src"), SelectionState::Partial);
+    assert_eq!(
+        selection_of(&state, "/root/src/core"),
+        SelectionState::Partial
     );
-    let ui_state = generate_ui_state(&state);
-    assert_eq!(ui_state.tree_files_count, 50_000);
-    assert_eq!(ui_state.tree_dirs_count, 550);
-    assert!(complete > 10_000_000);
-    assert!(collapsed < 50_000);
-    assert!(one_expanded < 100_000);
+
+    // A path that is not listed, and a directory, are not files of the tree.
+    click(&mut state, "/root/src/unlisted.rs");
+    click(&mut state, "/root/docs");
+    assert_eq!(selection_of(&state, "/root/src"), SelectionState::Partial);
+    assert_eq!(selection_of(&state, "/root/docs"), SelectionState::None);
+
+    assert_eq!(
+        state.selection_count_count(),
+        counted,
+        "single changes are followed, not recounted"
+    );
+
+    // Replacing the selection wholesale, or the list, counts again.
+    state.selected_files.clear();
+    assert_eq!(selection_of(&state, "/root/src"), SelectionState::None);
+    assert_eq!(state.selection_count_count(), counted + 1);
+    click(&mut state, "/root/src/main.rs");
+    state.search_query = "main".to_string();
+    filtering::apply_filters(&mut state);
+    assert_eq!(selection_of(&state, "/root/src"), SelectionState::Full);
+    assert_eq!(state.selection_count_count(), counted + 2);
 }

@@ -5,11 +5,94 @@
 //! builds the *complete* tree; the index-based builder must produce exactly this tree
 //! with the subtrees of collapsed directories cut off.
 
-use super::TreeNode;
+use super::{generate_ui_state, rows, TreeRow, UiState};
 use crate::app::selection::SelectionState;
+use crate::app::state::AppState;
 use crate::core::FileItem;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// A node of the tree as the original algorithm builds it: the nested form of a row.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct TreeNode {
+    pub name: String,
+    pub path: PathBuf,
+    pub is_directory: bool,
+    pub is_binary: bool,
+    pub size: u64,
+    pub children: Vec<TreeNode>,
+    pub has_children: bool,
+    pub selection_state: SelectionState,
+    pub is_expanded: bool,
+    pub is_match: bool,
+    pub is_previewed: bool,
+    pub children_loaded: bool,
+}
+
+/// Rebuilds the nested tree from its rows: a row belongs to the nearest row above it
+/// that is one level less deep. This is the inverse of listing a tree row by row, so
+/// rows that nest into the expected tree are the expected rows, depth included.
+pub(super) fn nest(rows: &[TreeRow]) -> Vec<TreeNode> {
+    fn nest_level(
+        rows: &mut std::iter::Peekable<std::slice::Iter<TreeRow>>,
+        depth: usize,
+    ) -> Vec<TreeNode> {
+        let mut nodes = Vec::new();
+        while let Some(row) = rows.next_if(|row| row.depth == depth) {
+            nodes.push(TreeNode {
+                name: row.name.clone(),
+                path: row.path.clone(),
+                is_directory: row.is_directory,
+                is_binary: row.is_binary,
+                size: row.size,
+                children: nest_level(rows, depth + 1),
+                has_children: row.has_children,
+                selection_state: row.selection_state,
+                is_expanded: row.is_expanded,
+                is_match: row.is_match,
+                is_previewed: row.is_previewed,
+                children_loaded: row.children_loaded,
+            });
+        }
+        nodes
+    }
+
+    let mut remaining = rows.iter().peekable();
+    let nodes = nest_level(&mut remaining, 0);
+    assert!(
+        remaining.next().is_none(),
+        "a row is deeper than the row above it allows"
+    );
+    nodes
+}
+
+/// The tree the UI can show for `state`: all of its rows, whatever the viewport is,
+/// in nested form.
+pub(super) fn snapshot_tree(state: &AppState) -> Vec<TreeNode> {
+    nest(&rows::all_rows(state))
+}
+
+/// A snapshot together with the tree the UI can show for the same state.
+pub(super) struct Snapshot {
+    /// All rows of the tree, in nested form.
+    pub tree: Vec<TreeNode>,
+    ui_state: UiState,
+}
+
+impl std::ops::Deref for Snapshot {
+    type Target = UiState;
+
+    fn deref(&self) -> &UiState {
+        &self.ui_state
+    }
+}
+
+pub(super) fn snapshot(state: &AppState) -> Snapshot {
+    Snapshot {
+        tree: snapshot_tree(state),
+        ui_state: generate_ui_state(state),
+    }
+}
 
 /// Arguments for the `build_tree_nodes` function.
 pub(super) struct BuildTreeArgs<'a> {

@@ -1,6 +1,9 @@
 //! Defines the central, mutable state of the application.
 
+use crate::app::selection::{DirectorySelection, SelectedFiles, SelectionCountsCache};
+use crate::app::tracked::Tracked;
 use crate::app::tree_index::{TreeIndex, TreeIndexCache};
+use crate::app::view_model::TreeViewState;
 use crate::config::{AppConfig, ConfigSnapshot, ConfigStore};
 use crate::core::{is_blank, FileItem, FileNameMatcher, ScanProgress};
 use std::collections::HashSet;
@@ -293,9 +296,10 @@ pub struct AppState {
     /// Private so that every change goes through [`AppState::set_filtered_file_list`].
     filtered_file_list: Vec<FileItem>,
     /// The set of absolute paths to files that are currently selected by the user.
-    pub selected_files: HashSet<PathBuf>,
+    pub selected_files: SelectedFiles,
     /// The set of absolute paths to directories that are expanded in the UI tree.
-    pub expanded_dirs: HashSet<PathBuf>,
+    /// Tracked, because the rows of the tree are derived from it.
+    pub expanded_dirs: Tracked<HashSet<PathBuf>>,
     /// The directories the user collapsed while a filter was active. The host does not
     /// expand them again on its own for as long as that filter session lasts, see
     /// [`AppState::reveal_directory`].
@@ -357,6 +361,12 @@ pub struct AppState {
     filtered_revision: u64,
     /// The hierarchy derived from `filtered_file_list`, see [`AppState::file_tree`].
     tree_index_cache: TreeIndexCache,
+    /// The selection counts of the directories, derived from the hierarchy and
+    /// `selected_files`, see [`AppState::directory_selection`].
+    selection_counts_cache: SelectionCountsCache,
+    /// What the UI looks at of the tree (its viewport) and the row list derived from
+    /// the hierarchy and `expanded_dirs`. Owned by the view model.
+    pub(crate) tree_view: TreeViewState,
 }
 
 impl Default for AppState {
@@ -377,8 +387,8 @@ impl AppState {
             current_path: String::new(),
             full_file_list: Vec::new(),
             filtered_file_list: Vec::new(),
-            selected_files: HashSet::new(),
-            expanded_dirs: HashSet::new(),
+            selected_files: SelectedFiles::default(),
+            expanded_dirs: Tracked::default(),
             collapsed_under_filter: HashSet::new(),
             loaded_dirs: HashSet::new(),
             search_query: String::new(),
@@ -403,6 +413,8 @@ impl AppState {
             config_store,
             filtered_revision: 0,
             tree_index_cache: TreeIndexCache::default(),
+            selection_counts_cache: SelectionCountsCache::default(),
+            tree_view: TreeViewState::default(),
         }
     }
 
@@ -705,15 +717,25 @@ impl AppState {
     ///
     /// With the last filter text gone the filter session is over: what the user
     /// collapsed during it no longer holds back [`AppState::reveal_directory`].
+    ///
+    /// Other filters show another list: the UI shows it from the top (it scrolls
+    /// there when the filter texts of a snapshot change), so the window of rows
+    /// starts at the top as well and the answer already holds the rows it needs.
     pub fn set_filter_texts(
         &mut self,
         search_query: String,
         extension_filter: String,
         content_search_query: String,
     ) -> bool {
+        let content_query_changed = self.content_search_query != content_search_query;
+        if content_query_changed
+            || self.search_query != search_query
+            || self.extension_filter != extension_filter
+        {
+            self.tree_view.reset();
+        }
         self.search_query = search_query;
         self.extension_filter = extension_filter;
-        let content_query_changed = self.content_search_query != content_search_query;
         self.content_search_query = content_search_query;
         if !self.has_active_filter() {
             self.collapsed_under_filter.clear();
@@ -726,7 +748,11 @@ impl AppState {
     pub fn expand_directories(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
         for directory in directories {
             self.collapsed_under_filter.remove(&directory);
-            self.expanded_dirs.insert(directory);
+            // Only a real change touches the tracked set: the rows of the tree are
+            // rebuilt whenever it is borrowed mutably.
+            if !self.expanded_dirs.contains(&directory) {
+                self.expanded_dirs.insert(directory);
+            }
         }
     }
 
@@ -736,7 +762,9 @@ impl AppState {
     pub fn collapse_directories(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
         let remember = self.has_active_filter();
         for directory in directories {
-            self.expanded_dirs.remove(&directory);
+            if self.expanded_dirs.contains(&directory) {
+                self.expanded_dirs.remove(&directory);
+            }
             if remember {
                 self.collapsed_under_filter.insert(directory);
             }
@@ -752,7 +780,9 @@ impl AppState {
     /// Re-applying the same filter (after a lazy load, a change of the case
     /// sensitivity, the end of a scan) therefore never undoes a collapse.
     pub fn reveal_directory(&mut self, directory: &Path) {
-        if !self.collapsed_under_filter.contains(directory) {
+        if !self.collapsed_under_filter.contains(directory)
+            && !self.expanded_dirs.contains(directory)
+        {
             self.expanded_dirs.insert(directory.to_path_buf());
         }
     }
@@ -862,9 +892,29 @@ impl AppState {
     }
 
     /// Identifies the current content of the filtered file list.
-    #[cfg(test)]
     pub(crate) fn filtered_revision(&self) -> u64 {
         self.filtered_revision
+    }
+
+    /// The number of selected files below every directory of the filtered file list.
+    ///
+    /// Derived data like [`AppState::file_tree`]: counted on first use, and kept up
+    /// to date from the journal of `selected_files` for as long as the list stays
+    /// the same, so a click on one checkbox does not count the whole tree again.
+    pub(crate) fn directory_selection(&self) -> Arc<DirectorySelection> {
+        self.selection_counts_cache.get_or_update(
+            self.filtered_revision,
+            Path::new(&self.current_path),
+            &self.filtered_file_list,
+            &self.file_tree(),
+            &self.selected_files,
+        )
+    }
+
+    /// How often the selection of the whole tree had to be counted.
+    #[cfg(test)]
+    pub(crate) fn selection_count_count(&self) -> usize {
+        self.selection_counts_cache.full_count_count()
     }
 
     /// How often the hierarchy of the filtered file list had to be built.
@@ -892,6 +942,7 @@ impl AppState {
         self.selected_files.clear();
         self.expanded_dirs.clear();
         self.collapsed_under_filter.clear();
+        self.tree_view.reset();
         self.loaded_dirs.clear();
         self.search_query.clear();
         self.extension_filter.clear();
@@ -1360,8 +1411,8 @@ mod tests {
         let mut state = AppState {
             current_path: "/test/project".to_string(),
             full_file_list: vec![create_test_file_item("/test/project/file.txt", false)],
-            selected_files: HashSet::from([PathBuf::from("/test/project/file.txt")]),
-            expanded_dirs: HashSet::from([PathBuf::from("/test/project")]),
+            selected_files: HashSet::from([PathBuf::from("/test/project/file.txt")]).into(),
+            expanded_dirs: HashSet::from([PathBuf::from("/test/project")]).into(),
             loaded_dirs: HashSet::from([PathBuf::from("/test/project")]),
             search_query: "test".to_string(),
             is_fully_scanned: true,
@@ -1414,7 +1465,7 @@ mod tests {
             file_to_ignore.clone(),
         ];
         state.selected_files =
-            HashSet::from([file_to_keep.path.clone(), file_to_ignore.path.clone()]);
+            HashSet::from([file_to_keep.path.clone(), file_to_ignore.path.clone()]).into();
 
         // Set the patterns for this specific test case.
         state.config.ignore_patterns = HashSet::from(["node_modules/".to_string()]);
@@ -1621,7 +1672,7 @@ mod tests {
         let mut state = AppState {
             current_path: "/old".to_string(),
             full_file_list: vec![create_test_file_item("/old/a.rs", false)],
-            selected_files: HashSet::from([PathBuf::from("/old/a.rs")]),
+            selected_files: HashSet::from([PathBuf::from("/old/a.rs")]).into(),
             is_fully_scanned: true,
             ..AppState::default()
         };
@@ -1950,6 +2001,33 @@ mod tests {
         assert!(state.set_filter_texts("b".to_string(), String::new(), String::new()));
         assert_eq!(state.search_query, "b");
         assert!(state.has_active_filter());
+    }
+
+    #[test]
+    fn test_changed_filter_texts_show_the_new_list_from_the_top() {
+        use crate::app::view_model::Viewport;
+        let mut state = AppState::default();
+        state.set_filter_texts("a".to_string(), String::new(), String::new());
+        let scrolled = Viewport::new(500, 80);
+        state.tree_view.set_viewport(scrolled);
+
+        // The same texts again: the UI has not moved.
+        state.set_filter_texts("a".to_string(), String::new(), String::new());
+        assert_eq!(state.tree_view.viewport(), scrolled);
+
+        for texts in [("ab", "", ""), ("ab", "rs", ""), ("ab", "rs", "needle")] {
+            state.tree_view.set_viewport(scrolled);
+            state.set_filter_texts(
+                texts.0.to_string(),
+                texts.1.to_string(),
+                texts.2.to_string(),
+            );
+            assert_eq!(
+                state.tree_view.viewport(),
+                Viewport::new(0, 80),
+                "{texts:?}"
+            );
+        }
     }
 
     // --- Content filter ---

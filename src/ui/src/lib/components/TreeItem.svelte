@@ -1,18 +1,20 @@
 <script lang="ts">
-  import type { TreeNode } from "$lib/types";
+  import type { TreeRow } from "$lib/types";
   import { post } from "$lib/services/backend";
   import { formatFileSize } from "$lib/utils";
   import { toggleDirectory } from "$lib/modules/treeExpansion";
 
   // Runes props (no `export let` in Svelte 5)
+  // A pure row: it shows the row the host sent and posts commands, nothing
+  // else. `index` is the position of the row in the list of all rows.
   type Props = {
-    node: TreeNode;
-    level?: number;
+    node: TreeRow;
     index?: number;
     focused?: boolean;
   };
-  let { node, level = 0, index = 0, focused = false }: Props = $props();
+  let { node, index = 0, focused = false }: Props = $props();
 
+  const level = $derived(node.depth);
   const indentWidth = () => level * 21;
 
   // Auswahl-Zustände (nur für Directory relevant)

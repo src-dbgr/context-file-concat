@@ -55,38 +55,75 @@ pub fn apply_filter_texts(state: &mut AppState) {
     }
 }
 
+/// The number of directories one application of the filters expands at most.
+///
+/// A filter that matches broadly (an extension most files have) would otherwise
+/// expand every directory of the project: nobody reads tens of thousands of rows,
+/// and the expanded set would stay that large after the filter is gone. The first
+/// matches in tree order are revealed; every other match is still listed and
+/// counted, its directory just stays collapsed until the user opens it or narrows
+/// the filter. 500 directories are far more than fit on a screen (a viewport shows
+/// some 30 to 80 rows), and revealing them costs one pass over the list instead of
+/// a path per match and level: 6 ms instead of 160 ms for 500,000 matching files
+/// in 25,000 directories (measured: see `docs/virtualization.md`).
+pub const AUTO_EXPAND_LIMIT: usize = 500;
+
 /// Expands the parent directories of files that match the current search criteria.
 ///
-/// This function iterates through all filtered files that match the current search,
-/// extension, or content filters and expands the directories above them, so that the
-/// matches are visible in the file tree. A directory the user collapsed while a filter
-/// was active stays collapsed, see [`AppState::reveal_directory`]; that is what makes
-/// it safe to call this whenever the filters are applied again.
+/// The directories above the files that match the search, extension or content filter
+/// are expanded, so that the matches are visible in the file tree: the first
+/// [`AUTO_EXPAND_LIMIT`] of them in the order of the tree. A directory the user
+/// collapsed while a filter was active stays collapsed, see
+/// [`AppState::reveal_directory`]; that is what makes it safe to call this whenever
+/// the filters are applied again.
 pub fn auto_expand_for_matches(state: &mut AppState) {
-    let root_path = PathBuf::from(&state.current_path);
-    let name_matcher = state.file_name_matcher();
-    let matches: Vec<PathBuf> = state
-        .filtered_file_list()
-        .iter()
-        .filter(|item| {
-            !item.is_directory
-                && (name_matcher.matches_any(&item.path)
-                    || state.content_search_results.contains(&item.path))
-        })
-        .map(|item| item.path.clone())
-        .collect();
+    for directory in directories_of_matches(state, AUTO_EXPAND_LIMIT) {
+        state.reveal_directory(&directory);
+    }
+}
 
-    for path in matches {
-        let mut current = path.parent();
-        while let Some(parent) = current {
-            if parent.starts_with(&root_path) && parent != root_path {
-                state.reveal_directory(parent);
-            } else {
-                break;
-            }
-            current = parent.parent();
+/// The directories of the tree that hold a match somewhere below them, in the order
+/// of the tree (a directory before its content), at most `limit` of them.
+fn directories_of_matches(state: &AppState, limit: usize) -> Vec<PathBuf> {
+    let items = state.filtered_file_list();
+    let index = state.file_tree();
+    let name_matcher = state.file_name_matcher();
+    let content_matches = &state.content_search_results;
+    if !name_matcher.is_active() && content_matches.is_empty() {
+        return Vec::new();
+    }
+    let is_match = |item: &FileItem| {
+        name_matcher.matches_any(&item.path) || content_matches.contains(&item.path)
+    };
+
+    // The directories of the tree, each before the directories inside it.
+    let mut directories: Vec<usize> = Vec::new();
+    let mut pending: Vec<usize> = index.roots().iter().rev().copied().collect();
+    while let Some(current) = pending.pop() {
+        if items[current].is_directory {
+            directories.push(current);
+            pending.extend(index.children(current).iter().rev());
         }
     }
+
+    // Backwards, the content of a directory is decided before the directory itself.
+    let mut holds_match = vec![false; items.len()];
+    for &directory in directories.iter().rev() {
+        holds_match[directory] = index.children(directory).iter().any(|&child| {
+            if items[child].is_directory {
+                holds_match[child]
+            } else {
+                is_match(&items[child])
+            }
+        });
+    }
+
+    directories
+        .into_iter()
+        .filter(|&directory| holds_match[directory])
+        .take(limit)
+        .map(|directory| items[directory].path.clone())
+        .collect()
 }
 
 /// Collects all parent directories for a given set of file paths.
@@ -195,6 +232,94 @@ mod tests {
         }
     }
 
+    /// `directories` directories below `/project`, each with one file `match.rs`.
+    fn state_with_matches_in(directories: usize) -> AppState {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        for directory in 0..directories {
+            let path = format!("/project/dir{directory:04}");
+            state
+                .full_file_list
+                .push(create_test_file_item(&path, true));
+            state
+                .full_file_list
+                .push(create_test_file_item(&format!("{path}/match.rs"), false));
+        }
+        state.is_fully_scanned = true;
+        state
+    }
+
+    #[test]
+    fn test_auto_expansion_stops_at_the_limit_in_tree_order() {
+        let mut state = state_with_matches_in(AUTO_EXPAND_LIMIT + 20);
+        state.search_query = "match".to_string();
+
+        apply_filter_texts(&mut state);
+
+        // The first directories of the tree are expanded, the rest stays collapsed.
+        assert_eq!(state.expanded_dirs.len(), AUTO_EXPAND_LIMIT);
+        let expected: HashSet<PathBuf> = (0..AUTO_EXPAND_LIMIT)
+            .map(|directory| PathBuf::from(format!("/project/dir{directory:04}")))
+            .collect();
+        assert_eq!(state.expanded_dirs, expected);
+        // Every match is still listed and counted.
+        let ui_state = generate_ui_state(&state);
+        assert_eq!(ui_state.tree_files_count, AUTO_EXPAND_LIMIT + 20);
+        assert_eq!(ui_state.rows_total, 2 * AUTO_EXPAND_LIMIT + 20);
+
+        // Applying the same filter again expands nothing more.
+        auto_expand_for_matches(&mut state);
+        assert_eq!(state.expanded_dirs.len(), AUTO_EXPAND_LIMIT);
+
+        // A directory the user opens beyond the limit is theirs.
+        let beyond = PathBuf::from(format!("/project/dir{:04}", AUTO_EXPAND_LIMIT + 5));
+        state.expand_directories([beyond.clone()]);
+        auto_expand_for_matches(&mut state);
+        assert_eq!(state.expanded_dirs.len(), AUTO_EXPAND_LIMIT + 1);
+        assert!(state.expanded_dirs.contains(&beyond));
+    }
+
+    #[test]
+    fn test_auto_expansion_below_the_limit_reveals_every_match() {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            create_test_file_item("/project/a", true),
+            create_test_file_item("/project/a/deep", true),
+            create_test_file_item("/project/a/deep/hit.rs", false),
+            create_test_file_item("/project/a/other.txt", false),
+            create_test_file_item("/project/b", true),
+            create_test_file_item("/project/b/miss.txt", false),
+            create_test_file_item("/project/c", true),
+            create_test_file_item("/project/c/hit.rs", false),
+        ];
+        state.is_fully_scanned = true;
+        state.extension_filter = "rs".to_string();
+
+        apply_filter_texts(&mut state);
+
+        let expected: HashSet<PathBuf> = ["/project/a", "/project/a/deep", "/project/c"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(state.expanded_dirs, expected);
+
+        // The matches of a content search are revealed the same way, and without a
+        // filter nothing is.
+        let mut state = state_with_matches_in(3);
+        apply_filters(&mut state);
+        auto_expand_for_matches(&mut state);
+        assert!(state.expanded_dirs.is_empty());
+        state.content_search_results = HashSet::from([PathBuf::from("/project/dir0001/match.rs")]);
+        auto_expand_for_matches(&mut state);
+        assert_eq!(
+            state.expanded_dirs,
+            HashSet::from([PathBuf::from("/project/dir0001")])
+        );
+    }
+
     /// Creates a clean test configuration without any ignore patterns.
     fn create_test_config() -> AppConfig {
         AppConfig {
@@ -222,7 +347,7 @@ mod tests {
 
         // The filtered list should contain `src` (parent dir) and `main.rs`.
         assert_eq!(ui_state.visible_files_count, 2);
-        assert_eq!(ui_state.tree.len(), 1); // Only `src` directory at root
+        assert_eq!(ui_state.root_rows().len(), 1); // Only `src` directory at root
     }
 
     #[test]
@@ -336,7 +461,7 @@ mod tests {
         state.content_search_results.clear();
         apply_filters(&mut state);
         assert_eq!(visible_paths(&state).len(), 2);
-        assert_eq!(generate_ui_state(&state).tree.len(), 2);
+        assert_eq!(generate_ui_state(&state).root_rows().len(), 2);
     }
 
     /// Filtering, highlighting and auto-expansion share one matching rule, so a filter
@@ -357,11 +482,12 @@ mod tests {
         auto_expand_for_matches(&mut state);
         let ui_state = generate_ui_state(&state);
 
-        let build = &ui_state.tree[0];
+        let build = ui_state.root_rows()[0];
         assert!(build.is_expanded, "The directory of the match is expanded");
-        assert_eq!(build.children.len(), 1, "Only the match is listed");
-        assert_eq!(build.children[0].name, "Makefile");
-        assert!(build.children[0].is_match, "The match is highlighted");
+        let listed = ui_state.children_of(build);
+        assert_eq!(listed.len(), 1, "Only the match is listed");
+        assert_eq!(listed[0].name, "Makefile");
+        assert!(listed[0].is_match, "The match is highlighted");
     }
 
     #[test]
