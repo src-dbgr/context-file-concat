@@ -9,8 +9,8 @@ CFC (Context File Concatenator) is a desktop application designed to intelligent
 ## Key Features
 
 - **High-Performance Scanning**: Engineered for speed, CFC handles large repositories with ease.
-  - **Proactive Scanning**: An initial, shallow scan provides immediate UI feedback, while a full scan continues indexing in the background.
-  - **Lazy Loading**: Directory contents are loaded on-demand as you expand them, eliminating long initial wait times.
+  - **Proactive Scanning**: An initial, shallow scan provides immediate UI feedback, while a full scan continues indexing in the background and fills the tree as it goes.
+  - **Lazy Loading**: Directory contents are loaded on-demand as you expand them, also while the full scan is still running, eliminating long initial wait times.
   - **UI Virtualization**: The file tree uses virtual scrolling to ensure the UI remains smooth and responsive, even with tens of thousands of files.
 - **Directory Selection**: Easily select a project directory using a native file dialog or by dragging and dropping it into the application.
 - **Interactive File Tree**: View your project structure in a familiar tree view. Select or deselect individual files or entire directories.

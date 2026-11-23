@@ -3,9 +3,9 @@
 use super::{CoreError, FileItem, IgnoreRules, MAX_FILE_SIZE};
 use crate::utils::file_detection::is_text_file;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -100,6 +100,8 @@ pub struct DirectoryScanner {
     max_file_size: u64,
     /// The minimum time between two progress reports.
     progress_throttle: Duration,
+    /// How the result is cut into batches.
+    batch_limits: BatchLimits,
 }
 
 /// What has to be looked at to tell whether a listed entry is binary.
@@ -129,20 +131,37 @@ impl ContentKind {
     }
 }
 
-/// A listed entry whose content has to be looked at: the item at `index` of the list.
+/// An entry the walk has listed, together with what has to be looked at to tell
+/// whether it is binary (`item.is_binary` is `false` until that has happened).
 #[derive(Debug)]
-struct ContentJob {
-    index: usize,
-    path: PathBuf,
+struct ListedEntry {
+    item: FileItem,
     kind: ContentKind,
 }
 
-/// How many entries are handed to the thread pool at a time. Large enough to make
-/// the handing over cheap, small enough for the pool to start while the walk is
-/// still in its first directories.
-const CONTENT_CHUNK_SIZE: usize = 256;
+/// When the walk closes the batch it is filling and hands it over.
+///
+/// A batch is the unit in which a scan delivers its result
+/// ([`DirectoryScanner::scan_in_batches`]) and at the same time the unit of work of
+/// the threads that look at the contents. The count keeps a batch small enough for
+/// those threads to start while the walk is still in its first directories and makes
+/// handing over cheap; the age makes sure that a slow walk (a network drive) delivers
+/// what it has found without waiting for a batch to fill up.
+#[derive(Debug, Clone, Copy)]
+struct BatchLimits {
+    max_items: usize,
+    max_age: Duration,
+}
 
-/// Tells whether the entry of `job` is binary by the application-wide rule
+/// The limits of a scan in production. A walk of a local disk lists some 100,000
+/// entries per second, so the count decides there (a few hundred small batches per
+/// second, which is what the measurements of [`MAX_CONTENT_THREADS`] were made with).
+const BATCH_LIMITS: BatchLimits = BatchLimits {
+    max_items: 256,
+    max_age: Duration::from_millis(100),
+};
+
+/// Tells whether the entry at `path` is binary by the application-wide rule
 /// (`utils::file_detection`), which `is_text` applies to a path ([`is_text_file`] in
 /// production).
 ///
@@ -150,92 +169,137 @@ const CONTENT_CHUNK_SIZE: usize = 256;
 /// judged by the file it points to; a link that leads to no file (broken, or to a
 /// directory) has no content and is not binary, like the preview and the generation,
 /// which report such an entry as unreadable rather than as binary.
-fn is_binary_content(job: &ContentJob, is_text: &impl Fn(&Path) -> anyhow::Result<bool>) -> bool {
-    let has_content = match job.kind {
+fn is_binary_content(
+    path: &Path,
+    kind: ContentKind,
+    is_text: &impl Fn(&Path) -> anyhow::Result<bool>,
+) -> bool {
+    let has_content = match kind {
         ContentKind::None => false,
         ContentKind::File => true,
         // `metadata` follows the link.
-        ContentKind::Link => std::fs::metadata(&job.path).is_ok_and(|target| target.is_file()),
+        ContentKind::Link => std::fs::metadata(path).is_ok_and(|target| target.is_file()),
     };
-    has_content && !is_text(&job.path).unwrap_or(false)
+    has_content && !is_text(path).unwrap_or(false)
 }
 
-/// Runs `produce`, and looks at the content of the entries it submits while it runs.
-/// Returns the result of `produce` and, for every entry that was looked at, its index
-/// and whether it is binary (in no particular order).
+/// Looks at the content of every entry of `batch` and returns the finished items, in
+/// the order of the batch. `None` if the scan was cancelled before the end of the
+/// batch: no further file is opened then, and a batch that is not complete is not
+/// delivered.
+fn classify_batch(
+    batch: Vec<ListedEntry>,
+    cancel_flag: &AtomicBool,
+    is_text: &impl Fn(&Path) -> anyhow::Result<bool>,
+) -> Option<Vec<FileItem>> {
+    let mut items = Vec::with_capacity(batch.len());
+    for ListedEntry { mut item, kind } in batch {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return None;
+        }
+        item.is_binary = is_binary_content(&item.path, kind, is_text);
+        items.push(item);
+    }
+    Some(items)
+}
+
+/// Delivers batches that are finished in any order in the order they were handed
+/// over: a batch waits here until all the batches before it have been delivered.
+///
+/// `deliver` is called under a lock, one batch at a time, from whichever thread
+/// completes the next batch in line. It should therefore be quick (in production it
+/// passes the batch on through a channel).
+struct InOrder<'a> {
+    deliver: &'a (dyn Fn(Vec<FileItem>) + Sync),
+    line: Mutex<Line>,
+}
+
+/// The state of [`InOrder`]: the number of the batch that is delivered next, and the
+/// finished batches that come after it.
+#[derive(Default)]
+struct Line {
+    next: usize,
+    waiting: BTreeMap<usize, Vec<FileItem>>,
+}
+
+impl<'a> InOrder<'a> {
+    fn new(deliver: &'a (dyn Fn(Vec<FileItem>) + Sync)) -> Self {
+        Self {
+            deliver,
+            line: Mutex::new(Line::default()),
+        }
+    }
+
+    /// Takes the finished batch with the number `sequence` and delivers every batch
+    /// whose turn it is now.
+    fn submit(&self, sequence: usize, batch: Vec<FileItem>) {
+        let mut line = self
+            .line
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        line.waiting.insert(sequence, batch);
+        loop {
+            let next = line.next;
+            let Some(batch) = line.waiting.remove(&next) else {
+                break;
+            };
+            (self.deliver)(batch);
+            line.next += 1;
+        }
+    }
+}
+
+/// Runs `produce`, looks at the content of the entries of every batch it hands over
+/// while it runs, and passes the finished batches to `on_batch`, in the order they
+/// were handed over. Returns the result of `produce` once all of that is done.
 ///
 /// This is the part of a scan that opens files, one per listed file whose extension
 /// does not settle the question. Opening a file is slow where a directory listing is
 /// fast, in particular the first time, so it is neither done in the walk nor after
-/// it: `produce` (the walk) runs on the calling thread and hands the entries over in
-/// chunks of [`CONTENT_CHUNK_SIZE`], which the threads of [`content_pool`] work off
-/// meanwhile. The function returns when both are done.
+/// it: `produce` (the walk) runs on the calling thread, and the threads of
+/// [`content_pool`] work off its batches meanwhile, one batch per task.
 ///
-/// Once `cancel_flag` is raised no further file is opened; the entries that were not
-/// looked at are missing in the result. A cancelled scan is discarded by its caller.
+/// Once `cancel_flag` is raised no further file is opened. The batch a thread was
+/// working on is then incomplete and is dropped, and with it every batch after it
+/// (nothing is delivered out of order). What a cancelled scan has delivered up to
+/// then is a correct, if partial, listing.
 fn classify_alongside<R>(
     cancel_flag: &AtomicBool,
     is_text: &(impl Fn(&Path) -> anyhow::Result<bool> + Sync),
-    produce: impl FnOnce(&mut dyn FnMut(ContentJob)) -> R,
-) -> (R, Vec<(usize, bool)>) {
-    let verdicts = Mutex::new(Vec::new());
-    // `in_place_scope`: `produce` stays on this thread, only the chunks go to the pool.
-    let result = match content_pool() {
+    on_batch: &(dyn Fn(Vec<FileItem>) + Sync),
+    produce: impl FnOnce(&mut dyn FnMut(Vec<ListedEntry>)) -> R,
+) -> R {
+    let in_order = InOrder::new(on_batch);
+    // `in_place_scope`: `produce` stays on this thread, only the batches go to the pool.
+    match content_pool() {
         Some(pool) => pool.in_place_scope(|scope| {
-            hand_over_in_chunks(scope, cancel_flag, is_text, &verdicts, produce)
+            hand_over_batches(scope, cancel_flag, is_text, &in_order, produce)
         }),
         None => rayon::in_place_scope(|scope| {
-            hand_over_in_chunks(scope, cancel_flag, is_text, &verdicts, produce)
+            hand_over_batches(scope, cancel_flag, is_text, &in_order, produce)
         }),
-    };
-    (result, into_inner(verdicts))
+    }
 }
 
 /// The body of [`classify_alongside`] inside the scope of the thread pool: runs
-/// `produce` and spawns a task for every chunk of entries it submits.
-fn hand_over_in_chunks<'scope, R>(
+/// `produce` and spawns a task for every batch it hands over.
+fn hand_over_batches<'scope, R>(
     scope: &rayon::Scope<'scope>,
     cancel_flag: &'scope AtomicBool,
     is_text: &'scope (impl Fn(&Path) -> anyhow::Result<bool> + Sync),
-    verdicts: &'scope Mutex<Vec<(usize, bool)>>,
-    produce: impl FnOnce(&mut dyn FnMut(ContentJob)) -> R,
+    in_order: &'scope InOrder<'scope>,
+    produce: impl FnOnce(&mut dyn FnMut(Vec<ListedEntry>)) -> R,
 ) -> R {
-    let classify = |chunk: Vec<ContentJob>| {
+    let mut handed_over = 0;
+    produce(&mut |batch| {
+        let sequence = handed_over;
+        handed_over += 1;
         scope.spawn(move |_| {
-            let chunk_verdicts: Vec<(usize, bool)> = chunk
-                .iter()
-                .take_while(|_| !cancel_flag.load(Ordering::Relaxed))
-                .map(|job| (job.index, is_binary_content(job, is_text)))
-                .collect();
-            verdicts
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .extend(chunk_verdicts);
+            if let Some(items) = classify_batch(batch, cancel_flag, is_text) {
+                in_order.submit(sequence, items);
+            }
         });
-    };
-
-    let mut chunk = Vec::with_capacity(CONTENT_CHUNK_SIZE);
-    let result = produce(&mut |job| {
-        chunk.push(job);
-        if chunk.len() == CONTENT_CHUNK_SIZE {
-            classify(std::mem::replace(
-                &mut chunk,
-                Vec::with_capacity(CONTENT_CHUNK_SIZE),
-            ));
-        }
-    });
-    if !chunk.is_empty() {
-        classify(chunk);
-    }
-    result
-}
-
-/// The content of a mutex nobody else holds any more, whether or not a thread
-/// panicked while it held the lock.
-fn into_inner<T>(mutex: Mutex<T>) -> T {
-    mutex
-        .into_inner()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    })
 }
 
 /// The most threads that open files at the same time during a scan.
@@ -288,74 +352,76 @@ fn content_pool_threads() -> usize {
     })
 }
 
-/// A scan: turns the entries a walk yields into `FileItem`s.
+/// What a scan loop needs besides the entries of its walk.
+struct WalkSettings<'a> {
+    /// Entries up to and including this depth (the start directory of the scan and
+    /// the directories leading to it) are walked but neither counted nor reported.
+    start_depth: usize,
+    /// Files larger than this many bytes are counted as skipped and not reported.
+    max_file_size: u64,
+    cancel_flag: &'a AtomicBool,
+    /// The minimum time between two progress reports.
+    progress_throttle: Duration,
+    batch_limits: BatchLimits,
+}
+
+/// A scan: turns the entries a walk yields into `FileItem`s and passes them to
+/// `on_batch`, batch by batch, in the order of the walk.
 ///
 /// It takes the entries as an iterator rather than walking itself, so the loop
 /// (throttling, cancellation, what happens when an entry changes or disappears between
 /// being listed and being looked at) can be driven deterministically.
 ///
-/// Entries up to and including `start_depth` (the start directory of the scan and the
-/// directories leading to it) are walked but neither counted nor reported. Files larger
-/// than `max_file_size` bytes are counted as skipped and not reported either.
-///
 /// The walk itself ([`walk_entries`]) is sequential: it defines the order of the
 /// result, the progress and where a cancellation stops it, and it does not open a
 /// file. Whether the files are binary is found out on other threads while the walk
-/// goes on, see [`classify_alongside`]; the verdicts are entered into the list, by
-/// index, when both are done.
-fn process_walker_results<F>(
+/// goes on, see [`classify_alongside`]; a batch is delivered when that is known for
+/// all of its entries, so every item that leaves the scan is final.
+fn stream_walker_results<F>(
     walker: impl Iterator<Item = Result<ignore::DirEntry, ignore::Error>>,
-    start_depth: usize,
-    max_file_size: u64,
-    cancel_flag: Arc<AtomicBool>,
+    settings: &WalkSettings,
     progress_callback: F,
-    progress_throttle: Duration,
-) -> Vec<FileItem>
-where
-    F: Fn(ScanProgress) + Send + Sync + 'static,
+    on_batch: &(dyn Fn(Vec<FileItem>) + Sync),
+) where
+    F: Fn(ScanProgress),
 {
-    let (mut final_files, verdicts) =
-        classify_alongside(&cancel_flag, &is_text_file, |look_at_content| {
-            walk_entries(
-                walker,
-                start_depth,
-                max_file_size,
-                &cancel_flag,
-                progress_callback,
-                progress_throttle,
-                look_at_content,
-            )
-        });
-    for (index, is_binary) in verdicts {
-        final_files[index].is_binary = is_binary;
-    }
-    final_files
+    classify_alongside(settings.cancel_flag, &is_text_file, on_batch, |hand_over| {
+        walk_entries(walker, settings, progress_callback, hand_over)
+    });
 }
 
 /// The loop of a scan: lists the entries of `walker` in its order, reports the
-/// progress and stops when the scan is cancelled. Every entry that has content
-/// (a file, a link) is passed to `look_at_content` with its index in the list;
-/// `FileItem::is_binary` is left `false` here.
+/// progress and stops when the scan is cancelled. The entries are passed to
+/// `hand_over` in batches (see [`BatchLimits`]); `FileItem::is_binary` is left
+/// `false` here.
 fn walk_entries<F>(
     walker: impl Iterator<Item = Result<ignore::DirEntry, ignore::Error>>,
-    start_depth: usize,
-    max_file_size: u64,
-    cancel_flag: &AtomicBool,
+    settings: &WalkSettings,
     progress_callback: F,
-    progress_throttle: Duration,
-    look_at_content: &mut dyn FnMut(ContentJob),
-) -> Vec<FileItem>
-where
+    hand_over: &mut dyn FnMut(Vec<ListedEntry>),
+) where
     F: Fn(ScanProgress),
 {
-    let mut final_files = Vec::new();
-    let large_files_skipped_counter = AtomicUsize::new(0);
-    let files_scanned_counter = AtomicUsize::new(0);
+    let limits = settings.batch_limits;
+    let mut batch: Vec<ListedEntry> = Vec::with_capacity(limits.max_items);
+    let mut batch_opened = Instant::now();
+    let mut large_files_skipped = 0;
+    let mut files_scanned = 0;
     let mut last_update = Instant::now();
 
     for result in walker {
-        if cancel_flag.load(Ordering::SeqCst) {
-            break;
+        if settings.cancel_flag.load(Ordering::SeqCst) {
+            // What has not been handed over yet is not going to be looked at either.
+            return;
+        }
+
+        // A batch that has been open for long enough goes out before the next entry
+        // is dealt with, however few entries it holds.
+        if !batch.is_empty() && batch_opened.elapsed() >= limits.max_age {
+            hand_over(std::mem::replace(
+                &mut batch,
+                Vec::with_capacity(limits.max_items),
+            ));
         }
 
         let entry = match result {
@@ -371,21 +437,21 @@ where
         // Check for the start directory (and its ancestors) and skip it *before*
         // incrementing the counter. This prevents inflating the scanned count with
         // directories that are not part of the result.
-        if entry.depth() <= start_depth {
+        if entry.depth() <= settings.start_depth {
             continue;
         }
 
         // All logic related to counting and progress now happens only for valid entries.
-        let count = files_scanned_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if Instant::now().duration_since(last_update) > progress_throttle {
+        files_scanned += 1;
+        if Instant::now().duration_since(last_update) > settings.progress_throttle {
             tracing::debug!(
                 "[SCANNER] Throttling condition met. Invoking progress callback for {} files.",
-                count
+                files_scanned
             );
             let path_str = entry.path().to_string_lossy().into_owned();
             progress_callback(ScanProgress {
-                files_scanned: count,
-                large_files_skipped: large_files_skipped_counter.load(Ordering::Relaxed),
+                files_scanned,
+                large_files_skipped,
                 current_scanning_path: path_str,
             });
             last_update = Instant::now();
@@ -405,30 +471,36 @@ where
             }
         };
 
-        if !metadata.is_dir() && metadata.len() > max_file_size {
-            large_files_skipped_counter.fetch_add(1, Ordering::Relaxed);
+        if !metadata.is_dir() && metadata.len() > settings.max_file_size {
+            large_files_skipped += 1;
             continue;
         }
 
-        let kind = ContentKind::of(&metadata);
-        if kind != ContentKind::None {
-            look_at_content(ContentJob {
-                index: final_files.len(),
-                path: entry.path().to_path_buf(),
-                kind,
-            });
+        if batch.is_empty() {
+            batch_opened = Instant::now();
         }
-        final_files.push(FileItem {
-            path: entry.path().to_path_buf(),
-            is_directory: metadata.is_dir(),
-            // Entered by the caller, once the content has been looked at.
-            is_binary: false,
-            size: metadata.len(),
-            depth: entry.depth(),
-            parent: entry.path().parent().map(PathBuf::from),
+        batch.push(ListedEntry {
+            item: FileItem {
+                path: entry.path().to_path_buf(),
+                is_directory: metadata.is_dir(),
+                // Entered once the content has been looked at.
+                is_binary: false,
+                size: metadata.len(),
+                depth: entry.depth(),
+                parent: entry.path().parent().map(PathBuf::from),
+            },
+            kind: ContentKind::of(&metadata),
         });
+        if batch.len() >= limits.max_items {
+            hand_over(std::mem::replace(
+                &mut batch,
+                Vec::with_capacity(limits.max_items),
+            ));
+        }
     }
-    final_files
+    if !batch.is_empty() {
+        hand_over(batch);
+    }
 }
 
 impl DirectoryScanner {
@@ -439,6 +511,7 @@ impl DirectoryScanner {
             ignore_patterns,
             max_file_size: MAX_FILE_SIZE,
             progress_throttle: PROGRESS_UPDATE_THROTTLE,
+            batch_limits: BATCH_LIMITS,
         }
     }
 
@@ -457,21 +530,12 @@ impl DirectoryScanner {
         }
     }
 
-    /// Performs the scan described by `request` asynchronously, providing progress
-    /// updates via a callback.
+    /// Performs the scan described by `request` and returns everything it lists at
+    /// once: the items in the order of the walk, and the custom ignore patterns that
+    /// were active. This is [`DirectoryScanner::scan_in_batches`] with the batches
+    /// collected; see there for how the scan works.
     ///
-    /// This function performs the scan in a blocking thread to avoid blocking the async runtime,
-    /// while allowing for cancellation and progress reporting. It uses the `ignore` crate
-    /// for high-performance, gitignore-aware directory traversal. The custom ignore
-    /// patterns are applied through [`IgnoreRules`], which also reports which of them
-    /// were active (the second value of the result).
-    ///
-    /// The walk always begins at the project root, even when only a subdirectory is
-    /// requested: on its way down it visits nothing but the directories leading to the
-    /// start directory. That way the `.gitignore` files of all ancestors inside the
-    /// project, the anchoring of the custom patterns and the depth of the items are the
-    /// same as in a full scan by construction. A start directory that is itself ignored
-    /// consequently yields nothing.
+    /// A scan that is cancelled returns what it had delivered up to then.
     pub async fn scan<F>(
         &self,
         request: &ScanRequest,
@@ -481,11 +545,56 @@ impl DirectoryScanner {
     where
         F: Fn(ScanProgress) + Send + Sync + 'static,
     {
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let collector = Arc::clone(&collected);
+        let matched_patterns = self
+            .scan_in_batches(request, cancel_flag, progress_callback, move |batch| {
+                lock(&collector).extend(batch);
+            })
+            .await?;
+        let items = std::mem::take(&mut *lock(&collected));
+        Ok((items, matched_patterns))
+    }
+
+    /// Performs the scan described by `request` asynchronously and delivers what it
+    /// lists while it runs: `on_batch` is called with one batch of finished items
+    /// after the other, in the order of the walk, every item exactly once. Progress
+    /// is reported via `progress_callback`. The result is the set of custom ignore
+    /// patterns that were active.
+    ///
+    /// `on_batch` is called from the threads of the scan and holds up the delivery of
+    /// the following batches while it runs, so it should only pass the batch on. How
+    /// the walk is cut into batches is described at [`BatchLimits`]. When the scan is
+    /// cancelled, the batches delivered so far are a correct but partial listing.
+    ///
+    /// This function performs the scan in a blocking thread to avoid blocking the async runtime,
+    /// while allowing for cancellation and progress reporting. It uses the `ignore` crate
+    /// for high-performance, gitignore-aware directory traversal. The custom ignore
+    /// patterns are applied through [`IgnoreRules`], which also reports which of them
+    /// were active.
+    ///
+    /// The walk always begins at the project root, even when only a subdirectory is
+    /// requested: on its way down it visits nothing but the directories leading to the
+    /// start directory. That way the `.gitignore` files of all ancestors inside the
+    /// project, the anchoring of the custom patterns and the depth of the items are the
+    /// same as in a full scan by construction. A start directory that is itself ignored
+    /// consequently yields nothing.
+    pub async fn scan_in_batches<F, B>(
+        &self,
+        request: &ScanRequest,
+        cancel_flag: Arc<AtomicBool>,
+        progress_callback: F,
+        on_batch: B,
+    ) -> Result<HashSet<String>, CoreError>
+    where
+        F: Fn(ScanProgress) + Send + Sync + 'static,
+        B: Fn(Vec<FileItem>) + Send + Sync + 'static,
+    {
         let request = request.clone();
         let ignore_patterns_clone = self.ignore_patterns.clone();
         let max_file_size = self.max_file_size;
-
-        let throttle = self.progress_throttle;
+        let progress_throttle = self.progress_throttle;
+        let batch_limits = self.batch_limits;
 
         let blocking_task_handle = tokio::task::spawn_blocking(move || {
             let mut walker_builder = ignore::WalkBuilder::new(request.project_root());
@@ -509,7 +618,13 @@ impl DirectoryScanner {
             // asking the rules about each entry on its own is the complete answer. The
             // rules remember which patterns decided, which is the report of active ones.
             let walk_rules = Arc::clone(&rules);
-            let start_depth = request.start_depth;
+            let settings = WalkSettings {
+                start_depth: request.start_depth,
+                max_file_size,
+                cancel_flag: &cancel_flag,
+                progress_throttle,
+                batch_limits,
+            };
             walker_builder.filter_entry(move |entry| {
                 // Stay on the route to the start directory. Entries beside it are not
                 // part of this scan, so they must not activate a pattern either.
@@ -522,25 +637,22 @@ impl DirectoryScanner {
 
             let walker = walker_builder.build();
 
-            let final_files = process_walker_results(
-                walker,
-                start_depth,
-                max_file_size,
-                cancel_flag,
-                progress_callback,
-                throttle,
-            );
+            stream_walker_results(walker, &settings, progress_callback, &on_batch);
 
-            (final_files, rules.matched_patterns())
+            rules.matched_patterns()
         });
 
         // Await the result. If the task panicked, spawn_blocking returns a JoinError,
         // which we convert into our custom CoreError::Join.
-        match blocking_task_handle.await {
-            Ok(result) => Ok(result),
-            Err(join_error) => Err(join_error.into()),
-        }
+        blocking_task_handle.await.map_err(CoreError::from)
     }
+}
+
+/// Locks `mutex`, whether or not a thread panicked while it held the lock.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -561,10 +673,50 @@ mod tests {
             }
         })
     }
+    /// The whole result of the scan loop over `walker`, in the order of the walk,
+    /// cut into batches by the limits of production.
+    fn process_walker_results<F>(
+        walker: impl Iterator<Item = Result<ignore::DirEntry, ignore::Error>>,
+        start_depth: usize,
+        max_file_size: u64,
+        cancel_flag: Arc<AtomicBool>,
+        progress_callback: F,
+        progress_throttle: Duration,
+    ) -> Vec<FileItem>
+    where
+        F: Fn(ScanProgress),
+    {
+        let settings = WalkSettings {
+            start_depth,
+            max_file_size,
+            cancel_flag: &cancel_flag,
+            progress_throttle,
+            batch_limits: BATCH_LIMITS,
+        };
+        batches_of_walk(walker, &settings, progress_callback).concat()
+    }
+
+    /// The batches the scan loop delivers for `walker`, in the order of delivery.
+    fn batches_of_walk<F>(
+        walker: impl Iterator<Item = Result<ignore::DirEntry, ignore::Error>>,
+        settings: &WalkSettings,
+        progress_callback: F,
+    ) -> Vec<Vec<FileItem>>
+    where
+        F: Fn(ScanProgress),
+    {
+        let batches = Mutex::new(Vec::new());
+        stream_walker_results(walker, settings, progress_callback, &|batch| {
+            batches.lock().unwrap().push(batch);
+        });
+        batches.into_inner().unwrap()
+    }
+
     use crate::utils::test_helpers::setup_test_logging;
     use std::fs;
     use std::panic;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{atomic::AtomicBool, Mutex};
     use tempfile::TempDir;
 
@@ -705,7 +857,8 @@ mod tests {
         cancel_flag.store(true, Ordering::SeqCst);
         let files = handle.await.expect("Scan task panicked");
 
-        assert!(!files.is_empty());
+        // What was delivered are the batches that were complete by then (possibly
+        // none), not the whole walk.
         assert!(
             files.len() < 200,
             "Scan should have stopped early, but found {} files",
@@ -1385,27 +1538,32 @@ mod tests {
     }
 
     /// Looks at the content of `items` (of the kinds named index by index) the way a
-    /// scan does, and enters the verdicts.
+    /// scan does: handed over in batches of the size of production. `items` becomes
+    /// what was delivered, which is the whole list unless the scan was cancelled.
     fn classify_content(
-        items: &mut [FileItem],
+        items: &mut Vec<FileItem>,
         kinds: &[ContentKind],
         cancel_flag: &AtomicBool,
         is_text: &(impl Fn(&Path) -> anyhow::Result<bool> + Sync),
     ) {
-        let ((), verdicts) = classify_alongside(cancel_flag, is_text, |look_at_content| {
-            for (index, (item, kind)) in items.iter().zip(kinds).enumerate() {
-                if *kind != ContentKind::None {
-                    look_at_content(ContentJob {
-                        index,
-                        path: item.path.clone(),
-                        kind: *kind,
-                    });
+        let mut entries: Vec<ListedEntry> = std::mem::take(items)
+            .into_iter()
+            .zip(kinds)
+            .map(|(item, kind)| ListedEntry { item, kind: *kind })
+            .collect();
+        let delivered = Mutex::new(Vec::new());
+        classify_alongside(
+            cancel_flag,
+            is_text,
+            &|batch| delivered.lock().unwrap().extend(batch),
+            |hand_over| {
+                while !entries.is_empty() {
+                    let rest = entries.split_off(entries.len().min(BATCH_LIMITS.max_items));
+                    hand_over(std::mem::replace(&mut entries, rest));
                 }
-            }
-        });
-        for (index, is_binary) in verdicts {
-            items[index].is_binary = is_binary;
-        }
+            },
+        );
+        *items = delivered.into_inner().unwrap();
     }
 
     fn file_items(count: usize) -> Vec<FileItem> {
@@ -1509,50 +1667,267 @@ mod tests {
             (1..=content_pool_threads()).contains(&asked),
             "{asked} of {FILES} files were looked at"
         );
-        assert_eq!(items.iter().filter(|item| item.is_binary).count(), asked);
+        // No batch was complete at that moment, so none was delivered.
+        assert!(items.is_empty(), "{} items were delivered", items.len());
     }
 
-    /// The contents are looked at while the walk is still under way, not after it:
-    /// the walk below does not end before the first chunk it handed over has been
-    /// started. (If the chunk were only worked off after the walk, the walk would
-    /// wait in vain and the test would fail.)
+    /// The contents are looked at, and the finished batch is delivered, while the walk
+    /// is still under way, not after it: the walk below does not end before the first
+    /// batch it handed over has been delivered. (If the batch were only worked off
+    /// after the walk, the walk would wait in vain and the test would fail.)
     #[test]
-    fn test_contents_are_looked_at_while_the_walk_goes_on() {
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let started_tx = Mutex::new(started_tx);
-        let is_text = |_: &Path| {
-            let _ = started_tx.lock().unwrap().send(());
+    fn test_batches_are_delivered_while_the_walk_goes_on() {
+        let (delivered_tx, delivered_rx) = std::sync::mpsc::channel();
+        let delivered_tx = Mutex::new(delivered_tx);
+        let is_text = |_: &Path| Ok(true);
+        let entries: Vec<ListedEntry> = file_items(BATCH_LIMITS.max_items)
+            .into_iter()
+            .map(|item| ListedEntry {
+                item,
+                kind: ContentKind::File,
+            })
+            .collect();
+
+        let delivered_during_the_walk = classify_alongside(
+            &AtomicBool::new(false),
+            &is_text,
+            &|batch| {
+                let _ = delivered_tx.lock().unwrap().send(batch.len());
+            },
+            |hand_over| {
+                hand_over(entries);
+                // The walk is not done yet: this is still inside it.
+                delivered_rx.recv_timeout(Duration::from_secs(30))
+            },
+        );
+
+        assert_eq!(delivered_during_the_walk, Ok(BATCH_LIMITS.max_items));
+    }
+
+    /// Batches that are finished out of order are delivered in the order they were
+    /// handed over: here the first batch is the slowest by far.
+    #[test]
+    fn test_batches_are_delivered_in_the_order_of_the_walk() {
+        const BATCHES: usize = 12;
+        let is_text = |path: &Path| {
+            if path.starts_with("/batch_0") {
+                std::thread::sleep(Duration::from_millis(50));
+            }
             Ok(true)
         };
+        let delivered = Mutex::new(Vec::new());
 
-        let (started_during_the_walk, verdicts) =
-            classify_alongside(&AtomicBool::new(false), &is_text, |look_at_content| {
-                for index in 0..CONTENT_CHUNK_SIZE {
-                    look_at_content(ContentJob {
-                        index,
-                        path: PathBuf::from(format!("/project/file_{index}.txt")),
+        classify_alongside(
+            &AtomicBool::new(false),
+            &is_text,
+            &|batch| delivered.lock().unwrap().push(batch[0].path.clone()),
+            |hand_over| {
+                for batch in 0..BATCHES {
+                    hand_over(vec![ListedEntry {
+                        item: FileItem {
+                            path: PathBuf::from(format!("/batch_{batch}/file.txt")),
+                            ..Default::default()
+                        },
                         kind: ContentKind::File,
-                    });
+                    }]);
                 }
-                // The walk is not done yet: this is still inside it.
-                started_rx.recv_timeout(Duration::from_secs(30)).is_ok()
-            });
+            },
+        );
 
-        assert!(started_during_the_walk);
-        assert_eq!(verdicts.len(), CONTENT_CHUNK_SIZE);
+        let expected: Vec<PathBuf> = (0..BATCHES)
+            .map(|batch| PathBuf::from(format!("/batch_{batch}/file.txt")))
+            .collect();
+        assert_eq!(delivered.into_inner().unwrap(), expected);
     }
 
-    /// Entries are handed over in chunks, and the last, incomplete one is not lost:
-    /// every entry gets exactly one verdict, under its own index.
+    fn walk_settings(cancel_flag: &AtomicBool, batch_limits: BatchLimits) -> WalkSettings<'_> {
+        WalkSettings {
+            start_depth: 0,
+            max_file_size: MAX_FILE_SIZE,
+            cancel_flag,
+            progress_throttle: PROGRESS_UPDATE_THROTTLE,
+            batch_limits,
+        }
+    }
+
+    fn sorted_walk(root: &Path) -> ignore::Walk {
+        ignore::WalkBuilder::new(root)
+            .hidden(false)
+            .follow_links(false)
+            .sort_by_file_path(|a, b| a.cmp(b))
+            .build()
+    }
+
+    /// A project of `count` files `file_000.txt`, ... in one directory.
+    fn flat_project(count: usize) -> TempDir {
+        let temp_dir = tempfile::tempdir().unwrap();
+        for file in 0..count {
+            fs::write(temp_dir.path().join(format!("file_{file:03}.txt")), "text").unwrap();
+        }
+        temp_dir
+    }
+
+    /// The walk closes a batch when it holds the configured number of entries; the
+    /// last, incomplete one is not lost. Together the batches are the list, in order.
+    #[test]
+    fn test_a_walk_is_cut_into_batches_by_count() {
+        let project = flat_project(25);
+        let cancel_flag = AtomicBool::new(false);
+        let limits = BatchLimits {
+            max_items: 10,
+            max_age: Duration::from_secs(3600),
+        };
+
+        let batches = batches_of_walk(
+            sorted_walk(project.path()),
+            &walk_settings(&cancel_flag, limits),
+            |_| {},
+        );
+
+        let sizes: Vec<usize> = batches.iter().map(Vec::len).collect();
+        assert_eq!(sizes, [10, 10, 5]);
+        let names: Vec<String> = batches
+            .concat()
+            .iter()
+            .map(|item| {
+                item.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let expected: Vec<String> = (0..25).map(|file| format!("file_{file:03}.txt")).collect();
+        assert_eq!(names, expected);
+    }
+
+    /// A batch that has been open for longer than the configured age is handed over
+    /// with what it holds: a slow walk delivers what it has found so far.
+    #[test]
+    fn test_a_slow_walk_delivers_batches_by_age() {
+        let project = flat_project(6);
+        let cancel_flag = AtomicBool::new(false);
+        let limits = BatchLimits {
+            max_items: 1000,
+            max_age: Duration::from_millis(20),
+        };
+        // The walk takes its time before the fourth entry (the root comes first).
+        let mut seen = 0;
+        let walker = observing_each_entry(sorted_walk(project.path()), |_| {
+            seen += 1;
+            if seen == 5 {
+                std::thread::sleep(Duration::from_millis(60));
+            }
+        });
+
+        let batches = batches_of_walk(walker, &walk_settings(&cancel_flag, limits), |_| {});
+
+        // The pause splits the walk (usually into 3 + 3; a machine that stalls
+        // elsewhere too may split it further). Nothing is lost or reordered.
+        assert!(batches.len() >= 2, "{} batch(es)", batches.len());
+        assert!(batches.iter().all(|batch| !batch.is_empty()));
+        let names: Vec<String> = batches
+            .concat()
+            .iter()
+            .map(|item| {
+                item.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let expected: Vec<String> = (0..6).map(|file| format!("file_{file:03}.txt")).collect();
+        assert_eq!(names, expected);
+    }
+
+    /// What a cancelled scan has delivered is a prefix of the walk, in whole batches.
+    #[test]
+    fn test_a_cancelled_walk_has_delivered_a_prefix_in_whole_batches() {
+        let project = flat_project(25);
+        let cancel_flag = AtomicBool::new(false);
+        let limits = BatchLimits {
+            max_items: 10,
+            max_age: Duration::from_secs(3600),
+        };
+        let (delivered_tx, delivered_rx) = std::sync::mpsc::channel();
+        let batches = Mutex::new(Vec::new());
+        // The scan is cancelled when the walk comes to the 16th file, after the first
+        // batch has been delivered.
+        let mut seen = 0;
+        let walker = observing_each_entry(sorted_walk(project.path()), |_| {
+            seen += 1;
+            if seen == 17 {
+                delivered_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("the first batch is delivered during the walk");
+                cancel_flag.store(true, Ordering::SeqCst);
+            }
+        });
+
+        stream_walker_results(
+            walker,
+            &walk_settings(&cancel_flag, limits),
+            |_| {},
+            &|batch: Vec<FileItem>| {
+                batches.lock().unwrap().push(batch);
+                let _ = delivered_tx.send(());
+            },
+        );
+
+        let batches = batches.into_inner().unwrap();
+        assert!(
+            batches.len() == 1 && batches[0].len() == 10,
+            "one whole batch is delivered, the half-filled one is not: {:?}",
+            batches.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+        assert!(batches[0][9].path.ends_with("file_009.txt"));
+    }
+
+    /// The scanner delivers every item exactly once and in the order in which
+    /// `scan` returns them, and reports the active patterns at the end.
+    #[tokio::test]
+    async fn scan_in_batches_delivers_the_result_of_a_scan_piece_by_piece() {
+        let (_temp_dir, root) = setup_test_filesystem();
+        let patterns = HashSet::from(["*.log".to_string()]);
+        let request = ScanRequest::project(&root, None);
+        let (expected, expected_patterns) = DirectoryScanner::new(patterns.clone())
+            .scan(&request, Arc::new(AtomicBool::new(false)), |_| {})
+            .await
+            .unwrap();
+        let mut scanner = DirectoryScanner::new(patterns);
+        scanner.batch_limits.max_items = 2;
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&batches);
+
+        let active_patterns = scanner
+            .scan_in_batches(
+                &request,
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+                move |batch| sink.lock().unwrap().push(batch),
+            )
+            .await
+            .unwrap();
+
+        let batches = std::mem::take(&mut *batches.lock().unwrap());
+        assert!(batches.len() > 1 && batches.iter().all(|batch| batch.len() <= 2));
+        // The walk is not sorted, but two walks of an unchanged tree agree.
+        assert_eq!(summarize(batches.concat()), summarize(expected));
+        assert_eq!(active_patterns, expected_patterns);
+    }
+
+    /// However many batches the entries make up, every entry is delivered exactly
+    /// once, in its place and with its own verdict.
     #[test]
     fn test_every_submitted_entry_gets_its_verdict() {
         for count in [
             0,
             1,
-            CONTENT_CHUNK_SIZE - 1,
-            CONTENT_CHUNK_SIZE,
-            CONTENT_CHUNK_SIZE + 1,
-            3 * CONTENT_CHUNK_SIZE + 7,
+            BATCH_LIMITS.max_items - 1,
+            BATCH_LIMITS.max_items,
+            BATCH_LIMITS.max_items + 1,
+            3 * BATCH_LIMITS.max_items + 7,
         ] {
             let mut items = file_items(count);
             let kinds = vec![ContentKind::File; count];

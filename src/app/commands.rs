@@ -507,8 +507,31 @@ fn ignore_pattern_for_path(state: &AppState, path: &Path) -> Option<String> {
         .iter()
         .any(|item| item.is_directory && item.path == path);
 
-    let mut pattern = relative_path.to_string_lossy().to_string();
-    if is_directory && !pattern.ends_with('/') {
+    gitignore_pattern(relative_path, is_directory)
+}
+
+/// The gitignore pattern for the entry at `relative_path` (relative to the project
+/// root); the pattern of a directory ends with a slash.
+///
+/// A gitignore pattern separates the names of a path with `/` on every platform (a
+/// backslash escapes the character after it), so the pattern is put together from the
+/// components of the path, not from its text: on Windows that text is `src\gen`.
+///
+/// `None` for a path that names no entry below the root: the root itself, or a path
+/// with anything but names in it (`..`, a drive).
+fn gitignore_pattern(relative_path: &Path, is_directory: bool) -> Option<String> {
+    let names = relative_path
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if names.is_empty() {
+        return None;
+    }
+    let mut pattern = names.join("/");
+    if is_directory {
         pattern.push('/');
     }
     Some(pattern)
@@ -1200,10 +1223,6 @@ mod tests {
         assert!(state.is_current_scan(&token));
         assert!(state.has_scan_task(), "Scan must stay cancellable");
         assert!(!token.is_cancelled());
-        assert!(
-            state.begin_lazy_load().is_none(),
-            "Lazy loads must stay locked out while the scan is running"
-        );
         state.cancel_current_scan();
     }
 
@@ -1682,6 +1701,98 @@ mod tests {
             .await;
         let final_patterns_count = harness.state.lock().config.ignore_patterns.len();
         assert_eq!(initial_patterns_count, final_patterns_count);
+    }
+
+    /// The names of a nested path are joined with `/` whatever the separator of the
+    /// platform is. The paths are built with `join`, so on Windows they read
+    /// `src\gen\out`, which is not what a gitignore pattern looks like.
+    #[test]
+    fn test_gitignore_pattern_joins_the_names_of_a_path_with_slashes() {
+        let nested = Path::new("src").join("gen").join("out");
+        assert_eq!(
+            gitignore_pattern(&nested, true).as_deref(),
+            Some("src/gen/out/")
+        );
+        assert_eq!(
+            gitignore_pattern(&nested.join("a b.rs"), false).as_deref(),
+            Some("src/gen/out/a b.rs")
+        );
+        assert_eq!(
+            gitignore_pattern(Path::new("docs"), true).as_deref(),
+            Some("docs/")
+        );
+        assert_eq!(
+            gitignore_pattern(Path::new("notes.txt"), false).as_deref(),
+            Some("notes.txt")
+        );
+    }
+
+    /// A path as Windows spells it.
+    #[cfg(windows)]
+    #[test]
+    fn test_gitignore_pattern_of_a_path_with_backslashes() {
+        assert_eq!(
+            gitignore_pattern(Path::new(r"src\gen"), true).as_deref(),
+            Some("src/gen/")
+        );
+        assert_eq!(
+            gitignore_pattern(Path::new(r"src\gen\mod.rs"), false).as_deref(),
+            Some("src/gen/mod.rs")
+        );
+    }
+
+    /// Only a path that names an entry below the root has a pattern.
+    #[test]
+    fn test_gitignore_pattern_needs_a_path_below_the_root() {
+        assert_eq!(gitignore_pattern(Path::new(""), true), None);
+        assert_eq!(
+            gitignore_pattern(&Path::new("..").join("other"), false),
+            None
+        );
+        assert_eq!(gitignore_pattern(Path::new("/absolute"), false), None);
+    }
+
+    /// The pattern of a nested directory removes that directory, and only it, from
+    /// the loaded list: it is a valid gitignore pattern on every platform.
+    #[tokio::test]
+    async fn test_add_ignore_path_for_a_nested_directory_uses_slashes() {
+        let harness = TestHarness::new();
+        harness.create_file("src/gen/out.rs", "");
+        harness.create_file("src/main.rs", "");
+        harness.create_file("gen/keep.rs", "");
+        harness.set_initial_files(&[
+            "src",
+            "src/gen",
+            "src/gen/out.rs",
+            "src/main.rs",
+            "gen",
+            "gen/keep.rs",
+        ]);
+        let nested = harness.root_path.join("src").join("gen");
+
+        add_ignore_path(json!(nested), harness.proxy.clone(), harness.state.clone()).await;
+
+        let state = harness.state.lock();
+        assert!(
+            state.config.ignore_patterns.contains("src/gen/"),
+            "{:?}",
+            state.config.ignore_patterns
+        );
+        let remaining: HashSet<PathBuf> = state
+            .full_file_list
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        let root = &harness.root_path;
+        assert_eq!(
+            remaining,
+            HashSet::from([
+                root.join("src"),
+                root.join("src").join("main.rs"),
+                root.join("gen"),
+                root.join("gen").join("keep.rs"),
+            ])
+        );
     }
 
     /// Whether the path is a directory is taken from the loaded list, not from the

@@ -3,7 +3,7 @@
 use crate::app::tree_index::{TreeIndex, TreeIndexCache};
 use crate::config::{AppConfig, ConfigSnapshot, ConfigStore};
 use crate::core::{is_blank, FileItem, FileNameMatcher, ScanProgress};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -241,6 +241,45 @@ impl LazyLoadToken {
     }
 }
 
+/// The items of the file list that did not come from the walk of the scan that is
+/// building the list: the first level (published ahead of the walk) and the levels
+/// the user asked for while the walk was under way (lazy loads).
+///
+/// The walk lists these items as well. Keeping track of them is what lets its batches
+/// be merged without duplicates and without comparing every batch against the whole
+/// list, and what makes the finished list exactly what the walk saw: an item the
+/// walk has not confirmed by the end (deleted in the meantime) is removed again.
+#[derive(Debug, Default)]
+struct AheadOfWalk {
+    /// By path: `true` once the walk has listed the item too.
+    confirmed: HashMap<PathBuf, bool>,
+}
+
+impl AheadOfWalk {
+    fn add(&mut self, path: &Path) {
+        self.confirmed.entry(path.to_path_buf()).or_insert(false);
+    }
+
+    /// `true` if `path` is already in the list; the walk has confirmed it by this.
+    fn confirm(&mut self, path: &Path) -> bool {
+        match self.confirmed.get_mut(path) {
+            Some(confirmed) => {
+                *confirmed = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The paths the walk has not listed.
+    fn unconfirmed(self) -> HashSet<PathBuf> {
+        self.confirmed
+            .into_iter()
+            .filter_map(|(path, confirmed)| (!confirmed).then_some(path))
+            .collect()
+    }
+}
+
 /// A path that is being opened and has not been looked at yet, see
 /// [`AppState::begin_open`].
 #[derive(Debug, Clone)]
@@ -342,6 +381,9 @@ pub struct AppState {
     lazy_load_cancel_flag: Arc<AtomicBool>,
     /// The directory scan that is currently in progress, if any.
     scan: RunSlot,
+    /// Set while the walk of the current scan fills the file list, see
+    /// [`AppState::merge_scanned_items`].
+    ahead_of_walk: Option<AheadOfWalk>,
     /// Set while the current scan has not yet found the path it is to open.
     opening: Option<PendingOpen>,
     /// The content generation that is currently in progress, if any.
@@ -396,6 +438,7 @@ impl AppState {
             file_list_generation: 0,
             lazy_load_cancel_flag: Arc::new(AtomicBool::new(false)),
             scan: RunSlot::default(),
+            ahead_of_walk: None,
             opening: None,
             generation: RunSlot::default(),
             content_search: RunSlot::default(),
@@ -420,6 +463,7 @@ impl AppState {
     pub fn begin_scan(&mut self) -> ScanToken {
         self.invalidate_file_list();
         self.opening = None;
+        self.ahead_of_walk = None;
         self.scan_progress = no_scan_progress();
         ScanToken(self.scan.begin())
     }
@@ -447,6 +491,7 @@ impl AppState {
 
     fn register_open(&mut self, pending: PendingOpen) -> ScanToken {
         self.opening = Some(pending);
+        self.ahead_of_walk = None;
         self.scan_progress = no_scan_progress();
         ScanToken(self.scan.begin())
     }
@@ -548,6 +593,7 @@ impl AppState {
             return false;
         }
         self.opening = None;
+        self.ahead_of_walk = None;
         // The counters stay as the result of the scan; it works on no path any more.
         self.scan_progress.current_scanning_path.clear();
         true
@@ -564,21 +610,24 @@ impl AppState {
         }
 
         self.opening = None;
+        self.ahead_of_walk = None;
         self.scan_progress = no_scan_progress();
         self.status = StatusNotice::ScanCancelled;
         tracing::info!("Scan cancelled.");
     }
 
-    /// Returns a token for a lazy load of a single directory level, or `None` if a full
-    /// scan is in progress (which will load that level anyway).
-    pub fn begin_lazy_load(&self) -> Option<LazyLoadToken> {
-        if self.is_scanning() {
-            return None;
-        }
-        Some(LazyLoadToken {
+    /// Returns a token for a lazy load of a single directory level of the current
+    /// file list.
+    ///
+    /// A lazy load is possible at any time, also while a scan is walking the project:
+    /// the walk gets to a directory when it gets to it, the user who expands it wants
+    /// to see it now. The level is then in the list ahead of the walk, see
+    /// [`AppState::merge_directory_level`].
+    pub fn begin_lazy_load(&self) -> LazyLoadToken {
+        LazyLoadToken {
             file_list_generation: self.file_list_generation,
             cancel_flag: self.lazy_load_cancel_flag.clone(),
-        })
+        }
     }
 
     /// `true` if the file list the lazy load was started for is still the current one.
@@ -807,9 +856,129 @@ impl AppState {
     ///
     /// The list then holds a single level, so `root` is the only directory whose
     /// children are loaded; whatever was loaded in the list before is forgotten.
+    ///
+    /// The walk of the whole project that follows lists this level again; the items
+    /// are remembered as being ahead of it, see [`AppState::merge_scanned_items`].
     pub fn replace_with_shallow_file_list(&mut self, root: &std::path::Path, files: Vec<FileItem>) {
+        let mut ahead_of_walk = AheadOfWalk::default();
+        for item in &files {
+            ahead_of_walk.add(&item.path);
+        }
+        self.ahead_of_walk = Some(ahead_of_walk);
         self.full_file_list = files;
         self.loaded_dirs = HashSet::from([root.to_path_buf()]);
+    }
+
+    /// Adds `items`, which the walk of the scan identified by `token` has listed, to
+    /// the file list. An item that is already there (because its level was published
+    /// ahead of the walk) is not added a second time.
+    ///
+    /// The directories of the items do not count as loaded by this: the walk may not
+    /// have listed all of their children yet. That is settled for all directories at
+    /// once by [`AppState::complete_scanned_file_list`].
+    ///
+    /// Does nothing and returns `false` for a stale token. The filtered list is not
+    /// touched; the caller applies the filters when it publishes the change.
+    pub fn merge_scanned_items(&mut self, token: &ScanToken, items: Vec<FileItem>) -> bool {
+        if !self.is_current_scan(token) {
+            return false;
+        }
+        let ahead_of_walk = self.ahead_of_walk.get_or_insert_with(AheadOfWalk::default);
+        self.full_file_list.reserve(items.len());
+        for item in items {
+            if !ahead_of_walk.confirm(&item.path) {
+                self.full_file_list.push(item);
+            }
+        }
+        true
+    }
+
+    /// Declares the file list complete on behalf of the scan identified by `token`,
+    /// whose walk has come to its end and has delivered all its items
+    /// ([`AppState::merge_scanned_items`]): every directory in the list is loaded,
+    /// `active_patterns` are the ignore patterns that were active, and the list is
+    /// exactly what the walk saw. Items that were in the list ahead of the walk and
+    /// that the walk did not find are removed, and so are selected paths that are not
+    /// in the list (any more).
+    ///
+    /// Does nothing and returns `false` for a stale token. The filtered list is not
+    /// touched; the caller applies the filters.
+    pub fn complete_scanned_file_list(
+        &mut self,
+        token: &ScanToken,
+        active_patterns: HashSet<String>,
+    ) -> bool {
+        if !self.is_current_scan(token) {
+            return false;
+        }
+        let not_found = self
+            .ahead_of_walk
+            .take()
+            .map(AheadOfWalk::unconfirmed)
+            .unwrap_or_default();
+        if !not_found.is_empty() {
+            self.full_file_list
+                .retain(|item| !not_found.contains(&item.path));
+        }
+        if !self.selected_files.is_empty() {
+            let still_listed: HashSet<PathBuf> = self
+                .full_file_list
+                .iter()
+                .filter(|item| self.selected_files.contains(&item.path))
+                .map(|item| item.path.clone())
+                .collect();
+            self.selected_files = still_listed;
+        }
+        self.loaded_dirs = self
+            .full_file_list
+            .iter()
+            .filter(|item| item.is_directory)
+            .map(|item| item.path.clone())
+            .collect();
+        self.active_ignore_patterns = active_patterns;
+        self.is_fully_scanned = true;
+        true
+    }
+
+    /// Adds `items`, the content of `directory` as a lazy load has listed it, to the
+    /// file list and marks the directory as loaded; `active_patterns` are the ignore
+    /// patterns that were active in that level. Items that are already in the list
+    /// (the walk of a running scan has been there) are not added a second time.
+    ///
+    /// Does nothing and returns `false` if the file list is no longer the one the
+    /// lazy load was started for. The filtered list is not touched; the caller
+    /// applies the filters.
+    pub fn merge_directory_level(
+        &mut self,
+        token: &LazyLoadToken,
+        directory: &Path,
+        items: Vec<FileItem>,
+        active_patterns: HashSet<String>,
+    ) -> bool {
+        if !self.is_current_lazy_load(token) {
+            return false;
+        }
+        self.loaded_dirs.insert(directory.to_path_buf());
+        self.active_ignore_patterns.extend(active_patterns);
+
+        let new_paths: HashSet<&Path> = items.iter().map(|item| item.path.as_path()).collect();
+        let already_listed: HashSet<PathBuf> = self
+            .full_file_list
+            .iter()
+            .filter(|item| new_paths.contains(item.path.as_path()))
+            .map(|item| item.path.clone())
+            .collect();
+        for item in items {
+            if already_listed.contains(&item.path) {
+                continue;
+            }
+            // While a scan walks the project, the level is ahead of its walk.
+            if let Some(ahead_of_walk) = self.ahead_of_walk.as_mut() {
+                ahead_of_walk.add(&item.path);
+            }
+            self.full_file_list.push(item);
+        }
+        true
     }
 
     /// Makes `files` the complete content of the project: every directory in it is loaded.
@@ -885,6 +1054,7 @@ impl AppState {
     fn clear_directory_data(&mut self) {
         self.cancel_current_generation();
         self.invalidate_file_list();
+        self.ahead_of_walk = None;
 
         self.current_path = String::new();
         self.full_file_list.clear();
@@ -1116,26 +1286,200 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_begin_lazy_load_is_refused_while_scanning() {
+    async fn test_a_lazy_load_begun_during_a_scan_belongs_to_the_list_of_that_scan() {
         let mut state = AppState::default();
-        assert!(state.begin_lazy_load().is_some());
+        let before = state.begin_lazy_load();
 
         let _token = state.begin_scan();
+        let during = state.begin_lazy_load();
 
-        assert!(state.begin_lazy_load().is_none());
+        assert!(!state.is_current_lazy_load(&before));
+        assert!(state.is_current_lazy_load(&during));
+        assert!(!during.is_cancelled());
+    }
+
+    fn scanned_file(path: &str) -> FileItem {
+        create_test_file_item(path, false)
+    }
+
+    fn scanned_dir(path: &str) -> FileItem {
+        create_test_file_item(path, true)
+    }
+
+    fn listed_paths(state: &AppState) -> Vec<&str> {
+        state
+            .full_file_list
+            .iter()
+            .map(|item| item.path.to_str().unwrap())
+            .collect()
+    }
+
+    /// A state in which a scan of `/p` has published the first level: `/p/a` (a
+    /// directory) and `/p/f.txt`.
+    fn state_after_shallow_phase() -> (AppState, ScanToken) {
+        let mut state = AppState {
+            current_path: "/p".to_string(),
+            ..AppState::default()
+        };
+        let token = state.begin_scan();
+        state.begin_scan_walk(&token);
+        state.replace_with_shallow_file_list(
+            Path::new("/p"),
+            vec![scanned_dir("/p/a"), scanned_file("/p/f.txt")],
+        );
+        (state, token)
+    }
+
+    #[test]
+    fn test_batches_of_the_walk_are_merged_without_duplicating_the_first_level() {
+        let (mut state, token) = state_after_shallow_phase();
+
+        assert!(state.merge_scanned_items(
+            &token,
+            vec![scanned_dir("/p/a"), scanned_file("/p/a/x.txt")]
+        ));
+        assert!(state.merge_scanned_items(
+            &token,
+            vec![scanned_file("/p/a/y.txt"), scanned_file("/p/f.txt")]
+        ));
+
+        assert_eq!(
+            listed_paths(&state),
+            ["/p/a", "/p/f.txt", "/p/a/x.txt", "/p/a/y.txt"]
+        );
+        // The walk may not be done with `/p/a`: it does not count as loaded yet.
+        assert_eq!(state.loaded_dirs, HashSet::from([PathBuf::from("/p")]));
+        assert!(!state.is_fully_scanned);
+    }
+
+    #[test]
+    fn test_batches_of_an_outdated_scan_are_not_merged() {
+        let (mut state, token) = state_after_shallow_phase();
+        let newer = state.begin_scan();
+
+        assert!(!state.merge_scanned_items(&token, vec![scanned_file("/p/a/x.txt")]));
+        assert!(!state.complete_scanned_file_list(&token, HashSet::new()));
+
+        assert_eq!(listed_paths(&state), ["/p/a", "/p/f.txt"]);
+        assert!(!state.is_fully_scanned);
+        assert!(state.is_current_scan(&newer));
+    }
+
+    #[test]
+    fn test_a_level_loaded_during_the_walk_is_not_listed_twice() {
+        let (mut state, token) = state_after_shallow_phase();
+        // The walk has delivered one child of `/p/a` when the user expands it.
+        state.merge_scanned_items(&token, vec![scanned_file("/p/a/x.txt")]);
+        let lazy = state.begin_lazy_load();
+
+        assert!(state.merge_directory_level(
+            &lazy,
+            Path::new("/p/a"),
+            vec![scanned_file("/p/a/x.txt"), scanned_file("/p/a/y.txt")],
+            HashSet::from(["*.log".to_string()]),
+        ));
+        // The walk goes on and comes to the second child itself.
+        state.merge_scanned_items(&token, vec![scanned_file("/p/a/y.txt")]);
+
+        assert_eq!(
+            listed_paths(&state),
+            ["/p/a", "/p/f.txt", "/p/a/x.txt", "/p/a/y.txt"]
+        );
+        assert!(state.loaded_dirs.contains(Path::new("/p/a")));
+        assert!(state.active_ignore_patterns.contains("*.log"));
+    }
+
+    #[test]
+    fn test_the_completed_list_is_what_the_walk_saw() {
+        let (mut state, token) = state_after_shallow_phase();
+        let lazy = state.begin_lazy_load();
+        state.merge_directory_level(
+            &lazy,
+            Path::new("/p/a"),
+            vec![scanned_file("/p/a/x.txt"), scanned_file("/p/a/gone.txt")],
+            HashSet::from(["lazy".to_string()]),
+        );
+        state.selected_files = HashSet::from([
+            PathBuf::from("/p/a/x.txt"),
+            PathBuf::from("/p/a/gone.txt"),
+            PathBuf::from("/p/f.txt"),
+        ]);
+        // The walk finds neither `/p/f.txt` nor `/p/a/gone.txt` (deleted meanwhile).
+        state.merge_scanned_items(
+            &token,
+            vec![
+                scanned_dir("/p/a"),
+                scanned_file("/p/a/x.txt"),
+                scanned_dir("/p/a/sub"),
+            ],
+        );
+
+        assert!(state.complete_scanned_file_list(&token, HashSet::from(["walk".to_string()])));
+
+        assert_eq!(listed_paths(&state), ["/p/a", "/p/a/x.txt", "/p/a/sub"]);
+        assert_eq!(
+            state.selected_files,
+            HashSet::from([PathBuf::from("/p/a/x.txt")])
+        );
+        assert_eq!(
+            state.loaded_dirs,
+            HashSet::from([PathBuf::from("/p/a"), PathBuf::from("/p/a/sub")])
+        );
+        assert_eq!(
+            state.active_ignore_patterns,
+            HashSet::from(["walk".to_string()])
+        );
+        assert!(state.is_fully_scanned);
+    }
+
+    #[test]
+    fn test_a_level_loaded_for_a_replaced_list_is_not_merged() {
+        let (mut state, _token) = state_after_shallow_phase();
+        let lazy = state.begin_lazy_load();
+        let _newer = state.begin_scan();
+
+        assert!(!state.merge_directory_level(
+            &lazy,
+            Path::new("/p/a"),
+            vec![scanned_file("/p/a/x.txt")],
+            HashSet::new(),
+        ));
+
+        assert_eq!(listed_paths(&state), ["/p/a", "/p/f.txt"]);
+        assert!(!state.loaded_dirs.contains(Path::new("/p/a")));
+    }
+
+    #[test]
+    fn test_a_level_loaded_after_a_cancelled_scan_completes_what_the_walk_left() {
+        let (mut state, token) = state_after_shallow_phase();
+        state.merge_scanned_items(&token, vec![scanned_file("/p/a/x.txt")]);
+        state.cancel_current_scan();
+        let lazy = state.begin_lazy_load();
+
+        state.merge_directory_level(
+            &lazy,
+            Path::new("/p/a"),
+            vec![scanned_file("/p/a/x.txt"), scanned_file("/p/a/y.txt")],
+            HashSet::new(),
+        );
+
+        assert_eq!(
+            listed_paths(&state),
+            ["/p/a", "/p/f.txt", "/p/a/x.txt", "/p/a/y.txt"]
+        );
     }
 
     #[tokio::test]
     async fn test_lazy_load_token_goes_stale_when_file_list_is_replaced() {
         let mut state = AppState::default();
 
-        let token = state.begin_lazy_load().expect("not scanning");
+        let token = state.begin_lazy_load();
         assert!(state.is_current_lazy_load(&token));
         let scan = state.begin_scan();
         assert!(!state.is_current_lazy_load(&token), "stale after new scan");
         state.finish_scan(&scan);
 
-        let token = state.begin_lazy_load().expect("not scanning");
+        let token = state.begin_lazy_load();
         state.reset_directory_state();
         assert!(!state.is_current_lazy_load(&token), "stale after reset");
     }
@@ -1143,7 +1487,7 @@ mod tests {
     #[tokio::test]
     async fn test_lazy_load_is_cancelled_when_a_new_scan_begins() {
         let mut state = AppState::default();
-        let lazy = state.begin_lazy_load().expect("not scanning");
+        let lazy = state.begin_lazy_load();
         let scanner_flag = lazy.cancel_flag();
         assert!(!lazy.is_cancelled());
 
@@ -1160,7 +1504,7 @@ mod tests {
     #[tokio::test]
     async fn test_lazy_load_is_cancelled_when_directory_is_reset() {
         let mut state = AppState::default();
-        let lazy = state.begin_lazy_load().expect("not scanning");
+        let lazy = state.begin_lazy_load();
 
         state.reset_directory_state();
 
@@ -1173,12 +1517,12 @@ mod tests {
     #[tokio::test]
     async fn test_lazy_load_started_for_the_new_file_list_is_not_cancelled() {
         let mut state = AppState::default();
-        let outdated = state.begin_lazy_load().expect("not scanning");
+        let outdated = state.begin_lazy_load();
         let scan = state.begin_scan();
         state.finish_scan(&scan);
 
-        let current = state.begin_lazy_load().expect("scan has finished");
-        let sibling = state.begin_lazy_load().expect("scan has finished");
+        let current = state.begin_lazy_load();
+        let sibling = state.begin_lazy_load();
 
         assert!(outdated.is_cancelled());
         assert!(!current.is_cancelled());
@@ -1195,7 +1539,7 @@ mod tests {
         let mut state = AppState::default();
         let scan = state.begin_scan();
         state.finish_scan(&scan);
-        let lazy = state.begin_lazy_load().expect("scan has finished");
+        let lazy = state.begin_lazy_load();
 
         state.cancel_current_scan();
         state.cancel_current_generation();
@@ -1536,7 +1880,7 @@ mod tests {
         let mut state = AppState::default();
         state.config.ignore_patterns.clear();
         state.current_path = "/project".to_string();
-        let token = state.begin_lazy_load().expect("No scan is running");
+        let token = state.begin_lazy_load();
 
         // Without patterns nothing changes, so the lazy load stays valid.
         state.apply_ignore_patterns();
@@ -1547,7 +1891,7 @@ mod tests {
 
         assert!(!state.is_current_lazy_load(&token));
         assert!(token.is_cancelled(), "The lazy scan must be told to stop");
-        let fresh = state.begin_lazy_load().expect("No scan is running");
+        let fresh = state.begin_lazy_load();
         assert!(state.is_current_lazy_load(&fresh) && !fresh.is_cancelled());
     }
 
@@ -1632,7 +1976,7 @@ mod tests {
     #[test]
     fn test_begin_open_registers_the_scan_and_leaves_the_loaded_directory_alone() {
         let mut state = state_with_loaded_directory();
-        let lazy_load = state.begin_lazy_load().unwrap();
+        let lazy_load = state.begin_lazy_load();
 
         let token = state.begin_open(Path::new("/new"));
 
@@ -1651,7 +1995,7 @@ mod tests {
     #[test]
     fn test_entering_the_opened_directory_replaces_the_loaded_one_and_keeps_the_scan() {
         let mut state = state_with_loaded_directory();
-        let lazy_load = state.begin_lazy_load().unwrap();
+        let lazy_load = state.begin_lazy_load();
         let token = state.begin_open(Path::new("/new"));
 
         assert!(state.enter_opened_directory(&token, Path::new("/new")));

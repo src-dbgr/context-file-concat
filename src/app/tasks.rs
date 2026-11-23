@@ -13,6 +13,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::events::UserEvent;
@@ -56,13 +58,40 @@ pub trait ContentGenerator: Send + Sync {
 /// The outcome of a directory scan: the items found and the ignore patterns that matched.
 pub type ScanOutcome = Result<(Vec<FileItem>, HashSet<String>), CoreError>;
 
+/// The outcome of a scan that has delivered its items in batches: the ignore patterns
+/// that matched.
+pub type StreamedScanOutcome = Result<HashSet<String>, CoreError>;
+
+/// Takes the batches of a streaming scan, see [`Scanner::scan_in_batches`].
+pub type BatchSink = Box<dyn Fn(Vec<FileItem>) + Send + Sync>;
+
 /// A trait abstracting the directory scanning functionality.
 pub trait Scanner: Send + Sync {
+    /// Scans what `request` describes and returns all of it at once.
     fn scan(
         &self,
         request: &ScanRequest,
         progress_callback: Box<dyn Fn(ScanProgress) + Send + Sync>,
     ) -> impl Future<Output = ScanOutcome> + Send;
+
+    /// Scans what `request` describes and passes the items to `on_batch` while the
+    /// scan runs: batch by batch, every item once. `on_batch` is called from the
+    /// threads of the scan and must be quick. The batches that were delivered stand
+    /// even if the scan fails or is cancelled afterwards.
+    ///
+    /// By default the result of [`Scanner::scan`] is delivered as a single batch.
+    fn scan_in_batches(
+        &self,
+        request: &ScanRequest,
+        progress_callback: Box<dyn Fn(ScanProgress) + Send + Sync>,
+        on_batch: BatchSink,
+    ) -> impl Future<Output = StreamedScanOutcome> + Send {
+        async move {
+            let (items, matched_patterns) = self.scan(request, progress_callback).await?;
+            on_batch(items);
+            Ok(matched_patterns)
+        }
+    }
 }
 
 /// A trait abstracting the token counting functionality.
@@ -141,6 +170,24 @@ impl Scanner for RealScanner {
             .with_max_file_size(self.max_file_size);
         scanner
             .scan(request, self.cancel_flag.clone(), progress_callback)
+            .await
+    }
+
+    async fn scan_in_batches(
+        &self,
+        request: &ScanRequest,
+        progress_callback: Box<dyn Fn(ScanProgress) + Send + Sync>,
+        on_batch: BatchSink,
+    ) -> StreamedScanOutcome {
+        let scanner = DirectoryScanner::new(self.ignore_patterns.clone())
+            .with_max_file_size(self.max_file_size);
+        scanner
+            .scan_in_batches(
+                request,
+                self.cancel_flag.clone(),
+                progress_callback,
+                on_batch,
+            )
             .await
     }
 }
@@ -398,12 +445,37 @@ async fn scan_phases<P: EventProxy, S: Scanner, F: FileSearcher + 'static>(
     }
 
     // --- Phase 2: Deep Background Scan (Indexing) ---
-    let scan_result_deep = scanner
-        .scan(
-            &ScanRequest::project(path, None),
+    // The walk delivers what it finds while it runs; the batches are published into
+    // the state at the pace of `publisher`. A batch that arrives when the scan is no
+    // longer the current one ends the task (the guard has nothing to release then).
+    let (batch_tx, mut batch_rx) = mpsc::unbounded_channel::<Vec<FileItem>>();
+    let mut publisher = BatchPublisher::new();
+    let deep_request = ScanRequest::project(path, None);
+    let scan_result_deep = {
+        let scan = scanner.scan_in_batches(
+            &deep_request,
             scan_progress_reporter(proxy, state, token),
-        )
-        .await;
+            Box::new(move |batch| {
+                // Nobody listens any more once the task has ended.
+                let _ = batch_tx.send(batch);
+            }),
+        );
+        tokio::pin!(scan);
+        loop {
+            // In this order: the end of the scan first, and publishing before taking
+            // more batches, which a fast walk supplies without a pause.
+            tokio::select! {
+                biased;
+                outcome = &mut scan => break outcome,
+                () = tokio::time::sleep_until(publisher.due()), if publisher.has_pending() => {
+                    if !publisher.publish(state, proxy, token) {
+                        return;
+                    }
+                }
+                Some(batch) = batch_rx.recv() => publisher.add(batch),
+            }
+        }
+    };
 
     if token.is_cancelled() {
         tracing::info!("Scan cancelled during deep scan phase.");
@@ -411,14 +483,112 @@ async fn scan_phases<P: EventProxy, S: Scanner, F: FileSearcher + 'static>(
     }
 
     match scan_result_deep {
-        Ok((files, patterns)) => {
-            if apply_deep_scan_result(state, token, files, patterns) {
+        Ok(patterns) => {
+            // The scan has ended, so everything it delivers is in the channel.
+            while let Ok(batch) = batch_rx.try_recv() {
+                publisher.add(batch);
+            }
+            if apply_deep_scan_result(state, token, publisher.take_pending(), patterns) {
                 repeat_content_search_to_the_end(proxy, state, searcher).await;
                 complete_scan(state, proxy, token);
             }
         }
         Err(e) => handle_scan_error(e, state, proxy, token),
     }
+}
+
+/// The shortest time between two publications of scanned items, see [`BatchPublisher`].
+const MIN_PUBLISH_INTERVAL: Duration = Duration::from_millis(150);
+
+/// How many times the duration of a publication has to pass before the next one, see
+/// [`BatchPublisher`]. 9 limits publishing to a tenth of the time of a scan.
+const PUBLISH_PAUSE_FACTOR: u32 = 9;
+
+/// Publishes the items a running scan delivers into the state, at a bounded cost.
+///
+/// The scanner delivers small batches, hundreds per second on a fast disk. Publishing
+/// means: merging them into the file list, applying the filters to the whole list and
+/// sending a state update, for which the tree index is built anew. All of that grows
+/// with the size of the list, and it happens under the lock on the state. The batches
+/// are therefore collected here and published together
+///
+/// * at most every [`MIN_PUBLISH_INTERVAL`] (more often would not be seen), and
+/// * only after [`PUBLISH_PAUSE_FACTOR`] times the duration of the previous
+///   publication has passed. The larger the list gets, the less often it is
+///   published, and the share of publishing in the time of the scan (and in the time
+///   the state is locked) stays below 1 / (1 + factor) however large the project is.
+struct BatchPublisher {
+    pending: Vec<FileItem>,
+    due: tokio::time::Instant,
+}
+
+impl BatchPublisher {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            due: tokio::time::Instant::now() + MIN_PUBLISH_INTERVAL,
+        }
+    }
+
+    fn add(&mut self, mut batch: Vec<FileItem>) {
+        self.pending.append(&mut batch);
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// When the next publication may happen.
+    fn due(&self) -> tokio::time::Instant {
+        self.due
+    }
+
+    /// The items that have not been published.
+    fn take_pending(&mut self) -> Vec<FileItem> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Publishes the pending items on behalf of the scan identified by `token` and
+    /// sets the time of the next publication. Returns `false` if the scan is no
+    /// longer the current one (nothing is changed or sent then).
+    fn publish<P: EventProxy>(
+        &mut self,
+        state: &SharedState,
+        proxy: &P,
+        token: &ScanToken,
+    ) -> bool {
+        let items = self.take_pending();
+        let Some(cost) = publish_scanned_items(state, proxy, token, items) else {
+            return false;
+        };
+        self.due = tokio::time::Instant::now() + pause_after_publication(cost);
+        true
+    }
+}
+
+/// How long to wait after a publication that took `cost`, see [`BatchPublisher`].
+fn pause_after_publication(cost: Duration) -> Duration {
+    MIN_PUBLISH_INTERVAL.max(cost.saturating_mul(PUBLISH_PAUSE_FACTOR))
+}
+
+/// Merges `items`, delivered by the walk of the scan identified by `token`, into the
+/// file list and tells the UI. Returns how long that took (while the state was
+/// locked), or `None` without touching anything if the scan is no longer the current
+/// one.
+fn publish_scanned_items<P: EventProxy>(
+    state: &SharedState,
+    proxy: &P,
+    token: &ScanToken,
+    items: Vec<FileItem>,
+) -> Option<Duration> {
+    let mut s = state.lock();
+    let started = std::time::Instant::now();
+    if !s.merge_scanned_items(token, items) {
+        return None;
+    }
+    filtering::apply_filters(&mut s);
+    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&s))));
+    Some(started.elapsed())
 }
 
 /// What the scan identified by `token` does with the progress its scanner reports
@@ -480,25 +650,23 @@ fn apply_shallow_scan_result<P: EventProxy>(
     true
 }
 
-/// Stores the result of the deep scan phase. The scan is not finished by this, see
-/// [`complete_scan`]; nothing is sent to the UI.
+/// Stores the end of the deep scan phase: `remaining_items` are the items of the walk
+/// that have not been published yet, with them the file list is complete. The scan is
+/// not finished by this, see [`complete_scan`]; nothing is sent to the UI.
 ///
 /// Returns `false` without touching the state if the scan is no longer the current one.
 fn apply_deep_scan_result(
     state: &SharedState,
     token: &ScanToken,
-    files: Vec<FileItem>,
+    remaining_items: Vec<FileItem>,
     patterns: HashSet<String>,
 ) -> bool {
     let mut s = state.lock();
-    if !s.is_current_scan(token) {
+    if !s.merge_scanned_items(token, remaining_items)
+        || !s.complete_scanned_file_list(token, patterns)
+    {
         return false;
     }
-    let new_file_paths: HashSet<_> = files.iter().map(|f| f.path.clone()).collect();
-    s.selected_files.retain(|p| new_file_paths.contains(p));
-    s.replace_with_complete_file_list(files);
-    s.active_ignore_patterns = patterns;
-    s.is_fully_scanned = true;
     filtering::apply_filters(&mut s);
     true
 }
@@ -755,9 +923,14 @@ fn handle_scan_error<P: EventProxy>(
 /// is told). The result of the load does not touch the expansion state anymore: if the
 /// user collapses the directory while the load is in flight, it stays collapsed.
 ///
+/// This also works while a scan is walking the project: the walk gets to the
+/// directory when it gets to it, the user wants to see it now. The level is then in
+/// the list ahead of the walk, which does not add it a second time
+/// ([`AppState::merge_directory_level`]).
+///
 /// Only the scan itself runs in a spawned task. Returns its handle, which completes
 /// when the result has been dealt with (merged or discarded), or `None` if the request
-/// was refused: a full scan is running, or the directory is not part of the project.
+/// was refused: the directory is not part of the project.
 pub fn start_lazy_load_scan<P: EventProxy>(
     path: PathBuf,
     proxy: P,
@@ -765,10 +938,7 @@ pub fn start_lazy_load_scan<P: EventProxy>(
 ) -> Option<JoinHandle<()>> {
     let (scanner, token, request) = {
         let mut state_guard = state.lock();
-        let Some(token) = state_guard.begin_lazy_load() else {
-            tracing::warn!("Attempted to lazy load while a full scan was in progress. Ignoring.");
-            return None;
-        };
+        let token = state_guard.begin_lazy_load();
         // The project root anchors the ignore rules and the depth of the new items.
         let request = match ScanRequest::directory_level(&state_guard.current_path, &path) {
             Ok(request) if !state_guard.current_path.is_empty() => request,
@@ -836,35 +1006,15 @@ fn apply_lazy_load_result<P: EventProxy>(
     token: &LazyLoadToken,
 ) -> bool {
     let mut state_guard = state.lock();
-    if !state_guard.is_current_lazy_load(token) {
-        tracing::debug!("Discarding outdated lazy load result for {:?}.", loaded_dir);
-        return false;
-    }
-
     match scan_result {
         Ok((new_items, new_active_patterns)) => {
-            tracing::debug!(
-                "Lazy load found {} items in {:?}.",
-                new_items.len(),
-                loaded_dir
-            );
-
-            state_guard.loaded_dirs.insert(loaded_dir.to_path_buf());
-            state_guard
-                .active_ignore_patterns
-                .extend(new_active_patterns);
-
-            let existing_paths: HashSet<PathBuf> = state_guard
-                .full_file_list
-                .iter()
-                .map(|item| item.path.clone())
-                .collect();
-
-            for item in new_items {
-                if !existing_paths.contains(&item.path) {
-                    state_guard.full_file_list.push(item);
-                }
+            let found = new_items.len();
+            if !state_guard.merge_directory_level(token, loaded_dir, new_items, new_active_patterns)
+            {
+                tracing::debug!("Discarding outdated lazy load result for {:?}.", loaded_dir);
+                return false;
             }
+            tracing::debug!("Lazy load found {} items in {:?}.", found, loaded_dir);
 
             // Apply other filters to the now-updated list.
             filtering::apply_filters(&mut state_guard);
@@ -873,6 +1023,10 @@ fn apply_lazy_load_result<P: EventProxy>(
                 &state_guard,
             ))));
             true
+        }
+        Err(_) if !state_guard.is_current_lazy_load(token) => {
+            tracing::debug!("Discarding outdated lazy load result for {:?}.", loaded_dir);
+            false
         }
         Err(e) => {
             tracing::error!("Lazy load failed for {:?}: {}", loaded_dir, e);
@@ -1112,9 +1266,8 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
-    use std::time::Duration;
     use tempfile::{tempdir, TempDir};
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::oneshot;
 
     //============================================================================================//
     //|                                       TEST HARNESS                                       |//
@@ -1929,11 +2082,7 @@ mod tests {
         let scan_error = CoreError::Io("Not a directory".to_string(), path_to_load.clone());
         *scanner.shallow_result.lock().unwrap() = Err(scan_error.clone());
 
-        let token = harness
-            .state
-            .lock()
-            .begin_lazy_load()
-            .expect("No scan is running");
+        let token = harness.state.lock().begin_lazy_load();
 
         // Act
         lazy_load_task(
@@ -2680,31 +2829,45 @@ mod tests {
             .any(|item| item.path == new_file_path));
     }
 
-    /// Tests that a lazy load scan is ignored if a main scan is already in progress.
+    /// A directory can be loaded while a scan is walking the project: the level is
+    /// listed at once, and the scan goes on.
     #[tokio::test]
-    async fn start_lazy_load_scan_is_ignored_if_already_scanning() {
-        // Arrange
+    async fn start_lazy_load_scan_during_a_scan_loads_the_level() {
+        // Arrange: a scan that has published the first level.
         let mut harness = TestHarness::new();
         let dir_to_load = harness.root_path.join("src");
-
-        {
+        std::fs::create_dir(&dir_to_load).unwrap();
+        std::fs::write(dir_to_load.join("main.rs"), "fn main() {}").unwrap();
+        let token = {
             let mut state = harness.state.lock();
-            let _token = state.begin_scan(); // Simulate an ongoing scan
-        }
+            let token = state.begin_scan();
+            let root = harness.root_path.clone();
+            state.replace_with_shallow_file_list(&root, vec![dir_item(&dir_to_load, 1)]);
+            token
+        };
 
         // Act
-        let load = start_lazy_load_scan(
+        start_lazy_load_scan(
             dir_to_load.clone(),
             harness.proxy.clone(),
             harness.state.clone(),
-        );
+        )
+        .expect("The load is started")
+        .await
+        .unwrap();
 
-        // Assert: the request is refused without loading or announcing anything.
-        assert!(load.is_none(), "No load must have been started");
-        harness.assert_no_events("No events should be sent when lazy load is ignored");
+        // Assert
+        let ui_state = harness.last_state_update().unwrap();
+        assert!(ui_state.is_scanning);
+        assert_eq!(ui_state.visible_files_count, 2);
         let state = harness.state.lock();
-        assert!(!state.expanded_dirs.contains(&dir_to_load));
-        assert!(!state.loaded_dirs.contains(&dir_to_load));
+        assert!(state.is_current_scan(&token), "The scan is not disturbed");
+        assert!(state.expanded_dirs.contains(&dir_to_load));
+        assert!(state.loaded_dirs.contains(&dir_to_load));
+        assert!(state
+            .full_file_list
+            .iter()
+            .any(|item| item.path == dir_to_load.join("main.rs")));
     }
 
     /// Tests that the RealFileSearcher gracefully handles files that cannot be read
@@ -3350,7 +3513,7 @@ mod tests {
         let harness = TestHarness::new();
         let mut state = harness.state.lock();
 
-        let token = state.begin_lazy_load().expect("No scan is running");
+        let token = state.begin_lazy_load();
         let scanner = lazy_load_scanner(&state.config, &token);
         assert!(!scanner.cancel_flag.load(Ordering::SeqCst));
         let scan = state.begin_scan();
@@ -3360,7 +3523,7 @@ mod tests {
         );
         state.finish_scan(&scan);
 
-        let token = state.begin_lazy_load().expect("Scan has finished");
+        let token = state.begin_lazy_load();
         let scanner = lazy_load_scanner(&state.config, &token);
         assert!(!scanner.cancel_flag.load(Ordering::SeqCst));
         state.reset_directory_state();
@@ -3385,11 +3548,7 @@ mod tests {
             }],
             vec![],
         );
-        let token = harness
-            .state
-            .lock()
-            .begin_lazy_load()
-            .expect("No scan is running");
+        let token = harness.state.lock().begin_lazy_load();
         // Act: the user switches directories while the lazy load is in flight.
         harness.state.lock().reset_directory_state();
         lazy_load_task(
@@ -3423,7 +3582,7 @@ mod tests {
         let token = {
             let mut state = harness.state.lock();
             state.full_file_list.push(dir_item(&dir, 1));
-            state.begin_lazy_load().expect("No scan is running")
+            state.begin_lazy_load()
         };
 
         // Act
@@ -3571,7 +3730,6 @@ mod tests {
             !src_node.children_loaded,
             "`src` must be lazily loadable after the cancelled rescan"
         );
-        assert!(state.begin_lazy_load().is_some());
     }
 
     /// Two overlapping searches: the one for the older query finishes last. Its matches
@@ -4018,7 +4176,7 @@ mod tests {
             let mut state = harness.state.lock();
             state.full_file_list.push(dir_item(&dir, 1));
             state.content_search_query = "needle".to_string();
-            state.begin_lazy_load().expect("No scan is running")
+            state.begin_lazy_load()
         };
 
         lazy_load_task(
@@ -4050,7 +4208,7 @@ mod tests {
         let token = {
             let mut state = harness.state.lock();
             state.full_file_list.push(dir_item(&dir, 1));
-            state.begin_lazy_load().expect("No scan is running")
+            state.begin_lazy_load()
         };
 
         // Act: meanwhile the user adds an ignore pattern, which is applied locally.
@@ -4423,7 +4581,7 @@ mod tests {
         let token = {
             let mut state = harness.state.lock();
             state.collapse_directories([src.clone()]);
-            state.begin_lazy_load().expect("No scan is running")
+            state.begin_lazy_load()
         };
         let mut scanner = MockScanner::new();
         scanner.set_results(vec![file_item(&new_match, 2)], vec![]);
@@ -4444,5 +4602,323 @@ mod tests {
         );
         assert!(!state.expanded_dirs.contains(&src), "stays collapsed");
         assert!(state.expanded_dirs.contains(&lib), "the new match is shown");
+    }
+
+    //============================================================================================//
+    //|                              THE DEEP SCAN PUBLISHES AS IT GOES                          |//
+    //============================================================================================//
+
+    /// A scanner whose deep scan delivers the batches the test feeds it, when it feeds
+    /// them, and ends when the feed is dropped. The shallow scan returns `shallow`.
+    struct StreamingScanner {
+        shallow: Vec<FileItem>,
+        feed: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<FileItem>>>,
+    }
+
+    impl StreamingScanner {
+        fn new(shallow: Vec<FileItem>) -> (Self, mpsc::UnboundedSender<Vec<FileItem>>) {
+            let (feed_tx, feed_rx) = mpsc::unbounded_channel();
+            let scanner = Self {
+                shallow,
+                feed: tokio::sync::Mutex::new(feed_rx),
+            };
+            (scanner, feed_tx)
+        }
+    }
+
+    impl Scanner for StreamingScanner {
+        async fn scan(
+            &self,
+            _: &ScanRequest,
+            _: Box<dyn Fn(ScanProgress) + Send + Sync>,
+        ) -> ScanOutcome {
+            Ok((self.shallow.clone(), HashSet::new()))
+        }
+
+        async fn scan_in_batches(
+            &self,
+            _: &ScanRequest,
+            _: Box<dyn Fn(ScanProgress) + Send + Sync>,
+            on_batch: BatchSink,
+        ) -> StreamedScanOutcome {
+            let mut feed = self.feed.lock().await;
+            while let Some(batch) = feed.recv().await {
+                on_batch(batch);
+            }
+            Ok(HashSet::from(["deep".to_string()]))
+        }
+    }
+
+    /// Starts a scan of the root of `harness` with a [`StreamingScanner`] and waits
+    /// until its first level (`shallow`) has been published.
+    async fn spawn_streaming_scan(
+        harness: &mut TestHarness,
+        shallow: Vec<FileItem>,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        ScanToken,
+        mpsc::UnboundedSender<Vec<FileItem>>,
+    ) {
+        let (scanner, feed) = StreamingScanner::new(shallow);
+        let token = harness.state.lock().begin_scan();
+        let task = tokio::spawn(proactive_scan_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            harness.root_path.clone(),
+            scanner,
+            MockFileSearcher::default(),
+            token.clone(),
+        ));
+        let shallow_event = harness.next_event().await;
+        assert!(matches!(shallow_event, UserEvent::StateUpdate(_)));
+        (task, token, feed)
+    }
+
+    fn listed(harness: &TestHarness) -> Vec<PathBuf> {
+        let state = harness.state.lock();
+        state
+            .full_file_list
+            .iter()
+            .map(|item| item.path.clone())
+            .collect()
+    }
+
+    /// What the walk finds is shown while the scan is still running, batch after
+    /// batch, and without listing the first level a second time. The end of the scan
+    /// completes the list.
+    #[tokio::test]
+    async fn deep_scan_publishes_its_batches_while_it_runs() {
+        let mut harness = TestHarness::new();
+        let src = harness.root_path.join("src");
+        let (task, _token, feed) =
+            spawn_streaming_scan(&mut harness, vec![dir_item(&src, 1)]).await;
+
+        // First batch: the walk comes by the first level again and goes below it.
+        feed.send(vec![dir_item(&src, 1), file_item(&src.join("a.rs"), 2)])
+            .unwrap();
+        let first = harness
+            .wait_for_state_update(|ui| ui.visible_files_count == 2)
+            .await;
+        assert!(first.is_scanning);
+        assert!(!first.is_fully_scanned);
+
+        // Second batch.
+        feed.send(vec![file_item(&src.join("b.rs"), 2)]).unwrap();
+        let second = harness
+            .wait_for_state_update(|ui| ui.visible_files_count == 3)
+            .await;
+        assert!(second.is_scanning);
+        assert!(
+            !harness.state.lock().loaded_dirs.contains(&src),
+            "The walk may not be done with `src` yet"
+        );
+
+        // A last batch right before the end is part of the final state.
+        feed.send(vec![file_item(&src.join("c.rs"), 2)]).unwrap();
+        drop(feed);
+        task.await.unwrap();
+
+        let last = harness.last_state_update().unwrap();
+        assert!(!last.is_scanning);
+        assert!(last.is_fully_scanned);
+        assert_eq!(last.visible_files_count, 4);
+        assert!(last.status_message.contains("Indexing complete"));
+        assert_eq!(
+            listed(&harness),
+            [
+                src.clone(),
+                src.join("a.rs"),
+                src.join("b.rs"),
+                src.join("c.rs")
+            ]
+        );
+        let state = harness.state.lock();
+        assert!(state.loaded_dirs.contains(&src));
+        assert_eq!(
+            state.active_ignore_patterns,
+            HashSet::from(["deep".to_string()])
+        );
+    }
+
+    /// The user expands a directory the walk has not come to: its level is loaded and
+    /// shown at once. When the walk gets there, nothing is listed twice.
+    #[tokio::test]
+    async fn a_directory_expanded_during_the_deep_scan_is_loaded_at_once() {
+        let mut harness = TestHarness::new();
+        let src = harness.root_path.join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("main.rs"), "fn main() {}").unwrap();
+        let (task, token, feed) = spawn_streaming_scan(&mut harness, vec![dir_item(&src, 1)]).await;
+
+        // Act: the lazy load, while the deep scan is under way.
+        start_lazy_load_scan(src.clone(), harness.proxy.clone(), harness.state.clone())
+            .expect("A lazy load is possible during a scan")
+            .await
+            .unwrap();
+
+        let ui_state = harness.last_state_update().unwrap();
+        assert!(ui_state.is_scanning);
+        let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
+        assert!(src_node.is_expanded && src_node.children_loaded);
+        assert_eq!(src_node.children.len(), 1);
+        assert!(harness.state.lock().is_current_scan(&token));
+
+        // The walk arrives at the directory and finds one more file.
+        feed.send(vec![
+            dir_item(&src, 1),
+            file_item(&src.join("main.rs"), 2),
+            file_item(&src.join("new.rs"), 2),
+        ])
+        .unwrap();
+        drop(feed);
+        task.await.unwrap();
+
+        let mut paths = listed(&harness);
+        paths.sort();
+        assert_eq!(
+            paths,
+            [src.clone(), src.join("main.rs"), src.join("new.rs")]
+        );
+        assert!(harness.state.lock().is_fully_scanned);
+    }
+
+    /// A scan that was superseded while its walk is delivering publishes nothing more
+    /// and ends by itself.
+    #[tokio::test]
+    async fn batches_of_a_superseded_scan_are_not_published() {
+        let mut harness = TestHarness::new();
+        let (old_task, old_token, feed) = spawn_streaming_scan(&mut harness, vec![]).await;
+
+        let new_token = begin_replacement_scan(&harness);
+        feed.send(vec![file_item(&harness.root_path.join("stale.txt"), 1)])
+            .unwrap();
+        // The feed stays open: the task has to end because of the stale batch.
+        tokio::time::timeout(EVENT_TIMEOUT, old_task)
+            .await
+            .expect("The superseded task ends when it tries to publish")
+            .unwrap();
+
+        assert!(old_token.is_cancelled());
+        harness.assert_no_events("A superseded scan must not send state updates");
+        assert!(listed(&harness).is_empty());
+        assert_replacement_scan_is_intact(&harness, &new_token);
+        drop(feed);
+    }
+
+    /// Cancelling a scan keeps what it has published: the list is partial, not
+    /// complete, and its directories can be loaded lazily.
+    #[tokio::test]
+    async fn a_cancelled_deep_scan_keeps_what_it_has_published() {
+        let mut harness = TestHarness::new();
+        let root = harness.root_path.clone();
+        let src = root.join("src");
+        let (task, _token, feed) =
+            spawn_streaming_scan(&mut harness, vec![dir_item(&src, 1)]).await;
+        feed.send(vec![file_item(&src.join("a.rs"), 2)]).unwrap();
+        harness
+            .wait_for_state_update(|ui| ui.visible_files_count == 2)
+            .await;
+
+        harness.state.lock().cancel_current_scan();
+        feed.send(vec![file_item(&src.join("late.rs"), 2)]).unwrap();
+        drop(feed);
+        task.await.unwrap();
+
+        assert_eq!(listed(&harness), [src.clone(), src.join("a.rs")]);
+        let state = harness.state.lock();
+        assert!(!state.is_scanning());
+        assert!(!state.is_fully_scanned);
+        assert_eq!(state.loaded_dirs, HashSet::from([root]));
+    }
+
+    /// The pause between two publications grows with what a publication costs, so
+    /// publishing takes a bounded share of the time however large the list is.
+    #[test]
+    fn the_pause_after_a_publication_is_in_proportion_to_its_cost() {
+        assert_eq!(
+            pause_after_publication(Duration::from_millis(1)),
+            MIN_PUBLISH_INTERVAL
+        );
+        assert_eq!(
+            pause_after_publication(Duration::from_millis(400)),
+            Duration::from_millis(400) * PUBLISH_PAUSE_FACTOR
+        );
+    }
+
+    /// Measurement, not a test: `CFC_PERF_TREE=<dir> cargo test --release --lib
+    /// perf_scan -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn perf_scan_of_a_large_tree() {
+        /// The scan as it was: everything at the end.
+        struct AtTheEnd(RealScanner);
+        impl Scanner for AtTheEnd {
+            async fn scan(
+                &self,
+                request: &ScanRequest,
+                progress: Box<dyn Fn(ScanProgress) + Send + Sync>,
+            ) -> ScanOutcome {
+                self.0.scan(request, progress).await
+            }
+        }
+
+        async fn run<S: Scanner + 'static>(
+            label: &str,
+            root: &Path,
+            make: impl Fn(Arc<AtomicBool>) -> S,
+        ) {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let proxy = TestEventProxy { sender: tx };
+            let mut app_state = AppState::default();
+            app_state.current_path = root.to_string_lossy().to_string();
+            let state = SharedState::new(app_state);
+            let token = state.lock().begin_scan();
+            let scanner = make(token.cancel_flag());
+            let started = std::time::Instant::now();
+            let task = tokio::spawn(proactive_scan_task(
+                proxy,
+                state.clone(),
+                root.to_path_buf(),
+                scanner,
+                RealFileSearcher,
+                token,
+            ));
+            let (mut first_level, mut below, mut updates, mut first_count) = (None, None, 0, 0);
+            let mut total = None;
+            while let Some(event) = rx.recv().await {
+                let UserEvent::StateUpdate(ui) = event else {
+                    continue;
+                };
+                updates += 1;
+                if first_level.is_none() && ui.visible_files_count > 0 {
+                    first_level = Some(started.elapsed());
+                    first_count = ui.visible_files_count;
+                } else if below.is_none() && ui.visible_files_count > first_count {
+                    below = Some(started.elapsed());
+                }
+                if ui.is_fully_scanned && !ui.is_scanning {
+                    total = Some((started.elapsed(), ui.visible_files_count));
+                    break;
+                }
+            }
+            task.await.unwrap();
+            println!(
+                "{label}: first level {first_level:?}, first items below {below:?}, complete {total:?}, {updates} state updates"
+            );
+        }
+
+        let root = PathBuf::from(std::env::var("CFC_PERF_TREE").expect("CFC_PERF_TREE"));
+        let real = |cancel_flag| RealScanner {
+            ignore_patterns: HashSet::new(),
+            max_file_size: MAX_FILE_SIZE,
+            cancel_flag,
+        };
+        for round in 0..3 {
+            run(&format!("[{round}] at the end "), &root, |flag| {
+                AtTheEnd(real(flag))
+            })
+            .await;
+            run(&format!("[{round}] incremental"), &root, real).await;
+        }
     }
 }

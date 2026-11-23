@@ -373,7 +373,7 @@ describe("FileTree", () => {
     ]);
   });
 
-  it("does not request a lazy load while a scan is running", async () => {
+  it("requests a lazy load while a scan is running too", async () => {
     seedState(
       [
         collapsedDir("/repo/vendor", {
@@ -391,8 +391,10 @@ describe("FileTree", () => {
       row(container, "/repo/vendor").querySelector(".arrow")!,
     );
 
+    // The scan fills the tree as it goes; the level the user asks for is
+    // listed at once.
     expect(expansionCommands()).toEqual([
-      ["setExpansion", { path: "/repo/vendor", expanded: true }],
+      ["loadDirectoryLevel", "/repo/vendor"],
     ]);
   });
 

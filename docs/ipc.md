@@ -229,6 +229,17 @@ The preview shows the first 1500 lines, followed by `...` and `[Preview truncate
 
 While a scan walks the directory it reports its progress at most every 100 ms. Each report is sent as `ScanProgress` (the live display of the scan panel) and stored in the host's state, so the snapshots sent during a scan carry the progress as of that moment in `scan_progress` and in `status_message` ("Scanning... 40 files processed. 2 large files skipped (/repo/src/main.rs)"). A scan that has not reported anything yet reads "Scanning... 0 files processed. 0 large files skipped."; when a scan has ended, the status is its outcome and `scan_progress` keeps the last counters. Reports of a scan that was cancelled or replaced are neither stored nor sent.
 
+### Snapshots during a scan
+
+A scan publishes what it finds while it runs. After the snapshot with the first level, further snapshots follow with `is_scanning: true`, `is_fully_scanned: false` and a tree that has grown: at most one every 150 ms, less often as the list grows (publishing takes about a tenth of the time of the scan). The UI needs nothing special for them; they are snapshots like any other.
+
+- `children_loaded` of a directory stays `false` until its content is known to be complete: when the scan has ended (then for all directories at once), or when its level was loaded with `loadDirectoryLevel`. An expanded directory can therefore show some of its children with `children_loaded: false` during a scan.
+- `loadDirectoryLevel` is answered during a scan like at any other time: the directory is expanded at once, and a snapshot with its complete level follows. The scan goes on and does not list that level a second time.
+- No entry is listed twice, and the list of a completed scan is exactly what its walk found, whatever was loaded on the way.
+- With an active content query, entries the scan adds are matched when the search is repeated at the end of the scan (or after a `loadDirectoryLevel`); until then they are not among the matches.
+- `cancelScan` keeps what has been published: the tree stays as far as the scan got, `is_fully_scanned` stays `false`, and the directories can be loaded on demand.
+- A re-scan starts again from the first level: directories that were expanded stay expanded and fill up as the scan gets to them.
+
 ### Opening a path
 
 Opening a path (a drop, the choice of the directory dialog, the `last_directory` of an imported config) replaces the loaded directory. Whether the path exists is not known when the command runs, and finding out is IO that does not belong on the command lane. The command therefore only **announces** the scan: the first snapshot has `is_scanning: true`, and everything else is still the directory that was loaded before (`current_path`, tree, selection, filters). The scan task then looks at the path:
@@ -320,7 +331,7 @@ Every way of changing the expansion is therefore a command, and the result is vi
 | "Expand all" / "Collapse all"                                              | `expandCollapseAll`                                                            |
 | Typing into a filter                                                       | `updateFilters`; the host expands the ancestors of the matches, see below      |
 
-The mapping from gesture to command lives in `src/ui/src/lib/modules/treeExpansion.ts`. While a scan is running the host refuses lazy loads (the scan delivers the children itself), so the UI sends `setExpansion` in that case. Only expanding loads: a directory that is already expanded without loaded children (expanded during a scan that was cancelled) is collapsed with `setExpansion { expanded: false }` like any other, and is loaded when it is expanded the next time.
+The mapping from gesture to command lives in `src/ui/src/lib/modules/treeExpansion.ts`. Expanding a directory whose children are not loaded sends `loadDirectoryLevel`, also while a scan is running: the scan fills the tree piece by piece, the level the user asks for is listed at once (see [Snapshots during a scan](#snapshots-during-a-scan)). Only expanding loads: a directory that is already expanded without loaded children (expanded during a scan that was cancelled) is collapsed with `setExpansion { expanded: false }` like any other, and is loaded when it is expanded the next time.
 
 Keys are handled in one place, the key handler of the tree in `FileTree.svelte` (roving focus): `Enter` toggles a directory or opens a file, `Space` toggles the selection, wherever the focus is inside the row. The one exception are the keys a control of the row acts on by itself (`activatesNatively` in `src/ui/src/lib/modules/nativeActivation.ts`): `Enter` and `Space` on the ignore button, `Space` on the checkbox. The tree leaves them to the control, whose click handler runs once (`addIgnorePath`, `toggleSelection` / `toggleDirectorySelection`); the global key guard (`keyboard.ts`), which blocks keys nothing handles, lets them through for the same reason. `TreeItem.svelte` handles the pointer only (a key that activates a control arrives there as its `click`).
 
