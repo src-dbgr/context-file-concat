@@ -126,7 +126,7 @@ The commands are idempotent (adding a pattern that is set, removing one that is 
 
 #### Persistence
 
-A changed configuration is written to the config file in the background. Every writer goes the same way: a numbered snapshot of the configuration is taken under the state lock, and of several saves under way the most recent snapshot is the one that ends up on disk (`ConfigStore` in `src/config/store.rs`). The window geometry is written with the last save of a session, at exit, which also goes that way and cannot be overtaken by a save that is still queued.
+A changed configuration is written to the config file in the background. Every writer goes the same way: a numbered snapshot of the configuration is taken under the state lock, and of several saves under way the most recent snapshot is the one that ends up on disk (`ConfigStore` in `src/config/store.rs`). The window geometry is written with the last save of a session, at exit: the store takes the most recent snapshot, written or not, adds the geometry, writes the result and closes (`ConfigStore::finalize`). For every other save this is a single step, so a save that is still queued can neither overtake it nor run after it, and a change made right before the exit is part of it.
 
 The file is replaced atomically: the configuration is written to a temporary file in the same directory, which is then renamed over the config file (`config::settings::save_config`; the same holds for `exportConfig`). A write that fails or is interrupted leaves the previous file untouched. A symbolic link at the place of the config file is followed, and the permissions of the file are kept. Only if the directory does not allow creating the temporary file is the file written in place.
 
