@@ -249,7 +249,7 @@ fn publish_generation_outcome<P: EventProxy>(
         }
         Err(CoreError::Cancelled) => {
             tracing::info!("Generation cancelled.");
-            state_guard.scan_progress.current_scanning_path = "Generation cancelled.".to_string();
+            state_guard.status = super::state::StatusNotice::GenerationCancelled;
         }
         Err(e) => {
             tracing::error!("Generation failed: {}", e);
@@ -430,10 +430,9 @@ fn apply_deep_scan_result<P: EventProxy>(
 
     // The final state is set here; the guard only cleans up on panics/cancellations.
     s.finish_scan(token);
-    s.scan_progress.current_scanning_path = format!(
-        "Indexing complete. Found {} visible items.",
-        s.filtered_file_list().len()
-    );
+    s.status = super::state::StatusNotice::IndexingComplete {
+        visible_items: s.filtered_file_list().len(),
+    };
 
     proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&s))));
     true
@@ -522,7 +521,9 @@ fn handle_scan_error<P: EventProxy>(
     if !state_lock.finish_scan(token) {
         return;
     }
-    state_lock.scan_progress.current_scanning_path = format!("Scan failed: {error}");
+    state_lock.status = super::state::StatusNotice::ScanFailed {
+        reason: error.to_string(),
+    };
     let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_lock)));
     proxy.send_event(event);
 }
@@ -2325,13 +2326,10 @@ mod tests {
 
         // Assert
         assert!(harness.get_last_state_update().await.is_none());
-        assert!(!harness
-            .state
-            .lock()
-            .unwrap()
-            .scan_progress
-            .current_scanning_path
-            .contains("Scan failed"));
+        assert!(!matches!(
+            harness.state.lock().unwrap().status,
+            crate::app::state::StatusNotice::ScanFailed { .. }
+        ));
         assert_replacement_scan_is_intact(&harness, &new_token);
     }
 
@@ -2408,8 +2406,8 @@ mod tests {
         assert!(state.is_generating());
         assert!(state.is_current_generation(&new_token));
         assert_ne!(
-            state.scan_progress.current_scanning_path,
-            "Generation cancelled."
+            state.status,
+            crate::app::state::StatusNotice::GenerationCancelled
         );
     }
 
