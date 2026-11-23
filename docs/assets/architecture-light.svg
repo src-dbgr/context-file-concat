@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1900" viewBox="0 0 1600 1900" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1916" viewBox="0 0 1600 1916" role="img" aria-labelledby="t d">
 <title id="t">CFC architecture: Rust host, Svelte UI and the IPC cycle between them</title>
 <desc id="d">The Svelte UI in the system WebView posts numbered commands through window.ipc. On the main thread of the Rust host an origin gate accepts them, IpcMessage::parse turns them into a Command, and the CommandDispatcher runs them on its ordered, continuation or blocking lane. Commands mutate AppState behind the SharedState lock and start token-guarded background tasks that use the core services. Under the lock send_snapshot builds a windowed UiState; the Correlated proxy stamps it with the last processed command, the coalescing outbox queues it, and the tao event loop delivers it with evaluate_script to window.render, where it is validated with Zod and put into the Svelte store. ConfigStore writes config.json and GeometryStore writes window.json.</desc>
 <style>
   .bg{fill:#FBFBF9}
   .zone{fill:#F3F3EF;stroke:#D5D7D1;stroke-width:1}
   .box{fill:#FFFFFF;stroke:#8C959F;stroke-width:1}
-  .scope{fill:none;stroke:#16191D;stroke-width:1;stroke-dasharray:2 4}
+  .scope{fill:#ECECE6;stroke:#8C959F;stroke-width:1}
   .rule{stroke:#16191D;stroke-width:1;fill:none}
   .lane{stroke:#8C959F;stroke-width:1;fill:none}
   .bound{stroke:#B4441A;stroke-width:1.25;stroke-dasharray:10 5 2 5;fill:none}
@@ -29,14 +29,14 @@
   .mk{fill:#B4441A}
   .mkt{fill:#FFFFFF;font-weight:700}
 </style>
-<rect x="0" y="0" width="1600" height="1900" class="bg"/>
+<rect x="0" y="0" width="1600" height="1916" class="bg"/>
 <!-- Title strip -->
 <text x="40" y="38" class="kick">ARCHITECTURE</text>
 <text x="40" y="78" class="title">CFC — Context File Concatenator</text>
 <text x="40" y="108" class="t m">A Rust host and a Svelte UI in one window: typed commands go in, complete snapshots come back.</text>
 <path d="M1180 36 L1235 36" class="ln s"/>
 <path d="M1244 36 L1234 40 L1234 32 Z" class="ah s"/>
-<text x="1260" y="43" class="t m">command or call</text>
+<text x="1260" y="43" class="t m">command, call or read</text>
 <path d="M1180 64 L1235 64" class="ln d"/>
 <path d="M1244 64 L1234 68 L1234 60 Z" class="ah d"/>
 <text x="1260" y="71" class="t m">snapshot or event for the UI</text>
@@ -66,14 +66,14 @@
 <rect x="1208" y="192" width="328" height="124" class="box"/>
 <text x="1224" y="220" class="t"><tspan class="k">ipc/handlers.ts</tspan></text>
 <text x="1224" y="246" class="t"><tspan class="c">window.render(state)</tspan></text>
-<text x="1224" y="272" class="t"><tspan class="c">UiStateSchema.safeParse</tspan></text>
-<text x="1224" y="298" class="t"><tspan class="m">Zod; invalid input is ignored</tspan></text>
-<path d="M1208 254 L1153 254" class="ln s"/>
-<path d="M1144 254 L1154 250 L1154 258 Z" class="ah s"/>
+<text x="1224" y="272" class="t"><tspan class="m">Zod: </tspan><tspan class="c">UiStateSchema</tspan></text>
+<text x="1224" y="298" class="t"><tspan class="m">9 more </tspan><tspan class="c">window.*</tspan><tspan class="m"> handlers</tspan></text>
+<path d="M1208 254 L1153 254" class="ln d"/>
+<path d="M1144 254 L1154 250 L1154 258 Z" class="ah d"/>
 <circle cx="1181" cy="254" r="13" class="mk"/>
 <text x="1181" y="261" class="mkt" text-anchor="middle">8</text>
-<path d="M884 254 L853 254" class="ln s"/>
-<path d="M844 254 L854 250 L854 258 Z" class="ah s"/>
+<path d="M884 254 L853 254" class="ln d"/>
+<path d="M844 254 L854 250 L854 258 Z" class="ah d"/>
 <path d="M480 254 L449 254" class="ln s"/>
 <path d="M440 254 L450 250 L450 258 Z" class="ah s"/>
 <!-- WebView boundary: the three things that cross it -->
@@ -84,9 +84,9 @@
 <circle cx="400" cy="360" r="13" class="mk"/>
 <text x="400" y="367" class="mkt" text-anchor="middle">1</text>
 <text x="424" y="416" class="t"><tspan class="c">window.ipc.postMessage(json)</tspan></text>
-<path d="M976 478 L976 345" class="ln p"/>
-<path d="M976 336 L980 346 L972 346 Z" class="ah p"/>
-<text x="960" y="416" class="t" text-anchor="end"><tspan class="c">cfc://</tspan><tspan class="m"> assets</tspan></text>
+<path d="M864 478 L864 345" class="ln p"/>
+<path d="M864 336 L868 346 L860 346 Z" class="ah p"/>
+<text x="880" y="416" class="t"><tspan class="c">cfc://</tspan><tspan class="m"> index.html, bundle</tspan></text>
 <path d="M1248 478 L1248 325" class="ln d"/>
 <path d="M1248 316 L1252 326 L1244 326 Z" class="ah d"/>
 <circle cx="1248" cy="360" r="13" class="mk"/>
@@ -95,19 +95,18 @@
 <!-- Host, main thread: composition root and platform policies -->
 <rect x="40" y="432" width="1520" height="190" class="zone"/>
 <text x="64" y="461" class="zl">HOST · MAIN THREAD</text>
-<text x="584" y="461" class="t m"><tspan class="c">src/main.rs</tspan><tspan class="m"> · </tspan><tspan class="c">src/platform</tspan></text>
-<text x="1536" y="461" class="t m" text-anchor="end">tao event loop, wry WebView</text>
+<text x="584" y="461" class="t m">tao event loop, wry WebView</text>
+<text x="1536" y="461" class="t m" text-anchor="end"><tspan class="c">src/main.rs</tspan><tspan class="m">, </tspan><tspan class="c">platform</tspan></text>
 <rect x="64" y="478" width="432" height="124" class="box"/>
 <text x="80" y="506" class="t"><tspan class="n">IPC origin gate</tspan></text>
-<text x="80" y="532" class="t"><tspan class="c">platform::ipc::accepted_message</tspan></text>
-<text x="80" y="558" class="t"><tspan class="m">only the UI's own origin may send;</tspan></text>
-<text x="80" y="584" class="t"><tspan class="m">other documents are dropped unparsed</tspan></text>
+<text x="80" y="532" class="t"><tspan class="c">ipc::accepted_message</tspan></text>
+<text x="80" y="558" class="t"><tspan class="m">only the UI's origin may send; a message</tspan></text>
+<text x="80" y="584" class="t"><tspan class="m">from elsewhere is dropped unparsed</tspan></text>
 <rect x="584" y="478" width="432" height="124" class="box"/>
 <text x="600" y="506" class="t"><tspan class="n">Asset protocol</tspan></text>
-<text x="600" y="532" class="t"><tspan class="c">cfc://</tspan><tspan class="m"> embedded bundle + CSP header</tspan></text>
+<text x="600" y="532" class="t"><tspan class="m">release: </tspan><tspan class="c">cfc://</tspan><tspan class="m"> embedded bundle + CSP</tspan></text>
 <text x="600" y="558" class="t"><tspan class="c">AppOrigin::classify</tspan><tspan class="m"> on navigation</tspan></text>
 <text x="600" y="584" class="t"><tspan class="m">debug builds load the Vite dev server</tspan></text>
-<text x="1002" y="506" class="tag" text-anchor="end">release builds</text>
 <rect x="1104" y="478" width="432" height="124" class="box"/>
 <text x="1120" y="506" class="t"><tspan class="n">Event loop delivery</tspan></text>
 <text x="1120" y="532" class="t"><tspan class="c">Event::UserEvent(Wake)</tspan></text>
@@ -140,7 +139,7 @@
 <text x="376" y="857" class="t" text-anchor="end"><tspan class="c">Work::Ordered | Blocking</tspan></text>
 <rect x="64" y="876" width="432" height="344" class="box"/>
 <text x="80" y="904" class="t"><tspan class="k">CommandDispatcher</tspan></text>
-<text x="80" y="930" class="t"><tspan class="m">three lanes; what runs is not its concern</tspan></text>
+<text x="80" y="930" class="t"><tspan class="m">three lanes; file drops are ordered too</tspan></text>
 <path d="M64 944 H496" class="lane"/>
 <text x="80" y="971" class="tag">ordered lane</text>
 <text x="80" y="997" class="t m">strict arrival order; a command runs</text>
@@ -171,31 +170,32 @@
 <text x="616" y="856" class="t"><tspan class="m">viewport, TreeIndexCache, AppConfig</tspan></text>
 <text x="616" y="882" class="t"><tspan class="m">one RunSlot each: scan, generation,</tspan></text>
 <text x="616" y="908" class="t"><tspan class="m">content search, preview</tspan></text>
-<path d="M496 903 L591 903" class="ln s"/>
-<path d="M600 903 L590 907 L590 899 Z" class="ah s"/>
-<circle cx="542" cy="903" r="13" class="mk"/>
-<text x="542" y="910" class="mkt" text-anchor="middle">4</text>
+<path d="M496 903 L575 903" class="ln s"/>
+<path d="M584 903 L574 907 L574 899 Z" class="ah s"/>
+<circle cx="536" cy="903" r="13" class="mk"/>
+<text x="536" y="910" class="mkt" text-anchor="middle">4</text>
 <path d="M800 926 L800 953" class="ln s"/>
 <path d="M800 962 L796 952 L804 952 Z" class="ah s"/>
+<text x="816" y="951" class="t"><tspan class="c">&amp;AppState</tspan></text>
 <rect x="600" y="962" width="400" height="124" class="box"/>
 <text x="616" y="990" class="t"><tspan class="k">send_snapshot</tspan></text>
 <text x="616" y="1016" class="t"><tspan class="c">generate_ui_state → UiState</tspan></text>
 <text x="616" y="1042" class="t"><tspan class="c">rows, rows_start, rows_total</tspan></text>
 <text x="616" y="1068" class="t"><tspan class="m">a window of rows plus counters</tspan></text>
 <text x="986" y="990" class="tag" text-anchor="end">under the lock</text>
-<path d="M640 1102 L640 1155" class="ln s"/>
-<path d="M640 1164 L636 1154 L644 1154 Z" class="ah s"/>
-<text x="656" y="1140" class="t m">spawn with token</text>
-<path d="M860 1164 L860 1111" class="ln s"/>
-<path d="M860 1102 L864 1112 L856 1112 Z" class="ah s"/>
-<text x="876" y="1140" class="t m">stage, then commit</text>
+<path d="M616 1102 L616 1155" class="ln s"/>
+<path d="M616 1164 L612 1154 L620 1154 Z" class="ah s"/>
+<text x="630" y="1140" class="t m">spawn + token</text>
+<path d="M784 1164 L784 1111" class="ln s"/>
+<path d="M784 1102 L788 1112 L780 1112 Z" class="ah s"/>
+<text x="798" y="1140" class="t m">results, if the token is current</text>
 <rect x="584" y="1164" width="432" height="202" class="box"/>
 <text x="600" y="1192" class="t"><tspan class="n">Background tasks</tspan></text>
-<text x="600" y="1218" class="t"><tspan class="m">scan (streamed batches), lazy directory</tspan></text>
-<text x="600" y="1244" class="t"><tspan class="m">load, content search, preview, generation</tspan></text>
-<text x="600" y="1270" class="t"><tspan class="m">token-guarded: a superseded or cancelled</tspan></text>
-<text x="600" y="1296" class="t"><tspan class="m">run changes nothing</tspan></text>
-<text x="600" y="1322" class="t"><tspan class="m">staged commit: stage (locked), prepare</tspan></text>
+<text x="600" y="1218" class="t"><tspan class="m">scan (streamed batches), lazy load,</tspan></text>
+<text x="600" y="1244" class="t"><tspan class="m">content search, preview, generation</tspan></text>
+<text x="600" y="1270" class="t"><tspan class="m">token-guarded: a superseded or</tspan></text>
+<text x="600" y="1296" class="t"><tspan class="m">cancelled run changes nothing</tspan></text>
+<text x="600" y="1322" class="t"><tspan class="m">list changes: stage (locked), prepare</tspan></text>
 <text x="600" y="1348" class="t"><tspan class="m">(unlocked), commit if still current</tspan></text>
 <text x="1002" y="1192" class="tag" text-anchor="end">off the lanes</text>
 <rect x="1104" y="708" width="432" height="150" class="box"/>
@@ -214,8 +214,9 @@
 <text x="1120" y="1042" class="t"><tspan class="c">last_processed_session</tspan></text>
 <text x="1120" y="1068" class="t"><tspan class="c">last_processed_seq</tspan></text>
 <text x="1120" y="1094" class="t"><tspan class="m">from CommandProgress, as it is sent</tspan></text>
-<text x="1120" y="1172" class="t"><tspan class="m">ScanProgress, ShowFilePreview,</tspan></text>
-<text x="1120" y="1198" class="t"><tspan class="m">ShowGeneratedContent pass unchanged</tspan></text>
+<text x="1120" y="1172" class="t"><tspan class="m">every other event (ScanProgress,</tspan></text>
+<text x="1120" y="1198" class="t"><tspan class="m">ShowFilePreview, …) passes unchanged</tspan></text>
+<path d="M1104 1136 H1536" class="lane"/>
 <path d="M1000 1024 L1095 1024" class="ln d"/>
 <path d="M1104 1024 L1094 1028 L1094 1020 Z" class="ah d"/>
 <circle cx="1052" cy="1024" r="13" class="mk"/>
@@ -243,57 +244,58 @@
 <text x="80" y="1674" class="t m">saved when the window rests and at exit</text>
 <path d="M584 944 L540 944 L540 1523 L505 1523" class="ln p"/>
 <path d="M496 1523 L506 1519 L506 1527 Z" class="ah p"/>
-<text x="556" y="1413" class="t"><tspan class="c">ConfigSnapshot</tspan></text>
-<path d="M40 540 L20 540 L20 1641 L55 1641" class="ln p"/>
+<text x="524" y="1413" class="t" text-anchor="end"><tspan class="c">ConfigSnapshot</tspan></text>
+<path d="M40 455 L20 455 L20 1641 L55 1641" class="ln p"/>
 <path d="M64 1641 L54 1645 L54 1637 Z" class="ah p"/>
 <!-- Core -->
 <rect x="560" y="1426" width="1000" height="278" class="zone"/>
 <text x="584" y="1455" class="zl">CORE</text>
 <text x="1536" y="1455" class="t" text-anchor="end"><tspan class="c">src/core</tspan><tspan class="m"> · </tspan><tspan class="c">src/utils</tspan><tspan class="m"> · no dependency on app or UI</tspan></text>
-<path d="M584 1472 H1536" class="lane"/>
-<text x="584" y="1500" class="t"><tspan class="k">DirectoryScanner</tspan><tspan class="cm">  scanner</tspan></text>
-<text x="584" y="1526" class="t m">cancellable walk, delivered in batches</text>
-<text x="1072" y="1500" class="t"><tspan class="k">FileHandler</tspan><tspan class="cm">  file_handler</tspan></text>
-<text x="1072" y="1526" class="t m">preview, decoding, output document</text>
-<path d="M584 1542 H1536" class="lane"/>
-<text x="584" y="1570" class="t"><tspan class="k">IgnoreRules</tspan><tspan class="cm">  ignore_rules</tspan></text>
-<text x="584" y="1596" class="t m">gitignore semantics incl. negation</text>
-<text x="1072" y="1570" class="t"><tspan class="k">count_tokens</tspan><tspan class="cm">  token_counter</tspan></text>
-<text x="1072" y="1596" class="t m">cl100k_base token count, cancellable</text>
-<path d="M584 1612 H1536" class="lane"/>
-<text x="584" y="1640" class="t"><tspan class="k">ContentSearch</tspan><tspan class="cm">  search</tspan></text>
-<text x="584" y="1666" class="t m">cancellable, bounded by the size limit</text>
-<text x="1072" y="1640" class="t"><tspan class="k">is_text_file</tspan><tspan class="cm">  utils::file_detection</tspan></text>
-<text x="1072" y="1666" class="t m">the one binary / text rule</text>
-<path d="M584 1682 H1536" class="lane"/>
-<path d="M800 1366 L800 1417" class="ln s"/>
-<path d="M800 1426 L796 1416 L804 1416 Z" class="ah s"/>
-<text x="816" y="1413" class="t"><tspan class="c">Scanner · FileSearcher · ContentGenerator · Tokenizer</tspan></text>
-<!-- The request / response cycle -->
+<text x="1536" y="1481" class="t m" text-anchor="end">filters and ignore rules are also called under the lock</text>
+<path d="M584 1498 H1536" class="lane"/>
+<text x="584" y="1524" class="t"><tspan class="k">DirectoryScanner</tspan><tspan class="cm">  scanner</tspan></text>
+<text x="584" y="1548" class="t m">cancellable walk, delivered in batches</text>
+<text x="1072" y="1524" class="t"><tspan class="k">FileHandler</tspan><tspan class="cm">  file_handler</tspan></text>
+<text x="1072" y="1548" class="t m">preview, decoding, output document</text>
+<path d="M584 1560 H1536" class="lane"/>
+<text x="584" y="1586" class="t"><tspan class="k">IgnoreRules</tspan><tspan class="cm">  ignore_rules</tspan></text>
+<text x="584" y="1610" class="t m">gitignore semantics incl. negation</text>
+<text x="1072" y="1586" class="t"><tspan class="k">count_tokens</tspan><tspan class="cm">  token_counter</tspan></text>
+<text x="1072" y="1610" class="t m">cl100k_base token count, cancellable</text>
+<path d="M584 1622 H1536" class="lane"/>
+<text x="584" y="1648" class="t"><tspan class="k">ContentSearch</tspan><tspan class="cm">  search</tspan></text>
+<text x="584" y="1672" class="t m">cancellable, bounded by the size limit</text>
+<text x="1072" y="1648" class="t"><tspan class="k">is_text_file</tspan><tspan class="cm">  utils::file_detection</tspan></text>
+<text x="1072" y="1672" class="t m">the one binary / text rule</text>
+<path d="M584 1684 H1536" class="lane"/>
+<path d="M640 1366 L640 1417" class="ln s"/>
+<path d="M640 1426 L636 1416 L644 1416 Z" class="ah s"/>
+<text x="656" y="1413" class="t"><tspan class="c">Scanner · FileSearcher · ContentGenerator · Tokenizer · FileHandler</tspan></text>
+<!-- From command to snapshot: the numbered path -->
 <path d="M40 1728 H1560" class="rule"/>
-<text x="40" y="1762" class="kick">ONE REQUEST, ONE ANSWER</text>
+<text x="40" y="1762" class="kick">FROM COMMAND TO SNAPSHOT</text>
 <circle cx="53" cy="1789" r="13" class="mk"/>
 <text x="53" y="1796" class="mkt" text-anchor="middle">1</text>
 <text x="78" y="1796" class="t"><tspan class="c">post()</tspan> numbers the command and posts the envelope via <tspan class="c">window.ipc</tspan></text>
-<circle cx="53" cy="1817" r="13" class="mk"/>
-<text x="53" y="1824" class="mkt" text-anchor="middle">2</text>
-<text x="78" y="1824" class="t">The origin gate accepts it; <tspan class="c">IpcMessage::parse</tspan> reads it into a <tspan class="c">Command</tspan></text>
-<circle cx="53" cy="1845" r="13" class="mk"/>
-<text x="53" y="1852" class="mkt" text-anchor="middle">3</text>
-<text x="78" y="1852" class="t">The dispatcher queues it on its lane; commands start in arrival order</text>
-<circle cx="53" cy="1873" r="13" class="mk"/>
-<text x="53" y="1880" class="mkt" text-anchor="middle">4</text>
-<text x="78" y="1880" class="t">The command locks <tspan class="c">SharedState</tspan>, mutates <tspan class="c">AppState</tspan>, may start a task</text>
+<circle cx="53" cy="1821" r="13" class="mk"/>
+<text x="53" y="1828" class="mkt" text-anchor="middle">2</text>
+<text x="78" y="1828" class="t">The origin gate accepts it; <tspan class="c">IpcMessage::parse</tspan> reads it into a <tspan class="c">Command</tspan></text>
+<circle cx="53" cy="1853" r="13" class="mk"/>
+<text x="53" y="1860" class="mkt" text-anchor="middle">3</text>
+<text x="78" y="1860" class="t">The dispatcher queues it on its lane; commands start in arrival order</text>
+<circle cx="53" cy="1885" r="13" class="mk"/>
+<text x="53" y="1892" class="mkt" text-anchor="middle">4</text>
+<text x="78" y="1892" class="t">The command locks <tspan class="c">SharedState</tspan>, mutates <tspan class="c">AppState</tspan>, may start a task</text>
 <circle cx="821" cy="1789" r="13" class="mk"/>
 <text x="821" y="1796" class="mkt" text-anchor="middle">5</text>
 <text x="846" y="1796" class="t">Still under the lock, <tspan class="c">send_snapshot</tspan> builds the windowed <tspan class="c">UiState</tspan></text>
-<circle cx="821" cy="1817" r="13" class="mk"/>
-<text x="821" y="1824" class="mkt" text-anchor="middle">6</text>
-<text x="846" y="1824" class="t">Stamped, queued, coalesced; a <tspan class="c">Wake</tspan> token goes to the event loop</text>
-<circle cx="821" cy="1845" r="13" class="mk"/>
-<text x="821" y="1852" class="mkt" text-anchor="middle">7</text>
-<text x="846" y="1852" class="t">The loop takes one event: <tspan class="c">evaluate_script</tspan> calls <tspan class="c">window.render</tspan></text>
-<circle cx="821" cy="1873" r="13" class="mk"/>
-<text x="821" y="1880" class="mkt" text-anchor="middle">8</text>
-<text x="846" y="1880" class="t"><tspan class="c">window.render</tspan> validates it with Zod and replaces <tspan class="c">appState</tspan></text>
+<circle cx="821" cy="1821" r="13" class="mk"/>
+<text x="821" y="1828" class="mkt" text-anchor="middle">6</text>
+<text x="846" y="1828" class="t">Stamped, queued, coalesced; a <tspan class="c">Wake</tspan> token goes to the event loop</text>
+<circle cx="821" cy="1853" r="13" class="mk"/>
+<text x="821" y="1860" class="mkt" text-anchor="middle">7</text>
+<text x="846" y="1860" class="t">The loop takes one event: <tspan class="c">evaluate_script</tspan> calls <tspan class="c">window.render</tspan></text>
+<circle cx="821" cy="1885" r="13" class="mk"/>
+<text x="821" y="1892" class="mkt" text-anchor="middle">8</text>
+<text x="846" y="1892" class="t"><tspan class="c">window.render</tspan> validates it with Zod and replaces <tspan class="c">appState</tspan></text>
 </svg>
