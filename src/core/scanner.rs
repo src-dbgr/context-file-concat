@@ -98,30 +98,29 @@ pub struct DirectoryScanner {
     ignore_patterns: HashSet<String>,
     /// Files larger than this many bytes are not listed.
     max_file_size: u64,
-    // This field only exists in test builds to allow deterministic testing of progress updates.
-    #[cfg(test)]
-    progress_throttle_override: Option<Duration>,
+    /// The minimum time between two progress reports.
+    progress_throttle: Duration,
 }
 
-/// Private helper function with the core walker loop.
-/// This allows the throttling logic to be tested deterministically without
-/// polluting the public API signature.
+/// The core loop of a scan: turns the entries a walk yields into `FileItem`s.
+///
+/// It takes the entries as an iterator rather than walking itself, so the loop
+/// (throttling, cancellation, what happens when an entry changes or disappears between
+/// being listed and being looked at) can be driven deterministically.
 ///
 /// Entries up to and including `start_depth` (the start directory of the scan and the
 /// directories leading to it) are walked but neither counted nor reported. Files larger
 /// than `max_file_size` bytes are counted as skipped and not reported either.
-fn process_walker_results<F, H>(
-    walker: ignore::Walk,
+fn process_walker_results<F>(
+    walker: impl Iterator<Item = Result<ignore::DirEntry, ignore::Error>>,
     start_depth: usize,
     max_file_size: u64,
     cancel_flag: Arc<AtomicBool>,
     progress_callback: F,
     progress_throttle: Duration,
-    mut test_hook: H,
 ) -> Vec<FileItem>
 where
     F: Fn(ScanProgress) + Send + Sync + 'static,
-    H: FnMut(&ignore::DirEntry) + Send + 'static,
 {
     let mut final_files = Vec::new();
     let large_files_skipped_counter = AtomicUsize::new(0);
@@ -142,9 +141,6 @@ where
                 continue;
             }
         };
-
-        // This hook is a no-op in production, but can inject delays and code during tests.
-        test_hook(&entry);
 
         // Check for the start directory (and its ancestors) and skip it *before*
         // incrementing the counter. This prevents inflating the scanned count with
@@ -215,8 +211,7 @@ impl DirectoryScanner {
         Self {
             ignore_patterns,
             max_file_size: MAX_FILE_SIZE,
-            #[cfg(test)]
-            progress_throttle_override: None,
+            progress_throttle: PROGRESS_UPDATE_THROTTLE,
         }
     }
 
@@ -226,10 +221,11 @@ impl DirectoryScanner {
         self
     }
 
+    /// A scanner that reports its progress at most every `throttle`.
     #[cfg(test)]
     fn new_with_throttle(ignore_patterns: HashSet<String>, throttle: Duration) -> Self {
         Self {
-            progress_throttle_override: Some(throttle),
+            progress_throttle: throttle,
             ..Self::new(ignore_patterns)
         }
     }
@@ -261,12 +257,7 @@ impl DirectoryScanner {
         let ignore_patterns_clone = self.ignore_patterns.clone();
         let max_file_size = self.max_file_size;
 
-        #[cfg(test)]
-        let throttle = self
-            .progress_throttle_override
-            .unwrap_or(PROGRESS_UPDATE_THROTTLE);
-        #[cfg(not(test))]
-        let throttle = PROGRESS_UPDATE_THROTTLE;
+        let throttle = self.progress_throttle;
 
         let blocking_task_handle = tokio::task::spawn_blocking(move || {
             let mut walker_builder = ignore::WalkBuilder::new(request.project_root());
@@ -320,7 +311,6 @@ impl DirectoryScanner {
 
             let walker = walker_builder.build();
 
-            // Call the internal helper with a no-op closure for the test hook.
             let final_files = process_walker_results(
                 walker,
                 start_depth,
@@ -328,7 +318,6 @@ impl DirectoryScanner {
                 cancel_flag,
                 progress_callback,
                 throttle,
-                |_| {},
             );
 
             let final_active_patterns = active_patterns.lock().unwrap().clone();
@@ -347,6 +336,21 @@ impl DirectoryScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The entries of `walker`, with `observe` called on each one right before the scan
+    /// loop gets to see it. This is how a test makes something happen at an exact
+    /// point of a scan: delete the file that comes up next, raise the cancellation
+    /// flag after the fifth entry, let time pass.
+    fn observing_each_entry(
+        walker: ignore::Walk,
+        mut observe: impl FnMut(&ignore::DirEntry),
+    ) -> impl Iterator<Item = Result<ignore::DirEntry, ignore::Error>> {
+        walker.inspect(move |entry| {
+            if let Ok(entry) = entry {
+                observe(entry);
+            }
+        })
+    }
     use crate::utils::test_helpers::running_as_root;
     use crate::utils::test_helpers::setup_test_logging;
     use std::fs;
@@ -461,6 +465,11 @@ mod tests {
         let task_sender = sender.clone();
         let walker = ignore::WalkBuilder::new(&root).require_git(false).build();
 
+        // A small delay per entry makes sure the cancellation happens mid-scan.
+        let walker = observing_each_entry(walker, |_| {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        });
+
         let handle = tokio::task::spawn_blocking(move || {
             process_walker_results(
                 walker,
@@ -475,10 +484,6 @@ mod tests {
                     }
                 },
                 PROGRESS_UPDATE_THROTTLE, // Use standard throttle for this test
-                move |_| {
-                    // Introduce a small delay to make cancellation more likely to happen mid-scan.
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                },
             )
         });
 
@@ -514,7 +519,15 @@ mod tests {
         let progress_updates = Arc::new(Mutex::new(Vec::new()));
         let updates_clone = progress_updates.clone();
 
-        let mut hook_call_count = 0;
+        let mut entries_seen = 0;
+        // The walk yields the root dir first (depth 0), then file1.txt. Sleeping when
+        // the *first file* comes up lets the throttle interval pass exactly once.
+        let walker = observing_each_entry(walker, move |entry| {
+            entries_seen += 1;
+            if entry.depth() > 0 && entries_seen == 2 {
+                std::thread::sleep(PROGRESS_UPDATE_THROTTLE + Duration::from_millis(10));
+            }
+        });
 
         process_walker_results(
             walker,
@@ -525,15 +538,6 @@ mod tests {
                 updates_clone.lock().unwrap().push(progress);
             },
             PROGRESS_UPDATE_THROTTLE, // Use standard throttle
-            // The deterministic test hook.
-            move |entry| {
-                hook_call_count += 1;
-                // The hook is called for the root dir first (depth 0), then for file1.txt.
-                // We sleep after the *first valid file* is processed by the hook.
-                if entry.depth() > 0 && hook_call_count == 2 {
-                    std::thread::sleep(PROGRESS_UPDATE_THROTTLE + Duration::from_millis(10));
-                }
-            },
         );
 
         let updates = progress_updates.lock().unwrap();
@@ -712,14 +716,14 @@ mod tests {
         let walker = ignore::WalkBuilder::new(root).build();
 
         let hook_file_to_delete = file_to_delete.clone();
-        let test_hook = move |entry: &ignore::DirEntry| {
+        let walker = observing_each_entry(walker, move |entry: &ignore::DirEntry| {
             if entry.path() == hook_file_to_delete {
                 // Deleting the file here causes the subsequent `entry.metadata()` call to fail.
                 fs::remove_file(&hook_file_to_delete).unwrap();
             }
-        };
+        });
 
-        // We test the private helper directly to use the deterministic test hook.
+        // The loop is driven directly, with entries that change under its feet.
         let files = process_walker_results(
             walker,
             0,
@@ -727,7 +731,6 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             |_| {},
             PROGRESS_UPDATE_THROTTLE,
-            test_hook,
         );
 
         let paths: HashSet<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
@@ -760,7 +763,7 @@ mod tests {
         let hook_cancel_flag = cancel_flag.clone();
         let hook_files_processed = files_processed_count.clone();
 
-        let test_hook = move |entry: &ignore::DirEntry| {
+        let walker = observing_each_entry(walker, move |entry: &ignore::DirEntry| {
             if entry.depth() > 0 {
                 // Skip counting the root directory itself.
                 let count = hook_files_processed.fetch_add(1, Ordering::SeqCst);
@@ -768,7 +771,7 @@ mod tests {
                     hook_cancel_flag.store(true, Ordering::SeqCst);
                 }
             }
-        };
+        });
 
         let files = process_walker_results(
             walker,
@@ -777,7 +780,6 @@ mod tests {
             cancel_flag,
             |_| {},
             PROGRESS_UPDATE_THROTTLE,
-            test_hook,
         );
 
         // The ignore::Walk iterator might have a small internal buffer, so the stop
@@ -839,14 +841,14 @@ mod tests {
         let walker = ignore::WalkBuilder::new(root).build();
 
         let hook_path_to_replace = path_to_replace.clone();
-        let test_hook = move |entry: &ignore::DirEntry| {
+        let walker = observing_each_entry(walker, move |entry: &ignore::DirEntry| {
             if entry.path() == hook_path_to_replace {
                 // This simulates a race condition where the file is replaced by a directory
                 // after being discovered by the directory walker.
                 fs::remove_file(&hook_path_to_replace).unwrap();
                 fs::create_dir(&hook_path_to_replace).unwrap();
             }
-        };
+        });
 
         let files = process_walker_results(
             walker,
@@ -855,7 +857,6 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             |_| {},
             PROGRESS_UPDATE_THROTTLE,
-            test_hook,
         );
 
         // The scanner should process the item based on what it is when metadata is read.

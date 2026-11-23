@@ -238,9 +238,10 @@ pub struct ContentSearchRequest {
     pub cancel_flag: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
 impl ContentSearchRequest {
     /// A request with the size limit of the core that is never cancelled.
-    pub fn new(query: impl Into<String>, case_sensitive: bool) -> Self {
+    pub(crate) fn new(query: impl Into<String>, case_sensitive: bool) -> Self {
         Self {
             query: query.into(),
             case_sensitive,

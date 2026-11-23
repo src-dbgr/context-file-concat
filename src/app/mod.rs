@@ -13,6 +13,7 @@ pub mod filtering;
 mod helpers;
 pub mod proxy;
 pub mod selection;
+pub mod shared_state;
 pub mod state;
 pub mod tasks;
 pub mod transport;
@@ -22,13 +23,13 @@ pub mod window_geometry;
 
 use crate::app::file_dialog::DialogService;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use wry::WebView;
 
 use crate::app::proxy::EventProxy;
 use dispatch::CommandDispatcher;
 use events::{IpcMessage, UserEvent};
-use state::AppState;
+use shared_state::SharedState;
 
 /// The main handler for IPC messages from the WebView: parses the message and queues
 /// its command on the matching lane of `dispatcher`, which executes commands in arrival
@@ -46,7 +47,7 @@ pub fn dispatch_ipc_message<P: EventProxy, D: DialogService + 'static>(
     message: String,
     dialog_service: Arc<D>,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     let Ok(msg) = serde_json::from_str::<IpcMessage>(&message) else {
         tracing::error!("Failed to parse IPC message: {}", message);
@@ -73,7 +74,7 @@ pub fn dispatch_dropped_path<P: EventProxy>(
     dispatcher: &CommandDispatcher,
     path: PathBuf,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     dispatcher.dispatch(async move { commands::open_dropped_path(path, proxy, state) });
 }
@@ -203,15 +204,14 @@ fn run_dialog_command<P: EventProxy, D: DialogService + ?Sized>(
     payload: serde_json::Value,
     dialog: &D,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     match command {
         DialogCommand::SelectDirectory => commands::select_directory(dialog, proxy, state),
         DialogCommand::SaveFile => commands::save_file(dialog, payload, proxy, state),
         DialogCommand::PickOutputDirectory => commands::pick_output_directory(dialog, proxy, state),
         DialogCommand::ExportConfig => commands::export_config(dialog, proxy, state),
-        DialogCommand::ImportConfig => tokio::runtime::Handle::current()
-            .block_on(commands::import_config(dialog, proxy, state)),
+        DialogCommand::ImportConfig => commands::import_config(dialog, proxy, state),
     }
 }
 
@@ -229,7 +229,7 @@ async fn run_command<P: EventProxy>(
     command: OrderedCommand,
     payload: serde_json::Value,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     use OrderedCommand as C;
     match command {
@@ -330,10 +330,11 @@ pub fn handle_user_event(event: UserEvent, webview: &WebView) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::state::StatusNotice;
+    use crate::app::state::{AppState, StatusNotice};
     use crate::config::AppConfig;
     use std::path::Path;
     use std::sync::mpsc as std_mpsc;
+    use std::sync::Mutex;
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -383,12 +384,28 @@ mod tests {
         close_dialog: std_mpsc::Sender<()>,
         proxy: TestEventProxy,
         events: mpsc::UnboundedReceiver<UserEvent>,
-        state: Arc<Mutex<AppState>>,
+        state: SharedState,
         idle_tasks: usize,
     }
 
     impl Harness {
-        fn new() -> Self {
+        /// Creates the harness on a runtime that is at rest.
+        ///
+        /// The tasks alive right after the dispatcher has been created are the
+        /// reference for [`Self::quiescence`], so nothing else may be alive at that
+        /// moment. A test that goes through several harnesses in a loop drops one and
+        /// creates the next; the lanes of the dropped one end a moment later, and
+        /// counting them would make the next harness consider itself at rest too early.
+        async fn new() -> Self {
+            let metrics = tokio::runtime::Handle::current().metrics();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while metrics.num_alive_tasks() > 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("tasks of an earlier harness are still running");
+
             let (opened, dialog_opened) = std_mpsc::channel();
             let (close_dialog, close) = std_mpsc::channel();
             let (tx, events) = mpsc::unbounded_channel();
@@ -398,9 +415,7 @@ mod tests {
             let dispatcher = CommandDispatcher::new();
             Self {
                 // The lanes of the dispatcher are the only tasks of an idle harness.
-                idle_tasks: tokio::runtime::Handle::current()
-                    .metrics()
-                    .num_alive_tasks(),
+                idle_tasks: metrics.num_alive_tasks(),
                 dispatcher,
                 dialog: Arc::new(BlockingDialog {
                     opened: Mutex::new(opened),
@@ -410,14 +425,14 @@ mod tests {
                 close_dialog,
                 proxy: TestEventProxy(tx),
                 events,
-                state: Arc::new(Mutex::new(state)),
+                state: SharedState::new(state),
             }
         }
 
         /// A harness whose loaded directory is `project` (not scanned yet).
-        fn with_project(project: &Path) -> Self {
-            let harness = Self::new();
-            harness.state.lock().unwrap().current_path = project.to_string_lossy().to_string();
+        async fn with_project(project: &Path) -> Self {
+            let harness = Self::new().await;
+            harness.state.lock().current_path = project.to_string_lossy().to_string();
             harness
         }
 
@@ -434,8 +449,8 @@ mod tests {
         /// commands have run (including the part of a command that suspended) and the
         /// background tasks they started have ended.
         ///
-        /// Must be called on a harness that was idle when it was created, as the
-        /// number of tasks alive at that time is the reference.
+        /// The reference is the number of tasks that were alive when the harness was
+        /// created, i.e. the lanes of its dispatcher (see [`Self::new`]).
         async fn quiescence(&self) {
             // The marker suspends once, so it passes through the ordered lane and the
             // continuation lane behind everything that was sent before it.
@@ -481,7 +496,6 @@ mod tests {
         fn is_expanded(&self, path: &str) -> bool {
             self.state
                 .lock()
-                .unwrap()
                 .expanded_dirs
                 .contains(&PathBuf::from(path))
         }
@@ -519,9 +533,9 @@ mod tests {
     /// is lost and nothing the UI does not edit is touched.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn quick_config_intents_are_all_applied() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.config.ignore_patterns.clear();
             state.config.window_size = (640.0, 480.0);
         }
@@ -541,27 +555,18 @@ mod tests {
         };
         assert_eq!(last.config.ignore_patterns, ["b", "c"]);
         assert!(!last.config.use_relative_paths);
-        assert_eq!(
-            harness.state.lock().unwrap().config.window_size,
-            (640.0, 480.0)
-        );
+        assert_eq!(harness.state.lock().config.window_size, (640.0, 480.0));
 
         harness.send("clearIgnorePatterns", serde_json::Value::Null);
         harness.events(1).await;
-        assert!(harness
-            .state
-            .lock()
-            .unwrap()
-            .config
-            .ignore_patterns
-            .is_empty());
+        assert!(harness.state.lock().config.ignore_patterns.is_empty());
     }
 
     /// The former whole-config command is gone; a stale UI cannot replace the config.
     #[tokio::test]
     async fn update_config_is_not_a_command_anymore() {
-        let mut harness = Harness::new();
-        let before = harness.state.lock().unwrap().config.clone();
+        let mut harness = Harness::new().await;
+        let before = harness.state.lock().config.clone();
         let mut replaced = before.clone();
         replaced.ignore_patterns.clear();
 
@@ -569,12 +574,12 @@ mod tests {
         harness.send("initialize", serde_json::Value::Null);
         harness.events(1).await;
 
-        assert_eq!(harness.state.lock().unwrap().config, before);
+        assert_eq!(harness.state.lock().config, before);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn commands_take_effect_in_the_order_they_were_sent() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
 
         // Each round ends with a different final command; with unordered execution
         // some rounds would end in the wrong state.
@@ -596,14 +601,14 @@ mod tests {
     /// once: a lost or repeated one would leave the file deselected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn an_odd_number_of_toggles_toggles_once() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
 
         for _ in 0..101 {
             harness.send("toggleSelection", serde_json::json!("/repo/src/main.rs"));
         }
         harness.events(101).await;
 
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(state
             .selected_files
             .contains(&PathBuf::from("/repo/src/main.rs")));
@@ -611,7 +616,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_open_dialog_does_not_hold_up_other_commands() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
 
         harness.send("pickOutputDirectory", serde_json::Value::Null);
         harness
@@ -631,7 +636,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn only_one_dialog_is_open_at_a_time() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
 
         harness.send("saveFile", serde_json::json!("content"));
         harness.send("importConfig", serde_json::Value::Null);
@@ -660,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_and_unknown_messages_are_ignored() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
 
         harness.send("noSuchCommand", serde_json::Value::Null);
         dispatch_ipc_message(
@@ -707,13 +712,13 @@ mod tests {
     async fn a_cancel_sent_right_after_a_rescan_cancels_that_rescan() {
         for round in 0..20 {
             let project = project_on_disk("a.txt");
-            let harness = Harness::with_project(project.path());
+            let harness = Harness::with_project(project.path()).await;
 
             harness.send("rescanDirectory", serde_json::Value::Null);
             harness.send("cancelScan", serde_json::Value::Null);
             harness.quiescence().await;
 
-            let state = harness.state.lock().unwrap();
+            let state = harness.state.lock();
             assert!(!state.is_scanning(), "round {round}");
             assert_eq!(state.status, StatusNotice::ScanCancelled, "round {round}");
             assert!(!state.is_fully_scanned, "round {round}");
@@ -725,13 +730,13 @@ mod tests {
     async fn a_clear_sent_right_after_a_rescan_leaves_no_directory_loaded() {
         for round in 0..20 {
             let project = project_on_disk("a.txt");
-            let harness = Harness::with_project(project.path());
+            let harness = Harness::with_project(project.path()).await;
 
             harness.send("rescanDirectory", serde_json::Value::Null);
             harness.send("clearDirectory", serde_json::Value::Null);
             harness.quiescence().await;
 
-            let state = harness.state.lock().unwrap();
+            let state = harness.state.lock();
             assert_eq!(state.current_path, "", "round {round}");
             assert!(!state.is_scanning(), "round {round}");
             assert!(state.full_file_list.is_empty(), "round {round}");
@@ -744,13 +749,13 @@ mod tests {
         for round in 0..20 {
             let first = project_on_disk("first.txt");
             let second = project_on_disk("second.txt");
-            let harness = Harness::new();
+            let harness = Harness::new().await;
 
             harness.drop_path(first.path());
             harness.drop_path(second.path());
             harness.quiescence().await;
 
-            let state = harness.state.lock().unwrap();
+            let state = harness.state.lock();
             assert_eq!(
                 Path::new(&state.current_path),
                 second.path(),
@@ -775,7 +780,7 @@ mod tests {
     async fn a_collapse_sent_right_after_a_lazy_load_ends_collapsed() {
         for round in 0..20 {
             let project = project_on_disk("a.txt");
-            let harness = Harness::with_project(project.path());
+            let harness = Harness::with_project(project.path()).await;
             let src = project.path().join("src");
 
             harness.send("loadDirectoryLevel", serde_json::json!(src));
@@ -785,7 +790,7 @@ mod tests {
             );
             harness.quiescence().await;
 
-            let state = harness.state.lock().unwrap();
+            let state = harness.state.lock();
             assert!(!state.expanded_dirs.contains(&src), "round {round}");
             // The load itself is not affected by the collapse.
             assert!(state.loaded_dirs.contains(&src), "round {round}");
@@ -797,7 +802,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn a_lazy_load_sent_right_after_a_collapse_ends_expanded() {
         let project = project_on_disk("a.txt");
-        let harness = Harness::with_project(project.path());
+        let harness = Harness::with_project(project.path()).await;
         let src = project.path().join("src");
 
         harness.send(
@@ -807,8 +812,372 @@ mod tests {
         harness.send("loadDirectoryLevel", serde_json::json!(src));
         harness.quiescence().await;
 
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(state.expanded_dirs.contains(&src));
         assert!(state.loaded_dirs.contains(&src));
+    }
+
+    // --- Opening a path that may not exist ---------------------------------------------
+    //
+    // Whether a dropped or selected path exists is only known once the scan task has
+    // looked at it. Until then the loaded directory stays; a path that does not exist
+    // leaves nothing behind but its error message.
+
+    impl Harness {
+        /// A harness whose loaded directory is `project`, scanned completely, with
+        /// `a.txt` selected, `src` expanded and a filename filter set.
+        async fn with_scanned_project(project: &Path) -> Self {
+            let mut harness = Self::with_project(project).await;
+            harness.send("rescanDirectory", serde_json::Value::Null);
+            harness.send("toggleSelection", serde_json::json!(project.join("a.txt")));
+            harness.send(
+                "setExpansion",
+                serde_json::json!({ "path": project.join("src"), "expanded": true }),
+            );
+            harness.send(
+                "updateFilters",
+                serde_json::json!({
+                    "searchQuery": "a",
+                    "extensionFilter": "",
+                    "contentSearchQuery": "",
+                }),
+            );
+            harness.quiescence().await;
+            assert!(harness.state.lock().is_fully_scanned);
+            harness.sent_errors();
+            harness
+        }
+
+        /// The error messages sent to the UI so far; all pending events are consumed.
+        fn sent_errors(&mut self) -> Vec<String> {
+            std::iter::from_fn(|| self.events.try_recv().ok())
+                .filter_map(|event| match event {
+                    UserEvent::ShowError(message) => Some(message),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Asserts that the project of [`Self::with_scanned_project`] is loaded just
+        /// as that function left it.
+        #[track_caller]
+        fn assert_scanned_project_is_untouched(&self, project: &Path, context: &str) {
+            let state = self.state.lock();
+            assert_eq!(Path::new(&state.current_path), project, "{context}");
+            assert!(!state.is_scanning() && !state.is_opening(), "{context}");
+            assert!(state.is_fully_scanned, "{context}");
+            assert_eq!(
+                listed_names(&state),
+                ["a.txt", "main.rs", "src"],
+                "{context}"
+            );
+            assert_eq!(
+                state.selected_files,
+                std::collections::HashSet::from([project.join("a.txt")]),
+                "{context}"
+            );
+            assert!(
+                state.expanded_dirs.contains(&project.join("src")),
+                "{context}"
+            );
+            assert_eq!(state.search_query, "a", "{context}");
+            assert_eq!(
+                state.config.last_directory.as_deref(),
+                Some(project),
+                "{context}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_dropped_path_that_does_not_exist_keeps_the_loaded_directory() {
+        for round in 0..10 {
+            let project = project_on_disk("a.txt");
+            let mut harness = Harness::with_scanned_project(project.path()).await;
+
+            harness.drop_path(&project.path().join("does-not-exist"));
+            harness.quiescence().await;
+
+            harness.assert_scanned_project_is_untouched(project.path(), &format!("round {round}"));
+            let errors = harness.sent_errors();
+            assert_eq!(errors.len(), 1, "round {round}: {errors:?}");
+            assert!(errors[0].contains("Path does not exist"), "round {round}");
+        }
+    }
+
+    /// The same through the directory dialog (a directory can vanish between being
+    /// picked and being looked at).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_selected_directory_that_does_not_exist_keeps_the_loaded_directory() {
+        struct PicksMissingDirectory(PathBuf);
+        impl DialogService for PicksMissingDirectory {
+            fn pick_directory(&self) -> Option<PathBuf> {
+                Some(self.0.clone())
+            }
+            fn pick_config_to_import(&self) -> Option<PathBuf> {
+                None
+            }
+            fn export_config_path(&self) -> Option<PathBuf> {
+                None
+            }
+            fn save_output_file_path(&self, _config: &AppConfig) -> Option<PathBuf> {
+                None
+            }
+        }
+
+        let project = project_on_disk("a.txt");
+        let mut harness = Harness::with_scanned_project(project.path()).await;
+
+        dispatch_ipc_message(
+            &harness.dispatcher,
+            serde_json::json!({ "command": "selectDirectory", "payload": null }).to_string(),
+            Arc::new(PicksMissingDirectory(project.path().join("gone"))),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        // The dialog command runs on the blocking lane; wait for its answer.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match harness.events.recv().await.expect("event channel closed") {
+                    UserEvent::ShowError(message) => {
+                        assert!(message.contains("Path does not exist"));
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("the missing directory was not reported");
+        harness.quiescence().await;
+
+        harness.assert_scanned_project_is_untouched(project.path(), "after the dialog");
+    }
+
+    /// A scan of the loaded directory is running when the path is dropped. The drop
+    /// supersedes it; when the path turns out not to exist, the scan is started again
+    /// instead of leaving the directory half listed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_missing_drop_during_a_rescan_lets_the_directory_be_scanned_completely() {
+        for round in 0..10 {
+            let project = project_on_disk("a.txt");
+            let mut harness = Harness::with_scanned_project(project.path()).await;
+
+            harness.send("rescanDirectory", serde_json::Value::Null);
+            harness.drop_path(&project.path().join("does-not-exist"));
+            harness.quiescence().await;
+
+            harness.assert_scanned_project_is_untouched(project.path(), &format!("round {round}"));
+            assert_eq!(harness.sent_errors().len(), 1, "round {round}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_missing_drop_does_not_undo_the_drop_before_it() {
+        for round in 0..10 {
+            let project = project_on_disk("a.txt");
+            let second = project_on_disk("second.txt");
+            let mut harness = Harness::with_scanned_project(project.path()).await;
+
+            harness.drop_path(second.path());
+            harness.drop_path(&project.path().join("does-not-exist"));
+            harness.quiescence().await;
+
+            let state = harness.state.lock();
+            assert_eq!(
+                Path::new(&state.current_path),
+                second.path(),
+                "round {round}"
+            );
+            assert!(
+                state.is_fully_scanned && !state.is_scanning(),
+                "round {round}"
+            );
+            assert_eq!(
+                listed_names(&state),
+                ["main.rs", "second.txt", "src"],
+                "round {round}"
+            );
+            assert!(state.selected_files.is_empty(), "round {round}");
+            drop(state);
+            assert_eq!(harness.sent_errors().len(), 1, "round {round}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_drop_that_follows_a_missing_one_is_loaded() {
+        for round in 0..10 {
+            let project = project_on_disk("a.txt");
+            let second = project_on_disk("second.txt");
+            let harness = Harness::with_scanned_project(project.path()).await;
+
+            harness.drop_path(&project.path().join("does-not-exist"));
+            harness.drop_path(second.path());
+            harness.quiescence().await;
+
+            let state = harness.state.lock();
+            assert_eq!(
+                Path::new(&state.current_path),
+                second.path(),
+                "round {round}"
+            );
+            assert!(
+                state.is_fully_scanned && !state.is_scanning(),
+                "round {round}"
+            );
+            assert_eq!(
+                listed_names(&state),
+                ["main.rs", "second.txt", "src"],
+                "round {round}"
+            );
+        }
+    }
+
+    /// The ordered-lane guarantee holds for a drop as for a rescan: the cancel that
+    /// follows it cancels it. What was loaded before is still there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_cancel_sent_right_after_a_drop_cancels_the_drop() {
+        for round in 0..20 {
+            let project = project_on_disk("a.txt");
+            let second = project_on_disk("second.txt");
+            let harness = Harness::with_scanned_project(project.path()).await;
+
+            harness.drop_path(second.path());
+            harness.send("cancelScan", serde_json::Value::Null);
+            harness.quiescence().await;
+
+            harness.assert_scanned_project_is_untouched(project.path(), &format!("round {round}"));
+            assert_eq!(
+                harness.state.lock().status,
+                StatusNotice::ScanCancelled,
+                "round {round}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_clear_sent_right_after_a_drop_leaves_no_directory_loaded() {
+        for round in 0..20 {
+            let project = project_on_disk("a.txt");
+            let second = project_on_disk("second.txt");
+            let harness = Harness::with_scanned_project(project.path()).await;
+
+            harness.drop_path(second.path());
+            harness.send("clearDirectory", serde_json::Value::Null);
+            harness.quiescence().await;
+
+            let state = harness.state.lock();
+            assert_eq!(state.current_path, "", "round {round}");
+            assert!(!state.is_scanning(), "round {round}");
+            assert!(state.full_file_list.is_empty(), "round {round}");
+            assert_eq!(state.config.last_directory, None, "round {round}");
+        }
+    }
+
+    /// A rescan asks for a fresh listing of "the directory". Right after a drop that is
+    /// the dropped one, which is about to be scanned anyway: the rescan must not bring
+    /// the previous directory back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_rescan_sent_right_after_a_drop_does_not_undo_the_drop() {
+        for round in 0..20 {
+            let project = project_on_disk("a.txt");
+            let second = project_on_disk("second.txt");
+            let harness = Harness::with_scanned_project(project.path()).await;
+
+            harness.drop_path(second.path());
+            harness.send("rescanDirectory", serde_json::Value::Null);
+            harness.quiescence().await;
+
+            let state = harness.state.lock();
+            assert_eq!(
+                Path::new(&state.current_path),
+                second.path(),
+                "round {round}"
+            );
+            assert!(
+                state.is_fully_scanned && !state.is_scanning(),
+                "round {round}"
+            );
+            assert_eq!(
+                listed_names(&state),
+                ["main.rs", "second.txt", "src"],
+                "round {round}"
+            );
+        }
+    }
+
+    /// An ignore pattern that is added while the dropped path has not been looked at
+    /// yet applies to the scan of the dropped directory, and does not replace that
+    /// scan by one of the previous directory.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn an_ignore_pattern_added_right_after_a_drop_applies_to_the_dropped_directory() {
+        for round in 0..20 {
+            let project = project_on_disk("a.txt");
+            let second = project_on_disk("second.txt");
+            let harness = Harness::with_scanned_project(project.path()).await;
+
+            harness.drop_path(second.path());
+            harness.send(
+                "addIgnorePattern",
+                serde_json::json!({ "pattern": "*.txt" }),
+            );
+            harness.quiescence().await;
+
+            let state = harness.state.lock();
+            assert_eq!(
+                Path::new(&state.current_path),
+                second.path(),
+                "round {round}"
+            );
+            assert!(
+                state.is_fully_scanned && !state.is_scanning(),
+                "round {round}"
+            );
+            assert_eq!(listed_names(&state), ["main.rs", "src"], "round {round}");
+        }
+    }
+
+    // --- Panics ------------------------------------------------------------------------
+
+    /// A command panics while it holds the state lock. The panic is contained by the
+    /// dispatcher, and the lock it poisoned is taken over: the commands that follow
+    /// work, on every lane, and so do background tasks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_command_that_panics_under_the_state_lock_does_not_end_the_application() {
+        let project = project_on_disk("a.txt");
+        let mut harness = Harness::with_project(project.path()).await;
+
+        let state = harness.state.clone();
+        harness.dispatcher.dispatch(async move {
+            let mut guard = state.lock();
+            guard.search_query = "set before the panic".to_string();
+            panic!("deliberate panic in a command holding the state lock");
+        });
+
+        // The ordered lane, a background task (the scan) and its state updates.
+        harness.send("rescanDirectory", serde_json::Value::Null);
+        harness.send("selectAll", serde_json::Value::Null);
+        harness.quiescence().await;
+        // The blocking lane.
+        harness.send("selectDirectory", serde_json::Value::Null);
+        harness
+            .dialog_opened
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        harness.close_dialog.send(()).unwrap();
+        harness.quiescence().await;
+
+        let state = harness.state.lock();
+        assert_eq!(state.search_query, "set before the panic");
+        assert!(state.is_fully_scanned && !state.is_scanning());
+        drop(state);
+        let mut last_update = None;
+        while let Ok(event) = harness.events.try_recv() {
+            if let UserEvent::StateUpdate(update) = event {
+                last_update = Some(update);
+            }
+        }
+        let last_update = last_update.expect("state updates keep being sent");
+        assert!(last_update.is_fully_scanned);
     }
 }

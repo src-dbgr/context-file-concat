@@ -376,17 +376,6 @@ pub fn is_text_file(path: &Path) -> Result<bool> {
     check_file_content_optimized(path)
 }
 
-/// Determines if a file is an image file.
-#[allow(dead_code)]
-pub fn is_image_file(path: &Path) -> bool {
-    if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
-        let ext_lower = extension.to_lowercase();
-        get_image_ext_set().contains(ext_lower.as_str()) || ext_lower == "svg"
-    } else {
-        false
-    }
-}
-
 /// Checks the initial bytes of a file to guess if it's text.
 fn check_file_content_optimized(path: &Path) -> Result<bool> {
     let mut buffer = [0u8; CONTENT_CHECK_BUFFER_SIZE];
@@ -422,19 +411,6 @@ pub fn is_text_content(bytes: &[u8]) -> bool {
     // If less than 5% of the bytes are weird control characters, we assume it's text.
     let ratio = control_char_count as f32 / sample.len() as f32;
     ratio < 0.05
-}
-
-/// Classifies a batch of files as text or image.
-#[allow(dead_code)]
-pub fn batch_classify_files(paths: &[&Path]) -> Vec<(bool, bool)> {
-    paths
-        .iter()
-        .map(|path| {
-            let is_text = is_text_file(path).unwrap_or(false);
-            let is_image = if !is_text { is_image_file(path) } else { false };
-            (is_text, is_image)
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -550,32 +526,21 @@ mod tests {
         assert!(!is_text_file(&path).unwrap());
     }
 
+    /// Images and archives are recognised by their extension, whatever they contain;
+    /// SVG is an image format that is text.
     #[test]
-    fn test_is_image_file_logic() {
-        assert!(is_image_file(Path::new("image.jpg")));
-        assert!(is_image_file(Path::new("image.PNG")));
-        assert!(is_image_file(Path::new("image.svg")));
-        assert!(!is_image_file(Path::new("document.txt")));
-        assert!(!is_image_file(Path::new("archive.zip")));
-        assert!(!is_image_file(Path::new("no_extension")));
-    }
-
-    #[test]
-    fn test_batch_classify_files_logic() {
+    fn test_images_and_archives_are_not_text_but_svg_is() {
         let dir = TempDir::new().unwrap();
-        let p1 = create_test_file(&dir, "text.txt", b"text");
-        let p2 = create_test_file(&dir, "image.png", b"png");
-        let p3 = create_test_file(&dir, "binary.zip", b"zip");
-        let p4 = create_test_file(&dir, "vector.svg", b"<svg>");
+        let text = create_test_file(&dir, "text.txt", b"text");
+        let image = create_test_file(&dir, "image.png", b"png");
+        let upper_case_image = create_test_file(&dir, "image.JPG", b"jpg");
+        let archive = create_test_file(&dir, "binary.zip", b"zip");
+        let vector = create_test_file(&dir, "vector.svg", b"<svg>");
 
-        let paths: Vec<&Path> = vec![&p1, &p2, &p3, &p4];
-        let results = batch_classify_files(&paths);
-
-        assert_eq!(results.len(), 4);
-        // (is_text, is_image)
-        assert_eq!(results[0], (true, false));
-        assert_eq!(results[1], (false, true));
-        assert_eq!(results[2], (false, false));
-        assert_eq!(results[3], (true, false));
+        assert!(is_text_file(&text).unwrap());
+        assert!(!is_text_file(&image).unwrap());
+        assert!(!is_text_file(&upper_case_image).unwrap());
+        assert!(!is_text_file(&archive).unwrap());
+        assert!(is_text_file(&vector).unwrap());
     }
 }

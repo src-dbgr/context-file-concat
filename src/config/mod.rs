@@ -1,9 +1,31 @@
 pub mod settings;
+pub mod store;
 
-use anyhow::Result;
+pub use store::{ConfigSnapshot, ConfigStore};
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
+
+/// The unit [`AppConfig::window_size`] and [`AppConfig::window_position`] are stored in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GeometryUnits {
+    /// Physical pixels. This is what versions up to 0.3.1 stored, without saying so:
+    /// a configuration that does not name its unit is read as physical. Never written
+    /// any more; the geometry is converted when the application starts (see
+    /// `app::window_geometry`).
+    Physical,
+    /// Logical units, independent of the scale factor of the display.
+    Logical,
+}
+
+impl GeometryUnits {
+    /// The unit of a stored geometry that does not name one.
+    fn of_unmarked_config() -> Self {
+        Self::Physical
+    }
+}
 
 /// The persisted settings of the application.
 ///
@@ -24,14 +46,29 @@ pub struct AppConfig {
     pub remove_empty_directories: bool,
     pub window_size: (f64, f64),
     pub window_position: (f64, f64),
+    /// The unit of `window_size` and `window_position`.
+    #[serde(default = "GeometryUnits::of_unmarked_config")]
+    pub geometry_units: GeometryUnits,
     /// Size limit for files in MiB: larger files are not listed by the scan, not read
     /// by the content search and not inlined into the generated output.
     pub max_file_size_mb: u64,
 }
 
 impl AppConfig {
-    pub fn load() -> Result<Self> {
-        settings::load_config(None)
+    /// Takes over the settings of `imported` that a user edits and shares: patterns,
+    /// search and output options, the file size limit.
+    ///
+    /// What describes this installation rather than a preference stays as it is: the
+    /// window geometry (an imported file may come from another display, or store it
+    /// in another unit) and the directory that was opened last.
+    pub fn adopt_user_settings(&mut self, imported: AppConfig) {
+        *self = AppConfig {
+            window_size: self.window_size,
+            window_position: self.window_position,
+            geometry_units: self.geometry_units,
+            last_directory: self.last_directory.take(),
+            ..imported
+        };
     }
 
     /// The file size limit ([`AppConfig::max_file_size_mb`]) in bytes, the unit the
@@ -101,6 +138,7 @@ impl Default for AppConfig {
             remove_empty_directories: false,
             window_size: (1200.0, 800.0),
             window_position: (100.0, 100.0),
+            geometry_units: GeometryUnits::Logical,
             max_file_size_mb: 20,
         }
     }
@@ -132,5 +170,55 @@ mod tests {
         assert_eq!(limit_of(3), 3 * 1024 * 1024);
         assert_eq!(limit_of(0), 0);
         assert_eq!(limit_of(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn a_config_that_does_not_name_its_geometry_unit_is_read_as_physical() {
+        let mut json = serde_json::to_value(AppConfig::default()).unwrap();
+        assert_eq!(json["geometry_units"], "logical");
+
+        json.as_object_mut().unwrap().remove("geometry_units");
+        let unmarked: AppConfig = serde_json::from_value(json).unwrap();
+
+        assert_eq!(unmarked.geometry_units, GeometryUnits::Physical);
+    }
+
+    #[test]
+    fn adopting_user_settings_keeps_geometry_and_last_directory() {
+        let mut current = AppConfig {
+            window_size: (1000.0, 700.0),
+            window_position: (7.0, 8.0),
+            geometry_units: GeometryUnits::Logical,
+            last_directory: Some(PathBuf::from("/current/project")),
+            ..AppConfig::default()
+        };
+        let imported = AppConfig {
+            ignore_patterns: HashSet::from(["*.imported".to_string()]),
+            tree_ignore_patterns: HashSet::from(["docs".to_string()]),
+            output_directory: Some(PathBuf::from("/imported/out")),
+            output_filename: "imported.txt".to_string(),
+            case_sensitive_search: true,
+            include_tree_by_default: false,
+            use_relative_paths: false,
+            remove_empty_directories: true,
+            max_file_size_mb: 3,
+            window_size: (4000.0, 3000.0),
+            window_position: (-900.0, -900.0),
+            geometry_units: GeometryUnits::Physical,
+            last_directory: Some(PathBuf::from("/somebody/elses/project")),
+        };
+
+        current.adopt_user_settings(imported.clone());
+
+        assert_eq!(
+            current,
+            AppConfig {
+                window_size: (1000.0, 700.0),
+                window_position: (7.0, 8.0),
+                geometry_units: GeometryUnits::Logical,
+                last_directory: Some(PathBuf::from("/current/project")),
+                ..imported
+            }
+        );
     }
 }

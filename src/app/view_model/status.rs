@@ -1,7 +1,8 @@
 //! Words the status of the application for the status bar.
 //!
 //! The state only records *what happened* ([`StatusNotice`]) and how far a scan has got
-//! ([`ScanProgress`]); how that reads is decided here.
+//! ([`ScanProgress`], as the running scan last reported it); how that reads is decided
+//! here.
 
 use crate::app::state::{AppState, StatusNotice};
 use crate::core::ScanProgress;
@@ -42,16 +43,24 @@ pub(super) fn scan_progress_for_ui(state: &AppState) -> ScanProgress {
     }
 }
 
-/// The line shown in the status bar.
+/// The line shown in the status bar: while a scan is running how far it has got (as of
+/// this snapshot; the live counters are sent as `ScanProgress` events), otherwise what
+/// happened last.
 pub(super) fn status_message(state: &AppState) -> String {
-    let activity = activity_text(state);
-    if state.is_scanning() {
-        format!(
-            "Scanning... {} files processed. {} large files skipped ({})",
-            state.scan_progress.files_scanned, state.scan_progress.large_files_skipped, activity
-        )
+    if !state.is_scanning() {
+        return activity_text(state);
+    }
+    let progress = &state.scan_progress;
+    let counters = format!(
+        "Scanning... {} files processed. {} large files skipped",
+        progress.files_scanned, progress.large_files_skipped
+    );
+    // A scan that has not reported anything yet has no path to show; the notice of
+    // whatever happened before it does not belong to it.
+    if progress.current_scanning_path.is_empty() {
+        format!("{counters}.")
     } else {
-        activity
+        format!("{counters} ({})", progress.current_scanning_path)
     }
 }
 
@@ -102,30 +111,61 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn running_scan_shows_its_counters_and_the_latest_notice_until_it_reports_a_path() {
+    #[test]
+    fn running_scan_shows_the_progress_it_has_reported() {
         let mut state = AppState::default();
         state.status = StatusNotice::ScanCancelled;
-        let _scan = state.begin_scan();
+        let scan = state.begin_scan();
 
+        // Nothing reported yet: no path, and no notice from before the scan.
         assert_eq!(
             status_message(&state),
-            "Scanning... 0 files processed. 0 large files skipped (Scan cancelled.)"
+            "Scanning... 0 files processed. 0 large files skipped."
         );
 
-        state.scan_progress = ScanProgress {
-            files_scanned: 40,
-            large_files_skipped: 2,
-            current_scanning_path: "/project/src/main.rs".to_string(),
-        };
+        state.record_scan_progress(
+            &scan,
+            ScanProgress {
+                files_scanned: 40,
+                large_files_skipped: 2,
+                current_scanning_path: "/project/src/main.rs".to_string(),
+            },
+        );
 
         assert_eq!(
             status_message(&state),
             "Scanning... 40 files processed. 2 large files skipped (/project/src/main.rs)"
         );
+        let progress = scan_progress_for_ui(&state);
+        assert_eq!(progress.current_scanning_path, "/project/src/main.rs");
         assert_eq!(
-            scan_progress_for_ui(&state).current_scanning_path,
-            "/project/src/main.rs"
+            (progress.files_scanned, progress.large_files_skipped),
+            (40, 2)
+        );
+    }
+
+    #[test]
+    fn finished_scan_shows_its_outcome_and_keeps_its_counters() {
+        let mut state = AppState::default();
+        let scan = state.begin_scan();
+        state.record_scan_progress(
+            &scan,
+            ScanProgress {
+                files_scanned: 40,
+                large_files_skipped: 2,
+                current_scanning_path: "/project/src/main.rs".to_string(),
+            },
+        );
+        state.finish_scan(&scan);
+        state.status = StatusNotice::IndexingComplete { visible_items: 38 };
+
+        let expected = "Indexing complete. Found 38 visible items.";
+        assert_eq!(status_message(&state), expected);
+        let progress = scan_progress_for_ui(&state);
+        assert_eq!(progress.current_scanning_path, expected);
+        assert_eq!(
+            (progress.files_scanned, progress.large_files_skipped),
+            (40, 2)
         );
     }
 }

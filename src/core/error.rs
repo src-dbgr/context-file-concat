@@ -17,18 +17,9 @@ pub enum CoreError {
     #[error("Task join error: {0}")]
     Join(String),
 
-    /// Represents a path that was expected to be a directory but was not.
-    #[allow(dead_code)]
-    #[error("Path is not a valid directory: {0}")]
-    NotADirectory(PathBuf),
-
     /// Represents a failure to strip a path prefix.
     #[error("Failed to strip prefix from path: {0}")]
     PathStrip(String),
-
-    /// Represents an error related to ignore pattern processing.
-    #[error("Pattern error: {0}")]
-    Pattern(String),
 
     /// Represents a user-initiated cancellation of an operation.
     #[error("Operation was cancelled by the user")]

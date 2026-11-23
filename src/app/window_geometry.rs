@@ -7,12 +7,18 @@
 //! All values are *logical* units: the window is restored with logical size/position,
 //! and mixing them with the physical pixels the windowing system reports would make the
 //! window grow on every restart on HiDPI displays.
+//!
+//! Versions up to 0.3.1 did mix them: they stored physical pixels. The configuration
+//! therefore names the unit of its geometry ([`GeometryUnits`]); a geometry without
+//! that mark is physical and is converted once, when it is read
+//! ([`WindowGeometry::from_config`]). Everything written from here is logical and
+//! marked as such.
 
+use crate::app::shared_state::SharedState;
 use crate::app::state::AppState;
-use crate::config::{settings, AppConfig};
+use crate::config::{AppConfig, ConfigStore, GeometryUnits};
 use anyhow::Result;
-use std::path::Path;
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::MutexGuard;
 use std::time::{Duration, Instant};
 
 /// Smallest inner size the window may have, in logical units.
@@ -109,27 +115,38 @@ pub struct WindowGeometry {
 }
 
 impl WindowGeometry {
-    /// Reads the stored geometry, replacing unusable values with the defaults.
-    pub fn from_config(config: &AppConfig) -> Self {
+    /// Reads the stored geometry in logical units, replacing unusable values with the
+    /// defaults.
+    ///
+    /// A geometry stored in physical pixels (a configuration written by a version that
+    /// did not name the unit) is converted with `primary_scale`, the scale factor of
+    /// the primary monitor: that is where such a window is most likely to have been,
+    /// and the stored values do not say. Without the conversion the first start after
+    /// an upgrade would open the window at twice its size on a 2x display.
+    pub fn from_config(config: &AppConfig, primary_scale: f64) -> Self {
+        let (size, position) = match config.geometry_units {
+            GeometryUnits::Logical => (Some(config.window_size), Some(config.window_position)),
+            GeometryUnits::Physical => (
+                to_logical(config.window_size, primary_scale),
+                to_logical(config.window_position, primary_scale),
+            ),
+        };
         let defaults = AppConfig::default();
-        let size = if is_persistable_size(config.window_size) {
-            config.window_size
-        } else {
-            defaults.window_size
-        };
-        let position = config.window_position;
-        let position = if position.0.is_finite() && position.1.is_finite() {
-            position
-        } else {
-            defaults.window_position
-        };
-        Self { size, position }
+        Self {
+            size: size
+                .filter(|size| is_persistable_size(*size))
+                .unwrap_or(defaults.window_size),
+            position: position
+                .filter(|position| position.0.is_finite() && position.1.is_finite())
+                .unwrap_or(defaults.window_position),
+        }
     }
 
-    /// Writes the geometry into a configuration.
+    /// Writes the geometry into a configuration, in logical units and marked as such.
     pub fn apply_to(&self, config: &mut AppConfig) {
         config.window_size = self.size;
         config.window_position = self.position;
+        config.geometry_units = GeometryUnits::Logical;
     }
 
     /// Records a new inner size reported in physical pixels; degenerate sizes are ignored.
@@ -180,63 +197,66 @@ impl WindowGeometry {
     /// Mirrors the geometry into the in-memory configuration if the state is free right
     /// now. Never blocks: a busy worker must not make resizing stutter, and the final
     /// geometry is written by [`persist`] regardless.
-    pub fn sync_if_uncontended(&self, state: &Mutex<AppState>) {
-        if let Some(mut guard) = lock_within(state, Duration::ZERO) {
+    pub fn sync_if_uncontended(&self, state: &SharedState) {
+        if let Some(mut guard) = state.try_lock() {
             self.apply_to(&mut guard.config);
         }
     }
 }
 
-/// Persists the geometry together with the current configuration.
+/// Persists the geometry together with the current configuration. This is the last
+/// save of a session.
+///
+/// It goes the way every save goes, as a numbered snapshot of the configuration (see
+/// [`ConfigStore`]), and it is written here and now instead of in the background: the
+/// process ends when the caller returns. Saves that are still queued in the background
+/// are older snapshots; one that is being written is waited for, the others are
+/// skipped, and the store is closed, so nothing can overwrite the final configuration.
 ///
 /// The in-memory configuration is the source of truth, so the state lock is preferred,
 /// but only for [`STATE_LOCK_BUDGET`]: quitting must not hang behind a worker that holds
-/// the state during a large scan/filter. If the budget runs out, the configuration is
-/// taken from disk instead. That is equivalent in practice because every command saves
-/// the configuration when it changes it; only a change made in that very moment could
-/// be missed. Disk I/O always happens without holding the state lock.
-pub fn persist(
-    geometry: WindowGeometry,
-    state: &Mutex<AppState>,
-    path_override: Option<&Path>,
-) -> Result<()> {
-    let config = match lock_within(state, STATE_LOCK_BUDGET) {
+/// the state during a large scan/filter. If the budget runs out, the most recent
+/// snapshot the store knows is used instead. That is the configuration as of the last
+/// change that was saved, which every command does when it changes it; only a change
+/// made in that very moment could be missed. Disk I/O always happens without holding
+/// the state lock.
+pub fn persist(geometry: WindowGeometry, state: &SharedState, store: &ConfigStore) -> Result<()> {
+    let snapshot = match lock_within(state, STATE_LOCK_BUDGET) {
         Some(mut guard) => {
             geometry.apply_to(&mut guard.config);
-            guard.config.clone()
+            guard.config_snapshot()
         }
         None => {
-            tracing::warn!("Application state is busy; saving window geometry from disk config.");
-            let mut config = settings::load_config(path_override)?;
+            tracing::warn!(
+                "Application state is busy; saving window geometry with the last saved config."
+            );
+            let mut config = store.latest();
             geometry.apply_to(&mut config);
-            config
+            store.snapshot(&config)
         }
     };
-    settings::save_config(&config, path_override)
+    snapshot.save_and_close()
 }
 
-/// Tries to lock `mutex` for at most `budget`. A poisoned lock is recovered: the
-/// configuration inside is still the best information available.
-fn lock_within<T>(mutex: &Mutex<T>, budget: Duration) -> Option<MutexGuard<'_, T>> {
+/// Tries to lock the state for at most `budget`.
+fn lock_within(state: &SharedState, budget: Duration) -> Option<MutexGuard<'_, AppState>> {
     let deadline = Instant::now() + budget;
     loop {
-        match mutex.try_lock() {
-            Ok(guard) => return Some(guard),
-            Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
-            Err(TryLockError::WouldBlock) => {
-                if Instant::now() >= deadline {
-                    return None;
-                }
-                std::thread::sleep(STATE_LOCK_POLL);
-            }
+        if let Some(guard) = state.try_lock() {
+            return Some(guard);
         }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(STATE_LOCK_POLL);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use crate::config::settings;
+    use std::path::Path;
 
     const MONITOR: Rect = Rect {
         x: 0.0,
@@ -318,22 +338,105 @@ mod tests {
             window_position: (f64::NAN, 5.0),
             ..AppConfig::default()
         };
-        let g = WindowGeometry::from_config(&config);
+        let g = WindowGeometry::from_config(&config, 2.0);
         assert_eq!(g.size, defaults.window_size);
         assert_eq!(g.position, defaults.window_position);
+    }
 
+    /// A geometry that is marked as logical is taken as it is, whatever the display.
+    #[test]
+    fn from_config_takes_a_logical_geometry_as_it_is() {
         let config = AppConfig {
             window_size: (1000.0, 700.0),
             window_position: (-50.0, 20.0),
+            geometry_units: GeometryUnits::Logical,
             ..AppConfig::default()
         };
-        let g = WindowGeometry::from_config(&config);
-        assert_eq!((g.size, g.position), ((1000.0, 700.0), (-50.0, 20.0)));
+        for scale in [1.0, 1.5, 2.0, f64::NAN] {
+            let g = WindowGeometry::from_config(&config, scale);
+            assert_eq!((g.size, g.position), ((1000.0, 700.0), (-50.0, 20.0)));
+        }
+    }
+
+    /// The upgrade from a version that stored physical pixels: on a 2x display the
+    /// window comes back at the size and place it had, not at twice of both.
+    #[test]
+    fn from_config_converts_a_physical_geometry_with_the_primary_scale() {
+        let stored_by_an_older_version = AppConfig {
+            window_size: (2400.0, 1600.0),
+            window_position: (200.0, -100.0),
+            geometry_units: GeometryUnits::Physical,
+            ..AppConfig::default()
+        };
+
+        let g = WindowGeometry::from_config(&stored_by_an_older_version, 2.0);
+        assert_eq!((g.size, g.position), ((1200.0, 800.0), (100.0, -50.0)));
+
+        // At 1x physical and logical are the same.
+        let g = WindowGeometry::from_config(&stored_by_an_older_version, 1.0);
+        assert_eq!((g.size, g.position), ((2400.0, 1600.0), (200.0, -100.0)));
+
+        let g = WindowGeometry::from_config(&stored_by_an_older_version, 1.5);
+        assert_eq!(g.size, (1600.0, 1600.0 / 1.5));
     }
 
     #[test]
-    fn apply_to_writes_both_fields() {
-        let mut config = AppConfig::default();
+    fn from_config_falls_back_to_defaults_when_the_conversion_yields_nothing_usable() {
+        let defaults = AppConfig::default();
+        let physical = |window_size| AppConfig {
+            window_size,
+            window_position: (200.0, 100.0),
+            geometry_units: GeometryUnits::Physical,
+            ..AppConfig::default()
+        };
+
+        // Smaller than the minimum once it is converted.
+        let g = WindowGeometry::from_config(&physical((1200.0, 800.0)), 2.0);
+        assert_eq!(g.size, defaults.window_size);
+        assert_eq!(g.position, (100.0, 50.0), "the position is still usable");
+
+        // No usable scale factor: nothing can be converted.
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let g = WindowGeometry::from_config(&physical((2400.0, 1600.0)), scale);
+            assert_eq!(g.size, defaults.window_size, "scale {scale}");
+            assert_eq!(g.position, defaults.window_position, "scale {scale}");
+        }
+    }
+
+    /// What the upgrade looks like end to end: a file without the unit mark is read,
+    /// converted once and written back as logical, so the next start takes it as it is.
+    #[test]
+    fn a_config_file_of_an_older_version_is_migrated_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut json = serde_json::to_value(AppConfig {
+            window_size: (2400.0, 1600.0),
+            window_position: (200.0, 100.0),
+            ..AppConfig::default()
+        })
+        .unwrap();
+        json.as_object_mut().unwrap().remove("geometry_units");
+        std::fs::write(&path, json.to_string()).unwrap();
+
+        // First start after the upgrade, on a 2x display.
+        let mut config = settings::load_config(&path).unwrap();
+        let geometry = WindowGeometry::from_config(&config, 2.0);
+        geometry.apply_to(&mut config);
+        settings::save_config(&config, &path).unwrap();
+        assert_eq!(geometry.size, (1200.0, 800.0));
+
+        // Second start.
+        let config = settings::load_config(&path).unwrap();
+        assert_eq!(config.geometry_units, GeometryUnits::Logical);
+        assert_eq!(WindowGeometry::from_config(&config, 2.0), geometry);
+    }
+
+    #[test]
+    fn apply_to_writes_both_fields_and_marks_them_as_logical() {
+        let mut config = AppConfig {
+            geometry_units: GeometryUnits::Physical,
+            ..AppConfig::default()
+        };
         let g = WindowGeometry {
             size: (1000.0, 700.0),
             position: (7.0, 8.0),
@@ -341,6 +444,7 @@ mod tests {
         g.apply_to(&mut config);
         assert_eq!(config.window_size, (1000.0, 700.0));
         assert_eq!(config.window_position, (7.0, 8.0));
+        assert_eq!(config.geometry_units, GeometryUnits::Logical);
     }
 
     #[test]
@@ -415,91 +519,106 @@ mod tests {
     }
 
     #[test]
-    fn lock_within_gives_up_on_a_held_lock_and_recovers_a_poisoned_one() {
-        let mutex = Arc::new(Mutex::new(1));
+    fn lock_within_gives_up_on_a_held_lock() {
+        let state = SharedState::new(AppState::default());
         {
-            let _held = mutex.lock().unwrap();
-            assert!(lock_within(&mutex, Duration::ZERO).is_none());
-            assert!(lock_within(&mutex, Duration::from_millis(20)).is_none());
+            let _held = state.lock();
+            assert!(lock_within(&state, Duration::ZERO).is_none());
+            assert!(lock_within(&state, Duration::from_millis(20)).is_none());
         }
-        assert_eq!(*lock_within(&mutex, Duration::ZERO).unwrap(), 1);
-
-        let poisoner = mutex.clone();
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoner.lock().unwrap();
-            panic!("poison the lock");
-        })
-        .join();
-        assert!(mutex.is_poisoned());
-        assert_eq!(*lock_within(&mutex, Duration::ZERO).unwrap(), 1);
+        assert!(lock_within(&state, Duration::ZERO).is_some());
     }
 
     #[test]
     fn sync_if_uncontended_updates_free_state_and_skips_busy_state() {
-        let state = Mutex::new(AppState::default());
+        let state = SharedState::new(AppState::default());
         let g = WindowGeometry {
             size: (1000.0, 700.0),
             position: (7.0, 8.0),
         };
         g.sync_if_uncontended(&state);
-        assert_eq!(state.lock().unwrap().config.window_size, (1000.0, 700.0));
+        assert_eq!(state.lock().config.window_size, (1000.0, 700.0));
 
         let other = geometry();
         {
-            let _held = state.lock().unwrap();
+            let _held = state.lock();
             other.sync_if_uncontended(&state); // must return immediately
         }
-        assert_eq!(state.lock().unwrap().config.window_size, (1000.0, 700.0));
+        assert_eq!(state.lock().config.window_size, (1000.0, 700.0));
     }
+
+    /// A state whose configuration is kept in a file of a fresh temporary directory.
+    fn state_with_config_file(dir: &Path) -> (SharedState, ConfigStore) {
+        let (store, config) = ConfigStore::open(dir.join("config.json"));
+        (
+            SharedState::new(AppState::new(config, store.clone())),
+            store,
+        )
+    }
+
+    const FINAL_GEOMETRY: WindowGeometry = WindowGeometry {
+        size: (1000.0, 700.0),
+        position: (7.0, 8.0),
+    };
 
     #[test]
     fn persist_saves_the_in_memory_config_with_the_geometry() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut app_state = AppState::default();
-        app_state.config = AppConfig {
-            output_filename: "in-memory.txt".into(),
-            ..AppConfig::default()
-        };
-        let state = Mutex::new(app_state);
-        let g = WindowGeometry {
-            size: (1000.0, 700.0),
-            position: (7.0, 8.0),
-        };
+        let (state, store) = state_with_config_file(dir.path());
+        state.lock().config.output_filename = "in-memory.txt".into();
 
-        persist(g, &state, Some(&path)).unwrap();
+        persist(FINAL_GEOMETRY, &state, &store).unwrap();
 
-        let saved = settings::load_config(Some(&path)).unwrap();
+        let saved = settings::load_config(store.path().unwrap()).unwrap();
         assert_eq!(saved.output_filename, "in-memory.txt");
         assert_eq!(saved.window_size, (1000.0, 700.0));
         assert_eq!(saved.window_position, (7.0, 8.0));
-        assert_eq!(state.lock().unwrap().config, saved);
+        assert_eq!(saved.geometry_units, GeometryUnits::Logical);
+        assert_eq!(state.lock().config, saved);
+    }
+
+    /// The race the ordered path exists for: a command changed the configuration and
+    /// its background save has not run yet when the application quits. Whenever that
+    /// save gets its turn, it must not put its older content over the final one.
+    #[test]
+    fn persist_cannot_be_overtaken_by_a_save_that_is_still_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store) = state_with_config_file(dir.path());
+        let queued = {
+            let mut guard = state.lock();
+            guard.config.output_filename = "first-change.txt".into();
+            guard.config_snapshot()
+        };
+        state.lock().config.output_filename = "second-change.txt".into();
+
+        persist(FINAL_GEOMETRY, &state, &store).unwrap();
+        queued.save().unwrap();
+
+        let saved = settings::load_config(store.path().unwrap()).unwrap();
+        assert_eq!(saved.output_filename, "second-change.txt");
+        assert_eq!(saved.window_size, (1000.0, 700.0));
     }
 
     #[test]
-    fn persist_falls_back_to_the_disk_config_when_the_state_is_busy() {
+    fn persist_falls_back_to_the_last_saved_config_when_the_state_is_busy() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let on_disk = AppConfig {
-            output_filename: "on-disk.txt".into(),
-            ..AppConfig::default()
-        };
-        settings::save_config(&on_disk, Some(&path)).unwrap();
-
-        let state = Mutex::new(AppState::default());
-        let g = WindowGeometry {
-            size: (1000.0, 700.0),
-            position: (7.0, 8.0),
+        let (state, store) = state_with_config_file(dir.path());
+        // A change whose save is still queued: it is not on disk yet.
+        let queued = {
+            let mut guard = state.lock();
+            guard.config.output_filename = "changed.txt".into();
+            guard.config_snapshot()
         };
         {
-            let _held = state.lock().unwrap();
+            let _held = state.lock();
             let started = Instant::now();
-            persist(g, &state, Some(&path)).unwrap();
+            persist(FINAL_GEOMETRY, &state, &store).unwrap();
             assert!(started.elapsed() < Duration::from_secs(5));
         }
+        queued.save().unwrap();
 
-        let saved = settings::load_config(Some(&path)).unwrap();
-        assert_eq!(saved.output_filename, "on-disk.txt");
+        let saved = settings::load_config(store.path().unwrap()).unwrap();
+        assert_eq!(saved.output_filename, "changed.txt");
         assert_eq!(saved.window_size, (1000.0, 700.0));
         assert_eq!(saved.window_position, (7.0, 8.0));
     }

@@ -2,8 +2,9 @@
 //! everything the UI needs for the rest is part of the collapsed node or a counter.
 
 use super::reference::{self, BuildTreeArgs};
-use super::{auto_expand_for_matches, generate_ui_state, TreeNode, UiState};
+use super::{generate_ui_state, TreeNode, UiState};
 use crate::app::filtering;
+use crate::app::filtering::auto_expand_for_matches;
 use crate::app::selection::SelectionState;
 use crate::app::state::AppState;
 use crate::config::AppConfig;

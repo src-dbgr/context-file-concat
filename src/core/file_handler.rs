@@ -216,6 +216,11 @@ pub struct GenerationRequest<'a> {
 
 /// Follows the progress of a generation. All notifications default to doing nothing,
 /// and `()` is the observer that is not interested in any of them.
+///
+/// The application does not show the progress of a generation, so it passes `()`. The
+/// trait is nevertheless the way to learn that a file has been appended: it is how
+/// the tests cancel a generation at an exact point between two files instead of
+/// racing against it, and where a progress display would hook in.
 pub trait GenerationObserver: Sync {
     /// The block of `file_path` has been appended to the document.
     fn file_appended(&self, _file_path: &Path) {}

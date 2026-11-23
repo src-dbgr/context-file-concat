@@ -26,7 +26,7 @@ CFC (Context File Concatenator) is a desktop application designed to intelligent
 - **Configuration Management**:
   - Import and export your settings (including ignore patterns) as a JSON file to share configurations across projects or teams.
   - Window size, position, and other settings are automatically saved between sessions.
-  - Set the environment variable `CFC_CONFIG_DIR` to use a different directory for `config.json` instead of the platform default (useful for separate profiles; the test suite always uses an isolated directory).
+  - Set the environment variable `CFC_CONFIG_DIR` to use a different directory for `config.json` instead of the platform default (useful for separate profiles; the test suite only ever writes config files in temporary directories).
 - **Customizable Output**:
   - Choose to include an ASCII directory tree at the start of the output file.
   - Use relative or absolute file paths in the output headers.
