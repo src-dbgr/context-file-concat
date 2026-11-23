@@ -49,7 +49,7 @@ The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on
 | `toggleDirectorySelection`      | `string` (path)                                         | Selects/deselects all files below a directory                                                                                                                                                                                                       |
 | `selectAll` / `deselectAll`     | `null`                                                  | Selects all listed files / clears the selection                                                                                                                                                                                                     |
 | `updateFilters`                 | `{ searchQuery, extensionFilter, contentSearchQuery }`  | Applies the filters; expands the ancestors of matches (no other fields)                                                                                                                                                                             |
-| `loadFilePreview`               | `string` (path)                                         | Marks the file as previewed; `showPreviewContent` follows once it has been read                                                                                                                                                                     |
+| `loadFilePreview`               | `string` (path)                                         | Marks the file as previewed; `showPreviewContent` follows once it has been read. Only an entry of the loaded list, see [File content](#file-content)                                                                                                |
 | `clearPreviewState`             | `null`                                                  | Clears the previewed file; a preview still being read is not shown any more                                                                                                                                                                         |
 | `generatePreview`               | `null`                                                  | Concatenates the selection; answers with `showGeneratedContent`. An output filename of the form `cfc_output_<timestamp>.txt` is replaced by one with the current time; every other name is kept, also the `cfc_output.txt` of a fresh configuration |
 | `cancelGeneration`              | `null`                                                  | Cancels the running generation                                                                                                                                                                                                                      |
@@ -59,7 +59,7 @@ The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on
 | `removeIgnorePattern`           | `{ pattern: string }` (any text, no other fields)       | Removes one ignore pattern                                                                                                                                                                                                                          |
 | `clearIgnorePatterns`           | `null`                                                  | Removes all ignore patterns                                                                                                                                                                                                                         |
 | `setConfigOption`               | `{ option, value }` (no other fields), see below        | Sets one user-editable option                                                                                                                                                                                                                       |
-| `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog, see [Config import](#config-import)                                                                                                                                                                                |
+| `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog, see [Config import and export](#config-import-and-export)                                                                                                                                                          |
 | `addIgnorePath`                 | `string` (path)                                         | Adds the ignore pattern for a path of the loaded tree (relative to the root; a directory of the loaded list gets a trailing `/`)                                                                                                                    |
 
 ### Filter texts
@@ -120,9 +120,11 @@ One type decides what the ignore patterns hide: `core::IgnoreRules` (`src/core/i
 
 The commands are idempotent (adding a pattern that is set, removing one that is not, and setting an option to its current value change nothing), a changed configuration is persisted, and **every config command is answered with a snapshot**, also when nothing changed. The UI relies on that: controls show the host's `config` and do not write to the store. This holds for every way these commands can end (`addIgnorePattern`, `removeIgnorePattern`, `clearIgnorePatterns`, `addIgnorePath`, `setConfigOption`): a payload that is refused (malformed, an unknown option, a blank pattern), `addIgnorePath` for a path outside the loaded directory or without a loaded directory. Refused payloads are logged on the host. The dialog command `pickOutputDirectory` is the exception that follows from its nature: a dismissed dialog sends nothing.
 
-#### Config import
+#### Config import and export
 
-`importConfig` takes the settings a user edits and shares from the chosen file: ignore patterns (also those of the generated tree), search and output options, the size limit. The window geometry of the file is **not** imported; the current values stay. The import is a hard reset of the loaded directory: selection, expansion, filters and preview are cleared and no directory is loaded (answered with a snapshot). If the file names a `last_directory` and that directory exists, it is then [opened](#opening-a-path) like a dropped path, which also records it as `last_directory`. If the file names none, or one that does not exist, nothing is scanned: the UI stays clean, no error is shown and `last_directory` keeps its value. The imported settings are persisted.
+`exportConfig` writes the settings a user edits and shares, and nothing else: ignore patterns (also those of the generated tree), the output file name, the search and output options, the size limit (`config::SharedConfig`; the patterns are sorted). What describes the installation is **not** part of the file: `last_directory`, `output_directory` and the window geometry. An exported file can be passed on without telling anything about the machine it comes from. The settings are copied under the state lock and written without it.
+
+`importConfig` accepts such a file as well as a complete configuration file (what versions up to 0.3.1 exported, or a copy of `config.json`). Settings the file does not name get their default. It takes the shared settings from the chosen file, and the `output_directory` if the file names one; without one the current output directory stays. The window geometry of the file is **not** imported; the current values stay. The import is a hard reset of the loaded directory: selection, expansion, filters and preview are cleared and no directory is loaded (answered with a snapshot). If the file names a `last_directory` and that directory exists, it is then [opened](#opening-a-path) like a dropped path, which also records it as `last_directory`. If the file names none, or one that does not exist, nothing is scanned: the UI stays clean, no error is shown and `last_directory` keeps its value. The imported settings are persisted.
 
 #### Persistence
 
@@ -132,7 +134,7 @@ The file is replaced atomically: the configuration is written to a temporary fil
 
 `window_size` and `window_position` are logical units, marked by `geometry_units: "logical"`. A config file without that mark was written by a version that stored physical pixels (up to 0.3.1); its geometry is converted once at startup, with the scale factor of the primary monitor.
 
-`max_file_size_mb` is the size limit in MiB (default 20) and the only size limit there is: larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search does not read larger files either. The value is not capped: a limit above the default is honoured by all of them, and nothing else depends on the size of a file (whether a file is text or binary is decided by its extension or its first kilobyte, see [File content](#file-content)). The smallest limit is 1: a smaller value in a config file (0 would hide every file that is not empty) is read as 1, on load and on import. It is not exposed in the UI; set it in the config file.
+`max_file_size_mb` is the size limit in MiB (default 20) and the only size limit there is: larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search does not read larger files either. The value is not capped: a limit above the default is honoured by all of them, and nothing else depends on the size of a file (whether a file is text or binary is decided by its extension and its first kilobyte, see [File content](#file-content)). The smallest limit is 1: a smaller value in a config file (0 would hide every file that is not empty) is read as 1, on load and on import. It is not exposed in the UI; set it in the config file.
 
 ### Text fields
 
@@ -198,10 +200,17 @@ Errors are reported as plain strings through `showError`; there is no error-code
 
 ### File content
 
-The text of a file is decoded by one rule (`decode_text` in `src/core/file_handler.rs`), for the file preview (`showPreviewContent`), the generated output (`showGeneratedContent`) and the content search alike:
+Whether a file is text or binary is decided by one rule (`is_binary` in `src/utils/file_detection.rs`), for the scan (`is_binary` of a tree node), the file preview, the content search and the generated output alike, so they never disagree about a file:
 
-1. Valid UTF-8 is used as it is.
-2. Otherwise the content is binary if the file has a known binary extension, or if its first kilobyte holds a NUL byte or many control characters.
+- A file is binary if its extension names a format that is certainly binary: images (not SVG), audio and video, archives and packages, executables and other compiler output (`wasm` among them), PDF and the zipped office formats, databases, fonts. The case of the extension does not matter.
+- Every other file is what its content says: binary if its first kilobyte holds a NUL byte or, where it is not valid UTF-8, more than 5 % control characters; text otherwise. An empty file is text.
+
+An extension never makes a file text, and extensions that are merely often binary (`dat`, `tmp`, `bak`, `cache`, `d`, `snap`, `raw`, ...) are left to the content. A symbolic link is judged by the name it is listed under and the content of the file it points to; a link that leads to no file is not binary (its preview and its block in the output report it as unreadable).
+
+The text of a file is decoded by one rule as well (`decode_text` in `src/core/file_handler.rs`), for the file preview (`showPreviewContent`), the generated output (`showGeneratedContent`) and the content search:
+
+1. Binary content (by the rule above) is not decoded.
+2. Valid UTF-8 is used as it is.
 3. Otherwise it is text that is not valid UTF-8 as a whole. If it holds at least one valid multi-byte UTF-8 sequence, and at least as many of them as invalid sequences, it is UTF-8 with damaged places: each invalid sequence becomes U+FFFD (`�`), everything else stays as it is. If not (a file in a legacy single-byte encoding has invalid sequences but practically never a valid multi-byte one), it is decoded as **Windows-1252**, the superset of ISO-8859-1 (Latin-1), which maps every byte to one character.
 
 The generated output is a header (`# CFC Output - Generated: …`, `# Total files: n`), optionally the directory tree, and one block per selected file: the path, `===FILE-START===`, the content, `---FILE-END-----`. Where the content cannot be embedded, the block holds a marker instead; the generation never fails because of a single file:
@@ -209,10 +218,12 @@ The generated output is a header (`# CFC Output - Generated: …`, `# Total file
 | Marker                                          | When                                                                                                                                      |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `[FILE TOO LARGE: <n> bytes - CONTENT SKIPPED]` | The file is larger than `max_file_size_mb`                                                                                                |
-| `[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]`   | The content is binary by rule 2                                                                                                           |
+| `[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]`   | The content is binary by rule 1                                                                                                           |
 | `[FILE UNREADABLE: <reason> - CONTENT SKIPPED]` | The file could not be read, e.g. it was deleted or lost its permissions since the scan; `<reason>` is the message of the operating system |
 
 The preview shows the first 1500 lines, followed by `...` and `[Preview truncated]` if the file has more. It reads only the beginning of the file: it stops once it has these lines and never reads more than 4 MiB, so a file whose first lines are longer than that is cut there (never inside a character). Rule 3 is applied to what was read. Instead of text the preview is `[DIRECTORY]` or `[BINARY FILE]` where that applies.
+
+`loadFilePreview` reads entries of the loaded list only: the path has to be one the scan has listed (the path as listed; it is compared, not resolved, so neither `..` nor a symbolic link leads elsewhere). Any other path, inside or outside the loaded directory, is not read: the command is answered with `ShowError` and a snapshot, and the preview that is shown stays.
 
 ### Scan progress
 
@@ -346,6 +357,8 @@ There is no optimistic update: a row changes when the snapshot arrives. Snapshot
 5. Update this document.
 
 ## Transport notes
+
+The host takes commands from the UI's own origin only. wry reports the URL of the document a message was posted from; a message from any other document (`about:blank`, a `data:` or `blob:` document, a web page) is logged and dropped before it is parsed (`accepted_message` in `src/platform/ipc.rs`, decided by `AppOrigin::is_own_page`). The origin is `cfc://index.html` in a release build (`http://cfc.index.html` on Windows, where wry rewrites custom schemes) and the Vite dev server `http://localhost:1420` in a debug build. See [Security of the WebView](./architecture.md#security-of-the-webview).
 
 The host serializes each `UserEvent` on the UI thread and evaluates the resulting `window.*` call in the WebView. An event that cannot be serialized is logged and skipped; no call is made for it. Consecutive undelivered state updates are coalesced to the latest one; the order relative to all other events is preserved (`src/app/transport.rs`).
 

@@ -24,7 +24,7 @@ CFC (Context File Concatenator) is a desktop application designed to intelligent
   - Click the ignore button next to any file or folder in the tree to ignore it instantly.
 - **Syntax Highlighting**: Preview individual files or the final concatenated output with syntax highlighting in a built-in Monaco editor.
 - **Configuration Management**:
-  - Import and export your settings (including ignore patterns) as a JSON file to share configurations across projects or teams.
+  - Import and export your settings (including ignore patterns) as a JSON file to share configurations across projects or teams. An exported file holds settings only: no directory of your machine and no window geometry.
   - Window size, position, and other settings are automatically saved between sessions.
   - Set the environment variable `CFC_CONFIG_DIR` to use a different directory for `config.json` instead of the platform default (useful for separate profiles; the test suite only ever writes config files in temporary directories).
 - **Customizable Output**:

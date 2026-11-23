@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Represents the progress of a directory scan.
@@ -102,7 +102,193 @@ pub struct DirectoryScanner {
     progress_throttle: Duration,
 }
 
-/// The core loop of a scan: turns the entries a walk yields into `FileItem`s.
+/// What has to be looked at to tell whether a listed entry is binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentKind {
+    /// A directory, or something that has no content to read (a socket, a device).
+    None,
+    /// A regular file: its own content.
+    File,
+    /// A symbolic link (the walk does not follow links): the content of the file it
+    /// points to, which is what the preview, the search and the generation read.
+    Link,
+}
+
+impl ContentKind {
+    /// The kind of an entry with this metadata (of the entry itself, not of the
+    /// target of a link).
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            Self::Link
+        } else if file_type.is_file() {
+            Self::File
+        } else {
+            Self::None
+        }
+    }
+}
+
+/// A listed entry whose content has to be looked at: the item at `index` of the list.
+#[derive(Debug)]
+struct ContentJob {
+    index: usize,
+    path: PathBuf,
+    kind: ContentKind,
+}
+
+/// How many entries are handed to the thread pool at a time. Large enough to make
+/// the handing over cheap, small enough for the pool to start while the walk is
+/// still in its first directories.
+const CONTENT_CHUNK_SIZE: usize = 256;
+
+/// Tells whether the entry of `job` is binary by the application-wide rule
+/// (`utils::file_detection`), which `is_text` applies to a path ([`is_text_file`] in
+/// production).
+///
+/// A file that cannot be read is taken as binary, to be on the safe side. A link is
+/// judged by the file it points to; a link that leads to no file (broken, or to a
+/// directory) has no content and is not binary, like the preview and the generation,
+/// which report such an entry as unreadable rather than as binary.
+fn is_binary_content(job: &ContentJob, is_text: &impl Fn(&Path) -> anyhow::Result<bool>) -> bool {
+    let has_content = match job.kind {
+        ContentKind::None => false,
+        ContentKind::File => true,
+        // `metadata` follows the link.
+        ContentKind::Link => std::fs::metadata(&job.path).is_ok_and(|target| target.is_file()),
+    };
+    has_content && !is_text(&job.path).unwrap_or(false)
+}
+
+/// Runs `produce`, and looks at the content of the entries it submits while it runs.
+/// Returns the result of `produce` and, for every entry that was looked at, its index
+/// and whether it is binary (in no particular order).
+///
+/// This is the part of a scan that opens files, one per listed file whose extension
+/// does not settle the question. Opening a file is slow where a directory listing is
+/// fast, in particular the first time, so it is neither done in the walk nor after
+/// it: `produce` (the walk) runs on the calling thread and hands the entries over in
+/// chunks of [`CONTENT_CHUNK_SIZE`], which the threads of [`content_pool`] work off
+/// meanwhile. The function returns when both are done.
+///
+/// Once `cancel_flag` is raised no further file is opened; the entries that were not
+/// looked at are missing in the result. A cancelled scan is discarded by its caller.
+fn classify_alongside<R>(
+    cancel_flag: &AtomicBool,
+    is_text: &(impl Fn(&Path) -> anyhow::Result<bool> + Sync),
+    produce: impl FnOnce(&mut dyn FnMut(ContentJob)) -> R,
+) -> (R, Vec<(usize, bool)>) {
+    let verdicts = Mutex::new(Vec::new());
+    // `in_place_scope`: `produce` stays on this thread, only the chunks go to the pool.
+    let result = match content_pool() {
+        Some(pool) => pool.in_place_scope(|scope| {
+            hand_over_in_chunks(scope, cancel_flag, is_text, &verdicts, produce)
+        }),
+        None => rayon::in_place_scope(|scope| {
+            hand_over_in_chunks(scope, cancel_flag, is_text, &verdicts, produce)
+        }),
+    };
+    (result, into_inner(verdicts))
+}
+
+/// The body of [`classify_alongside`] inside the scope of the thread pool: runs
+/// `produce` and spawns a task for every chunk of entries it submits.
+fn hand_over_in_chunks<'scope, R>(
+    scope: &rayon::Scope<'scope>,
+    cancel_flag: &'scope AtomicBool,
+    is_text: &'scope (impl Fn(&Path) -> anyhow::Result<bool> + Sync),
+    verdicts: &'scope Mutex<Vec<(usize, bool)>>,
+    produce: impl FnOnce(&mut dyn FnMut(ContentJob)) -> R,
+) -> R {
+    let classify = |chunk: Vec<ContentJob>| {
+        scope.spawn(move |_| {
+            let chunk_verdicts: Vec<(usize, bool)> = chunk
+                .iter()
+                .take_while(|_| !cancel_flag.load(Ordering::Relaxed))
+                .map(|job| (job.index, is_binary_content(job, is_text)))
+                .collect();
+            verdicts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(chunk_verdicts);
+        });
+    };
+
+    let mut chunk = Vec::with_capacity(CONTENT_CHUNK_SIZE);
+    let result = produce(&mut |job| {
+        chunk.push(job);
+        if chunk.len() == CONTENT_CHUNK_SIZE {
+            classify(std::mem::replace(
+                &mut chunk,
+                Vec::with_capacity(CONTENT_CHUNK_SIZE),
+            ));
+        }
+    });
+    if !chunk.is_empty() {
+        classify(chunk);
+    }
+    result
+}
+
+/// The content of a mutex nobody else holds any more, whether or not a thread
+/// panicked while it held the lock.
+fn into_inner<T>(mutex: Mutex<T>) -> T {
+    mutex
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The most threads that open files at the same time during a scan.
+///
+/// Opening files scales with the number of threads only up to a point (the threads
+/// get in each other's way inside the file system). Measured on macOS with 16 cores,
+/// scanning 26,000 files, of which the walk alone takes 0.14 s:
+///
+/// | Threads | Content cached | Files opened for the first time |
+/// | ------- | -------------- | ------------------------------- |
+/// | 1       | 0.50 s         | 1.4 s                           |
+/// | 4       | 0.26 s         | 0.70 s                          |
+/// | 8       | 0.32 s         | 0.44 s                          |
+/// | 16      | 0.48 s         | (not measured)                  |
+///
+/// 8 is close to the best of both columns. (The figures are from looking at the
+/// contents after the walk; doing it alongside the walk takes the walk's share off
+/// all of them.)
+const MAX_CONTENT_THREADS: usize = 8;
+
+/// The number of threads of [`content_pool`].
+fn content_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(MAX_CONTENT_THREADS)
+}
+
+/// The thread pool the contents are looked at on: [`content_threads`] threads, built
+/// when the first scan needs it. `None` if it cannot be built, in which case the
+/// work runs on rayon's global pool.
+fn content_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(content_threads())
+            .thread_name(|index| format!("cfc-scan-content-{index}"))
+            .build()
+            .map_err(|e| tracing::warn!("No thread pool for the scan: {e}. Using the default."))
+            .ok()
+    })
+    .as_ref()
+}
+
+/// The number of threads the contents are actually looked at on: those of
+/// [`content_pool`], or of rayon's global pool where that stands in.
+#[cfg(test)]
+fn content_pool_threads() -> usize {
+    content_pool().map_or_else(rayon::current_num_threads, |pool| {
+        pool.current_num_threads()
+    })
+}
+
+/// A scan: turns the entries a walk yields into `FileItem`s.
 ///
 /// It takes the entries as an iterator rather than walking itself, so the loop
 /// (throttling, cancellation, what happens when an entry changes or disappears between
@@ -111,6 +297,12 @@ pub struct DirectoryScanner {
 /// Entries up to and including `start_depth` (the start directory of the scan and the
 /// directories leading to it) are walked but neither counted nor reported. Files larger
 /// than `max_file_size` bytes are counted as skipped and not reported either.
+///
+/// The walk itself ([`walk_entries`]) is sequential: it defines the order of the
+/// result, the progress and where a cancellation stops it, and it does not open a
+/// file. Whether the files are binary is found out on other threads while the walk
+/// goes on, see [`classify_alongside`]; the verdicts are entered into the list, by
+/// index, when both are done.
 fn process_walker_results<F>(
     walker: impl Iterator<Item = Result<ignore::DirEntry, ignore::Error>>,
     start_depth: usize,
@@ -121,6 +313,40 @@ fn process_walker_results<F>(
 ) -> Vec<FileItem>
 where
     F: Fn(ScanProgress) + Send + Sync + 'static,
+{
+    let (mut final_files, verdicts) =
+        classify_alongside(&cancel_flag, &is_text_file, |look_at_content| {
+            walk_entries(
+                walker,
+                start_depth,
+                max_file_size,
+                &cancel_flag,
+                progress_callback,
+                progress_throttle,
+                look_at_content,
+            )
+        });
+    for (index, is_binary) in verdicts {
+        final_files[index].is_binary = is_binary;
+    }
+    final_files
+}
+
+/// The loop of a scan: lists the entries of `walker` in its order, reports the
+/// progress and stops when the scan is cancelled. Every entry that has content
+/// (a file, a link) is passed to `look_at_content` with its index in the list;
+/// `FileItem::is_binary` is left `false` here.
+fn walk_entries<F>(
+    walker: impl Iterator<Item = Result<ignore::DirEntry, ignore::Error>>,
+    start_depth: usize,
+    max_file_size: u64,
+    cancel_flag: &AtomicBool,
+    progress_callback: F,
+    progress_throttle: Duration,
+    look_at_content: &mut dyn FnMut(ContentJob),
+) -> Vec<FileItem>
+where
+    F: Fn(ScanProgress),
 {
     let mut final_files = Vec::new();
     let large_files_skipped_counter = AtomicUsize::new(0);
@@ -184,18 +410,19 @@ where
             continue;
         }
 
-        let is_binary = if metadata.is_file() {
-            // If file content cannot be read for is_text_file check, it returns Err.
-            // We treat such files as binary for safety, covering the unwrap_or(false) path.
-            !is_text_file(entry.path()).unwrap_or(false)
-        } else {
-            false
-        };
-
+        let kind = ContentKind::of(&metadata);
+        if kind != ContentKind::None {
+            look_at_content(ContentJob {
+                index: final_files.len(),
+                path: entry.path().to_path_buf(),
+                kind,
+            });
+        }
         final_files.push(FileItem {
             path: entry.path().to_path_buf(),
             is_directory: metadata.is_dir(),
-            is_binary,
+            // Entered by the caller, once the content has been looked at.
+            is_binary: false,
             size: metadata.len(),
             depth: entry.depth(),
             parent: entry.path().parent().map(PathBuf::from),
@@ -1134,5 +1361,314 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(default_files.len(), 3);
+    }
+
+    // =========================================================================
+    // SECTION: Telling binary files from text (after the walk, in parallel)
+    // =========================================================================
+
+    /// Scans `root` with the loop of the scanner, in the (sorted) order of the walk.
+    fn scan_sorted(root: &Path) -> Vec<FileItem> {
+        let walker = ignore::WalkBuilder::new(root)
+            .hidden(false)
+            .follow_links(false)
+            .sort_by_file_path(|a, b| a.cmp(b))
+            .build();
+        process_walker_results(
+            walker,
+            0,
+            MAX_FILE_SIZE,
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+            PROGRESS_UPDATE_THROTTLE,
+        )
+    }
+
+    /// Looks at the content of `items` (of the kinds named index by index) the way a
+    /// scan does, and enters the verdicts.
+    fn classify_content(
+        items: &mut [FileItem],
+        kinds: &[ContentKind],
+        cancel_flag: &AtomicBool,
+        is_text: &(impl Fn(&Path) -> anyhow::Result<bool> + Sync),
+    ) {
+        let ((), verdicts) = classify_alongside(cancel_flag, is_text, |look_at_content| {
+            for (index, (item, kind)) in items.iter().zip(kinds).enumerate() {
+                if *kind != ContentKind::None {
+                    look_at_content(ContentJob {
+                        index,
+                        path: item.path.clone(),
+                        kind: *kind,
+                    });
+                }
+            }
+        });
+        for (index, is_binary) in verdicts {
+            items[index].is_binary = is_binary;
+        }
+    }
+
+    fn file_items(count: usize) -> Vec<FileItem> {
+        (0..count)
+            .map(|i| FileItem {
+                path: PathBuf::from(format!("/project/file_{i}.txt")),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// The list comes out in the order of the walk, each file with its own verdict,
+    /// however the parallel look at the contents is scheduled.
+    #[test]
+    fn test_classifying_in_parallel_keeps_the_order_of_the_walk() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let mut expected = Vec::new();
+        for dir in 0..8 {
+            let dir_name = format!("dir_{dir}");
+            fs::create_dir(root.join(&dir_name)).unwrap();
+            expected.push((root.join(&dir_name), false));
+            for file in 0..40 {
+                // Sorted by name; every third file is binary by content.
+                let path = root.join(&dir_name).join(format!("file_{file:02}.dat"));
+                let is_binary = file % 3 == 0;
+                let content: &[u8] = if is_binary { b"\x00\x01" } else { b"text" };
+                fs::write(&path, content).unwrap();
+                expected.push((path, is_binary));
+            }
+        }
+
+        for _ in 0..3 {
+            let listed: Vec<(PathBuf, bool)> = scan_sorted(root)
+                .into_iter()
+                .map(|item| (item.path, item.is_binary))
+                .collect();
+            assert_eq!(listed, expected);
+        }
+    }
+
+    /// Only entries with content are looked at, each one exactly once, and what the
+    /// rule says is what the item gets. A file that cannot be read counts as binary.
+    #[test]
+    fn test_classify_content_asks_the_rule_once_per_file() {
+        let mut items = file_items(6);
+        items[1].is_directory = true;
+        let kinds = [
+            ContentKind::File,
+            ContentKind::None,
+            ContentKind::File,
+            ContentKind::File,
+            ContentKind::None,
+            ContentKind::File,
+        ];
+        let asked = Mutex::new(Vec::new());
+        let is_text = |path: &Path| {
+            asked.lock().unwrap().push(path.to_path_buf());
+            match path.file_name().unwrap().to_str().unwrap() {
+                "file_0.txt" => Ok(true),
+                "file_2.txt" => Ok(false),
+                "file_3.txt" => Err(anyhow::anyhow!("permission denied")),
+                "file_5.txt" => Ok(true),
+                other => panic!("{other} has no content to look at"),
+            }
+        };
+
+        classify_content(&mut items, &kinds, &AtomicBool::new(false), &is_text);
+
+        let verdicts: Vec<bool> = items.iter().map(|item| item.is_binary).collect();
+        assert_eq!(verdicts, [false, false, true, true, false, false]);
+        let mut asked = asked.into_inner().unwrap();
+        asked.sort();
+        assert_eq!(
+            asked,
+            [0, 2, 3, 5].map(|i| PathBuf::from(format!("/project/file_{i}.txt")))
+        );
+    }
+
+    /// A cancellation stops the look at the contents: files that have not been
+    /// started are not opened any more.
+    #[test]
+    fn test_classify_content_stops_when_the_scan_is_cancelled() {
+        const FILES: usize = 20_000;
+        let mut items = file_items(FILES);
+        let kinds = vec![ContentKind::File; FILES];
+        let cancel_flag = AtomicBool::new(false);
+        let asked = AtomicUsize::new(0);
+        // The first file that is looked at cancels the scan.
+        let is_text = |_: &Path| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            cancel_flag.store(true, Ordering::SeqCst);
+            Ok(false)
+        };
+
+        classify_content(&mut items, &kinds, &cancel_flag, &is_text);
+
+        // Only the files the worker threads had begun with at that moment got through.
+        let asked = asked.load(Ordering::SeqCst);
+        assert!(
+            (1..=content_pool_threads()).contains(&asked),
+            "{asked} of {FILES} files were looked at"
+        );
+        assert_eq!(items.iter().filter(|item| item.is_binary).count(), asked);
+    }
+
+    /// The contents are looked at while the walk is still under way, not after it:
+    /// the walk below does not end before the first chunk it handed over has been
+    /// started. (If the chunk were only worked off after the walk, the walk would
+    /// wait in vain and the test would fail.)
+    #[test]
+    fn test_contents_are_looked_at_while_the_walk_goes_on() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let started_tx = Mutex::new(started_tx);
+        let is_text = |_: &Path| {
+            let _ = started_tx.lock().unwrap().send(());
+            Ok(true)
+        };
+
+        let (started_during_the_walk, verdicts) =
+            classify_alongside(&AtomicBool::new(false), &is_text, |look_at_content| {
+                for index in 0..CONTENT_CHUNK_SIZE {
+                    look_at_content(ContentJob {
+                        index,
+                        path: PathBuf::from(format!("/project/file_{index}.txt")),
+                        kind: ContentKind::File,
+                    });
+                }
+                // The walk is not done yet: this is still inside it.
+                started_rx.recv_timeout(Duration::from_secs(30)).is_ok()
+            });
+
+        assert!(started_during_the_walk);
+        assert_eq!(verdicts.len(), CONTENT_CHUNK_SIZE);
+    }
+
+    /// Entries are handed over in chunks, and the last, incomplete one is not lost:
+    /// every entry gets exactly one verdict, under its own index.
+    #[test]
+    fn test_every_submitted_entry_gets_its_verdict() {
+        for count in [
+            0,
+            1,
+            CONTENT_CHUNK_SIZE - 1,
+            CONTENT_CHUNK_SIZE,
+            CONTENT_CHUNK_SIZE + 1,
+            3 * CONTENT_CHUNK_SIZE + 7,
+        ] {
+            let mut items = file_items(count);
+            let kinds = vec![ContentKind::File; count];
+            // Binary: every file with an odd number.
+            let is_text = |path: &Path| {
+                let name = path.file_stem().unwrap().to_str().unwrap();
+                let number: usize = name.trim_start_matches("file_").parse().unwrap();
+                Ok(number.is_multiple_of(2))
+            };
+
+            classify_content(&mut items, &kinds, &AtomicBool::new(false), &is_text);
+
+            let verdicts: Vec<bool> = items.iter().map(|item| item.is_binary).collect();
+            let expected: Vec<bool> = (0..count).map(|number| number % 2 == 1).collect();
+            assert_eq!(verdicts, expected, "{count} entries");
+        }
+    }
+
+    #[test]
+    fn test_contents_are_looked_at_on_a_bounded_pool() {
+        assert!((1..=MAX_CONTENT_THREADS).contains(&content_threads()));
+        let pool = content_pool().expect("the pool can be built");
+        assert_eq!(pool.current_num_threads(), content_threads());
+        // The work does run there.
+        let mut items = file_items(1);
+        let is_text = |_: &Path| {
+            let thread = std::thread::current();
+            assert!(thread.name().unwrap().starts_with("cfc-scan-content-"));
+            Ok(true)
+        };
+        classify_content(
+            &mut items,
+            &[ContentKind::File],
+            &AtomicBool::new(false),
+            &is_text,
+        );
+    }
+
+    #[test]
+    fn test_classify_content_does_nothing_for_a_scan_cancelled_during_the_walk() {
+        let mut items = file_items(100);
+        let kinds = vec![ContentKind::File; 100];
+        let is_text = |path: &Path| -> anyhow::Result<bool> { panic!("{path:?} was looked at") };
+
+        classify_content(&mut items, &kinds, &AtomicBool::new(true), &is_text);
+
+        assert!(items.iter().all(|item| !item.is_binary));
+    }
+
+    /// A symbolic link is judged by the file it points to, which is what the preview,
+    /// the search and the generation read. A link without a file behind it has no
+    /// content: it is not binary.
+    #[cfg(unix)]
+    #[test]
+    fn test_symbolic_links_are_classified_by_their_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("text"), "plain text").unwrap();
+        fs::write(outside.path().join("binary"), b"\x00\x01\x02").unwrap();
+        fs::create_dir(outside.path().join("directory")).unwrap();
+
+        symlink(outside.path().join("text"), root.join("to_text")).unwrap();
+        symlink(outside.path().join("binary"), root.join("to_binary")).unwrap();
+        symlink(outside.path().join("text"), root.join("to_text.png")).unwrap();
+        symlink(outside.path().join("directory"), root.join("to_directory")).unwrap();
+        symlink(outside.path().join("missing"), root.join("broken")).unwrap();
+        symlink(root.join("loop"), root.join("loop")).unwrap();
+
+        let verdicts: Vec<(String, bool, bool)> = scan_sorted(root)
+            .into_iter()
+            .map(|item| {
+                let name = item.path.file_name().unwrap().to_str().unwrap().to_string();
+                (name, item.is_directory, item.is_binary)
+            })
+            .collect();
+
+        assert_eq!(
+            verdicts,
+            [
+                ("broken".to_string(), false, false),
+                ("loop".to_string(), false, false),
+                ("to_binary".to_string(), false, true),
+                ("to_directory".to_string(), false, false),
+                ("to_text".to_string(), false, false),
+                // The extension of the listed name counts, as for a regular file.
+                ("to_text.png".to_string(), false, true),
+            ]
+        );
+    }
+
+    /// The scan and the preview agree about a linked file as about any other.
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_and_preview_agree_on_linked_files() {
+        use crate::core::FileHandler;
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("text"), "plain text").unwrap();
+        fs::write(outside.path().join("binary"), b"\x00\x01\x02").unwrap();
+        symlink(outside.path().join("text"), root.join("to_text")).unwrap();
+        symlink(outside.path().join("binary"), root.join("to_binary")).unwrap();
+
+        for item in scan_sorted(root) {
+            let preview = FileHandler::get_file_preview(&item.path, 10).unwrap();
+            assert_eq!(
+                preview == "[BINARY FILE]",
+                item.is_binary,
+                "{:?}",
+                item.path
+            );
+        }
     }
 }

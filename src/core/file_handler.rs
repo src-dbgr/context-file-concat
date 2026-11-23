@@ -11,7 +11,7 @@
 #[cfg(test)]
 use super::MAX_FILE_SIZE;
 use super::{CoreError, FileItem, TreeGenerator};
-use crate::utils::file_detection::{classify_by_extension, is_text_content, is_text_file};
+use crate::utils::file_detection::{self, has_binary_extension};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read};
@@ -127,21 +127,23 @@ fn decode_file_bytes(file_path: &Path, bytes: Vec<u8>) -> String {
 /// output generation, the file preview and the content search, so all of them always
 /// see the same characters. The rule:
 ///
-/// 1. Valid UTF-8 is used as is.
-/// 2. Anything else is binary if the application-wide detection says so (a known
-///    binary extension, NUL bytes, many control characters).
+/// 1. The content is binary if the application-wide detection says so
+///    ([`file_detection::is_binary`]: an extension that is certainly binary, NUL
+///    bytes or many control characters at the beginning). This is the verdict the
+///    scan has stored in `FileItem::is_binary`.
+/// 2. Valid UTF-8 is used as is.
 /// 3. The remaining files are text with bytes that are not UTF-8, and
 ///    [`guess_encoding`] decides what they are: UTF-8 with damaged places, which are
 ///    replaced by U+FFFD while everything around them stays intact, or a legacy
 ///    single-byte encoding, read as Windows-1252.
 pub(crate) fn decode_text(file_path: &Path, bytes: Vec<u8>) -> Option<String> {
+    if file_detection::is_binary(file_path, &bytes) {
+        return None;
+    }
     let bytes = match String::from_utf8(bytes) {
         Ok(text) => return Some(text),
         Err(error) => error.into_bytes(),
     };
-    if !is_text_despite_invalid_utf8(file_path, &bytes) {
-        return None;
-    }
     Some(match guess_encoding(&bytes) {
         TextEncoding::Utf8 => String::from_utf8_lossy(&bytes).into_owned(),
         TextEncoding::Windows1252 => decode_windows_1252(&bytes),
@@ -206,13 +208,6 @@ fn decode_windows_1252(bytes: &[u8]) -> String {
             _ => char::from(byte),
         })
         .collect()
-}
-
-/// Decides whether bytes that are not valid UTF-8 are still text, reusing the
-/// application-wide detection: a known binary extension or binary-looking content
-/// (NUL bytes, many control characters) disqualifies the file.
-fn is_text_despite_invalid_utf8(file_path: &Path, bytes: &[u8]) -> bool {
-    classify_by_extension(file_path) != Some(false) && is_text_content(bytes)
 }
 
 /// Runs [`load_selected_entry`] on the blocking thread pool.
@@ -391,25 +386,38 @@ impl FileHandler {
         }
         let io_error = |e: io::Error| CoreError::Io(e.to_string(), file_path.to_path_buf());
 
-        // Use a utility to quickly check if the file is likely text-based.
-        if !is_text_file(file_path)
-            .map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?
-        {
-            return Ok("[BINARY FILE]".to_string());
+        // The extension settles it for formats that are certainly binary; such a
+        // file is not even opened.
+        if has_binary_extension(file_path) {
+            return Ok(BINARY_PREVIEW_MARKER.to_string());
+        }
+        let mut file = fs::File::open(file_path).map_err(io_error)?;
+        // Everything else is what its first bytes say, as for the scan. Looking at
+        // them first keeps the preview of a binary file from reading megabytes in
+        // search of line ends.
+        let sample = file_detection::read_sample(&mut file).map_err(io_error)?;
+        if file_detection::is_binary(file_path, &sample) {
+            return Ok(BINARY_PREVIEW_MARKER.to_string());
         }
 
-        let file = fs::File::open(file_path).map_err(io_error)?;
-        let (bytes, is_cut) =
-            read_preview_prefix(file, max_lines, PREVIEW_MAX_BYTES).map_err(io_error)?;
+        let (bytes, is_cut) = read_preview_prefix(
+            io::Cursor::new(sample).chain(file),
+            max_lines,
+            PREVIEW_MAX_BYTES,
+        )
+        .map_err(io_error)?;
         Ok(preview_of(file_path, bytes, is_cut, max_lines))
     }
 }
+
+/// What the preview shows instead of the content of a binary file.
+const BINARY_PREVIEW_MARKER: &str = "[BINARY FILE]";
 
 /// Formats the preview of a file from the beginning of its content (pure, no IO).
 /// `is_cut` tells that the file goes on after `bytes`.
 fn preview_of(file_path: &Path, bytes: Vec<u8>, is_cut: bool, max_lines: usize) -> String {
     let Some(text) = decode_text(file_path, bytes) else {
-        return "[BINARY FILE]".to_string();
+        return BINARY_PREVIEW_MARKER.to_string();
     };
 
     let mut preview = String::new();
@@ -1226,6 +1234,64 @@ mod tests {
             FileHandler::get_file_preview(&path, 10).unwrap(),
             "[BINARY FILE]"
         );
+    }
+
+    /// The scan, the preview, the content search and the generated output apply one
+    /// rule, so they agree about every file: what is listed as text can be previewed,
+    /// searched and embedded, and what is listed as binary is a marker everywhere.
+    #[tokio::test]
+    async fn scan_preview_search_and_generation_agree_on_what_is_binary() {
+        use crate::core::ContentSearch;
+
+        let (_dir, root) = setup_test_environment();
+        // (file name, content, is it binary?)
+        let cases: &[(&str, &[u8], bool)] = &[
+            // Extensions that used to be taken for binary without a look.
+            ("main.d", b"needle: import std.stdio;\n", false),
+            ("case.snap", b"---\nneedle\n---\n", false),
+            ("notes.tmp", b"needle\n", false),
+            ("settings.bak", b"needle\n", false),
+            ("values.dat", b"needle;1;2\n", false),
+            ("build.cache", b"needle\n", false),
+            // Unknown extension, legacy encoding.
+            ("legacy.unknown", b"needle caf\xe9\n", false),
+            // Certainly binary formats, even if the content reads as text.
+            ("module.wasm", b"needle\n", true),
+            ("image.png", b"needle\n", true),
+            ("archive.zip", b"needle\n", true),
+            // Binary content behind an innocent name: valid UTF-8 with a NUL byte ...
+            ("notes.txt", b"needle\x00\n", true),
+            // ... and bytes that are no text in any encoding.
+            ("blob.unknown", b"needle\x00\x01\x02\xff\xfe", true),
+            ("utf16.md", b"\xff\xfen\x00e\x00e\x00d\x00l\x00e\x00", true),
+        ];
+        let names: Vec<&str> = cases.iter().map(|(name, _, _)| *name).collect();
+        for (name, content, _) in cases {
+            fs::write(root.join(name), content).unwrap();
+        }
+        let paths: Vec<PathBuf> = names.iter().map(|name| root.join(name)).collect();
+
+        let items = create_file_items(&root, &names);
+        let found = ContentSearch::new("needle", false).matching_paths(&items);
+        let generated = generate_plain(&paths, &root).await.unwrap();
+
+        for ((name, _, is_binary), item) in cases.iter().zip(&items) {
+            let preview = FileHandler::get_file_preview(&item.path, 10).unwrap();
+            let body = file_block_body(&generated, name);
+
+            assert_eq!(item.is_binary, *is_binary, "scan: {name}");
+            assert_eq!(preview == "[BINARY FILE]", *is_binary, "preview: {name}");
+            assert_eq!(!found.contains(&item.path), *is_binary, "search: {name}");
+            assert_eq!(
+                body == format!("{BINARY_CONTENT_MARKER}\n"),
+                *is_binary,
+                "generation: {name}"
+            );
+            if !is_binary {
+                assert!(preview.contains("needle"), "preview: {name}");
+                assert!(body.contains("needle"), "generation: {name}");
+            }
+        }
     }
 
     #[test]

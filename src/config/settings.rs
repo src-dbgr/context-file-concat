@@ -1,14 +1,15 @@
 use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::AppConfig;
+use super::{AppConfig, ImportedConfig, SharedConfig};
 
 const APP_NAME: &str = "ContextFileConcat";
 const CONFIG_FILE: &str = "config.json";
@@ -51,8 +52,9 @@ pub fn default_config_path() -> Option<PathBuf> {
 /// Loads the configuration from `config_path`.
 ///
 /// A missing file is created with the default configuration. A file that is empty or
-/// cannot be read as a configuration (not even after migrating an older format) yields
-/// the default configuration and is left as it is.
+/// cannot be read as a configuration yields the default configuration and is left as
+/// it is. Settings the file does not name have their default, see
+/// [`parse_stored_config`].
 pub fn load_config(config_path: &Path) -> Result<AppConfig> {
     if !config_path.exists() {
         tracing::info!(
@@ -73,24 +75,18 @@ pub fn load_config(config_path: &Path) -> Result<AppConfig> {
         return Ok(AppConfig::default());
     }
 
-    match serde_json::from_str::<AppConfig>(&config_content) {
+    match parse_stored_config(&config_content) {
         Ok(config) => {
             tracing::info!("Loaded config from {:?}", config_path);
             Ok(config)
         }
         Err(e) => {
-            tracing::warn!(
-                "Failed to parse config file at {:?}: {}. Attempting migration or fallback to default.",
+            tracing::error!(
+                "Failed to read the config file at {:?}: {}. Using default config.",
                 config_path,
                 e
             );
-            migrate_legacy_config(&config_content).or_else(|migration_err| {
-                tracing::error!(
-                    "Migration also failed: {}. Using default config.",
-                    migration_err
-                );
-                Ok(AppConfig::default())
-            })
+            Ok(AppConfig::default())
         }
     }
 }
@@ -106,9 +102,15 @@ pub fn save_config(config: &AppConfig, config_path: &Path) -> Result<()> {
             fs::create_dir_all(parent)?;
         }
     }
-    let config_json = serde_json::to_string_pretty(config)?;
-    write_atomically(config_path, |file| file.write_all(config_json.as_bytes()))?;
+    write_json(config, config_path)?;
     tracing::info!("Saved config to {:?}", config_path);
+    Ok(())
+}
+
+/// Writes `value` to `path` as indented JSON, atomically (see [`write_atomically`]).
+fn write_json(value: &impl Serialize, path: &Path) -> Result<()> {
+    let json = serde_json::to_string_pretty(value)?;
+    write_atomically(path, |file| file.write_all(json.as_bytes()))?;
     Ok(())
 }
 
@@ -183,91 +185,91 @@ fn temp_path_beside(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
-/// Exports the current configuration to a user-specified JSON file.
-pub fn export_config(config: &AppConfig, export_path: &Path) -> Result<()> {
-    save_config(config, export_path)
+/// Exports settings to a user-specified JSON file.
+///
+/// The file holds the settings that are meant to be shared and nothing else: no
+/// directory and no window geometry of this installation (see [`SharedConfig`]). It is
+/// written atomically, like the configuration itself.
+pub fn export_config(settings: &SharedConfig, export_path: &Path) -> Result<()> {
+    write_json(settings, export_path)?;
+    tracing::info!("Exported settings to {:?}", export_path);
+    Ok(())
 }
 
-/// Imports an application configuration from a user-specified JSON file.
-pub fn import_config(import_path: &PathBuf) -> Result<AppConfig> {
-    let config_content = fs::read_to_string(import_path)?;
-    match serde_json::from_str::<AppConfig>(&config_content) {
-        Ok(config) => {
-            tracing::info!("Imported config from {:?}", import_path);
-            Ok(config)
-        }
-        Err(_) => {
-            tracing::info!(
-                "Attempting to import legacy config format from {:?}",
-                import_path
-            );
-            migrate_legacy_config(&config_content)
-        }
+/// Imports settings from a user-specified JSON file.
+///
+/// Accepts what [`export_config`] writes as well as a complete configuration file
+/// (which is what earlier versions exported). Settings the file does not name have
+/// their default.
+pub fn import_config(import_path: &PathBuf) -> Result<ImportedConfig> {
+    let content = fs::read_to_string(import_path)?;
+    let imported = from_fields(parse_object(&content)?)?;
+    tracing::info!("Imported config from {:?}", import_path);
+    Ok(imported)
+}
+
+/// Reads a stored [`AppConfig`] from the content of a configuration file.
+///
+/// Fields the file does not name have their default; that is what
+/// `#[serde(default)]` on [`AppConfig`] does, for every field there is or will be.
+/// This function adds the two things a file of an older version needs that serde
+/// cannot express:
+///
+/// * the unit of a geometry the file does not hold, see
+///   [`mark_default_geometry_as_logical`];
+/// * `null` in place of a value, see [`from_fields`].
+fn parse_stored_config(content: &str) -> Result<AppConfig> {
+    let mut fields = parse_object(content)?;
+    mark_default_geometry_as_logical(&mut fields)?;
+    from_fields(fields)
+}
+
+/// Parses `content` as a JSON object.
+fn parse_object(content: &str) -> Result<Map<String, Value>> {
+    match serde_json::from_str(content)? {
+        Value::Object(fields) => Ok(fields),
+        _ => Err(anyhow!("Config is not a JSON object")),
     }
 }
 
-/// Helper to ensure a field in the config JSON exists, adding it from a default if not.
-/// This function isolates the fallible serialization step, making it testable.
-fn ensure_field_from_default<T: Serialize>(
-    obj: &mut serde_json::Map<String, Value>,
-    key: &str,
-    default_val: T,
-) -> Result<()> {
-    if !obj.contains_key(key) || obj.get(key) == Some(&Value::Null) {
-        let val = serde_json::to_value(default_val)?;
-        obj.insert(key.to_string(), val);
+/// Names the unit of the window geometry where the file holds no geometry at all.
+///
+/// A geometry without a unit is in physical pixels (see
+/// [`GeometryUnits`](super::GeometryUnits)), and that is what a missing
+/// `geometry_units` is read as. A file that holds neither size nor position, however,
+/// gets the default geometry, which is in the unit of the defaults.
+fn mark_default_geometry_as_logical(fields: &mut Map<String, Value>) -> Result<()> {
+    let names = |key: &str| fields.get(key).is_some_and(|value| !value.is_null());
+    if !names("window_size") && !names("window_position") && !names("geometry_units") {
+        fields.insert(
+            "geometry_units".to_string(),
+            serde_json::to_value(AppConfig::default().geometry_units)?,
+        );
     }
     Ok(())
 }
 
-/// Attempts to migrate a configuration from an older format to the current `AppConfig` struct.
-fn migrate_legacy_config(config_content: &str) -> Result<AppConfig> {
-    let mut value: Value = serde_json::from_str(config_content)?;
-    let obj = value
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("Config is not a JSON object"))?;
-
-    let defaults = AppConfig::default();
-
-    ensure_field_from_default(obj, "ignore_patterns", &defaults.ignore_patterns)?;
-    ensure_field_from_default(obj, "tree_ignore_patterns", &defaults.tree_ignore_patterns)?;
-    ensure_field_from_default(obj, "last_directory", &defaults.last_directory)?;
-    ensure_field_from_default(obj, "output_directory", &defaults.output_directory)?;
-    ensure_field_from_default(obj, "output_filename", &defaults.output_filename)?;
-    ensure_field_from_default(obj, "case_sensitive_search", defaults.case_sensitive_search)?;
-    ensure_field_from_default(
-        obj,
-        "include_tree_by_default",
-        defaults.include_tree_by_default,
-    )?;
-    ensure_field_from_default(obj, "use_relative_paths", defaults.use_relative_paths)?;
-    ensure_field_from_default(
-        obj,
-        "remove_empty_directories",
-        defaults.remove_empty_directories,
-    )?;
-    // The defaults are logical units. A file that brings a geometry of its own without
-    // naming its unit keeps the unit of such files (physical pixels, see
-    // `GeometryUnits`), which is what a missing `geometry_units` deserializes to.
-    if !obj.contains_key("window_size") && !obj.contains_key("window_position") {
-        ensure_field_from_default(obj, "geometry_units", defaults.geometry_units)?;
+/// Deserializes `fields`, reading a `null` like a field that is missing where it is
+/// no value of the field.
+///
+/// Files of early versions hold `null` for settings that had no value yet. Where
+/// `null` is a value (a directory that is not set) it is taken as that; only if the
+/// fields cannot be read as they are, every `null` gives way to the default.
+fn from_fields<T: DeserializeOwned>(mut fields: Map<String, Value>) -> Result<T> {
+    let as_written = T::deserialize(&Value::Object(fields.clone()));
+    if as_written.is_ok() || !fields.values().any(Value::is_null) {
+        return Ok(as_written?);
     }
-    ensure_field_from_default(obj, "window_size", defaults.window_size)?;
-    ensure_field_from_default(obj, "window_position", defaults.window_position)?;
-    ensure_field_from_default(obj, "max_file_size_mb", defaults.max_file_size_mb)?;
-
-    let migrated_config: AppConfig = serde_json::from_value(Value::Object(obj.clone()))?;
-    tracing::info!("Successfully migrated legacy config");
-    Ok(migrated_config)
+    fields.retain(|_, value| !value.is_null());
+    Ok(T::deserialize(Value::Object(fields))?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::GeometryUnits;
     #[cfg(unix)] // Only the permission-based tests need it.
     use crate::utils::test_helpers::running_as_root;
-    use serde::ser::{Error, Serializer};
-    use serde::Serialize;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -515,7 +517,7 @@ mod tests {
 
         assert_eq!(loaded.max_file_size_mb, crate::config::MIN_MAX_FILE_SIZE_MB);
         assert_eq!(
-            imported.max_file_size_mb,
+            imported.settings.max_file_size_mb,
             crate::config::MIN_MAX_FILE_SIZE_MB
         );
         // Nothing else is touched by that.
@@ -610,17 +612,19 @@ mod tests {
         let (value, expected) = config_json_with_retired_field();
         harness.write_to_config_file(&value.to_string());
 
-        let config = import_config(&harness.config_path).unwrap();
+        let imported = import_config(&harness.config_path).unwrap();
 
-        assert_eq!(config, expected);
+        assert_eq!(imported.settings, SharedConfig::from(&expected));
+        assert_eq!(imported.output_directory, expected.output_directory);
+        assert_eq!(imported.last_directory, expected.last_directory);
     }
 
     /// The migration of an incomplete file tolerates the retired field as well.
     #[test]
-    fn test_migrate_legacy_config_ignores_retired_field() {
+    fn test_stored_config_ignores_retired_field() {
         let legacy = json!({ "case_sensitive_search": true, "scan_chunk_size": 100 });
 
-        let config = migrate_legacy_config(&legacy.to_string()).unwrap();
+        let config = parse_stored_config(&legacy.to_string()).unwrap();
 
         assert_eq!(
             config,
@@ -637,7 +641,7 @@ mod tests {
         let export_path = harness.temp_path().join("export.json");
 
         save_config(&AppConfig::default(), &harness.config_path).unwrap();
-        export_config(&AppConfig::default(), &export_path).unwrap();
+        export_config(&SharedConfig::default(), &export_path).unwrap();
 
         for path in [&harness.config_path, &export_path] {
             let written = fs::read_to_string(path).unwrap();
@@ -649,47 +653,267 @@ mod tests {
     // SECTION: Migration Logic & Helpers Tests
     // =========================================================================
 
-    struct Unserializable;
-    impl Serialize for Unserializable {
-        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            Err(S::Error::custom("serialization is designed to fail"))
+    #[test]
+    fn test_stored_config_fails_for_non_object() {
+        let non_object_content = "[1, 2, 3]".to_string();
+        let result = parse_stored_config(&non_object_content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_stored_config_populates_all_fields() {
+        let legacy_content = "{}".to_string(); // Start with empty object
+        let migrated_config = parse_stored_config(&legacy_content).unwrap();
+        assert_eq!(migrated_config, AppConfig::default());
+    }
+
+    /// What the former migration did field by field, for every field: a file that
+    /// lacks a setting (it was written before the setting existed) keeps all its other
+    /// settings. Nothing here names the fields, so a new one is covered as well.
+    #[test]
+    fn test_stored_config_without_any_one_field_keeps_all_the_others() {
+        let harness = TestHarness::new();
+        let stored = AppConfig {
+            ignore_patterns: ["*.kept".to_string()].into(),
+            tree_ignore_patterns: ["kept".to_string()].into(),
+            last_directory: Some(PathBuf::from("/kept/project")),
+            output_directory: Some(PathBuf::from("/kept/out")),
+            output_filename: "kept.txt".to_string(),
+            case_sensitive_search: true,
+            include_tree_by_default: false,
+            use_relative_paths: false,
+            remove_empty_directories: true,
+            window_size: (1111.0, 777.0),
+            window_position: (11.0, 22.0),
+            geometry_units: GeometryUnits::Logical,
+            max_file_size_mb: 7,
+        };
+        let complete = serde_json::to_value(&stored).unwrap();
+        let defaults = serde_json::to_value(AppConfig::default()).unwrap();
+
+        for field in complete.as_object().unwrap().keys() {
+            for is_null in [false, true] {
+                let mut partial = complete.clone();
+                let fields = partial.as_object_mut().unwrap();
+                if is_null {
+                    fields.insert(field.clone(), Value::Null);
+                } else {
+                    fields.remove(field);
+                }
+                harness.write_to_config_file(&partial.to_string());
+
+                let loaded = load_config(&harness.config_path).unwrap();
+
+                let mut expected = complete.clone();
+                expected[field] = match (field.as_str(), is_null) {
+                    // A geometry without a unit is in physical pixels.
+                    ("geometry_units", _) => json!("physical"),
+                    // `null` is a value of a directory: none.
+                    ("last_directory" | "output_directory", true) => Value::Null,
+                    _ => defaults[field].clone(),
+                };
+                // Compared as configurations: the order of a set in JSON is arbitrary.
+                let expected: AppConfig = serde_json::from_value(expected).unwrap();
+                assert_eq!(loaded, expected, "{field}, null: {is_null}");
+            }
+        }
+    }
+
+    /// The unit of the geometry: the one of the file if it holds a geometry, the one
+    /// of the defaults if it holds none.
+    #[test]
+    fn test_stored_config_geometry_unit() {
+        let geometry_of = |stored: Value| {
+            let config = parse_stored_config(&stored.to_string()).unwrap();
+            (
+                config.geometry_units,
+                config.window_size,
+                config.window_position,
+            )
+        };
+        let default = AppConfig::default();
+        let (size, position) = (default.window_size, default.window_position);
+
+        // No geometry at all: the defaults, which are logical.
+        assert_eq!(
+            geometry_of(json!({})),
+            (GeometryUnits::Logical, size, position)
+        );
+        assert_eq!(
+            geometry_of(json!({ "window_size": null, "geometry_units": null })),
+            (GeometryUnits::Logical, size, position)
+        );
+        // A geometry of a version that did not name the unit: physical pixels.
+        assert_eq!(
+            geometry_of(json!({ "window_size": [2400.0, 1600.0], "window_position": [1.0, 2.0] })),
+            (GeometryUnits::Physical, (2400.0, 1600.0), (1.0, 2.0))
+        );
+        assert_eq!(
+            geometry_of(json!({ "window_size": [2400.0, 1600.0] })),
+            (GeometryUnits::Physical, (2400.0, 1600.0), position)
+        );
+        assert_eq!(
+            geometry_of(json!({ "window_position": [1.0, 2.0] })),
+            (GeometryUnits::Physical, size, (1.0, 2.0))
+        );
+        // A unit that is named is kept, with or without a geometry.
+        assert_eq!(
+            geometry_of(json!({ "window_size": [800.0, 600.0], "geometry_units": "logical" })),
+            (GeometryUnits::Logical, (800.0, 600.0), position)
+        );
+        assert_eq!(
+            geometry_of(json!({ "geometry_units": "physical" })),
+            (GeometryUnits::Physical, size, position)
+        );
+    }
+
+    /// `null` for a setting that has no such value is read like a missing field,
+    /// without costing the other settings.
+    #[test]
+    fn test_stored_config_reads_null_as_missing() {
+        let legacy = json!({
+            "case_sensitive_search": null,
+            "output_filename": "kept.txt",
+            "ignore_patterns": null,
+            "max_file_size_mb": null,
+        });
+
+        let config = parse_stored_config(&legacy.to_string()).unwrap();
+
+        assert_eq!(
+            config,
+            AppConfig {
+                output_filename: "kept.txt".to_string(),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_stored_config_with_a_value_of_the_wrong_type_is_an_error() {
+        let broken = json!({ "case_sensitive_search": "yes", "output_filename": null });
+        assert!(parse_stored_config(&broken.to_string()).is_err());
+    }
+
+    // =========================================================================
+    // SECTION: Export and import of shared settings
+    // =========================================================================
+
+    fn personal_config() -> AppConfig {
+        AppConfig {
+            ignore_patterns: ["*.shared".to_string()].into(),
+            last_directory: Some(PathBuf::from("/home/alice/secret-project")),
+            output_directory: Some(PathBuf::from("/home/alice/out")),
+            output_filename: "shared.txt".to_string(),
+            case_sensitive_search: true,
+            window_size: (1234.0, 567.0),
+            window_position: (89.0, 10.0),
+            max_file_size_mb: 7,
+            ..Default::default()
         }
     }
 
     #[test]
-    fn test_ensure_field_from_default_handles_serialization_error() {
-        let mut obj_map = serde_json::Map::new();
-        let result = ensure_field_from_default(&mut obj_map, "bad_key", Unserializable);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("serialization is designed to fail"));
+    fn test_exported_file_holds_the_shared_settings_only() {
+        let harness = TestHarness::new();
+        let export_path = harness.temp_path().join("export.json");
+
+        export_config(&SharedConfig::from(&personal_config()), &export_path).unwrap();
+
+        let written = fs::read_to_string(&export_path).unwrap();
+        for personal in [
+            "alice",
+            "last_directory",
+            "output_directory",
+            "window_size",
+            "window_position",
+            "geometry_units",
+            "1234",
+        ] {
+            assert!(!written.contains(personal), "{personal} in {written}");
+        }
+        let exported: Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(exported["ignore_patterns"], json!(["*.shared"]));
+        assert_eq!(exported["output_filename"], "shared.txt");
+        assert_eq!(exported["case_sensitive_search"], true);
+        assert_eq!(exported["max_file_size_mb"], 7);
+        assert_eq!(file_names_in(harness.temp_path()), ["export.json"]);
     }
 
     #[test]
-    fn test_ensure_field_from_default_inserts_missing_key() {
-        let mut obj_map = serde_json::Map::new();
-        let default_value = "hello".to_string();
-        ensure_field_from_default(&mut obj_map, "my_key", default_value.clone()).unwrap();
-        assert_eq!(obj_map.get("my_key").unwrap().as_str().unwrap(), "hello");
+    fn test_export_then_import_transfers_the_settings_and_nothing_else() {
+        let harness = TestHarness::new();
+        let export_path = harness.temp_path().join("export.json");
+        export_config(&SharedConfig::from(&personal_config()), &export_path).unwrap();
+
+        let imported = import_config(&export_path).unwrap();
+
+        assert_eq!(imported.settings, SharedConfig::from(&personal_config()));
+        assert_eq!(imported.output_directory, None);
+        assert_eq!(imported.last_directory, None);
+
+        let mut receiver = AppConfig {
+            output_directory: Some(PathBuf::from("/home/bob/out")),
+            last_directory: Some(PathBuf::from("/home/bob/project")),
+            ..Default::default()
+        };
+        let geometry = (receiver.window_size, receiver.window_position);
+        receiver.adopt_user_settings(imported);
+        assert_eq!(
+            receiver,
+            AppConfig {
+                output_directory: Some(PathBuf::from("/home/bob/out")),
+                last_directory: Some(PathBuf::from("/home/bob/project")),
+                window_size: geometry.0,
+                window_position: geometry.1,
+                geometry_units: GeometryUnits::Logical,
+                ..personal_config()
+            }
+        );
+    }
+
+    /// What versions up to 0.3.1 exported, and what a copy of `config.json` is.
+    #[test]
+    fn test_import_config_accepts_a_complete_config_file() {
+        let harness = TestHarness::new();
+        save_config(&personal_config(), &harness.config_path).unwrap();
+
+        let imported = import_config(&harness.config_path).unwrap();
+
+        assert_eq!(imported.settings, SharedConfig::from(&personal_config()));
+        assert_eq!(
+            imported.output_directory,
+            Some(PathBuf::from("/home/alice/out"))
+        );
+        assert_eq!(
+            imported.last_directory,
+            Some(PathBuf::from("/home/alice/secret-project"))
+        );
     }
 
     #[test]
-    fn test_migrate_legacy_config_fails_for_non_object() {
-        let non_object_content = "[1, 2, 3]".to_string();
-        let result = migrate_legacy_config(&non_object_content);
-        assert!(result.is_err());
-    }
+    fn test_import_config_reads_null_as_missing_and_rejects_non_objects() {
+        let harness = TestHarness::new();
+        let legacy = json!({
+            "case_sensitive_search": null,
+            "output_directory": null,
+            "output_filename": "x.txt",
+        });
+        harness.write_to_config_file(&legacy.to_string());
 
-    #[test]
-    fn test_migrate_legacy_config_populates_all_fields() {
-        let legacy_content = "{}".to_string(); // Start with empty object
-        let migrated_config = migrate_legacy_config(&legacy_content).unwrap();
-        assert_eq!(migrated_config, AppConfig::default());
+        let imported = import_config(&harness.config_path).unwrap();
+
+        assert_eq!(
+            imported.settings,
+            SharedConfig {
+                output_filename: "x.txt".to_string(),
+                ..SharedConfig::default()
+            }
+        );
+        assert_eq!(imported.output_directory, None);
+
+        harness.write_to_config_file("[1, 2, 3]");
+        assert!(import_config(&harness.config_path).is_err());
     }
 
     // =========================================================================
@@ -716,7 +940,7 @@ mod tests {
         let config = AppConfig::default();
 
         let save_result = save_config(&config, &config_path);
-        let export_result = export_config(&config, &config_path);
+        let export_result = export_config(&SharedConfig::from(&config), &config_path);
         assert!(!config_path.exists());
         let load_result = load_config(&config_path);
 

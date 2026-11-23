@@ -4,27 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CFC - Context File Concatenator</title>
-    <script>
-      /* Early theme bootstrapping to avoid FOUC:
-         Set data-theme="light|dark" before CSS loads based on user preference. */
-      (function () {
-        try {
-          var key = "cfc-theme";
-          var stored = localStorage.getItem(key);
-          var t =
-            stored === "light" || stored === "dark"
-              ? stored
-              : window.matchMedia &&
-                  window.matchMedia("(prefers-color-scheme: dark)").matches
-                ? "dark"
-                : "light";
-          document.documentElement.setAttribute("data-theme", t);
-        } catch (e) {
-          // In case storage is blocked, default to dark to match existing visuals
-          document.documentElement.setAttribute("data-theme", "dark");
-        }
-      })();
-    </script>
+    <!-- Early theme bootstrapping to avoid FOUC. A file, not an inline script:
+         the content security policy of the release build allows none
+         (src/platform/csp.rs). -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <!-- The layout is rendered by src/App.svelte, mounted into <body>. -->
