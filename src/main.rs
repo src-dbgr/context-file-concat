@@ -64,6 +64,8 @@ async fn main() {
     let ipc_handler_dialog = dialog_service.clone();
     // Executes IPC commands in arrival order; must be created inside the Tokio runtime.
     let ipc_dispatcher = app::dispatch::CommandDispatcher::new();
+    // Drops go through the same dispatcher, so they are ordered with the IPC commands.
+    let drop_dispatcher = ipc_dispatcher.clone();
     let ipc_handler = move |request: wry::http::Request<String>| {
         app::dispatch_ipc_message(
             &ipc_dispatcher,
@@ -85,11 +87,11 @@ async fn main() {
             DragDropEvent::Drop { paths, .. } => {
                 drop_handler_proxy.send_event(app::events::UserEvent::DragStateChanged(false));
                 if let Some(path) = paths.first() {
-                    app::tasks::start_scan_on_path(
+                    app::dispatch_dropped_path(
+                        &drop_dispatcher,
                         path.clone(),
                         drop_handler_proxy.clone(),
                         drop_handler_state.clone(),
-                        false,
                     );
                 }
             }

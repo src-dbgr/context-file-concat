@@ -42,15 +42,15 @@ The single source of truth is `CommandSchemas` in `schema.ts`; names and payload
 | `rescanDirectory`               | `null`                                                  | Rescans the current directory, keeping selection and expansion                  |
 | `clearDirectory`                | `null`                                                  | Resets all directory-related state                                              |
 | `cancelScan`                    | `null`                                                  | Cancels the running scan                                                        |
-| `loadDirectoryLevel`            | `string` (path)                                         | Scans one directory level, marks it loaded **and expands it**                   |
+| `loadDirectoryLevel`            | `string` (path)                                         | **Expands** the directory right away, then scans its level and marks it loaded  |
 | `setExpansion`                  | `{ path: string, expanded: boolean }` (no other fields) | Expands or collapses one directory. Idempotent; always answered with a snapshot |
 | `expandCollapseAll`             | `boolean`                                               | Expands (`true`) or collapses (`false`) every listed directory                  |
 | `toggleSelection`               | `string` (path)                                         | Selects/deselects one file                                                      |
 | `toggleDirectorySelection`      | `string` (path)                                         | Selects/deselects all files below a directory                                   |
 | `selectAll` / `deselectAll`     | `null`                                                  | Selects all listed files / clears the selection                                 |
 | `updateFilters`                 | `{ searchQuery, extensionFilter, contentSearchQuery }`  | Applies the filters; expands the ancestors of matches                           |
-| `loadFilePreview`               | `string` (path)                                         | Answers with `showPreviewContent`                                               |
-| `clearPreviewState`             | `null`                                                  | Clears the previewed file                                                       |
+| `loadFilePreview`               | `string` (path)                                         | Marks the file as previewed; `showPreviewContent` follows once it has been read |
+| `clearPreviewState`             | `null`                                                  | Clears the previewed file; a preview still being read is not shown any more     |
 | `generatePreview`               | `null`                                                  | Concatenates the selection; answers with `showGeneratedContent`                 |
 | `cancelGeneration`              | `null`                                                  | Cancels the running generation                                                  |
 | `saveFile`                      | `string` (content)                                      | Opens the save dialog; answers with `fileSaveStatus`                            |
@@ -100,7 +100,10 @@ post("setExpansion", { path: "/repo/src", expanded: true }); // payload is type-
 What follows from that:
 
 - Two commands on the ordered lane never race. `setExpansion(true)` followed by `setExpansion(false)` ends collapsed, two `toggleSelection` cancel out, and of two `updateFilters` the later one determines the filters.
-- Long-running work does not occupy the ordered lane. Scans and generations are started as tasks of their own by their commands. A content search suspends `updateFilters`; the part up to the suspension (storing the new filters) has run in order, the rest (applying the search result) moves to the continuation lane. Results are applied in posting order, so an older search cannot overwrite a newer one, and commands posted meanwhile are executed immediately.
+- **A command that starts background work does its bookkeeping itself, before it returns.** Opening a directory (`rescanDirectory`, a drop, the scan after a dialog) resets or cancels what was there, registers the new scan and sends the snapshot with `is_scanning: true` synchronously; `loadDirectoryLevel` marks the directory as expanded; `loadFilePreview` records the previewed file; `generatePreview` registers the generation. Only the IO runs in a task. The command that follows therefore always acts on the result: `rescanDirectory` → `cancelScan` ends cancelled, `rescanDirectory` → `clearDirectory` ends with no directory loaded, `loadDirectoryLevel` → `setExpansion(false)` ends collapsed (the load still delivers the children).
+- **Results of background work carry a token and are dropped when they are outdated.** A scan that was cancelled or replaced, a lazy load whose file list was replaced, a file preview that was followed by another one or closed, a content search that was followed by a newer one: none of them changes the state or sends anything any more. For previews this means `showPreviewContent` calls arrive in the order of the requests and an older file never replaces a newer one.
+- **A dropped path is a command.** The drag & drop handler queues the drop on the ordered lane (`dispatch_dropped_path`), so drops are ordered among themselves and with the IPC commands: of two drops in quick succession the second one is loaded.
+- Long-running work and file IO do not occupy the ordered lane. Scans and generations are started as tasks of their own by their commands; so are the read of a previewed file and the look at a path that is to be scanned (on a slow network drive even checking that it exists can take long). The config file is written in the background as well, from a numbered snapshot, so that an older save can never overwrite a newer one. A content search suspends `updateFilters`; the part up to the suspension (storing the new filters) has run in order, the rest (applying the search result) moves to the continuation lane. Results are applied in posting order, so an older search cannot overwrite a newer one, and commands posted meanwhile are executed immediately.
 - A native dialog blocks its thread for as long as the user takes. Dialog commands therefore run **outside** the ordered lane: a command that arrives while a dialog is open is executed right away, and what the dialog command does after the dialog has been closed (start the scan, store the output directory, import the config) happens after it. Dialog commands are ordered among themselves, so only one dialog is open at a time; a second one opens after the first has been closed.
 - A panicking command is logged and dropped; the lanes keep running.
 
@@ -120,6 +123,16 @@ Each `UserEvent` is turned into exactly one call of a `window.*` function instal
 | `DragStateChanged`     | `window.setDragState(isDragging)`                                                          | `DragStateSchema`          |
 
 Errors are reported as plain strings through `showError`; there is no error-code protocol.
+
+### Opening a path
+
+A scan is announced before anything is known about the path: the first snapshot has `is_scanning: true` and `current_path` as the path was given. The scan task then looks at the path:
+
+- A directory is scanned as is.
+- For a file (a dropped file), `current_path` changes to the directory the file lies in, with another snapshot, and that directory is scanned.
+- A path that does not exist ends the scan: `showError("Path does not exist: …")` followed by a snapshot with `is_scanning: false`. A rescan keeps the list it had; opening a new path has already reset the previous directory at that point.
+
+The scan is reported as complete (`is_scanning: false`, status "Indexing complete …") as its very last step. With an active content query that is after the search has been repeated on the complete file list, so the number of visible items in the status is the one of the final list. Until then the snapshot can show `is_fully_scanned: true` together with `is_scanning: true`.
 
 ## The state snapshot (`UiState`)
 

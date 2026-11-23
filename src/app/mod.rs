@@ -19,6 +19,7 @@ pub mod view_model;
 pub mod window_geometry;
 
 use crate::app::file_dialog::DialogService;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wry::WebView;
 
@@ -56,6 +57,20 @@ pub fn dispatch_ipc_message<P: EventProxy, D: DialogService + 'static>(
         }),
         None => dispatcher.dispatch(run_command(msg, proxy, state)),
     }
+}
+
+/// Queues the opening of a path that was dropped onto the window.
+///
+/// A drop is a command like any other: it replaces the loaded directory, so it has to
+/// be ordered relative to the IPC commands (and to other drops). It therefore runs on
+/// the ordered lane of the same `dispatcher`.
+pub fn dispatch_dropped_path<P: EventProxy>(
+    dispatcher: &CommandDispatcher,
+    path: PathBuf,
+    proxy: P,
+    state: Arc<Mutex<AppState>>,
+) {
+    dispatcher.dispatch(async move { commands::open_dropped_path(path, proxy, state) });
 }
 
 /// The commands that wait for the user to answer a native dialog.
@@ -103,7 +118,10 @@ fn run_dialog_command<P: EventProxy, D: DialogService + ?Sized>(
 /// Executes a command of the ordered lane.
 ///
 /// Most commands are synchronous: they mutate the state, possibly launch a background
-/// task (scan, generation) and return. `updateFilters` is the one command that can
+/// task (scan, lazy load, generation, file preview) and return. Whatever such a command
+/// means for the state (the scan is registered, the directory is expanded, the file is
+/// the previewed one) is done by the command itself, not by the task, so that the next
+/// command finds it done. `updateFilters` is the one command that can
 /// suspend, while it waits for a content search; the dispatcher then completes it on
 /// its continuation lane.
 async fn run_command<P: EventProxy>(msg: IpcMessage, proxy: P, state: Arc<Mutex<AppState>>) {
@@ -206,8 +224,9 @@ pub fn handle_user_event(event: UserEvent, webview: &WebView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::StatusNotice;
     use crate::config::AppConfig;
-    use std::path::PathBuf;
+    use std::path::Path;
     use std::sync::mpsc as std_mpsc;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -259,6 +278,7 @@ mod tests {
         proxy: TestEventProxy,
         events: mpsc::UnboundedReceiver<UserEvent>,
         state: Arc<Mutex<AppState>>,
+        idle_tasks: usize,
     }
 
     impl Harness {
@@ -269,8 +289,13 @@ mod tests {
             let mut state = AppState::default();
             state.config = AppConfig::default();
             state.current_path = "/repo".to_string();
+            let dispatcher = CommandDispatcher::new();
             Self {
-                dispatcher: CommandDispatcher::new(),
+                // The lanes of the dispatcher are the only tasks of an idle harness.
+                idle_tasks: tokio::runtime::Handle::current()
+                    .metrics()
+                    .num_alive_tasks(),
+                dispatcher,
                 dialog: Arc::new(BlockingDialog {
                     opened: Mutex::new(opened),
                     close: Mutex::new(close),
@@ -281,6 +306,47 @@ mod tests {
                 events,
                 state: Arc::new(Mutex::new(state)),
             }
+        }
+
+        /// A harness whose loaded directory is `project` (not scanned yet).
+        fn with_project(project: &Path) -> Self {
+            let harness = Self::new();
+            harness.state.lock().unwrap().current_path = project.to_string_lossy().to_string();
+            harness
+        }
+
+        fn drop_path(&self, path: &Path) {
+            dispatch_dropped_path(
+                &self.dispatcher,
+                path.to_path_buf(),
+                self.proxy.clone(),
+                self.state.clone(),
+            );
+        }
+
+        /// Waits until everything sent so far has been dealt with completely: the
+        /// commands have run (including the part of a command that suspended) and the
+        /// background tasks they started have ended.
+        ///
+        /// Must be called on a harness that was idle when it was created, as the
+        /// number of tasks alive at that time is the reference.
+        async fn quiescence(&self) {
+            // The marker suspends once, so it passes through the ordered lane and the
+            // continuation lane behind everything that was sent before it.
+            let (done, marker_ran) = tokio::sync::oneshot::channel();
+            self.dispatcher.dispatch(async move {
+                tokio::task::yield_now().await;
+                let _ = done.send(());
+            });
+            let metrics = tokio::runtime::Handle::current().metrics();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                marker_ran.await.expect("the marker command was dropped");
+                while metrics.num_alive_tasks() > self.idle_tasks {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the application did not come to rest");
         }
 
         fn send(&self, command: &str, payload: serde_json::Value) {
@@ -434,5 +500,140 @@ mod tests {
         let events = harness.events(1).await;
         assert!(matches!(events[0], UserEvent::StateUpdate(_)));
         assert!(harness.events.try_recv().is_err());
+    }
+
+    // --- Commands that start background work -------------------------------------------
+    //
+    // Starting a scan or a lazy load is a state change of its own (the scan is
+    // registered, the directory is marked as expanded). It has to happen in the command,
+    // not in the task the command spawns: otherwise the next command overtakes it.
+
+    /// A project directory on disk with a few files and a sub-directory.
+    fn project_on_disk(marker_file: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join(marker_file), "marker").unwrap();
+        dir
+    }
+
+    fn listed_names(state: &AppState) -> Vec<String> {
+        let mut names: Vec<String> = state
+            .full_file_list
+            .iter()
+            .filter_map(|item| item.path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_cancel_sent_right_after_a_rescan_cancels_that_rescan() {
+        for round in 0..20 {
+            let project = project_on_disk("a.txt");
+            let harness = Harness::with_project(project.path());
+
+            harness.send("rescanDirectory", serde_json::Value::Null);
+            harness.send("cancelScan", serde_json::Value::Null);
+            harness.quiescence().await;
+
+            let state = harness.state.lock().unwrap();
+            assert!(!state.is_scanning(), "round {round}");
+            assert_eq!(state.status, StatusNotice::ScanCancelled, "round {round}");
+            assert!(!state.is_fully_scanned, "round {round}");
+            assert!(state.full_file_list.is_empty(), "round {round}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_clear_sent_right_after_a_rescan_leaves_no_directory_loaded() {
+        for round in 0..20 {
+            let project = project_on_disk("a.txt");
+            let harness = Harness::with_project(project.path());
+
+            harness.send("rescanDirectory", serde_json::Value::Null);
+            harness.send("clearDirectory", serde_json::Value::Null);
+            harness.quiescence().await;
+
+            let state = harness.state.lock().unwrap();
+            assert_eq!(state.current_path, "", "round {round}");
+            assert!(!state.is_scanning(), "round {round}");
+            assert!(state.full_file_list.is_empty(), "round {round}");
+            assert_eq!(state.config.last_directory, None, "round {round}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn of_two_drops_the_second_one_is_loaded() {
+        for round in 0..20 {
+            let first = project_on_disk("first.txt");
+            let second = project_on_disk("second.txt");
+            let harness = Harness::new();
+
+            harness.drop_path(first.path());
+            harness.drop_path(second.path());
+            harness.quiescence().await;
+
+            let state = harness.state.lock().unwrap();
+            assert_eq!(
+                Path::new(&state.current_path),
+                second.path(),
+                "round {round}"
+            );
+            assert!(state.is_fully_scanned, "round {round}");
+            assert!(!state.is_scanning(), "round {round}");
+            assert_eq!(
+                listed_names(&state),
+                ["main.rs", "second.txt", "src"],
+                "round {round}"
+            );
+            assert_eq!(
+                state.config.last_directory.as_deref(),
+                Some(second.path()),
+                "round {round}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_collapse_sent_right_after_a_lazy_load_ends_collapsed() {
+        for round in 0..20 {
+            let project = project_on_disk("a.txt");
+            let harness = Harness::with_project(project.path());
+            let src = project.path().join("src");
+
+            harness.send("loadDirectoryLevel", serde_json::json!(src));
+            harness.send(
+                "setExpansion",
+                serde_json::json!({ "path": src, "expanded": false }),
+            );
+            harness.quiescence().await;
+
+            let state = harness.state.lock().unwrap();
+            assert!(!state.expanded_dirs.contains(&src), "round {round}");
+            // The load itself is not affected by the collapse.
+            assert!(state.loaded_dirs.contains(&src), "round {round}");
+            assert_eq!(listed_names(&state), ["main.rs"], "round {round}");
+        }
+    }
+
+    /// The counterpart: a request to load a directory that follows a collapse expands it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_lazy_load_sent_right_after_a_collapse_ends_expanded() {
+        let project = project_on_disk("a.txt");
+        let harness = Harness::with_project(project.path());
+        let src = project.path().join("src");
+
+        harness.send(
+            "setExpansion",
+            serde_json::json!({ "path": src, "expanded": false }),
+        );
+        harness.send("loadDirectoryLevel", serde_json::json!(src));
+        harness.quiescence().await;
+
+        let state = harness.state.lock().unwrap();
+        assert!(state.expanded_dirs.contains(&src));
+        assert!(state.loaded_dirs.contains(&src));
     }
 }

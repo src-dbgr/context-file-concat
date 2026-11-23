@@ -6,7 +6,7 @@ use crate::core::{FileItem, ScanProgress};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 
 /// Proof of identity of one background run, plus the means to tell it to stop.
@@ -171,6 +171,57 @@ impl ContentSearchToken {
     }
 }
 
+/// Identifies one request to preview a file.
+///
+/// Handed out by [`AppState::begin_preview`]. Reading the file takes place outside the
+/// state; only the read that belongs to the most recent request may show its content,
+/// so a slow read of a file the user has already left never replaces what the user is
+/// looking at now.
+#[derive(Debug, Clone)]
+pub struct PreviewToken(RunTicket);
+
+/// The configuration as it was at one moment, to be written to disk outside the state
+/// lock (see [`AppState::config_snapshot`]).
+///
+/// Snapshots are numbered in the order they were taken. [`ConfigSnapshot::save`] skips
+/// a snapshot once a newer one has been written, so concurrent saves cannot leave an
+/// outdated configuration on disk, in whatever order they get to run.
+#[derive(Debug)]
+pub struct ConfigSnapshot {
+    config: AppConfig,
+    revision: u64,
+    /// The revision of the newest snapshot written so far; shared by all snapshots of
+    /// one `AppState`. Holding it serializes the writes.
+    last_written: Arc<Mutex<u64>>,
+}
+
+impl ConfigSnapshot {
+    /// Writes the snapshot to the configuration file, unless a newer snapshot has been
+    /// written already. Blocks on file IO: not to be called on the ordered command lane
+    /// or while holding the state lock.
+    pub fn save(self) -> anyhow::Result<()> {
+        self.write_with(|config| crate::config::settings::save_config(config, None))
+    }
+
+    /// [`ConfigSnapshot::save`] with the function that writes the file as a parameter.
+    fn write_with(
+        self,
+        write: impl FnOnce(&AppConfig) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let mut last_written = self
+            .last_written
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.revision <= *last_written {
+            tracing::debug!("Skipping the save of a superseded config snapshot.");
+            return Ok(());
+        }
+        write(&self.config)?;
+        *last_written = self.revision;
+        Ok(())
+    }
+}
+
 /// The most recent noteworthy outcome, shown to the user while nothing is in progress.
 ///
 /// This is *what happened*, as data. How it is worded is decided by the view model.
@@ -287,6 +338,12 @@ pub struct AppState {
     generation: RunSlot,
     /// The content search that is currently in progress, if any.
     content_search: RunSlot,
+    /// The file preview that is currently being read, if any.
+    preview: RunSlot,
+    /// The number of configuration snapshots taken so far.
+    config_snapshots_taken: u64,
+    /// See [`ConfigSnapshot`].
+    config_snapshot_written: Arc<Mutex<u64>>,
     /// Incremented whenever `filtered_file_list` changes. Derived data (the tree index)
     /// is keyed by this revision.
     filtered_revision: u64,
@@ -321,6 +378,9 @@ impl Default for AppState {
             scan: RunSlot::default(),
             generation: RunSlot::default(),
             content_search: RunSlot::default(),
+            preview: RunSlot::default(),
+            config_snapshots_taken: 0,
+            config_snapshot_written: Arc::new(Mutex::new(0)),
             filtered_revision: 0,
             tree_index_cache: TreeIndexCache::default(),
         }
@@ -479,6 +539,41 @@ impl AppState {
         self.content_search_results.clear();
     }
 
+    /// Makes `path` the previewed file and returns the token of the read that is going
+    /// to deliver its content. A read that is still under way is superseded.
+    pub fn begin_preview(&mut self, path: PathBuf) -> PreviewToken {
+        self.previewed_file_path = Some(path);
+        PreviewToken(self.preview.begin())
+    }
+
+    /// Ends the read identified by `token`. Returns `true` if it belongs to the most
+    /// recent preview request, i.e. if its content may be shown; `false` (and nothing
+    /// happens) if the preview was replaced or closed in the meantime.
+    pub fn finish_preview(&mut self, token: &PreviewToken) -> bool {
+        self.preview.finish(&token.0)
+    }
+
+    /// Closes the preview: no file is previewed, and a read that is still under way
+    /// will not show its content any more.
+    pub fn clear_preview(&mut self) {
+        self.preview.cancel();
+        self.previewed_file_path = None;
+    }
+
+    /// Captures the configuration for saving it outside the state lock.
+    ///
+    /// Take the snapshot while holding the lock, right after the change, and save it
+    /// afterwards: the snapshots are numbered here, which is what keeps a save that is
+    /// overtaken by a later one from overwriting it.
+    pub fn config_snapshot(&mut self) -> ConfigSnapshot {
+        self.config_snapshots_taken += 1;
+        ConfigSnapshot {
+            config: self.config.clone(),
+            revision: self.config_snapshots_taken,
+            last_written: self.config_snapshot_written.clone(),
+        }
+    }
+
     /// Makes `files` the result of the first, shallow phase of a scan of `root`.
     ///
     /// The list then holds a single level, so `root` is the only directory whose
@@ -565,7 +660,7 @@ impl AppState {
         self.extension_filter.clear();
         self.content_search_query.clear();
         self.clear_content_search();
-        self.previewed_file_path = None;
+        self.clear_preview();
         self.active_ignore_patterns.clear();
         self.is_fully_scanned = false;
         self.patterns_need_rescan = false;
@@ -1258,5 +1353,104 @@ mod tests {
 
         assert_eq!(state.loaded_dirs, HashSet::from([root]));
         assert_eq!(state.full_file_list.len(), 1);
+    }
+
+    // --- Preview requests ---
+
+    #[test]
+    fn test_only_the_most_recent_preview_request_may_show_its_content() {
+        let mut state = AppState::default();
+        let first = state.begin_preview(PathBuf::from("/project/a.rs"));
+        let second = state.begin_preview(PathBuf::from("/project/b.rs"));
+
+        assert!(!state.finish_preview(&first), "Superseded by the second");
+        assert_eq!(
+            state.previewed_file_path,
+            Some(PathBuf::from("/project/b.rs"))
+        );
+        assert!(state.finish_preview(&second));
+        assert!(!state.finish_preview(&second), "A read ends only once");
+    }
+
+    #[test]
+    fn test_closing_the_preview_invalidates_the_read_under_way() {
+        let mut state = AppState::default();
+        let token = state.begin_preview(PathBuf::from("/project/a.rs"));
+
+        state.clear_preview();
+
+        assert_eq!(state.previewed_file_path, None);
+        assert!(!state.finish_preview(&token));
+    }
+
+    #[test]
+    fn test_reset_directory_state_invalidates_the_preview_read_under_way() {
+        let mut state = AppState::default();
+        let token = state.begin_preview(PathBuf::from("/project/a.rs"));
+
+        state.reset_directory_state();
+
+        assert!(!state.finish_preview(&token));
+    }
+
+    // --- Config snapshots ---
+
+    /// Collects what the snapshots write instead of touching the config file.
+    fn record_into(
+        written: &mut Vec<String>,
+    ) -> impl FnOnce(&AppConfig) -> anyhow::Result<()> + '_ {
+        |config| {
+            written.push(config.output_filename.clone());
+            Ok(())
+        }
+    }
+
+    fn snapshot_named(state: &mut AppState, output_filename: &str) -> ConfigSnapshot {
+        state.config.output_filename = output_filename.to_string();
+        state.config_snapshot()
+    }
+
+    #[test]
+    fn test_config_snapshots_are_written_in_the_order_they_were_taken() {
+        let mut state = AppState::default();
+        let mut written = Vec::new();
+        let older = snapshot_named(&mut state, "older");
+        let newer = snapshot_named(&mut state, "newer");
+
+        older.write_with(record_into(&mut written)).unwrap();
+        newer.write_with(record_into(&mut written)).unwrap();
+
+        assert_eq!(written, ["older", "newer"]);
+    }
+
+    /// The saves run outside the state lock, so an older one can get its turn after a
+    /// newer one. It must not put the outdated configuration back on disk.
+    #[test]
+    fn test_overtaken_config_snapshot_is_not_written() {
+        let mut state = AppState::default();
+        let mut written = Vec::new();
+        let older = snapshot_named(&mut state, "older");
+        let newer = snapshot_named(&mut state, "newer");
+
+        newer.write_with(record_into(&mut written)).unwrap();
+        older.write_with(record_into(&mut written)).unwrap();
+
+        assert_eq!(written, ["newer"]);
+    }
+
+    /// A snapshot whose write failed has not been written: the one before it is still
+    /// the newest on disk, and a later one is written as usual.
+    #[test]
+    fn test_failed_config_save_does_not_count_as_written() {
+        let mut state = AppState::default();
+        let mut written = Vec::new();
+        let failing = snapshot_named(&mut state, "failing");
+        let next = snapshot_named(&mut state, "next");
+
+        let result = failing.write_with(|_| Err(anyhow::anyhow!("disk full")));
+        next.write_with(record_into(&mut written)).unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(written, ["next"]);
     }
 }

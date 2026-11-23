@@ -7,7 +7,13 @@
 //! guarantee that, so every command goes through a [`CommandDispatcher`] instead.
 //!
 //! This module knows nothing about individual commands. It only decides *when* a unit
-//! of work runs; *what* runs is decided by the caller (see `dispatch_ipc_message`).
+//! of work runs; *what* runs is decided by the caller (see `dispatch_ipc_message` and
+//! `dispatch_dropped_path`).
+//!
+//! The order is only worth something if a command performs every state change it
+//! stands for before it returns (or suspends). A command that starts background work
+//! therefore registers that work in the state itself and spawns nothing but the IO;
+//! and it must not block the lane with IO of its own.
 //!
 //! # Lanes
 //!
