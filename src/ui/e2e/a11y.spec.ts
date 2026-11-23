@@ -512,6 +512,7 @@ for (const theme of THEMES) {
  */
 test("the key guard leaves Tab and Enter on a summary to the browser", async ({
   page,
+  browserName,
 }) => {
   await open(page, "dark");
   await setAppState(page, withRepo());
@@ -544,9 +545,10 @@ test("the key guard leaves Tab and Enter on a summary to the browser", async ({
     ),
   ).toEqual([false, false, false, false]);
 
-  // Tab from the focused row leaves the tree (it is one stop).
+  // Tab from the focused row leaves the tree (it is one stop). WebKit moves
+  // focus to buttons only with Option+Tab, like the walk above.
   await from[2].focus();
-  await page.keyboard.press("Alt+Tab");
+  await page.keyboard.press(browserName === "webkit" ? "Alt+Tab" : "Tab");
   expect(
     await page.evaluate(() => !!document.activeElement?.closest(".tree")),
   ).toBe(false);
