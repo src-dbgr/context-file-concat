@@ -2,13 +2,15 @@
 //!
 //! It takes the `AppState` and modifies the `filtered_file_list` based on various
 //! criteria like search queries, extension filters, and content search results, and it
-//! expands the directories of the matches ([`auto_expand_for_matches`]).
+//! expands the directories of the matches ([`auto_expand_for_matches`]), except for
+//! the ones the user collapsed while filtering (the rule is
+//! [`AppState::reveal_directory`]).
 //! This cleanly separates the logic of state mutation from the logic of state
 //! presentation (`view_model`), which only reads the state.
 
 use crate::app::state::AppState;
 use crate::config::AppConfig;
-use crate::core::{is_blank, FileItem, FileNameMatcher, SearchEngine};
+use crate::core::{FileItem, FileNameMatcher, SearchEngine};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -33,8 +35,7 @@ pub fn apply_filters(state: &mut AppState) {
         &PathBuf::from(&state.current_path),
         &state.config,
         &state.file_name_matcher(),
-        &state.content_search_query,
-        &state.content_search_results,
+        state.content_filter_matches(),
         &unloaded_dirs,
         state.is_fully_scanned,
     );
@@ -44,8 +45,10 @@ pub fn apply_filters(state: &mut AppState) {
 /// Expands the parent directories of files that match the current search criteria.
 ///
 /// This function iterates through all filtered files that match the current search,
-/// extension, or content filters and adds their parent directories to the `expanded_dirs` set,
-/// ensuring that search results are visible in the file tree.
+/// extension, or content filters and expands the directories above them, so that the
+/// matches are visible in the file tree. A directory the user collapsed while a filter
+/// was active stays collapsed, see [`AppState::reveal_directory`]; that is what makes
+/// it safe to call this whenever the filters are applied again.
 pub fn auto_expand_for_matches(state: &mut AppState) {
     let root_path = PathBuf::from(&state.current_path);
     let name_matcher = state.file_name_matcher();
@@ -64,7 +67,7 @@ pub fn auto_expand_for_matches(state: &mut AppState) {
         let mut current = path.parent();
         while let Some(parent) = current {
             if parent.starts_with(&root_path) && parent != root_path {
-                state.expanded_dirs.insert(parent.to_path_buf());
+                state.reveal_directory(parent);
             } else {
                 break;
             }
@@ -101,14 +104,15 @@ fn get_required_ancestors(file_paths: &HashSet<PathBuf>, root_path: &Path) -> Ha
 /// and ignored. This one rule decides it for the filename query and the extension
 /// filter (through [`FileNameMatcher`]) and for the content query. An active text is
 /// matched as typed, without trimming.
-#[allow(clippy::too_many_arguments)] // Allowed for this function as all params are cohesive for filtering
+///
+/// `content_matches` are the matches of the content filter, `None` if there is none
+/// to apply (see [`AppState::content_filter_matches`]).
 fn apply_filters_on_data(
     full_file_list: &[FileItem],
     root_path: &Path,
     config: &AppConfig,
     name_matcher: &FileNameMatcher,
-    content_search_query: &str,
-    content_search_results: &HashSet<PathBuf>,
+    content_matches: Option<&HashSet<PathBuf>>,
     dirs_to_preserve: &HashSet<PathBuf>,
     is_fully_scanned: bool,
 ) -> Vec<FileItem> {
@@ -125,14 +129,13 @@ fn apply_filters_on_data(
     };
 
     // Step 2: Apply content search if active.
-    let has_content_filter = !is_blank(content_search_query);
-    if has_content_filter {
-        if content_search_results.is_empty() {
+    if let Some(content_matches) = content_matches {
+        if content_matches.is_empty() {
             return Vec::new();
         }
-        let required_dirs = get_required_ancestors(content_search_results, root_path);
+        let required_dirs = get_required_ancestors(content_matches, root_path);
         working_list.retain(|item| {
-            content_search_results.contains(&item.path) || required_dirs.contains(&item.path)
+            content_matches.contains(&item.path) || required_dirs.contains(&item.path)
         });
     }
 

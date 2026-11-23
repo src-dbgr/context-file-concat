@@ -12,6 +12,7 @@
 //! (`AppState::expanded_dirs` is the single source of truth for expansion). Totals that
 //! would otherwise require the whole tree are sent as counters.
 
+pub(crate) mod lossy_path;
 mod status;
 mod tree_builder;
 mod ui_config;
@@ -28,10 +29,9 @@ mod reference;
 use crate::app::selection::SelectionState;
 use crate::app::state::AppState;
 use crate::app::tree_index::TreeCounts;
-use crate::core::{is_blank, FileItem};
 use serde::Serialize;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tree_builder::{build_tree_nodes, TreeView};
 
 pub use ui_config::UiConfig;
@@ -73,6 +73,9 @@ pub struct UiState {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct TreeNode {
     pub name: String,
+    /// Written lossily, so that a name that is not valid Unicode cannot make the
+    /// snapshot unserializable (see [`lossy_path`]).
+    #[serde(serialize_with = "lossy_path::serialize")]
     pub path: PathBuf,
     pub is_directory: bool,
     pub is_binary: bool,
@@ -127,8 +130,11 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
 /// Builds the pruned tree for the current state.
 fn build_tree_snapshot(state: &AppState) -> TreeSnapshot {
     if (state.is_scanning() && state.full_file_list.is_empty())
-        // If content search is active but has no results, the tree should be empty
-        || (!is_blank(&state.content_search_query) && state.content_search_results.is_empty())
+        // A content filter without matches leaves nothing to show. (While the first
+        // search for a query is still running there is no content filter yet.)
+        || state
+            .content_filter_matches()
+            .is_some_and(|matches| matches.is_empty())
     {
         return TreeSnapshot {
             nodes: Vec::new(),
@@ -152,47 +158,6 @@ fn build_tree_snapshot(state: &AppState) -> TreeSnapshot {
     }
 }
 
-/// Returns a list of the selected file paths in natural tree order.
-pub fn get_selected_files_in_tree_order(state: &AppState) -> Vec<PathBuf> {
-    // Use full_file_list to ensure all selected files are included,
-    // regardless of the current search filter. This list already respects ignore patterns.
-    let mut selected_file_items: Vec<&FileItem> = state
-        .full_file_list
-        .iter()
-        .filter(|item| !item.is_directory && state.selected_files.contains(&item.path))
-        .collect();
-
-    selected_file_items.sort_by_key(|a| a.path.clone());
-
-    selected_file_items
-        .into_iter()
-        .map(|item| item.path.clone())
-        .collect()
-}
-
-/// Determines the programming language from a file path for syntax highlighting.
-pub fn get_language_from_path(path: &Path) -> String {
-    match path.extension().and_then(|s| s.to_str()) {
-        Some("rs") => "rust",
-        Some("js") | Some("mjs") | Some("cjs") => "javascript",
-        Some("ts") | Some("tsx") => "typescript",
-        Some("py") => "python",
-        Some("html") | Some("htm") => "html",
-        Some("css") => "css",
-        Some("json") => "json",
-        Some("md") => "markdown",
-        Some("toml") => "toml",
-        Some("yaml") | Some("yml") => "yaml",
-        Some("sh") => "shell",
-        Some("go") => "go",
-        Some("java") => "java",
-        Some("c") | Some("h") => "c",
-        Some("cpp") | Some("hpp") | Some("cxx") | Some("hxx") => "cpp",
-        _ => "plaintext",
-    }
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,8 +167,8 @@ mod tests {
     use std::path::PathBuf;
 
     /// Creates a test `FileItem` with the specified path and directory flag.
-    fn create_test_file_item(path_str: &str, is_dir: bool) -> FileItem {
-        FileItem {
+    fn create_test_file_item(path_str: &str, is_dir: bool) -> crate::core::FileItem {
+        crate::core::FileItem {
             path: PathBuf::from(path_str),
             is_directory: is_dir,
             is_binary: false,

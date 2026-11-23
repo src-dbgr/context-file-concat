@@ -370,7 +370,7 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
           "type": "string",
         },
         "payload": {
-          "additionalProperties": {},
+          "additionalProperties": false,
           "properties": {
             "contentSearchQuery": {
               "default": "",

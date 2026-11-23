@@ -35,36 +35,46 @@ UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  �
 
 The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on the host the routing table `COMMANDS` in `src/app/mod.rs`. The two are compared by the [contract tests](#contract-tests): same command names, and every example payload the host serializes passes the schema of its command. The wire format is `{"command": <name>, "payload": <payload | null>}`.
 
-| Command                         | Payload                                                 | Effect                                                                          |
-| ------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `initialize`                    | `null`                                                  | Sends the current snapshot                                                      |
-| `selectDirectory`               | `null`                                                  | Opens the directory dialog and [opens](#opening-a-path) the choice              |
-| `rescanDirectory`               | `null`                                                  | Rescans the current directory, keeping selection and expansion                  |
-| `clearDirectory`                | `null`                                                  | Resets all directory-related state                                              |
-| `cancelScan`                    | `null`                                                  | Cancels the running scan                                                        |
-| `loadDirectoryLevel`            | `string` (path)                                         | **Expands** the directory right away, then scans its level and marks it loaded  |
-| `setExpansion`                  | `{ path: string, expanded: boolean }` (no other fields) | Expands or collapses one directory. Idempotent; always answered with a snapshot |
-| `expandCollapseAll`             | `boolean`                                               | Expands (`true`) or collapses (`false`) every listed directory                  |
-| `toggleSelection`               | `string` (path)                                         | Selects/deselects one file                                                      |
-| `toggleDirectorySelection`      | `string` (path)                                         | Selects/deselects all files below a directory                                   |
-| `selectAll` / `deselectAll`     | `null`                                                  | Selects all listed files / clears the selection                                 |
-| `updateFilters`                 | `{ searchQuery, extensionFilter, contentSearchQuery }`  | Applies the filters; expands the ancestors of matches                           |
-| `loadFilePreview`               | `string` (path)                                         | Marks the file as previewed; `showPreviewContent` follows once it has been read |
-| `clearPreviewState`             | `null`                                                  | Clears the previewed file; a preview still being read is not shown any more     |
-| `generatePreview`               | `null`                                                  | Concatenates the selection; answers with `showGeneratedContent`                 |
-| `cancelGeneration`              | `null`                                                  | Cancels the running generation                                                  |
-| `saveFile`                      | `string` (content)                                      | Opens the save dialog; answers with `fileSaveStatus`                            |
-| `pickOutputDirectory`           | `null`                                                  | Opens the dialog, stores the choice as output directory and persists it         |
-| `addIgnorePattern`              | `{ pattern: string }` (not blank, no other fields)      | Adds one ignore pattern, see [Config changes](#config-changes)                  |
-| `removeIgnorePattern`           | `{ pattern: string }` (any text, no other fields)       | Removes one ignore pattern                                                      |
-| `clearIgnorePatterns`           | `null`                                                  | Removes all ignore patterns                                                     |
-| `setConfigOption`               | `{ option, value }` (no other fields), see below        | Sets one user-editable option                                                   |
-| `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog, see [Config import](#config-import)            |
-| `addIgnorePath`                 | `string` (path)                                         | Adds the ignore pattern for a path of the loaded tree (relative to the root)    |
+| Command                         | Payload                                                 | Effect                                                                                                                                                                                                                |
+| ------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `initialize`                    | `null`                                                  | Sends the current snapshot                                                                                                                                                                                            |
+| `selectDirectory`               | `null`                                                  | Opens the directory dialog and [opens](#opening-a-path) the choice                                                                                                                                                    |
+| `rescanDirectory`               | `null`                                                  | Rescans the current directory, keeping selection and expansion                                                                                                                                                        |
+| `clearDirectory`                | `null`                                                  | Resets all directory-related state                                                                                                                                                                                    |
+| `cancelScan`                    | `null`                                                  | Cancels the running scan                                                                                                                                                                                              |
+| `loadDirectoryLevel`            | `string` (path)                                         | **Expands** the directory right away, then scans its level and marks it loaded                                                                                                                                        |
+| `setExpansion`                  | `{ path: string, expanded: boolean }` (no other fields) | Expands or collapses one directory. Idempotent; always answered with a snapshot                                                                                                                                       |
+| `expandCollapseAll`             | `boolean`                                               | Expands (`true`) or collapses (`false`) every directory the filters show                                                                                                                                              |
+| `toggleSelection`               | `string` (path)                                         | Selects/deselects one file                                                                                                                                                                                            |
+| `toggleDirectorySelection`      | `string` (path)                                         | Selects/deselects all files below a directory                                                                                                                                                                         |
+| `selectAll` / `deselectAll`     | `null`                                                  | Selects all listed files / clears the selection                                                                                                                                                                       |
+| `updateFilters`                 | `{ searchQuery, extensionFilter, contentSearchQuery }`  | Applies the filters; expands the ancestors of matches (no other fields)                                                                                                                                               |
+| `loadFilePreview`               | `string` (path)                                         | Marks the file as previewed; `showPreviewContent` follows once it has been read                                                                                                                                       |
+| `clearPreviewState`             | `null`                                                  | Clears the previewed file; a preview still being read is not shown any more                                                                                                                                           |
+| `generatePreview`               | `null`                                                  | Concatenates the selection; answers with `showGeneratedContent`. A default output filename (`cfc_output.txt`, `cfc_output_<timestamp>.txt`) is replaced by one with the current time; a name the user has set is kept |
+| `cancelGeneration`              | `null`                                                  | Cancels the running generation                                                                                                                                                                                        |
+| `saveFile`                      | `string` (content)                                      | Opens the save dialog; answers with `fileSaveStatus`                                                                                                                                                                  |
+| `pickOutputDirectory`           | `null`                                                  | Opens the dialog, stores the choice as output directory and persists it                                                                                                                                               |
+| `addIgnorePattern`              | `{ pattern: string }` (not blank, no other fields)      | Adds one ignore pattern, see [Config changes](#config-changes)                                                                                                                                                        |
+| `removeIgnorePattern`           | `{ pattern: string }` (any text, no other fields)       | Removes one ignore pattern                                                                                                                                                                                            |
+| `clearIgnorePatterns`           | `null`                                                  | Removes all ignore patterns                                                                                                                                                                                           |
+| `setConfigOption`               | `{ option, value }` (no other fields), see below        | Sets one user-editable option                                                                                                                                                                                         |
+| `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog, see [Config import](#config-import)                                                                                                                                                  |
+| `addIgnorePath`                 | `string` (path)                                         | Adds the ignore pattern for a path of the loaded tree (relative to the root; a directory of the loaded list gets a trailing `/`)                                                                                      |
 
 ### Filter texts
 
 One rule decides whether a filter text is set, for `searchQuery`, `extensionFilter` and `contentSearchQuery` alike: a text that is empty or consists of whitespace only is **not set**. It is ignored entirely: it does not filter, it starts no content search, and the UI does not show the "no results for filter" message for it. A text that is set is matched exactly as typed; it is not trimmed. The rule lives in `core::is_blank` on the host; the UI mirrors it in `hasActiveFilters` (`FileTree.svelte`).
+
+The payload has a type on the host (`UpdateFiltersPayload` in `commands.rs`): the three texts, each optional (a text that is left out is empty), and nothing else. A malformed payload changes nothing and is answered with the unchanged snapshot.
+
+### Content search
+
+A content query is searched in the background; `updateFilters` suspends until the matches are there (see [Command ordering](#command-ordering)). What a snapshot shows that is sent in the meantime:
+
+- While the **first** search for a query is running (the query was empty before), there is no content filter yet: the list is shown as it is without it. It is not emptied.
+- Once a search has answered, its matches are the filter until the next search answers, also while that next search (a refined query, the repetition after a lazy load or a scan) is running. A query without matches shows an empty tree.
+- A search that **fails** (its worker panicked) is reported with `showError("The content search failed: …")`, followed by a snapshot. The matches of the search before it stay; a failed search is not a search without matches.
 
 ### Config changes
 
@@ -108,7 +118,7 @@ One type decides what the ignore patterns hide: `core::IgnoreRules` (`src/core/i
 - Blank patterns, comments (`#…`) and invalid globs are not rules and hide nothing.
 - `active_ignore_patterns` holds the patterns that decided about at least one entry of the scan: those that hid one and the negations that re-included one. Of several patterns matching the same entry only the deciding one is reported.
 
-The commands are idempotent (adding a pattern that is set, removing one that is not, and setting an option to its current value change nothing), a changed configuration is persisted, and **every config command is answered with a snapshot**, also when nothing changed. The UI relies on that: controls show the host's `config` and do not write to the store.
+The commands are idempotent (adding a pattern that is set, removing one that is not, and setting an option to its current value change nothing), a changed configuration is persisted, and **every config command is answered with a snapshot**, also when nothing changed. The UI relies on that: controls show the host's `config` and do not write to the store. This holds for every way these commands can end (`addIgnorePattern`, `removeIgnorePattern`, `clearIgnorePatterns`, `addIgnorePath`, `setConfigOption`): a payload that is refused (malformed, an unknown option, a blank pattern), `addIgnorePath` for a path outside the loaded directory or without a loaded directory. Refused payloads are logged on the host. The dialog command `pickOutputDirectory` is the exception that follows from its nature: a dismissed dialog sends nothing.
 
 #### Config import
 
@@ -150,11 +160,11 @@ post("setExpansion", { path: "/repo/src", expanded: true }); // payload is type-
 
 `dispatch_ipc_message` does not execute anything itself. It parses the message and queues the command on a `CommandDispatcher` (`src/app/dispatch.rs`), which has three lanes:
 
-| Lane         | Commands                                                                                                               | Guarantee                                                                                          |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Ordered      | Everything except the dialog commands                                                                                  | Commands start in arrival order; a command runs without interleaving until it finishes or suspends |
-| Continuation | The rest of a command that suspended (`updateFilters` during a content search, `setConfigOption` while it repeats one) | Finished one at a time, in the order the commands were posted                                      |
-| Blocking     | `selectDirectory`, `saveFile`, `pickOutputDirectory`, `importConfig`, `exportConfig`                                   | One at a time, in arrival order, on the blocking thread pool                                       |
+| Lane         | Commands                                                                                                               | Guarantee                                                                                                             |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Ordered      | Everything except the dialog commands                                                                                  | Commands start in arrival order; a command runs without interleaving until it finishes or suspends                    |
+| Continuation | The rest of a command that suspended (`updateFilters` during a content search, `setConfigOption` while it repeats one) | Finished one at a time, in the order the commands were posted                                                         |
+| Blocking     | `selectDirectory`, `saveFile`, `pickOutputDirectory`, `importConfig`, `exportConfig`                                   | One at a time, in arrival order, on the blocking thread pool; each starts after the ordered commands posted before it |
 
 What follows from that:
 
@@ -162,8 +172,9 @@ What follows from that:
 - **A command that starts background work does its bookkeeping itself, before it returns.** Starting a scan (`rescanDirectory`, a drop, the scan after a dialog) supersedes the scan that was running, registers the new one and sends the snapshot with `is_scanning: true` synchronously; `loadDirectoryLevel` marks the directory as expanded; `loadFilePreview` records the previewed file; `generatePreview` registers the generation. Only the IO runs in a task. The command that follows therefore always acts on the result: `rescanDirectory` → `cancelScan` ends cancelled, `rescanDirectory` → `clearDirectory` ends with no directory loaded, a drop → `cancelScan` ends cancelled with the previous directory still loaded, a drop → `rescanDirectory` ends with the dropped directory loaded, `loadDirectoryLevel` → `setExpansion(false)` ends collapsed (the load still delivers the children).
 - **Results of background work carry a token and are dropped when they are outdated.** A scan that was cancelled or replaced, a lazy load whose file list was replaced, a file preview that was followed by another one or closed, a content search that was followed by a newer one: none of them changes the state or sends anything any more. For previews this means `showPreviewContent` calls arrive in the order of the requests and an older file never replaces a newer one.
 - **A dropped path is a command.** The drag & drop handler queues the drop on the ordered lane (`dispatch_dropped_path`), so drops are ordered among themselves and with the IPC commands: of two drops in quick succession the second one is loaded.
-- Long-running work and file IO do not occupy the ordered lane. Scans and generations are started as tasks of their own by their commands; so are the read of a previewed file and the look at a path that is to be scanned (on a slow network drive even checking that it exists can take long). The config file is written in the background as well, from a numbered snapshot, so that an older save can never overwrite a newer one (see [Persistence](#persistence)). A content search suspends `updateFilters`; the part up to the suspension (storing the new filters) has run in order, the rest (applying the search result) moves to the continuation lane. Results are applied in posting order, so an older search cannot overwrite a newer one, and commands posted meanwhile are executed immediately.
+- Long-running work and file IO do not occupy the ordered lane; no command of that lane touches the file system. Scans and generations are started as tasks of their own by their commands; so are the read of a previewed file and the look at a path that is to be scanned (on a slow network drive even checking that it exists can take long). `addIgnorePath` takes what it needs to know about its path (is it a directory?) from the loaded file list. The config file is written in the background as well, from a numbered snapshot, so that an older save can never overwrite a newer one (see [Persistence](#persistence)). A content search suspends `updateFilters`; the part up to the suspension (storing the new filters) has run in order, the rest (applying the search result) moves to the continuation lane. Results are applied in posting order, so an older search cannot overwrite a newer one, and commands posted meanwhile are executed immediately.
 - A native dialog blocks its thread for as long as the user takes. Dialog commands therefore run **outside** the ordered lane: a command that arrives while a dialog is open is executed right away, and what the dialog command does after the dialog has been closed (start the scan, store the output directory, import the config) happens after it. Dialog commands are ordered among themselves, so only one dialog is open at a time; a second one opens after the first has been closed.
+- **A dialog command starts after the commands that were posted before it.** Renaming the output file and pressing "Save" right away opens the save dialog with the new name. The dispatcher puts a marker on the ordered lane when the dialog command arrives and starts the command when the lane has reached the marker, i.e. when every earlier command has finished or suspended. A suspended command (a content search that is still running) has made its own state changes by then and does not hold the dialog back; the lane itself never waits for a dialog.
 - A panicking command is logged and dropped; the lanes keep running. This holds in release builds too (the release profile unwinds), and also for a command that panics while it holds the state lock: the lock is taken over by the next command (`SharedState` in `src/app/shared_state.rs`), which works on the state as it was left.
 
 ## Host calls (Host → UI)
@@ -215,7 +226,9 @@ Opening a path (a drop, the choice of the directory dialog, the `last_directory`
 
 Until the path has been looked at, commands act on the directory that is still loaded, and the announced scan is the current one: `cancelScan` cancels it (the loaded directory stays), `clearDirectory` ends with no directory loaded, another drop replaces it. `rescanDirectory` does nothing in that phase (the opening delivers a fresh listing anyway) and is answered with the unchanged snapshot.
 
-`rescanDirectory` itself keeps the loaded directory by definition; if the directory has vanished, the scan ends with the same error and the list stays.
+`rescanDirectory` itself keeps the loaded directory by definition; if the directory has vanished, the scan ends with the same error and the list stays, as complete as it was (`is_fully_scanned` is untouched, so "remove empty directories" keeps working on it). A re-scan reports `is_fully_scanned: false` from the moment it has found its directory, with a snapshot, until it completes.
+
+A scan task that ends without having finished its scan (a panic at any point, from the first look at the path on) releases the scanning state and sends a snapshot with `is_scanning: false`.
 
 The scan is reported as complete (`is_scanning: false`, status "Indexing complete …") as its very last step. With an active content query that is after the search has been repeated on the complete file list, so the number of visible items in the status is the one of the final list. Until then the snapshot can show `is_fully_scanned: true` together with `is_scanning: true`.
 
@@ -255,7 +268,7 @@ Sending the complete tree on every update costs ~14 MB of JSON at 50,000 files, 
 
 | Field                               | Meaning                                                                                                                                                              |
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`, `path`                      | Display name and absolute path (the node's identity)                                                                                                                 |
+| `name`, `path`                      | Display name and absolute path (the node's identity). A path that is not valid Unicode is sent lossily (U+FFFD); see below                                           |
 | `is_directory`, `is_binary`, `size` | Kind and size                                                                                                                                                        |
 | `children`                          | Child nodes, directories first, then by name. **Empty for files and for collapsed directories**                                                                      |
 | `has_children`                      | **Required.** The directory has children in the filtered list, whether or not they were sent. `false` for files and for directories that are empty or not loaded yet |
@@ -264,6 +277,8 @@ Sending the complete tree on every update costs ~14 MB of JSON at 50,000 files, 
 | `selection_state`                   | `"none" \| "partial" \| "full"`. For directories it is computed from **all** files below it, also the ones not sent                                                  |
 | `is_match`                          | The node matches the filename, extension or content filter                                                                                                           |
 | `is_previewed`                      | The file is shown in the preview panel                                                                                                                               |
+
+Paths are written lossily (`src/app/view_model/lossy_path.rs`; also `config.output_directory` and the path of `showPreviewContent`): serde refuses a path that is not valid Unicode, and a single such file name would otherwise cost the UI the whole snapshot. For every valid path nothing changes. The row of such a file is shown, but the path the UI sends back for it is not the one the host knows, so commands for it have no effect.
 
 Because the tree is partial, the UI must not derive totals from it. `tree_files_count` and `tree_dirs_count` describe the complete filtered tree and are independent of what is expanded. (`visible_files_count` is the raw length of the filtered list and counts directories and items outside the tree as well; the file tree header uses the `tree_*` counters.)
 
@@ -290,11 +305,19 @@ Every way of changing the expansion is therefore a command, and the result is vi
 | `ArrowLeft` on an expanded directory                                       | `setExpansion { expanded: false }`                                             |
 | A gesture that expands a directory with `children_loaded: false` (no scan) | `loadDirectoryLevel`; the host loads the level, marks it loaded and expands it |
 | "Expand all" / "Collapse all"                                              | `expandCollapseAll`                                                            |
-| Typing into a filter                                                       | `updateFilters`; the host expands the ancestors of all matches                 |
+| Typing into a filter                                                       | `updateFilters`; the host expands the ancestors of the matches, see below      |
 
 The mapping from gesture to command lives in `src/ui/src/lib/modules/treeExpansion.ts`. While a scan is running the host refuses lazy loads (the scan delivers the children itself), so the UI sends `setExpansion` in that case. Only expanding loads: a directory that is already expanded without loaded children (expanded during a scan that was cancelled) is collapsed with `setExpansion { expanded: false }` like any other, and is loaded when it is expanded the next time.
 
 Keys are handled in one place, the key handler of the tree in `FileTree.svelte` (roving focus): `Enter` toggles a directory or opens a file, `Space` toggles the selection, wherever the focus is inside the row. `TreeItem.svelte` handles the pointer only.
+
+**"Expand all" and "Collapse all" act on the directories the filters show**, i.e. the directories of the filtered list. Under an active filter, "Expand all" adds them to what is expanded and "Collapse all" removes exactly them; directories the filter hides keep their state, so what was expanded before the filter is still expanded when the filter is cleared. Without a filter both reach every listed directory.
+
+**Automatic expansion and manual collapse.** Whenever the filters are applied with a result that can show matches (typing into a filter, the answer of a content search, its repetition after a lazy load, a change of the case sensitivity or the end of a scan), the host expands the directories above the matches. One rule keeps that from fighting the user (`AppState::reveal_directory`):
+
+> A directory the user collapses while a filter is active (`setExpansion { expanded: false }`, "Collapse all") is not expanded by the host again until the filters are cleared, i.e. until all three filter texts are blank, or until the user expands it (`setExpansion { expanded: true }`, "Expand all", `loadDirectoryLevel`).
+
+So collapsing a directory with matches and typing on leaves it collapsed, as does everything that merely applies the same filters again; a match in a directory the user has not collapsed is still revealed. Loading another directory (which clears the filters) ends the hold as well.
 
 There is no optimistic update: a row changes when the snapshot arrives. Snapshots are cheap enough for that, and it rules out the UI and the host disagreeing.
 
@@ -308,7 +331,7 @@ There is no optimistic update: a row changes when the snapshot arrives. Snapshot
   UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture
   ```
 
-- **TypeScript → Rust fixture (commands).** `src/app/command_contract_tests.rs` writes the routing table `COMMANDS` with example payloads into `src/ui/src/tests/contracts/fixtures/commands.json`; payloads with a type on the host (`ConfigOption`, `IgnorePatternPayload`, `SetExpansionPayload`) are serialized from that type, one example per `ConfigOption`. `rust-fixture.test.ts` checks that `CommandSchemas` has exactly the same command names, that every example passes the schema of its command unchanged, and that both sides know the same options of `setConfigOption`. `COMMANDS` is what the router resolves names with, so a command cannot be routed without being part of the contract. The fixture is regenerated with the same command as above.
+- **TypeScript → Rust fixture (commands).** `src/app/command_contract_tests.rs` writes the routing table `COMMANDS` with example payloads into `src/ui/src/tests/contracts/fixtures/commands.json`; payloads with a type on the host (`ConfigOption`, `IgnorePatternPayload`, `SetExpansionPayload`, `UpdateFiltersPayload`) are serialized from that type, one example per `ConfigOption`. These types reject unknown fields, and so do their schemas (`.strict()`). `rust-fixture.test.ts` checks that `CommandSchemas` has exactly the same command names, that every example passes the schema of its command unchanged, and that both sides know the same options of `setConfigOption`. `COMMANDS` is what the router resolves names with, so a command cannot be routed without being part of the contract. The fixture is regenerated with the same command as above.
 - **Schema tests.** `src/ui/src/tests/contracts/` covers the command union, the state schema, property tests and JSON-schema snapshots (`npm run test:contracts`).
 - **Pruning.** `src/app/view_model/pruning_tests.rs` and the property tests in `cache_tests.rs` compare the snapshot with the original full-tree algorithm, pruned by the same rule.
 
@@ -322,6 +345,6 @@ There is no optimistic update: a row changes when the snapshot arrives. Snapshot
 
 ## Transport notes
 
-The host serializes each `UserEvent` on the UI thread and evaluates the resulting `window.*` call in the WebView. Consecutive undelivered state updates are coalesced to the latest one; the order relative to all other events is preserved (`src/app/transport.rs`).
+The host serializes each `UserEvent` on the UI thread and evaluates the resulting `window.*` call in the WebView. An event that cannot be serialized is logged and skipped; no call is made for it. Consecutive undelivered state updates are coalesced to the latest one; the order relative to all other events is preserved (`src/app/transport.rs`).
 
 In E2E tests there is no host. `$lib/dev/e2eBridge.ts` (installed only when `$lib/dev/e2eShim.ts` allows it) exposes `window.__e2e.store.setAppState`, which sets the store directly. States seeded this way have to follow the same rules as real snapshots: children only below expanded directories, counters filled in.

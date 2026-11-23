@@ -116,6 +116,24 @@ impl<'a> SelectionSummary<'a> {
     }
 }
 
+/// The selected files of `items` in the order of the tree, i.e. sorted by path.
+///
+/// `items` is meant to be the unfiltered list: what is selected stays selected when a
+/// filter hides it, and a generation covers all of it. Selected paths that are not
+/// listed (any more) are left out.
+pub fn selected_files_in_tree_order(
+    items: &[FileItem],
+    selected: &HashSet<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = items
+        .iter()
+        .filter(|item| !item.is_directory && selected.contains(&item.path))
+        .map(|item| item.path.clone())
+        .collect();
+    files.sort();
+    files
+}
+
 /// The selection of one subtree of the file tree: what a click on its checkbox acts on.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct SubtreeSelection {
@@ -294,5 +312,40 @@ mod tests {
         assert_eq!(json(SelectionState::None), r#""none""#);
         assert_eq!(json(SelectionState::Partial), r#""partial""#);
         assert_eq!(json(SelectionState::Full), r#""full""#);
+    }
+
+    #[test]
+    fn selected_files_are_listed_in_tree_order() {
+        let item = |path: &str, is_directory| FileItem {
+            path: PathBuf::from(path),
+            is_directory,
+            ..Default::default()
+        };
+        // Scan order is not tree order.
+        let items = vec![
+            item("/p/z.rs", false),
+            item("/p/src", true),
+            item("/p/src/b.rs", false),
+            item("/p/a.rs", false),
+            item("/p/src/a.rs", false),
+        ];
+        let selected = HashSet::from([
+            PathBuf::from("/p/z.rs"),
+            PathBuf::from("/p/src/b.rs"),
+            PathBuf::from("/p/src/a.rs"),
+            // A selected directory is not a file; an unlisted path is gone.
+            PathBuf::from("/p/src"),
+            PathBuf::from("/p/removed.rs"),
+        ]);
+
+        assert_eq!(
+            selected_files_in_tree_order(&items, &selected),
+            [
+                PathBuf::from("/p/src/a.rs"),
+                PathBuf::from("/p/src/b.rs"),
+                PathBuf::from("/p/z.rs"),
+            ]
+        );
+        assert!(selected_files_in_tree_order(&items, &HashSet::new()).is_empty());
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::app::tree_index::{TreeIndex, TreeIndexCache};
 use crate::config::{AppConfig, ConfigSnapshot, ConfigStore};
-use crate::core::{FileItem, FileNameMatcher, ScanProgress};
+use crate::core::{is_blank, FileItem, FileNameMatcher, ScanProgress};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,7 +145,8 @@ impl GenerationToken {
     }
 
     /// `true` once this generation has been cancelled or superseded by a newer one.
-    pub fn is_cancelled(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
     }
 }
@@ -166,7 +167,8 @@ impl ContentSearchToken {
     }
 
     /// `true` once this search has been superseded by a newer one or cleared.
-    pub fn is_cancelled(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
     }
 }
@@ -233,7 +235,8 @@ impl LazyLoadToken {
     }
 
     /// `true` once the file list this lazy load was started for has been replaced.
-    pub fn is_cancelled(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel_flag.load(Ordering::SeqCst)
     }
 }
@@ -293,6 +296,10 @@ pub struct AppState {
     pub selected_files: HashSet<PathBuf>,
     /// The set of absolute paths to directories that are expanded in the UI tree.
     pub expanded_dirs: HashSet<PathBuf>,
+    /// The directories the user collapsed while a filter was active. The host does not
+    /// expand them again on its own for as long as that filter session lasts, see
+    /// [`AppState::reveal_directory`].
+    collapsed_under_filter: HashSet<PathBuf>,
     /// The set of absolute paths to directories whose children have been loaded.
     pub loaded_dirs: HashSet<PathBuf>,
     /// The current search query for filenames.
@@ -303,6 +310,10 @@ pub struct AppState {
     pub content_search_query: String,
     /// The set of paths that match the current content search query.
     pub content_search_results: HashSet<PathBuf>,
+    /// `true` once a search for the content query has delivered its matches. Until
+    /// then there is nothing the content filter could work with, see
+    /// [`AppState::content_filter_matches`].
+    content_search_answered: bool,
     /// The filename of the currently loaded configuration file, if any.
     pub current_config_filename: Option<String>,
     /// The progress of the directory scan as it was last reported by the scan that is
@@ -368,11 +379,13 @@ impl AppState {
             filtered_file_list: Vec::new(),
             selected_files: HashSet::new(),
             expanded_dirs: HashSet::new(),
+            collapsed_under_filter: HashSet::new(),
             loaded_dirs: HashSet::new(),
             search_query: String::new(),
             extension_filter: String::new(),
             content_search_query: String::new(),
             content_search_results: HashSet::new(),
+            content_search_answered: false,
             current_config_filename: None,
             scan_progress: no_scan_progress(),
             status: StatusNotice::Ready,
@@ -482,6 +495,21 @@ impl AppState {
             }
             _ => AfterAbandonedScan::Nothing,
         }
+    }
+
+    /// Records that the scan identified by `token` has found its directory and is about
+    /// to walk it: from here on the file list is the one this scan is building, so it
+    /// no longer counts as complete. Until this moment a scan changes nothing but the
+    /// scanning state itself, which is why a scan that never finds its directory
+    /// ([`AppState::abandon_scan`]) leaves the loaded list as complete as it was.
+    ///
+    /// Returns `true` if this changed what the UI shows. Does nothing and returns
+    /// `false` for a stale token.
+    pub fn begin_scan_walk(&mut self, token: &ScanToken) -> bool {
+        if !self.is_current_scan(token) {
+            return false;
+        }
+        std::mem::replace(&mut self.is_fully_scanned, false)
     }
 
     /// Stores the progress reported by the scan identified by `token`, so that the
@@ -629,7 +657,17 @@ impl AppState {
             return false;
         }
         self.content_search_results = matches;
+        self.content_search_answered = true;
         true
+    }
+
+    /// Ends the search identified by `token` without a result (the search failed). The
+    /// matches of the search before it stay in place.
+    ///
+    /// Does nothing for a stale token. Returns `true` if this call ended the running
+    /// search, i.e. if the failure is the caller's to report.
+    pub fn abandon_content_search(&mut self, token: &ContentSearchToken) -> bool {
+        self.content_search.finish(&token.0)
     }
 
     /// Drops the matches of the content search and supersedes a search that is still
@@ -637,6 +675,86 @@ impl AppState {
     pub fn clear_content_search(&mut self) {
         self.content_search.cancel();
         self.content_search_results.clear();
+        self.content_search_answered = false;
+    }
+
+    /// The matches the content filter works with, or `None` if there is no content
+    /// filter to apply: the query is [blank](is_blank), or the first search for it is
+    /// still running. In the latter case the list stays as it is without the content
+    /// filter until the matches arrive, instead of being empty in the meantime. Once a
+    /// search has delivered, its matches apply until the next one delivers (also
+    /// while that next one is running).
+    pub fn content_filter_matches(&self) -> Option<&HashSet<PathBuf>> {
+        if is_blank(&self.content_search_query) {
+            return None;
+        }
+        let awaiting_first_matches =
+            self.content_search.is_active() && !self.content_search_answered;
+        (!awaiting_first_matches).then_some(&self.content_search_results)
+    }
+
+    /// `true` if at least one of the three filters is set (not [blank](is_blank)).
+    pub fn has_active_filter(&self) -> bool {
+        !is_blank(&self.search_query)
+            || !is_blank(&self.extension_filter)
+            || !is_blank(&self.content_search_query)
+    }
+
+    /// Stores the filter texts as the user entered them. Returns `true` if the content
+    /// query has changed, i.e. if the content has to be searched again.
+    ///
+    /// With the last filter text gone the filter session is over: what the user
+    /// collapsed during it no longer holds back [`AppState::reveal_directory`].
+    pub fn set_filter_texts(
+        &mut self,
+        search_query: String,
+        extension_filter: String,
+        content_search_query: String,
+    ) -> bool {
+        self.search_query = search_query;
+        self.extension_filter = extension_filter;
+        let content_query_changed = self.content_search_query != content_search_query;
+        self.content_search_query = content_search_query;
+        if !self.has_active_filter() {
+            self.collapsed_under_filter.clear();
+        }
+        content_query_changed
+    }
+
+    /// Expands `directories` because the user asked for it (a click, "expand all", a
+    /// lazy load).
+    pub fn expand_directories(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
+        for directory in directories {
+            self.collapsed_under_filter.remove(&directory);
+            self.expanded_dirs.insert(directory);
+        }
+    }
+
+    /// Collapses `directories` because the user asked for it (a click, "collapse
+    /// all"). While a filter is active the directories are remembered, so that the
+    /// filter does not open them again, see [`AppState::reveal_directory`].
+    pub fn collapse_directories(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
+        let remember = self.has_active_filter();
+        for directory in directories {
+            self.expanded_dirs.remove(&directory);
+            if remember {
+                self.collapsed_under_filter.insert(directory);
+            }
+        }
+    }
+
+    /// Expands `directory` on behalf of a filter, to show a match below it.
+    ///
+    /// The one rule of the automatic expansion: **a directory the user collapsed while
+    /// a filter was active is not opened again by the host until the filters have been
+    /// cleared** (all three texts blank) or the user expands it. Everything else is
+    /// expanded, so a match in a directory the user has not touched still shows up.
+    /// Re-applying the same filter (after a lazy load, a change of the case
+    /// sensitivity, the end of a scan) therefore never undoes a collapse.
+    pub fn reveal_directory(&mut self, directory: &Path) {
+        if !self.collapsed_under_filter.contains(directory) {
+            self.expanded_dirs.insert(directory.to_path_buf());
+        }
     }
 
     /// Makes `path` the previewed file and returns the token of the read that is going
@@ -670,9 +788,9 @@ impl AppState {
         self.config_store.snapshot(&self.config)
     }
 
-    /// The store the configuration is persisted through. It can be asked for the most
-    /// recent snapshot without locking the state.
-    pub fn config_store(&self) -> ConfigStore {
+    /// The store the configuration is persisted through.
+    #[cfg(test)]
+    pub(crate) fn config_store(&self) -> ConfigStore {
         self.config_store.clone()
     }
 
@@ -773,6 +891,7 @@ impl AppState {
         self.set_filtered_file_list(Vec::new());
         self.selected_files.clear();
         self.expanded_dirs.clear();
+        self.collapsed_under_filter.clear();
         self.loaded_dirs.clear();
         self.search_query.clear();
         self.extension_filter.clear();
@@ -1750,5 +1869,167 @@ mod tests {
         let saved = crate::config::settings::load_config(&path).unwrap();
         assert_eq!(saved.output_filename, "newer.txt");
         assert_eq!(state.config_store().latest(), state.config);
+    }
+
+    // --- Expansion while filtering ---
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn test_reveal_expands_what_the_user_has_not_collapsed_under_the_filter() {
+        let mut state = AppState::default();
+        state.set_filter_texts("main".to_string(), String::new(), String::new());
+
+        state.reveal_directory(Path::new("/p/a"));
+        state.collapse_directories(paths(&["/p/a"]));
+        state.reveal_directory(Path::new("/p/a"));
+        state.reveal_directory(Path::new("/p/b"));
+
+        assert_eq!(state.expanded_dirs, HashSet::from([PathBuf::from("/p/b")]));
+    }
+
+    #[test]
+    fn test_collapse_without_a_filter_does_not_hold_back_a_later_filter() {
+        let mut state = AppState::default();
+        state.expand_directories(paths(&["/p/a"]));
+        state.collapse_directories(paths(&["/p/a"]));
+        assert!(state.expanded_dirs.is_empty());
+
+        state.set_filter_texts(String::new(), "rs".to_string(), String::new());
+        state.reveal_directory(Path::new("/p/a"));
+
+        assert!(state.expanded_dirs.contains(Path::new("/p/a")));
+    }
+
+    #[test]
+    fn test_the_hold_on_a_collapsed_directory_ends_with_the_filters_or_an_expand() {
+        let mut state = AppState::default();
+        state.set_filter_texts(String::new(), String::new(), "needle".to_string());
+        state.collapse_directories(paths(&["/p/a", "/p/b"]));
+
+        // Another filter text is the same session.
+        state.set_filter_texts("x".to_string(), String::new(), String::new());
+        state.reveal_directory(Path::new("/p/a"));
+        assert!(state.expanded_dirs.is_empty());
+
+        // The user opens one of them: it is the host's to reveal again.
+        state.expand_directories(paths(&["/p/a"]));
+        state.expanded_dirs.clear();
+        state.reveal_directory(Path::new("/p/a"));
+        state.reveal_directory(Path::new("/p/b"));
+        assert_eq!(state.expanded_dirs, HashSet::from([PathBuf::from("/p/a")]));
+
+        // All filters blank (whitespace counts as blank): the session is over.
+        state.set_filter_texts(" ".to_string(), String::new(), String::new());
+        state.set_filter_texts("x".to_string(), String::new(), String::new());
+        state.reveal_directory(Path::new("/p/b"));
+        assert!(state.expanded_dirs.contains(Path::new("/p/b")));
+    }
+
+    #[test]
+    fn test_resetting_the_directory_ends_the_filter_session() {
+        let mut state = AppState::default();
+        state.set_filter_texts("x".to_string(), String::new(), String::new());
+        state.collapse_directories(paths(&["/p/a"]));
+
+        state.reset_directory_state();
+        state.set_filter_texts("x".to_string(), String::new(), String::new());
+        state.reveal_directory(Path::new("/p/a"));
+
+        assert!(state.expanded_dirs.contains(Path::new("/p/a")));
+    }
+
+    #[test]
+    fn test_set_filter_texts_reports_a_changed_content_query() {
+        let mut state = AppState::default();
+        assert!(!state.set_filter_texts("a".to_string(), "rs".to_string(), String::new()));
+        assert!(state.set_filter_texts("a".to_string(), "rs".to_string(), "x".to_string()));
+        assert!(!state.set_filter_texts("b".to_string(), String::new(), "x".to_string()));
+        assert!(state.set_filter_texts("b".to_string(), String::new(), String::new()));
+        assert_eq!(state.search_query, "b");
+        assert!(state.has_active_filter());
+    }
+
+    // --- Content filter ---
+
+    #[test]
+    fn test_content_filter_applies_once_a_search_has_answered() {
+        let mut state = AppState::default();
+        assert_eq!(state.content_filter_matches(), None, "no query");
+
+        state.content_search_query = "needle".to_string();
+        let first = state.begin_content_search();
+        assert_eq!(state.content_filter_matches(), None, "first search running");
+
+        assert!(state.finish_content_search(&first, HashSet::new()));
+        assert_eq!(state.content_filter_matches(), Some(&HashSet::new()));
+
+        // The next search runs: the previous answer applies until it delivers.
+        let second = state.begin_content_search();
+        assert_eq!(state.content_filter_matches(), Some(&HashSet::new()));
+        let found = HashSet::from([PathBuf::from("/p/a.txt")]);
+        assert!(state.finish_content_search(&second, found.clone()));
+        assert_eq!(state.content_filter_matches(), Some(&found));
+
+        // Clearing the query starts over.
+        state.content_search_query.clear();
+        state.clear_content_search();
+        state.content_search_query = "other".to_string();
+        let _third = state.begin_content_search();
+        assert_eq!(state.content_filter_matches(), None);
+    }
+
+    /// Matches that are simply there (no search is running) are the filter.
+    #[test]
+    fn test_content_filter_uses_the_matches_in_place_when_no_search_runs() {
+        let state = AppState {
+            content_search_query: "needle".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(state.content_filter_matches(), Some(&HashSet::new()));
+    }
+
+    #[test]
+    fn test_abandoned_content_search_keeps_the_previous_matches() {
+        let mut state = AppState {
+            content_search_query: "needle".to_string(),
+            ..Default::default()
+        };
+        let found = HashSet::from([PathBuf::from("/p/a.txt")]);
+        let first = state.begin_content_search();
+        state.finish_content_search(&first, found.clone());
+
+        let failing = state.begin_content_search();
+        let newer = state.begin_content_search();
+        assert!(!state.abandon_content_search(&failing), "superseded");
+        assert!(state.abandon_content_search(&newer));
+        assert!(!state.abandon_content_search(&newer), "only once");
+
+        assert_eq!(state.content_search_results, found);
+        assert_eq!(state.content_filter_matches(), Some(&found));
+    }
+
+    // --- Scan walk ---
+
+    #[test]
+    fn test_begin_scan_walk_marks_the_list_incomplete_for_the_current_scan_only() {
+        let mut state = AppState {
+            is_fully_scanned: true,
+            ..Default::default()
+        };
+        let outdated = state.begin_scan();
+        assert!(
+            state.is_fully_scanned,
+            "beginning a scan changes no list flag"
+        );
+        let current = state.begin_scan();
+
+        assert!(!state.begin_scan_walk(&outdated));
+        assert!(state.is_fully_scanned);
+        assert!(state.begin_scan_walk(&current));
+        assert!(!state.is_fully_scanned);
+        assert!(!state.begin_scan_walk(&current), "nothing changes twice");
     }
 }

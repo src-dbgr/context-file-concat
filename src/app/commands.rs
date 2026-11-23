@@ -18,8 +18,8 @@ use super::view_model::generate_ui_state;
 use crate::app::file_dialog::DialogService;
 use crate::config::{self, AppConfig};
 use crate::core::is_blank;
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// Opens a file dialog for the user to select a directory to scan.
 ///
@@ -148,6 +148,15 @@ fn parse_payload<T: serde::de::DeserializeOwned>(
         .ok()
 }
 
+/// Answers a command that changes nothing with the state as it is.
+///
+/// The UI shows what the host reports and waits for the answer to what it has sent
+/// (see `HostDraft` in the UI), so a command whose payload is refused is answered like
+/// any other: with a snapshot, which then shows that nothing has changed.
+fn answer_unchanged<P: EventProxy>(proxy: &P, state: &SharedState) {
+    send_state(proxy, &state.lock());
+}
+
 /// Adds one ignore pattern. Adding a pattern that is already set changes nothing.
 ///
 /// See [`change_config`] for what a pattern change does to the loaded directory.
@@ -157,11 +166,11 @@ pub async fn add_ignore_pattern<P: EventProxy>(
     state: SharedState,
 ) {
     let Some(IgnorePatternPayload { pattern }) = parse_payload("addIgnorePattern", payload) else {
-        return;
+        return answer_unchanged(&proxy, &state);
     };
     if is_blank(&pattern) {
         tracing::warn!("Ignoring a blank ignore pattern.");
-        return;
+        return answer_unchanged(&proxy, &state);
     }
     change_config(&proxy, &state, |config| {
         config.ignore_patterns.insert(pattern);
@@ -177,7 +186,7 @@ pub async fn remove_ignore_pattern<P: EventProxy>(
 ) {
     let Some(IgnorePatternPayload { pattern }) = parse_payload("removeIgnorePattern", payload)
     else {
-        return;
+        return answer_unchanged(&proxy, &state);
     };
     change_config(&proxy, &state, |config| {
         config.ignore_patterns.remove(&pattern);
@@ -197,7 +206,7 @@ pub async fn set_config_option<P: EventProxy>(
     state: SharedState,
 ) {
     let Some(option) = parse_payload::<ConfigOption>("setConfigOption", payload) else {
-        return;
+        return answer_unchanged(&proxy, &state);
     };
     change_config(&proxy, &state, |config| option.apply_to(config)).await;
 }
@@ -228,7 +237,9 @@ enum ContentSearchFollowUp {
 /// - Removal of empty directories: the filters are re-applied.
 ///
 /// Every call is answered with a state update, also when nothing has changed: the UI
-/// does not edit its copy of the configuration, it shows what the host reports.
+/// does not edit its copy of the configuration, it shows what the host reports. The
+/// commands that end up here keep that promise for the requests they refuse as well
+/// ([`answer_unchanged`]).
 async fn change_config<P: EventProxy>(
     proxy: &P,
     state: &SharedState,
@@ -338,49 +349,48 @@ pub fn initialize<P: EventProxy>(proxy: P, state: SharedState) {
     proxy.send_event(event);
 }
 
+/// Payload of [`update_filters`]: the three filter texts as the user entered them.
+/// A text that is left out counts as empty.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub(crate) struct UpdateFiltersPayload {
+    pub search_query: String,
+    pub extension_filter: String,
+    pub content_search_query: String,
+}
+
 /// Updates the filename, extension, and content search filters.
 ///
 /// If the content search query has changed, it triggers a new content search task.
 /// Otherwise, it just re-applies the filename and extension filters on the existing file list.
+/// Either way the directories of the matches are expanded, except for those the user
+/// collapsed since the filters were last empty (see [`AppState::reveal_directory`]).
+///
+/// A malformed payload changes nothing and is answered with the unchanged state.
 pub async fn update_filters<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
     state: SharedState,
 ) {
-    if let Ok(filters) = serde_json::from_value::<HashMap<String, String>>(payload.clone()) {
-        let should_search_content = {
-            let mut state_guard = state.lock();
+    let Some(filters) = parse_payload::<UpdateFiltersPayload>("updateFilters", payload) else {
+        return answer_unchanged(&proxy, &state);
+    };
+    let should_search_content = state.lock().set_filter_texts(
+        filters.search_query,
+        filters.extension_filter,
+        filters.content_search_query,
+    );
 
-            state_guard.search_query = filters.get("searchQuery").cloned().unwrap_or_default();
-            state_guard.extension_filter =
-                filters.get("extensionFilter").cloned().unwrap_or_default();
-
-            let new_content_query = filters
-                .get("contentSearchQuery")
-                .cloned()
-                .unwrap_or_default();
-
-            if new_content_query != state_guard.content_search_query {
-                state_guard.content_search_query = new_content_query;
-                true
-            } else {
-                false
-            }
-        };
-
-        if should_search_content {
-            let searcher = tasks::RealFileSearcher;
-            search_in_files(proxy, state, searcher).await;
-        } else {
-            with_state_and_notify(&state, &proxy, |s| {
-                filtering::apply_filters(s);
-                if !is_blank(&s.search_query) || !is_blank(&s.extension_filter) {
-                    auto_expand_for_matches(s);
-                }
-            });
-        }
+    if should_search_content {
+        let searcher = tasks::RealFileSearcher;
+        search_in_files(proxy, state, searcher).await;
     } else {
-        tracing::warn!("Failed to deserialize filters from payload: {:?}", payload);
+        with_state_and_notify(&state, &proxy, |s| {
+            filtering::apply_filters(s);
+            if !is_blank(&s.search_query) || !is_blank(&s.extension_filter) {
+                auto_expand_for_matches(s);
+            }
+        });
     }
 }
 
@@ -424,37 +434,47 @@ pub fn load_directory_level<P: EventProxy>(
 /// the UI button of a tree row).
 ///
 /// The pattern is the path relative to the project root; directory patterns end with
-/// a slash. It is applied like any other added pattern, see [`change_config`]. Paths
-/// outside the loaded directory are ignored, as is the command without a directory.
+/// a slash. Whether the path is a directory is taken from the loaded file list, which
+/// is where the rows of the tree come from; the file system is not asked (this runs
+/// on the command lane). It is applied like any other added pattern, see
+/// [`change_config`].
+///
+/// A path outside the loaded directory adds nothing, as does the command without a
+/// directory. Like every config command it is answered with a state update either way.
 pub async fn add_ignore_path<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
     state: SharedState,
 ) {
-    let Some(path_to_ignore) = parse_payload::<PathBuf>("addIgnorePath", payload) else {
-        return;
+    let pattern = parse_payload::<PathBuf>("addIgnorePath", payload)
+        .and_then(|path| ignore_pattern_for_path(&state.lock(), &path));
+    let Some(pattern) = pattern else {
+        return answer_unchanged(&proxy, &state);
     };
-    // The lock is not held while the file system is asked about the path.
-    let root_path = {
-        let state_guard = state.lock();
-        if state_guard.current_path.is_empty() {
-            return;
-        }
-        PathBuf::from(&state_guard.current_path)
-    };
-    let Ok(relative_path) = path_to_ignore.strip_prefix(&root_path) else {
-        return;
-    };
-
-    let mut pattern = relative_path.to_string_lossy().to_string();
-    if path_to_ignore.is_dir() && !pattern.ends_with('/') {
-        pattern.push('/');
-    }
 
     change_config(&proxy, &state, |config| {
         config.ignore_patterns.insert(pattern);
     })
     .await;
+}
+
+/// The ignore pattern for `path`, a path of the loaded tree; `None` without a loaded
+/// directory and for a path that does not lie below it.
+fn ignore_pattern_for_path(state: &AppState, path: &Path) -> Option<String> {
+    if state.current_path.is_empty() {
+        return None;
+    }
+    let relative_path = path.strip_prefix(&state.current_path).ok()?;
+    let is_directory = state
+        .full_file_list
+        .iter()
+        .any(|item| item.is_directory && item.path == path);
+
+    let mut pattern = relative_path.to_string_lossy().to_string();
+    if is_directory && !pattern.ends_with('/') {
+        pattern.push('/');
+    }
+    Some(pattern)
 }
 
 /// Toggles the selection state of a single file.
@@ -537,9 +557,9 @@ pub fn set_expansion<P: EventProxy>(payload: serde_json::Value, proxy: P, state:
         Ok(SetExpansionPayload { path, expanded }) => {
             with_state_and_notify(&state, &proxy, |s| {
                 if expanded {
-                    s.expanded_dirs.insert(path);
+                    s.expand_directories([path]);
                 } else {
-                    s.expanded_dirs.remove(&path);
+                    s.collapse_directories([path]);
                 }
             });
         }
@@ -547,7 +567,12 @@ pub fn set_expansion<P: EventProxy>(payload: serde_json::Value, proxy: P, state:
     }
 }
 
-/// Expands or collapses all *currently visible* directories in the file tree.
+/// Expands or collapses all *currently visible* directories in the file tree, i.e.
+/// the directories of the filtered list.
+///
+/// Directories a filter hides are not touched: what was expanded outside the filter
+/// is still expanded when the filter is cleared, whichever of the two the user chose
+/// in between.
 pub fn expand_collapse_all<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
@@ -555,15 +580,16 @@ pub fn expand_collapse_all<P: EventProxy>(
 ) {
     if let Ok(expand) = serde_json::from_value::<bool>(payload.clone()) {
         with_state_and_notify(&state, &proxy, |s| {
+            let visible_directories: Vec<PathBuf> = s
+                .filtered_file_list()
+                .iter()
+                .filter(|i| i.is_directory)
+                .map(|i| i.path.clone())
+                .collect();
             if expand {
-                s.expanded_dirs = s
-                    .filtered_file_list()
-                    .iter()
-                    .filter(|i| i.is_directory)
-                    .map(|i| i.path.clone())
-                    .collect();
+                s.expand_directories(visible_directories);
             } else {
-                s.expanded_dirs.clear();
+                s.collapse_directories(visible_directories);
             }
         });
     } else {
@@ -591,7 +617,20 @@ pub fn deselect_all<P: EventProxy>(proxy: P, state: SharedState) {
     });
 }
 
+/// Whether `filename` is a name the application chose itself: the static name of a
+/// fresh configuration (`cfc_output.txt`, see `AppConfig::default`) or the timestamped
+/// name an earlier generation assigned (`cfc_output_<timestamp>.txt`). Any other name
+/// was set by the user.
+fn is_default_output_filename(filename: &str) -> bool {
+    filename == "cfc_output.txt"
+        || (filename.starts_with("cfc_output_") && filename.ends_with(".txt"))
+}
+
 /// Generates the final concatenated output from selected files by spawning a cancellable task.
+///
+/// A default output filename is replaced by one with the current time (see
+/// [`is_default_output_filename`]), so that successive outputs do not overwrite each
+/// other; the new name is persisted.
 pub fn generate_preview<P: EventProxy>(proxy: P, state: SharedState) {
     let mut state_guard = state.lock();
 
@@ -601,10 +640,8 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: SharedState) {
     // content is still being read.
     state_guard.clear_preview();
 
-    // Only generate a new timestamped filename if the current one appears to be a default.
-    // This preserves any filename explicitly set by the user.
-    let current_filename = &state_guard.config.output_filename;
-    if current_filename.starts_with("cfc_output_") && current_filename.ends_with(".txt") {
+    // A default name gets the time of this generation; a name the user has set is kept.
+    if is_default_output_filename(&state_guard.config.output_filename) {
         let new_filename = format!(
             "cfc_output_{}.txt",
             chrono::Local::now().format("%Y%m%d_%H%M%S")
@@ -920,6 +957,20 @@ mod tests {
             }
             state.full_file_list = items.clone();
             state.set_filtered_file_list(items);
+        }
+
+        /// The number of state updates among the events sent so far; all pending events
+        /// are consumed, and any other event fails the test.
+        #[track_caller]
+        fn state_updates_sent(&mut self) -> usize {
+            std::iter::from_fn(|| self.event_rx.try_recv().ok())
+                .inspect(|event| {
+                    assert!(
+                        matches!(event, UserEvent::StateUpdate(_)),
+                        "Only state updates expected, got {event:?}"
+                    )
+                })
+                .count()
         }
 
         /// The most recent state update among the events sent so far, without waiting
@@ -1416,11 +1467,10 @@ mod tests {
             );
         }
 
+        // Like every config command it is answered, with the unchanged state.
+        assert_eq!(harness.state_updates_sent(), 1);
         harness
-            .expect_no_event_within(
-                QUIET_PERIOD,
-                "No events should be sent when no directory is loaded",
-            )
+            .expect_no_event_within(QUIET_PERIOD, "Nothing else is sent")
             .await;
     }
 
@@ -1470,7 +1520,13 @@ mod tests {
             json!({ "option": "output_filename" }),
             whole_config.clone(),
         ] {
-            set_config_option(payload, harness.proxy.clone(), harness.state.clone()).await;
+            set_config_option(
+                payload.clone(),
+                harness.proxy.clone(),
+                harness.state.clone(),
+            )
+            .await;
+            assert_eq!(harness.state_updates_sent(), 1, "answer to {payload}");
         }
         for payload in [
             json!("*.log"),
@@ -1484,15 +1540,36 @@ mod tests {
                 harness.state.clone(),
             )
             .await;
-            remove_ignore_pattern(payload, harness.proxy.clone(), harness.state.clone()).await;
+            assert_eq!(harness.state_updates_sent(), 1, "answer to add {payload}");
+            remove_ignore_pattern(
+                payload.clone(),
+                harness.proxy.clone(),
+                harness.state.clone(),
+            )
+            .await;
+            assert_eq!(
+                harness.state_updates_sent(),
+                1,
+                "answer to remove {payload}"
+            );
         }
+        add_ignore_path(
+            json!({ "path": "src" }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+        assert_eq!(harness.state_updates_sent(), 1, "answer to addIgnorePath");
 
         // A blank text is not a pattern.
         add_pattern(&harness, "   ").await;
+        assert_eq!(harness.state_updates_sent(), 1, "answer to a blank pattern");
 
+        // Nothing was changed, nothing was saved, and each refusal was answered once:
+        // the UI shows what the host reports, so it has to be told that nothing changed.
         assert_eq!(harness.state.lock().config, initial_config);
         harness
-            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .expect_no_event_within(QUIET_PERIOD, "Nothing else is sent")
             .await;
     }
 
@@ -1544,11 +1621,38 @@ mod tests {
 
         add_ignore_path(outside_path, harness.proxy.clone(), harness.state.clone()).await;
 
+        // Answered with the unchanged state.
+        assert_eq!(harness.state_updates_sent(), 1);
         harness
-            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .expect_no_event_within(QUIET_PERIOD, "Nothing else is sent")
             .await;
         let final_patterns_count = harness.state.lock().config.ignore_patterns.len();
         assert_eq!(initial_patterns_count, final_patterns_count);
+    }
+
+    /// Whether the path is a directory is taken from the loaded list, not from the
+    /// disk: the command runs on the ordered lane, which does no file IO.
+    #[tokio::test]
+    async fn test_add_ignore_path_takes_the_kind_of_the_path_from_the_loaded_list() {
+        let mut harness = TestHarness::new();
+        // Nothing of this exists on disk.
+        let dir = harness.root_path.join("build");
+        let file = harness.root_path.join("notes");
+        {
+            let mut state = harness.state.lock();
+            state.full_file_list =
+                vec![file_item(dir.clone(), true), file_item(file.clone(), false)];
+            filtering::apply_filters(&mut state);
+        }
+
+        add_ignore_path(json!(dir), harness.proxy.clone(), harness.state.clone()).await;
+        add_ignore_path(json!(file), harness.proxy.clone(), harness.state.clone()).await;
+
+        assert_eq!(harness.state_updates_sent(), 2);
+        let state = harness.state.lock();
+        assert!(state.config.ignore_patterns.contains("build/"));
+        assert!(state.config.ignore_patterns.contains("notes"));
+        assert!(state.full_file_list.is_empty());
     }
 
     #[tokio::test]
@@ -2294,9 +2398,260 @@ mod tests {
             harness.state.clone(),
         )
         .await;
+        // Answered with the unchanged state: the filter inputs wait for the echo.
+        assert_eq!(harness.state_updates_sent(), 1);
         harness
-            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .expect_no_event_within(QUIET_PERIOD, "Nothing else is sent")
             .await;
+    }
+
+    /// The payload has a type on the host: unknown fields and wrong value types are
+    /// refused as a whole (nothing is applied), a text that is left out is empty.
+    #[tokio::test]
+    async fn test_update_filters_payload_is_typed() {
+        let mut harness = TestHarness::new();
+        harness.set_initial_files(&["main.rs", "notes.md"]);
+        let filter =
+            |payload| update_filters(payload, harness.proxy.clone(), harness.state.clone());
+
+        for refused in [
+            json!({ "searchQuery": "main", "search_query": "x" }),
+            json!({ "searchQuery": "main", "extra": true }),
+            json!({ "searchQuery": 7 }),
+            json!({ "searchQuery": "main", "extensionFilter": null }),
+        ] {
+            filter(refused.clone()).await;
+            assert_eq!(harness.state.lock().search_query, "", "{refused}");
+        }
+
+        filter(json!({ "searchQuery": "main" })).await;
+        {
+            let state = harness.state.lock();
+            assert_eq!(state.search_query, "main");
+            assert_eq!(state.extension_filter, "");
+            assert_eq!(state.content_search_query, "");
+        }
+        let _ = harness.last_state_update();
+
+        let all = UpdateFiltersPayload {
+            search_query: String::new(),
+            extension_filter: "md".to_string(),
+            content_search_query: String::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&all).unwrap(),
+            json!({ "searchQuery": "", "extensionFilter": "md", "contentSearchQuery": "" })
+        );
+        update_filters(
+            serde_json::to_value(&all).unwrap(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+        let ui_state = harness.last_state_update().unwrap();
+        assert_eq!(ui_state.search_query, "");
+        assert_eq!(ui_state.extension_filter, "md");
+        assert_eq!(ui_state.visible_files_count, 1);
+    }
+
+    // --- Expansion under a filter ---
+
+    /// `a/x.rs`, `a/deep/y.rs` and `b/z.md`, completely loaded.
+    fn harness_with_two_branches() -> (TestHarness, PathBuf, PathBuf, PathBuf) {
+        let harness = TestHarness::new();
+        let (a, deep, b) = (
+            harness.root_path.join("a"),
+            harness.root_path.join("a").join("deep"),
+            harness.root_path.join("b"),
+        );
+        {
+            let mut state = harness.state.lock();
+            state.replace_with_complete_file_list(vec![
+                file_item(a.clone(), true),
+                file_item(deep.clone(), true),
+                file_item(b.clone(), true),
+                file_item(a.join("x.rs"), false),
+                file_item(deep.join("y.rs"), false),
+                file_item(b.join("z.md"), false),
+            ]);
+            state.is_fully_scanned = true;
+            filtering::apply_filters(&mut state);
+        }
+        (harness, a, deep, b)
+    }
+
+    async fn type_filter(harness: &TestHarness, search_query: &str, extension_filter: &str) {
+        let payload = UpdateFiltersPayload {
+            search_query: search_query.to_string(),
+            extension_filter: extension_filter.to_string(),
+            content_search_query: String::new(),
+        };
+        update_filters(
+            serde_json::to_value(payload).unwrap(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+    }
+
+    fn expanded(harness: &TestHarness) -> HashSet<PathBuf> {
+        harness.state.lock().expanded_dirs.clone()
+    }
+
+    /// "Expand all" under a filter expands what the filter shows and keeps what was
+    /// expanded outside of it.
+    #[tokio::test]
+    async fn test_expand_all_under_a_filter_keeps_expansions_outside_the_filter() {
+        let (harness, a, deep, b) = harness_with_two_branches();
+        harness.state.lock().expand_directories([b.clone()]);
+        type_filter(&harness, "", "rs").await;
+        harness
+            .state
+            .lock()
+            .collapse_directories([a.clone(), deep.clone()]);
+
+        expand_collapse_all(json!(true), harness.proxy.clone(), harness.state.clone());
+
+        assert_eq!(
+            expanded(&harness),
+            HashSet::from([a.clone(), deep.clone(), b.clone()]),
+            "`b` is hidden by the filter and must stay expanded"
+        );
+        type_filter(&harness, "", "").await;
+        assert_eq!(expanded(&harness), HashSet::from([a, deep, b]));
+    }
+
+    /// "Collapse all" under a filter collapses what the filter shows, nothing else.
+    #[tokio::test]
+    async fn test_collapse_all_under_a_filter_keeps_expansions_outside_the_filter() {
+        let (mut harness, a, deep, b) = harness_with_two_branches();
+        harness
+            .state
+            .lock()
+            .expand_directories([a, deep, b.clone()]);
+        type_filter(&harness, "", "rs").await;
+
+        expand_collapse_all(json!(false), harness.proxy.clone(), harness.state.clone());
+
+        assert_eq!(expanded(&harness), HashSet::from([b.clone()]));
+        let ui_state = harness.last_state_update().unwrap();
+        assert!(ui_state.tree.iter().all(|node| !node.is_expanded));
+
+        type_filter(&harness, "", "").await;
+        let ui_state = harness.last_state_update().unwrap();
+        let b_node = ui_state.tree.iter().find(|node| node.path == b).unwrap();
+        assert!(b_node.is_expanded, "expanded before the filter, and still");
+    }
+
+    /// Without a filter the two reach every directory, as they always did.
+    #[tokio::test]
+    async fn test_expand_and_collapse_all_without_a_filter_reach_every_directory() {
+        let (harness, a, deep, b) = harness_with_two_branches();
+
+        expand_collapse_all(json!(true), harness.proxy.clone(), harness.state.clone());
+        assert_eq!(expanded(&harness), HashSet::from([a, deep, b]));
+
+        expand_collapse_all(json!(false), harness.proxy.clone(), harness.state.clone());
+        assert!(expanded(&harness).is_empty());
+    }
+
+    /// The filter opens the directories of its matches. A directory the user then
+    /// collapses stays collapsed while the user keeps typing.
+    #[tokio::test]
+    async fn test_collapse_then_type_stays_collapsed() {
+        let (mut harness, a, deep, _) = harness_with_two_branches();
+        type_filter(&harness, "r", "").await;
+        assert_eq!(expanded(&harness), HashSet::from([a.clone(), deep.clone()]));
+
+        set_expansion(
+            json!({ "path": a, "expanded": false }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        type_filter(&harness, "rs", "").await;
+        type_filter(&harness, "x", "rs").await;
+
+        assert!(!expanded(&harness).contains(&a), "must not be re-opened");
+        let ui_state = harness.last_state_update().unwrap();
+        let a_node = ui_state.tree.iter().find(|node| node.path == a).unwrap();
+        assert!(!a_node.is_expanded && a_node.has_children);
+    }
+
+    /// A match in a directory the user has not collapsed is still shown, also while
+    /// another directory is held collapsed.
+    #[tokio::test]
+    async fn test_new_filter_text_still_expands_the_directory_of_a_new_match() {
+        let (harness, a, deep, b) = harness_with_two_branches();
+        type_filter(&harness, "", "rs").await;
+        set_expansion(
+            json!({ "path": a, "expanded": false }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        // The filter now matches in `b`, which was not expanded so far.
+        type_filter(&harness, "", "md").await;
+        assert_eq!(expanded(&harness), HashSet::from([deep.clone(), b.clone()]));
+
+        // Expanding by hand ends the hold on that directory.
+        set_expansion(
+            json!({ "path": a, "expanded": true }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        set_expansion(
+            json!({ "path": a, "expanded": false }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        // ... and so does clearing the filters: the next filter starts afresh.
+        type_filter(&harness, "", "").await;
+        type_filter(&harness, "x", "").await;
+        assert!(expanded(&harness).contains(&a));
+    }
+
+    /// "Collapse all" under a filter is a collapse by the user as well.
+    #[tokio::test]
+    async fn test_collapse_all_then_type_stays_collapsed() {
+        let (harness, a, deep, _) = harness_with_two_branches();
+        type_filter(&harness, "r", "").await;
+        assert_eq!(expanded(&harness), HashSet::from([a.clone(), deep.clone()]));
+
+        expand_collapse_all(json!(false), harness.proxy.clone(), harness.state.clone());
+        type_filter(&harness, "rs", "").await;
+
+        assert!(!expanded(&harness).contains(&a));
+        assert!(!expanded(&harness).contains(&deep));
+    }
+
+    /// Changing the case sensitivity applies the filters again and repeats the
+    /// content search; neither re-opens what the user collapsed.
+    #[tokio::test]
+    async fn test_case_toggle_does_not_reopen_a_collapsed_directory() {
+        let mut harness = TestHarness::new();
+        let file = harness.create_file("src/main.rs", "fn main() { needle }");
+        let src = harness.root_path.join("src");
+        harness.set_initial_files(&["src", "src/main.rs"]);
+        update_filters(
+            json!({ "contentSearchQuery": "needle" }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+        assert_eq!(expanded(&harness), HashSet::from([src.clone()]));
+
+        set_expansion(
+            json!({ "path": src, "expanded": false }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        set_option(&harness, ConfigOption::CaseSensitiveSearch(true)).await;
+
+        let state = harness.state.lock();
+        assert_eq!(state.content_search_results, HashSet::from([file]));
+        assert!(state.expanded_dirs.is_empty(), "must not be re-opened");
+        drop(state);
+        let _ = harness.last_state_update();
     }
 
     #[tokio::test]
@@ -2593,6 +2948,42 @@ mod tests {
         let _ = harness.get_next_event().await;
         // The generation task also sends a final StateUpdate when it completes.
         let _ = harness.get_next_event().await;
+    }
+
+    /// The name of a fresh configuration is a default name too: the first generation
+    /// gives it its timestamp.
+    #[tokio::test]
+    async fn test_generate_preview_timestamps_the_default_filename_of_a_fresh_config() {
+        let mut harness = TestHarness::new();
+        assert_eq!(
+            harness.state.lock().config.output_filename,
+            AppConfig::default().output_filename
+        );
+
+        generate_preview(harness.proxy.clone(), harness.state.clone());
+
+        let assigned = harness.state.lock().config.output_filename.clone();
+        assert_ne!(assigned, AppConfig::default().output_filename);
+        assert!(assigned.starts_with("cfc_output_") && assigned.ends_with(".txt"));
+        let announced = harness.get_next_event().await;
+        match announced {
+            Some(UserEvent::StateUpdate(ui_state)) => {
+                assert_eq!(ui_state.config.output_filename, assigned)
+            }
+            other => panic!("Expected a state update, got {other:?}"),
+        }
+        let _ = harness.get_next_event().await;
+    }
+
+    #[test]
+    fn test_default_output_filenames_are_recognized() {
+        assert!(is_default_output_filename(
+            &AppConfig::default().output_filename
+        ));
+        assert!(is_default_output_filename("cfc_output_20240101_120000.txt"));
+        for custom in ["context.txt", "cfc_output.md", "my_cfc_output.txt", ""] {
+            assert!(!is_default_output_filename(custom), "{custom}");
+        }
     }
 
     /// A file that names only some settings is completed with the defaults.

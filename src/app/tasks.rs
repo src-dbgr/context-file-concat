@@ -18,14 +18,13 @@ use tokio::task::JoinHandle;
 use super::events::UserEvent;
 use super::filtering::{self, auto_expand_for_matches};
 use super::proxy::EventProxy;
+use super::selection::selected_files_in_tree_order;
 use super::shared_state::SharedState;
 use super::state::{
     AfterAbandonedScan, AppState, GenerationToken, LazyLoadToken, PreviewToken, ScanToken,
     StatusNotice,
 };
-use super::view_model::{
-    generate_ui_state, get_language_from_path, get_selected_files_in_tree_order,
-};
+use super::view_model::generate_ui_state;
 use crate::config::{AppConfig, ConfigSnapshot};
 
 use crate::core::file_handler::GenerationRequest;
@@ -34,6 +33,7 @@ use crate::core::{
     is_blank, ContentSearch, ContentSearchRequest, CoreError, DirectoryScanner, FileHandler,
     FileItem, ScanProgress, SearchEngine,
 };
+use crate::utils::language::language_of;
 use tiktoken_rs::cl100k_base;
 
 //================================================================================================//
@@ -70,9 +70,14 @@ pub trait Tokenizer: Send + Sync {
     fn count_tokens(&self, text: &str) -> impl Future<Output = usize> + Send;
 }
 
+/// The outcome of a content search: the matching paths, or why the search failed.
+pub type SearchOutcome = Result<HashSet<PathBuf>, String>;
+
 /// A trait abstracting the file content search functionality.
 pub trait FileSearcher: Send + Sync {
-    /// Returns the paths of the files whose content matches `request`.
+    /// Returns the paths of the files whose content matches `request`, or what kept
+    /// the search from coming to an end (a failed search is not a search without
+    /// matches).
     ///
     /// Once the cancellation flag of the request is raised the result is no longer
     /// needed; an implementation should then stop and may return anything.
@@ -80,7 +85,7 @@ pub trait FileSearcher: Send + Sync {
         &self,
         files_to_search: Vec<FileItem>,
         request: ContentSearchRequest,
-    ) -> impl Future<Output = HashSet<PathBuf>> + Send;
+    ) -> impl Future<Output = SearchOutcome> + Send;
 }
 
 //================================================================================================//
@@ -161,11 +166,11 @@ impl FileSearcher for RealFileSearcher {
         &self,
         files_to_search: Vec<FileItem>,
         request: ContentSearchRequest,
-    ) -> HashSet<PathBuf> {
+    ) -> SearchOutcome {
         let search = ContentSearch::from(request);
         tokio::task::spawn_blocking(move || search.matching_paths(&files_to_search))
             .await
-            .unwrap_or_default()
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -198,7 +203,7 @@ pub async fn generation_task<P, G, T>(
     let (selected, root, config, files_for_tree, is_fully_scanned) = {
         let state_guard = state.lock();
         (
-            get_selected_files_in_tree_order(&state_guard),
+            selected_files_in_tree_order(&state_guard.full_file_list, &state_guard.selected_files),
             PathBuf::from(&state_guard.current_path),
             state_guard.config.clone(),
             state_guard.full_file_list.clone(),
@@ -305,25 +310,36 @@ impl<P: EventProxy> Drop for GenerationGuard<'_, P> {
 ///
 /// The guard is bound to the scan's own [`ScanToken`]: if a newer scan has taken over in
 /// the meantime, dropping the guard of the old task leaves the state untouched.
-struct ScanGuard<'a, P: EventProxy> {
-    state: &'a SharedState,
-    proxy: &'a P,
-    token: &'a ScanToken,
+struct ScanGuard<P: EventProxy> {
+    state: SharedState,
+    proxy: P,
+    token: ScanToken,
 }
 
-impl<P: EventProxy> Drop for ScanGuard<'_, P> {
+impl<P: EventProxy> ScanGuard<P> {
+    fn new(state: &SharedState, proxy: &P, token: &ScanToken) -> Self {
+        Self {
+            state: state.clone(),
+            proxy: proxy.clone(),
+            token: token.clone(),
+        }
+    }
+}
+
+impl<P: EventProxy> Drop for ScanGuard<P> {
     fn drop(&mut self) {
         // This may run while the task is unwinding from a panic, possibly one that
         // happened under the state lock; `SharedState::lock` copes with that.
         let mut state = self.state.lock();
-        if state.finish_scan(self.token) {
+        if state.finish_scan(&self.token) {
             self.proxy
                 .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&state))));
         }
     }
 }
 
-/// The core orchestration logic for the proactive, two-phase scan.
+/// The proactive, two-phase scan of `path` as a task of its own: [`scan_phases`] under
+/// a [`ScanGuard`].
 ///
 /// `token` identifies this scan run. Every state mutation is conditional on the token
 /// still being current, so a cancelled or superseded task cannot interfere with the
@@ -342,33 +358,41 @@ pub async fn proactive_scan_task<P: EventProxy, S: Scanner, F: FileSearcher + 's
     searcher: F,
     token: ScanToken,
 ) {
-    let _scan_guard = ScanGuard {
-        state: &state,
-        proxy: &proxy,
-        token: &token,
-    };
+    let _scan_guard = ScanGuard::new(&state, &proxy, &token);
+    scan_phases(&proxy, &state, &path, scanner, searcher, &token).await;
+}
 
+/// The two phases of a scan. Whoever calls this holds the [`ScanGuard`] of the scan:
+/// returning early (cancellation) relies on it to release the scanning state.
+async fn scan_phases<P: EventProxy, S: Scanner, F: FileSearcher + 'static>(
+    proxy: &P,
+    state: &SharedState,
+    path: &Path,
+    scanner: S,
+    searcher: F,
+    token: &ScanToken,
+) {
     // --- Phase 1: Shallow Scan ---
     let scan_result_shallow = scanner
         .scan(
-            &ScanRequest::project(&path, Some(1)),
-            scan_progress_reporter(&proxy, &state, &token),
+            &ScanRequest::project(path, Some(1)),
+            scan_progress_reporter(proxy, state, token),
         )
         .await;
 
     if token.is_cancelled() {
         tracing::info!("Scan cancelled after shallow scan phase.");
-        return; // _scan_guard is dropped here, cleaning up the state and notifying.
+        return; // The caller's guard cleans up the state and notifies.
     }
 
     match scan_result_shallow {
         Ok((files, patterns)) => {
-            if !apply_shallow_scan_result(&state, &proxy, &token, &path, files, patterns) {
+            if !apply_shallow_scan_result(state, proxy, token, path, files, patterns) {
                 return;
             }
         }
         Err(e) => {
-            handle_scan_error(e, &state, &proxy, &token);
+            handle_scan_error(e, state, proxy, token);
             return;
         }
     }
@@ -376,24 +400,24 @@ pub async fn proactive_scan_task<P: EventProxy, S: Scanner, F: FileSearcher + 's
     // --- Phase 2: Deep Background Scan (Indexing) ---
     let scan_result_deep = scanner
         .scan(
-            &ScanRequest::project(&path, None),
-            scan_progress_reporter(&proxy, &state, &token),
+            &ScanRequest::project(path, None),
+            scan_progress_reporter(proxy, state, token),
         )
         .await;
 
     if token.is_cancelled() {
         tracing::info!("Scan cancelled during deep scan phase.");
-        return; // _scan_guard is dropped here.
+        return; // As above.
     }
 
     match scan_result_deep {
         Ok((files, patterns)) => {
-            if apply_deep_scan_result(&state, &token, files, patterns) {
-                repeat_content_search_to_the_end(&proxy, &state, searcher).await;
-                complete_scan(&state, &proxy, &token);
+            if apply_deep_scan_result(state, token, files, patterns) {
+                repeat_content_search_to_the_end(proxy, state, searcher).await;
+                complete_scan(state, proxy, token);
             }
         }
-        Err(e) => handle_scan_error(e, &state, &proxy, &token),
+        Err(e) => handle_scan_error(e, state, proxy, token),
     }
 }
 
@@ -549,11 +573,14 @@ pub fn open_path<P: EventProxy>(
 /// afterwards it is superseded by one that knows the new patterns (and does not walk
 /// what they exclude).
 ///
+/// Nothing that describes the loaded list changes here: it stays what it is (and as
+/// complete as it is) until the task has found the directory, see
+/// [`locate_scan_root`]. If the directory has vanished, the list is still good.
+///
 /// The caller holds the lock on the state and passes it as `state_guard`; `state` is
 /// the handle the scan task keeps.
 pub fn restart_scan<P: EventProxy>(state_guard: &mut AppState, proxy: P, state: SharedState) {
     let directory = PathBuf::from(&state_guard.current_path);
-    state_guard.is_fully_scanned = false;
     let token = state_guard.begin_scan();
     launch_scan(state_guard, token, directory, proxy, state);
 }
@@ -571,30 +598,38 @@ fn launch_scan<P: EventProxy>(
     proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
         state_guard,
     ))));
-    let task_token = token.clone();
-    let handle = tokio::spawn(async move {
-        let Some((directory, scanner)) = locate_scan_root(path, &proxy, &state, &task_token).await
-        else {
-            return;
-        };
-        proactive_scan_task(
-            proxy,
-            state,
-            directory,
-            scanner,
-            RealFileSearcher,
-            task_token,
-        )
-        .await;
-    });
+    let handle = tokio::spawn(scan_task(path, proxy, state, token.clone()));
     state_guard.attach_scan_task(&token, handle);
+}
+
+/// The task of a scan from its very first step: looks at `path` and, if there is a
+/// directory to scan, runs the two phases.
+///
+/// The guard covers all of it, so a task that ends early for whatever reason (a panic
+/// while the path is looked at included) releases the scanning state.
+async fn scan_task<P: EventProxy>(path: PathBuf, proxy: P, state: SharedState, token: ScanToken) {
+    let _scan_guard = ScanGuard::new(&state, &proxy, &token);
+    let Some((directory, scanner)) = locate_scan_root(path, &proxy, &state, &token).await else {
+        return;
+    };
+    scan_phases(
+        &proxy,
+        &state,
+        &directory,
+        scanner,
+        RealFileSearcher,
+        &token,
+    )
+    .await;
 }
 
 /// The first step of a scan task: finds the directory to scan for `path` on disk.
 ///
 /// If the scan is opening `path`, the directory replaces the loaded one here: this is
-/// the moment the previous directory is reset. The scanner is created here as well, so
-/// it works with the configuration as it is when the walk begins.
+/// the moment the previous directory is reset. For a re-scan it is the moment the
+/// loaded list stops counting as complete ([`AppState::begin_scan_walk`]). The scanner
+/// is created here as well, so it works with the configuration as it is when the walk
+/// begins.
 ///
 /// Returns `None` if there is nothing to scan: either the scan is no longer the
 /// current one (nothing is touched then), or the path does not exist. The latter ends
@@ -619,8 +654,10 @@ async fn locate_scan_root<P: EventProxy>(
     match located {
         Ok(directory) => {
             let shown_path = directory.to_string_lossy().to_string();
+            // From here on the list is the one this scan builds.
+            let no_longer_complete = state_guard.begin_scan_walk(token);
             let entered = state_guard.enter_opened_directory(token, &directory);
-            if entered || state_guard.current_path != shown_path {
+            if entered || no_longer_complete || state_guard.current_path != shown_path {
                 state_guard.current_path = shown_path;
                 proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
                     &state_guard,
@@ -740,7 +777,7 @@ pub fn start_lazy_load_scan<P: EventProxy>(
                 return None;
             }
         };
-        state_guard.expanded_dirs.insert(path);
+        state_guard.expand_directories([path]);
         proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
             &state_guard,
         ))));
@@ -925,7 +962,7 @@ async fn file_preview_task<P, R>(
     match outcome {
         Ok(content) => proxy.send_event(UserEvent::ShowFilePreview {
             content,
-            language: get_language_from_path(&path),
+            language: language_of(&path).to_string(),
             search_term,
             path,
         }),
@@ -956,6 +993,9 @@ pub async fn refresh_content_search<P: EventProxy, S: FileSearcher>(
 /// in flight only the one started last publishes its matches, so a slow search for an
 /// outdated query can never overwrite the matches of the current one.
 ///
+/// A search that fails (its worker panicked) is reported with `ShowError` and leaves
+/// the matches of the search before it in place.
+///
 /// [`ContentSearchToken`]: super::state::ContentSearchToken
 pub async fn search_in_files<P: EventProxy, S: FileSearcher>(
     proxy: P,
@@ -984,8 +1024,24 @@ pub async fn search_in_files<P: EventProxy, S: FileSearcher>(
         (token, state_guard.full_file_list.clone(), request)
     };
     let query = request.query.clone();
-    let matching_paths = searcher.search(files_to_search, request).await;
+    let outcome = searcher.search(files_to_search, request).await;
     let mut state_guard = state.lock();
+    let matching_paths = match outcome {
+        Ok(matching_paths) => matching_paths,
+        Err(reason) => {
+            // The matches of the search before stay: "the search failed" must not
+            // look like "nothing matches".
+            if state_guard.abandon_content_search(&token) {
+                tracing::error!("The content search for {query:?} failed: {reason}");
+                proxy.send_event(UserEvent::ShowError(format!(
+                    "The content search failed: {reason}"
+                )));
+                let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+                proxy.send_event(event);
+            }
+            return;
+        }
+    };
     if !state_guard.finish_content_search(&token, matching_paths) {
         tracing::debug!("Discarding outdated content search result for {:?}.", query);
         return;
@@ -1244,8 +1300,8 @@ mod tests {
         }
     }
     impl FileSearcher for MockFileSearcher {
-        async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> HashSet<PathBuf> {
-            self.results.lock().unwrap().clone()
+        async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> SearchOutcome {
+            Ok(self.results.lock().unwrap().clone())
         }
     }
 
@@ -1257,12 +1313,12 @@ mod tests {
         matching: HashSet<PathBuf>,
     }
     impl FileSearcher for ListBoundFileSearcher {
-        async fn search(&self, files: Vec<FileItem>, _: ContentSearchRequest) -> HashSet<PathBuf> {
-            files
+        async fn search(&self, files: Vec<FileItem>, _: ContentSearchRequest) -> SearchOutcome {
+            Ok(files
                 .into_iter()
                 .map(|item| item.path)
                 .filter(|path| self.matching.contains(path))
-                .collect()
+                .collect())
         }
     }
 
@@ -1286,7 +1342,7 @@ mod tests {
         }
     }
     impl FileSearcher for GatedFileSearcher {
-        async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> HashSet<PathBuf> {
+        async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> SearchOutcome {
             if let Some(started) = self.started.lock().unwrap().take() {
                 let _ = started.send(());
             }
@@ -1294,7 +1350,7 @@ mod tests {
             if let Some(release) = release {
                 let _ = release.await;
             }
-            self.results.clone()
+            Ok(self.results.clone())
         }
     }
 
@@ -2778,8 +2834,8 @@ mod tests {
         let limited = RealFileSearcher.search(files.clone(), request(6)).await;
         let generous = RealFileSearcher.search(files, request(u64::MAX)).await;
 
-        assert_eq!(limited, HashSet::from([small.clone()]));
-        assert_eq!(generous, HashSet::from([small, large]));
+        assert_eq!(limited, Ok(HashSet::from([small.clone()])));
+        assert_eq!(generous, Ok(HashSet::from([small, large])));
     }
 
     /// The real searcher does not read anything for a request that is already cancelled.
@@ -2795,7 +2851,7 @@ mod tests {
             .search(vec![file_item(&file, 1)], request)
             .await;
 
-        assert!(result.is_empty());
+        assert_eq!(result, Ok(HashSet::new()));
     }
 
     /// A searcher that keeps the request it was given and finds nothing.
@@ -2807,13 +2863,9 @@ mod tests {
         }
     }
     impl FileSearcher for RequestRecorder {
-        async fn search(
-            &self,
-            _: Vec<FileItem>,
-            request: ContentSearchRequest,
-        ) -> HashSet<PathBuf> {
+        async fn search(&self, _: Vec<FileItem>, request: ContentSearchRequest) -> SearchOutcome {
             *self.0.lock().unwrap() = Some(request);
-            HashSet::new()
+            Ok(HashSet::new())
         }
     }
 
@@ -2847,7 +2899,7 @@ mod tests {
 
     struct UnexpectedSearch;
     impl FileSearcher for UnexpectedSearch {
-        async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> HashSet<PathBuf> {
+        async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> SearchOutcome {
             panic!("No search expected without a content query");
         }
     }
@@ -2918,13 +2970,13 @@ mod tests {
             &self,
             files: Vec<FileItem>,
             request: ContentSearchRequest,
-        ) -> HashSet<PathBuf> {
+        ) -> SearchOutcome {
             let asked = self.asked.lock().unwrap().take().unwrap();
             let superseded = self.superseded.lock().unwrap().take().unwrap();
             asked.send(()).unwrap();
             superseded.await.unwrap();
             let found = RealFileSearcher.search(files, request).await;
-            *self.found_after_supersession.lock().unwrap() = Some(found.clone());
+            *self.found_after_supersession.lock().unwrap() = found.clone().ok();
             found
         }
     }
@@ -3978,5 +4030,369 @@ mod tests {
             !state.loaded_dirs.contains(&dir),
             "The directory stays loadable with the new patterns"
         );
+    }
+
+    //============================================================================================//
+    //|                         FAILED RE-SCAN, PANICS BEFORE THE WALK                            |//
+    //============================================================================================//
+
+    /// A complete list with one file below `src`, as a finished scan leaves it.
+    fn load_complete_list(harness: &TestHarness) -> PathBuf {
+        let file = harness.root_path.join("src").join("a.rs");
+        let mut state = harness.state.lock();
+        state.replace_with_complete_file_list(vec![
+            dir_item(&harness.root_path.join("src"), 1),
+            dir_item(&harness.root_path.join("empty"), 1),
+            file_item(&file, 2),
+        ]);
+        state.is_fully_scanned = true;
+        state.config.remove_empty_directories = true;
+        filtering::apply_filters(&mut state);
+        file
+    }
+
+    /// Re-scanning a directory that has vanished ends with an error and leaves the
+    /// list as it was, which includes that it is still the complete list: "remove
+    /// empty directories" keeps working on it.
+    #[tokio::test]
+    async fn a_failed_rescan_leaves_the_list_fully_scanned() {
+        let mut harness = TestHarness::new();
+        load_complete_list(&harness);
+        let vanished = harness.root_path.join("vanished");
+        harness.state.lock().current_path = vanished.to_string_lossy().to_string();
+
+        start_scan_on_path(vanished, harness.proxy.clone(), harness.state.clone(), true);
+
+        let ended = harness.wait_for_state_update(|s| !s.is_scanning).await;
+        assert!(ended.is_fully_scanned);
+        let mut state = harness.state.lock();
+        assert!(state.is_fully_scanned);
+        assert_eq!(state.full_file_list.len(), 3);
+        // The empty directory is still removed from what is shown.
+        filtering::apply_filters(&mut state);
+        assert_eq!(state.filtered_file_list().len(), 2);
+    }
+
+    /// A re-scan that finds its directory reports the list as incomplete from that
+    /// moment on (the announcement itself changes nothing but the scanning state).
+    #[tokio::test]
+    async fn a_rescan_marks_the_list_incomplete_once_the_directory_is_found() {
+        let mut harness = TestHarness::new();
+        load_complete_list(&harness);
+
+        start_scan_on_path(
+            harness.root_path.clone(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            true,
+        );
+
+        match harness.next_event().await {
+            UserEvent::StateUpdate(announced) => {
+                assert!(announced.is_scanning && announced.is_fully_scanned);
+            }
+            other => panic!("Expected the announcement of the scan, got {other:?}"),
+        }
+        let walking = harness.wait_for_state_update(|s| !s.is_fully_scanned).await;
+        assert!(walking.is_scanning);
+        let completed = harness.wait_for_state_update(|s| !s.is_scanning).await;
+        assert!(completed.is_fully_scanned);
+    }
+
+    /// A proxy whose `n`-th event makes the sender panic (once), to stage a panic in
+    /// the middle of a task. The other events are passed on.
+    #[derive(Clone)]
+    struct PanicOnEvent {
+        inner: TestEventProxy,
+        countdown: Arc<Mutex<Option<usize>>>,
+    }
+    impl PanicOnEvent {
+        fn nth(inner: TestEventProxy, n: usize) -> Self {
+            Self {
+                inner,
+                countdown: Arc::new(Mutex::new(Some(n))),
+            }
+        }
+    }
+    impl EventProxy for PanicOnEvent {
+        fn send_event(&self, event: UserEvent) {
+            let fire = {
+                let mut countdown = self.countdown.lock().unwrap();
+                match countdown.as_mut() {
+                    Some(0) => countdown.take().is_some(),
+                    Some(remaining) => {
+                        *remaining -= 1;
+                        false
+                    }
+                    None => false,
+                }
+            };
+            if fire {
+                panic!("failure injected by the test while the scan root is located");
+            }
+            self.inner.send_event(event);
+        }
+    }
+
+    /// The guard of a scan covers its first step too: a task that panics while it
+    /// looks at its path (here: under the state lock, when it reports the directory
+    /// it has entered) releases the scanning state and tells the UI.
+    #[tokio::test]
+    async fn a_panic_while_the_scan_root_is_located_releases_the_scan() {
+        let mut harness = TestHarness::new();
+        let target = tempdir().unwrap();
+        // Event 0 is the announcement, event 1 the report of the entered directory.
+        let proxy = PanicOnEvent::nth(harness.proxy.clone(), 1);
+
+        start_scan_on_path(
+            target.path().to_path_buf(),
+            proxy,
+            harness.state.clone(),
+            false,
+        );
+
+        match harness.next_event().await {
+            UserEvent::StateUpdate(announced) => assert!(announced.is_scanning),
+            other => panic!("Expected the announcement of the scan, got {other:?}"),
+        }
+        let released = harness.wait_for_state_update(|s| !s.is_scanning).await;
+        assert!(!released.is_scanning);
+        {
+            let state = harness.state.lock();
+            assert!(!state.is_scanning(), "the scan slot must be free again");
+            assert!(!state.is_opening());
+        }
+
+        // The next scan is not held up by the one that panicked.
+        start_scan_on_path(
+            target.path().to_path_buf(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            false,
+        );
+        let completed = harness
+            .wait_for_state_update(|s| !s.is_scanning && s.is_fully_scanned)
+            .await;
+        assert_eq!(
+            completed.current_path,
+            target.path().to_string_lossy().to_string()
+        );
+    }
+
+    //============================================================================================//
+    //|                         CONTENT SEARCH: FAILURE, FIRST SEARCH, EXPANSION                  |//
+    //============================================================================================//
+
+    struct FailingSearcher;
+    impl FileSearcher for FailingSearcher {
+        async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> SearchOutcome {
+            Err("the search worker panicked".to_string())
+        }
+    }
+
+    /// A search that fails is reported; it is not a search without matches. The
+    /// matches of the search before it stay, and the next search is not blocked.
+    #[tokio::test]
+    async fn a_failed_content_search_is_reported_and_keeps_the_previous_matches() {
+        let mut harness = TestHarness::new();
+        let matching = harness.root_path.join("a.txt");
+        let other = harness.root_path.join("b.txt");
+        {
+            let mut state = harness.state.lock();
+            state.full_file_list = vec![file_item(&matching, 1), file_item(&other, 1)];
+            state.content_search_query = "needle".to_string();
+        }
+        let first = MockFileSearcher::default();
+        first.set_results(HashSet::from([matching.clone()]));
+        search_in_files(harness.proxy.clone(), harness.state.clone(), first).await;
+        harness.drain_events();
+
+        search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            FailingSearcher,
+        )
+        .await;
+
+        let events = harness.drain_events();
+        match &events[..] {
+            [UserEvent::ShowError(message), UserEvent::StateUpdate(ui_state)] => {
+                assert!(message.contains("content search failed"), "{message}");
+                assert!(message.contains("panicked"), "{message}");
+                assert_eq!(ui_state.visible_files_count, 1, "the matches stay");
+            }
+            other => panic!("Expected an error and a state update, got {other:?}"),
+        }
+        {
+            let state = harness.state.lock();
+            assert_eq!(state.content_search_results, HashSet::from([matching]));
+        }
+
+        // The slot is free: a later search delivers.
+        let next = MockFileSearcher::default();
+        next.set_results(HashSet::from([other.clone()]));
+        search_in_files(harness.proxy.clone(), harness.state.clone(), next).await;
+        assert_eq!(
+            harness.state.lock().content_search_results,
+            HashSet::from([other])
+        );
+    }
+
+    /// The failure of a search that has been superseded is nobody's business.
+    #[tokio::test]
+    async fn a_failed_content_search_that_was_superseded_stays_silent() {
+        let mut harness = TestHarness::new();
+        harness.state.lock().content_search_query = "needle".to_string();
+
+        struct SupersededThenFailing(SharedState);
+        impl FileSearcher for SupersededThenFailing {
+            async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> SearchOutcome {
+                self.0.lock().begin_content_search();
+                Err("too late".to_string())
+            }
+        }
+
+        search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            SupersededThenFailing(harness.state.clone()),
+        )
+        .await;
+
+        harness.assert_no_events("An outdated search reports nothing");
+    }
+
+    /// While the first search for a query is running, a snapshot shows the list
+    /// without the content filter instead of an empty tree; the filter applies as
+    /// soon as the matches are there.
+    #[tokio::test]
+    async fn a_snapshot_during_the_first_content_search_is_not_empty() {
+        let mut harness = TestHarness::new();
+        let matching = harness.root_path.join("a.txt");
+        {
+            let mut state = harness.state.lock();
+            state.full_file_list = vec![
+                file_item(&matching, 1),
+                file_item(&harness.root_path.join("b.txt"), 1),
+            ];
+            filtering::apply_filters(&mut state);
+            state.content_search_query = "needle".to_string();
+        }
+        let (searcher, started, release) =
+            GatedFileSearcher::new(HashSet::from([matching.clone()]));
+        let search = tokio::spawn(search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            searcher,
+        ));
+        started.await.unwrap();
+
+        // Any command that answers with a snapshot while the search runs, also one
+        // that applies the filters again.
+        {
+            let mut state = harness.state.lock();
+            assert_eq!(state.content_filter_matches(), None);
+            assert_eq!(generate_ui_state(&state).tree.len(), 2);
+            filtering::apply_filters(&mut state);
+            assert_eq!(generate_ui_state(&state).tree.len(), 2);
+        }
+
+        release.send(()).unwrap();
+        search.await.unwrap();
+        let filtered = harness.last_state_update().unwrap();
+        assert_eq!(filtered.tree.len(), 1);
+        assert_eq!(filtered.tree[0].path, matching);
+    }
+
+    /// Once a search has answered, its answer applies until the next one arrives:
+    /// "no matches" stays an empty tree while the query is being refined.
+    #[tokio::test]
+    async fn a_snapshot_during_a_later_content_search_shows_the_previous_matches() {
+        let mut harness = TestHarness::new();
+        {
+            let mut state = harness.state.lock();
+            state.full_file_list = vec![file_item(&harness.root_path.join("a.txt"), 1)];
+            state.content_search_query = "needle".to_string();
+        }
+        search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            MockFileSearcher::default(),
+        )
+        .await;
+        assert!(harness.last_state_update().unwrap().tree.is_empty());
+
+        harness.state.lock().content_search_query = "needles".to_string();
+        let (searcher, started, release) = GatedFileSearcher::new(HashSet::new());
+        let search = tokio::spawn(search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            searcher,
+        ));
+        started.await.unwrap();
+        {
+            let state = harness.state.lock();
+            assert_eq!(state.content_filter_matches(), Some(&HashSet::new()));
+            assert!(generate_ui_state(&state).tree.is_empty());
+        }
+        release.send(()).unwrap();
+        search.await.unwrap();
+    }
+
+    /// Repeating the content search (here: after a lazy load brought new files) shows
+    /// the new matches, but does not re-open a directory the user collapsed while the
+    /// query was active.
+    #[tokio::test]
+    async fn repeated_content_search_does_not_reopen_a_collapsed_directory() {
+        let harness = TestHarness::new();
+        let src = harness.root_path.join("src");
+        let lib = harness.root_path.join("lib");
+        let old_match = src.join("old.txt");
+        let new_match = lib.join("new.txt");
+        {
+            let mut state = harness.state.lock();
+            state.full_file_list = vec![
+                dir_item(&src, 1),
+                dir_item(&lib, 1),
+                file_item(&old_match, 2),
+            ];
+            state.content_search_query = "needle".to_string();
+        }
+        let searcher = ListBoundFileSearcher {
+            matching: HashSet::from([old_match.clone(), new_match.clone()]),
+        };
+        search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            searcher.clone(),
+        )
+        .await;
+        assert!(harness.state.lock().expanded_dirs.contains(&src));
+
+        // The user collapses `src`, then opens `lib`, which is loaded lazily.
+        let token = {
+            let mut state = harness.state.lock();
+            state.collapse_directories([src.clone()]);
+            state.begin_lazy_load().expect("No scan is running")
+        };
+        let mut scanner = MockScanner::new();
+        scanner.set_results(vec![file_item(&new_match, 2)], vec![]);
+        lazy_load_task(
+            ScanRequest::directory_level(&harness.root_path, &lib).unwrap(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            scanner,
+            searcher,
+            token,
+        )
+        .await;
+
+        let state = harness.state.lock();
+        assert_eq!(
+            state.content_search_results,
+            HashSet::from([old_match, new_match])
+        );
+        assert!(!state.expanded_dirs.contains(&src), "stays collapsed");
+        assert!(state.expanded_dirs.contains(&lib), "the new match is shown");
     }
 }
