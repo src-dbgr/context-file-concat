@@ -841,12 +841,16 @@ test.describe("Keyboard on the controls of a tree row", () => {
   test("Delete on a row ignores it, as its ignore button does", async ({
     page,
   }) => {
-    expect(await press(page, inRow("/repo/README.md", ""), "Delete")).toEqual([
-      { command: "addIgnorePath", payload: "/repo/README.md" },
-    ]);
-    expect(await press(page, inRow("/repo/src", ""), "Delete")).toEqual([
-      { command: "addIgnorePath", payload: "/repo/src" },
-    ]);
+    // Delete acts only on a row in sight and not while a focus lookup is
+    // open; before the tree has settled (slow WebKit on Linux) a press posts
+    // nothing. The press is repeated until the tree is ready.
+    for (const path of ["/repo/README.md", "/repo/src"]) {
+      await expect(async () => {
+        expect(await press(page, inRow(path, ""), "Delete")).toEqual([
+          { command: "addIgnorePath", payload: path },
+        ]);
+      }).toPass({ timeout: 5_000 });
+    }
   });
 
   test("Delete with a modifier, and Backspace, ignore nothing", async ({
