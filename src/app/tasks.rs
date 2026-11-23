@@ -23,7 +23,6 @@ use super::proxy::EventProxy;
 use super::selection::selected_files_in_tree_order;
 use super::shared_state::SharedState;
 use super::staged;
-use super::state::Discarded;
 use super::state::{
     AfterAbandonedScan, AppState, GenerationToken, LazyLoadToken, PreviewToken, ScanToken,
     StatusNotice,
@@ -740,39 +739,57 @@ fn add_scanned_items(
 /// `committed` is called after a successful `commit`, under the same lock: this is
 /// where the state update is made, of exactly the state the event has left.
 ///
+/// If the state changed while the event was prepared, `commit` hands the event
+/// back, staged for the state as it is, and it is prepared and committed a second
+/// time; `commit` does not ask for a third.
+///
 /// Returns what all of this took, or `None` if the event is outdated (`stage`
-/// returned `None`, or `commit` `false`): nothing was changed then, and `committed`
+/// returned `None`, or `commit` says so): nothing was changed then, and `committed`
 /// was not called.
 fn in_three_steps<C: staged::Change>(
     state: &SharedState,
     stage: impl FnOnce(&mut AppState) -> Option<staged::Staged<C>>,
-    commit: impl FnOnce(&mut AppState, staged::Prepared<C::Rest>) -> (bool, Discarded),
+    mut commit: impl FnMut(&mut AppState, staged::Prepared<C::Rest>) -> staged::Committed<C>,
     committed: impl FnOnce(&mut AppState),
 ) -> Option<PublicationCost> {
     let started = std::time::Instant::now();
-    let (staged, staging) = {
+    let (mut staged, mut longest_lock) = {
         let mut s = state.lock();
         let locked = std::time::Instant::now();
         (stage(&mut s)?, locked.elapsed())
     };
 
-    let prepared = staged.prepare();
+    let mut committed = Some(committed);
+    let is_current = loop {
+        let prepared = staged.prepare();
 
-    let (is_current, committing, discarded) = {
         let mut s = state.lock();
         let locked = std::time::Instant::now();
-        let (is_current, discarded) = commit(&mut s, prepared);
-        if is_current {
-            committed(&mut s);
+        let outcome = commit(&mut s, prepared);
+        if matches!(outcome, staged::Committed::Done(true, _)) {
+            if let Some(committed) = committed.take() {
+                committed(&mut s);
+            }
         }
-        (is_current, locked.elapsed(), discarded)
+        longest_lock = longest_lock.max(locked.elapsed());
+        drop(s);
+        // Lists and hierarchies that have been replaced: not while the state is
+        // locked.
+        match outcome {
+            staged::Committed::Again(again, discarded) => {
+                drop(discarded);
+                staged = again;
+            }
+            staged::Committed::Done(is_current, discarded) => {
+                drop(discarded);
+                break is_current;
+            }
+        }
     };
-    // Lists and hierarchies that have been replaced: not while the state is locked.
-    drop(discarded);
 
     is_current.then(|| PublicationCost {
         total: started.elapsed(),
-        locked: staging.max(committing),
+        locked: longest_lock,
     })
 }
 
@@ -864,8 +881,8 @@ fn apply_deep_scan_result(
     }
     in_three_steps(
         state,
-        |s| staged::stage_scan_completion(s, token),
-        |s, prepared| staged::commit_scan_completion(s, token, prepared, patterns),
+        |s| staged::stage_scan_completion(s, token, patterns),
+        |s, prepared| staged::commit_scan_completion(s, token, prepared),
         |_| {},
     )
     .is_some()
@@ -1214,8 +1231,8 @@ fn apply_lazy_load_result<P: EventProxy>(
     // being held for the work on the whole list.
     let merged = in_three_steps(
         state,
-        |s| staged::stage_directory_level(s, token, loaded_dir, new_items),
-        |s, prepared| staged::commit_directory_level(s, token, prepared, new_active_patterns),
+        |s| staged::stage_directory_level(s, token, loaded_dir, new_items, new_active_patterns),
+        |s, prepared| staged::commit_directory_level(s, token, prepared),
         |s| proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(s)))),
     )
     .is_some();
@@ -5426,10 +5443,8 @@ mod tests {
         }
         let ui_state = {
             let mut state = harness.state.lock();
-            let (is_current, discarded) =
-                staged::commit_scanned_items(&mut state, &token, prepared);
-            drop(discarded);
-            assert!(is_current);
+            let committed = staged::commit_scanned_items(&mut state, &token, prepared);
+            assert!(matches!(committed, staged::Committed::Done(true, _)));
             generate_ui_state(&state)
         };
 
@@ -5441,6 +5456,66 @@ mod tests {
 
         drop(feed);
         task.await.unwrap();
+    }
+
+    /// An event that finds the state changed when its lists are ready does not
+    /// make them under the lock: it is prepared a second time, outside of it, for
+    /// the state as it is. Only if the state has changed again by then, the lists
+    /// are made under the lock. Either way the event happens once.
+    #[test]
+    fn an_event_that_meets_a_changed_state_is_prepared_again_without_the_lock() {
+        let root = PathBuf::from("/root");
+        let src = root.join("src");
+        for changes in 0..=3usize {
+            let mut state = AppState::default();
+            state.config.ignore_patterns.clear();
+            state.current_path = root.to_string_lossy().to_string();
+            let token = state.begin_scan();
+            state.begin_scan_walk(&token);
+            state.replace_with_shallow_file_list(&root, vec![dir_item(&src, 1)]);
+            filtering::apply_filters(&mut state);
+            let state = SharedState::new(state);
+            let built = state.lock().file_tree_build_count();
+
+            // What a command does between the steps: the file list is another one.
+            let (mut commits, mut updates) = (0, 0);
+            let cost = in_three_steps(
+                &state,
+                |s| staged::stage_scanned_items(s, &token, vec![file_item(&src.join("a.rs"), 2)]),
+                |s, prepared| {
+                    if commits < changes {
+                        let other = dir_item(&root.join(format!("other_{commits}")), 1);
+                        s.edit_full_file_list(|list| list.push(other));
+                        filtering::apply_filters(s);
+                    }
+                    commits += 1;
+                    staged::commit_scanned_items(s, &token, prepared)
+                },
+                |s| {
+                    updates += 1;
+                    assert_eq!(s.full_file_list().len(), 2 + changes.min(2));
+                },
+            );
+
+            assert!(cost.is_some(), "{changes} changes");
+            assert_eq!(commits, 1 + changes.min(1), "{changes} changes");
+            assert_eq!(updates, 1, "{changes} changes");
+            let state = state.lock();
+            let listed = state.full_file_list().iter();
+            assert_eq!(
+                listed.filter(|item| item.path == src.join("a.rs")).count(),
+                1,
+                "{changes} changes"
+            );
+            // The hierarchy came with the lists, unless they were made under the
+            // lock (and the command that changed the list built none).
+            state.file_tree();
+            assert_eq!(
+                state.file_tree_build_count() - built,
+                usize::from(changes >= 2),
+                "{changes} changes"
+            );
+        }
     }
 
     /// The end of the walk leaves the complete list, filtered, and its hierarchy
@@ -5765,10 +5840,11 @@ mod tests {
                 let (directory, items) = level();
                 let steps = locked(in_three_steps(
                     &state,
-                    |s| staged::stage_directory_level(s, &lazy_load, &directory, items),
-                    |s, prepared| {
-                        staged::commit_directory_level(s, &lazy_load, prepared, HashSet::new())
+                    |s| {
+                        let patterns = HashSet::new();
+                        staged::stage_directory_level(s, &lazy_load, &directory, items, patterns)
                     },
+                    |s, prepared| staged::commit_directory_level(s, &lazy_load, prepared),
                     snapshot,
                 ));
                 let (mut state, _token, _) = scanning_state(listed, 0, scenario);
@@ -5858,10 +5934,8 @@ mod tests {
                 let state = SharedState::new(state);
                 let steps = locked(in_three_steps(
                     &state,
-                    |s| staged::stage_scan_completion(s, &token),
-                    |s, prepared| {
-                        staged::commit_scan_completion(s, &token, prepared, HashSet::new())
-                    },
+                    |s| staged::stage_scan_completion(s, &token, HashSet::new()),
+                    |s, prepared| staged::commit_scan_completion(s, &token, prepared),
                     snapshot,
                 ));
                 let (mut state, token, _) = scanning_state(listed, 0, scenario);

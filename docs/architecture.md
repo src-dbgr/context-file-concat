@@ -196,7 +196,7 @@ The frontend is a Single Page Application (SPA) responsible for all rendering an
 
   _The lock._ Every command waits while the state is locked, and so does the walk, which reports its progress every 100 ms. The events that change the list of a large project are therefore brought into the state in three steps (`staged.rs`, driven by `tasks::in_three_steps`), of which only the first and the last hold the lock:
   1. _Stage (locked):_ what the work needs is taken out of the state: the file list (a shared handle, no copy), its revision and the inputs of the filters (`FilterInputs`), and what the event brings. For a batch of the walk, the items that are not listed yet are told from the ones that are. Nothing else changes.
-  2. _Prepare (not locked):_ the new file list, the filtered list and its tree index are built (`IndexedList`). Without an active filter the filtered list is the file list itself, so there is one list to build.
+  2. _Prepare (not locked):_ the new file list, the filtered list and its tree index are built (`IndexedList`). Without an active filter the filtered list is the file list itself, so there is one list to build. An event that leaves the file list and the filters as they are (a batch whose items are all listed already, a walk that ends with nothing to remove, a level that brings nothing new) builds nothing, with a filter as without one: the lists stay, with their revisions, the tree index and the selection counts. That is not assumed either: the state records which filters its filtered list was made with, out of which revision of the file list (`AppState::filters_of_filtered_list`), and nothing is built only if the filters of the event make the same of a list as those (`FilterInputs::filters_like`). A filtered list that was set in any other way, or whose filters have changed since without being applied, is made anew.
   3. _Commit (locked):_ the lists are installed together with the index, and the snapshot is made, under the same lock, from the state as it is then: a snapshot shows exactly the state.
 
   Four events go this way: a publication of the walk's items, the end of the walk (completion), a level loaded on demand, and the matches of a content search.
@@ -205,46 +205,46 @@ The frontend is a Single Page Application (SPA) responsible for all rendering an
   - **The token.** The scan, the lazy load or the content search has to be the current one, in step 1 and again in step 3. If it is not, nothing is changed and nothing sent, as before.
   - **The file list.** It has to have the revision it had in step 1. The list is private to `AppState`, and every method that changes it gives it a new revision, whatever the change is: a list of the same length, or an equal one, is another list.
   - **The filtered list.** It has to have the revision it had, and to be (or not to be) the file list as it was. "Is the file list" is the identity of the two `Arc`s, not a comparison.
-  - **The filters.** Their inputs have to be the ones of step 1: the root path, the filter texts, case sensitivity, the removal of empty directories with the directories that are loaded, and the matches of the content filter, which are the same only if they are the same set (the state gets a new one whenever they are replaced).
+  - **The filters.** Their inputs have to be the ones of step 1: the root path, the filter texts, case sensitivity, the removal of empty directories, whether the list is complete, the directories that are loaded (where empty directories are removed from a complete list), and the matches of the content filter, which are the same only if they are the same set (the state gets a new one whenever they are replaced). Every input is compared, because none of them is tied to a revision of the lists: the path changes when a re-scan is started, case sensitivity with the configuration, and the list stops being complete when the walk of a scan begins, each while the lists stay as they are. The loaded directories are the one input that nothing changes on its own today where they are compared (a level that is merged gives the file list a new revision, the end of a walk is followed by the filters under the same lock); they are compared all the same, because `loaded_dirs` is a public field and only those call sequences tie it to a revision.
 
-  If any of the last three does not hold, what was prepared is dropped and the event takes the plain way under the lock (the methods of `AppState`, then `apply_filters`), as it used to; the result is the same. A test plays 20,000 random sequences of events and commands against that plain way (`events_in_steps_end_like_events_under_one_lock`). Lists and indexes that have been replaced are dropped after the lock has been released (`Discarded`); that also goes for the lists a re-scan replaces with its first level.
+  If any of the last three does not hold, what was prepared is dropped, and nothing has happened. The event is not made under the lock then: step 3 stages it again, for the state as it is (`Committed::Again`; for a batch, the items that have been listed meanwhile are told from the others once more), and steps 2 and 3 are repeated. Only an event that finds the state changed a second time takes the plain way under the lock (the methods of `AppState`, then `apply_filters`), as every event used to; the result is the same. It is one more attempt and not a loop, so that a state that keeps changing cannot keep an event from happening. A test plays 20,000 random sequences of events and commands against that plain way, with commands between the steps of an event and again while it is prepared the second time (`events_in_steps_end_like_events_under_one_lock`); removing any one of the comparisons above makes it fail. Lists and indexes that have been replaced are dropped after the lock has been released (`Discarded`); that also goes for the lists a re-scan replaces with its first level.
 
   What is left under the lock, exactly:
   - In step 1: a hash lookup per item of a batch (is it listed ahead of the walk?); for the other events nothing that grows. If empty directories are removed, the set of loaded directories is copied (in step 1) and compared (in step 3).
-  - In step 3: moving the handles; for a completion, deselecting what is no longer listed, which costs what was selected since step 1 (the selection of step 1 is checked against the list in step 2, on a snapshot of it).
+  - In step 3: moving the handles; for a completion, deselecting what is no longer listed, which costs what was selected since step 1 (the selection of step 1 is checked against the list in step 2, on a snapshot of it). If the state has changed, what step 1 does, once more.
   - The snapshot: the list of rows is built anew (in proportion to the rows, i.e. to what is expanded), and the selection counts are brought up to date. For a list that only grew (a batch or a level without an active filter) they are extended by the appended files that are selected; otherwise they are counted anew (in proportion to the selected files, or to the filtered list if most of it is selected).
 
   Measured on the same machine with a synthetic list, release build (`cargo test --release --lib perf_lock_hold -- --ignored --nocapture`). The longest lock of the event, snapshot included; in brackets the same event under one lock (the change, the filters, the snapshot), which is what it used to be:
 
-  | Longest lock                                      | 200,000 listed        | 1,000,000 listed        |
-  | ------------------------------------------------- | --------------------- | ----------------------- |
-  | **No filter**                                     |                       |                         |
-  | Publication of 4,096 items                        | 0.2 ms (45–49 ms)     | 0.2 ms (250–270 ms)     |
-  | Publication of a tenth of the list                | 0.9–1.0 ms (48–63 ms) | 3.9–4.1 ms (295–414 ms) |
-  | Level loaded on demand                            | 0.1 ms (55 ms)        | 0.1 ms (316 ms)         |
-  | Matches of a content search                       | 0.8 ms (36 ms)        | 6.3 ms (233 ms)         |
-  | Completion                                        | < 0.1 ms (0.9 ms)     | < 0.1 ms (4.1 ms)       |
-  | **File name filter** (a fifth of the files)       |                       |                         |
-  | Publication of 4,096 items                        | 0.2 ms (92–101 ms)    | 0.2 ms (509–536 ms)     |
-  | Publication of a tenth of the list                | 1.1 ms (97–132 ms)    | 4.1–4.3 ms (607–821 ms) |
-  | Level loaded on demand                            | < 0.1 ms (95 ms)      | 0.2 ms (532 ms)         |
-  | Matches of a content search                       | 0.6 ms (47 ms)        | 3.0 ms (282 ms)         |
-  | Completion                                        | 0.1 ms (99 ms)        | 0.2 ms (612 ms)         |
-  | **Every directory expanded, every file selected** |                       |                         |
-  | Publication of 4,096 items                        | 2.5–3.4 ms (65–69 ms) | 11–12 ms (400–419 ms)   |
-  | Publication of a tenth of the list                | 6.3–7.8 ms (70–92 ms) | 40–48 ms (457–602 ms)   |
-  | Level loaded on demand                            | 1.2 ms (68 ms)        | 10 ms (466 ms)          |
-  | Matches of a content search                       | 4.5 ms (43 ms)        | 31 ms (266 ms)          |
-  | Completion                                        | 0.1 ms (52 ms)        | 0.1 ms (488 ms)         |
-  | **Empty directories removed**                     |                       |                         |
-  | Completion                                        | 0.1 ms (91 ms)        | 0.4 ms (701 ms)         |
-  | **First level of a re-scan** (any of the above)   | ≤ 0.1 ms (4–6 ms)     | ≤ 0.2 ms (22–31 ms)     |
+  | Longest lock                                      | 200,000 listed          | 1,000,000 listed        |
+  | ------------------------------------------------- | ----------------------- | ----------------------- |
+  | **No filter**                                     |                         |                         |
+  | Publication of 4,096 items                        | 0.2 ms (46–53 ms)       | 0.2 ms (241–261 ms)     |
+  | Publication of a tenth of the list                | 1.1–1.2 ms (48–73 ms)   | 4.1–4.5 ms (296–402 ms) |
+  | Level loaded on demand                            | ≤ 0.1 ms (52–54 ms)     | 0.1 ms (265–294 ms)     |
+  | Matches of a content search                       | 0.8–0.9 ms (39–43 ms)   | 5.9–6.6 ms (213–227 ms) |
+  | Completion                                        | < 0.1 ms (0.9 ms)       | < 0.1 ms (4.2 ms)       |
+  | **File name filter** (a fifth of the files)       |                         |                         |
+  | Publication of 4,096 items                        | 0.2 ms (93–105 ms)      | 0.2 ms (472–552 ms)     |
+  | Publication of a tenth of the list                | 0.9–1.1 ms (100–133 ms) | 4.0–4.6 ms (511–739 ms) |
+  | Level loaded on demand                            | ≤ 0.1 ms (97–100 ms)    | 0.1 ms (511–514 ms)     |
+  | Matches of a content search                       | 0.6–0.7 ms (49–53 ms)   | 2.8–3.8 ms (249–283 ms) |
+  | Completion                                        | < 0.1 ms (96 ms)        | < 0.1 ms (494–508 ms)   |
+  | **Every directory expanded, every file selected** |                         |                         |
+  | Publication of 4,096 items                        | 2.1–2.4 ms (61–75 ms)   | 7.5–9.1 ms (390–443 ms) |
+  | Publication of a tenth of the list                | 6.3–7.7 ms (71–111 ms)  | 37–43 ms (462–722 ms)   |
+  | Level loaded on demand                            | 1.2 ms (72–79 ms)       | 6.0–6.5 ms (436–474 ms) |
+  | Matches of a content search                       | 4.6 ms (41–47 ms)       | 28–29 ms (259–262 ms)   |
+  | Completion                                        | 0.1 ms (56–75 ms)       | 0.1 ms (573–601 ms)     |
+  | **Empty directories removed**                     |                         |                         |
+  | Completion                                        | 0.1 ms (90 ms)          | 0.3 ms (631–673 ms)     |
+  | **First level of a re-scan** (any of the above)   | ≤ 0.1 ms (4–6 ms)       | ≤ 0.2 ms (21–33 ms)     |
 
-  The work itself has not become less: a publication as a whole takes 47–64 ms at 200,000 and 250–400 ms at 1,000,000 entries without a filter (twice that with one), which is what the pace follows. It runs on the task of the event, beside the commands.
+  The work itself has not become less: a publication as a whole takes 47–67 ms at 200,000 and 240–450 ms at 1,000,000 entries without a filter (twice that with one), which is what the pace follows. It runs on the task of the event, beside the commands. The exception is the event that brings nothing: the completion of a walk under a file name filter, which used to build the filtered list and its index once more beside the commands (about 95 ms and 500 ms), builds nothing.
 
   Not covered by the steps, i.e. still under one lock for work on the whole list:
   - Commands that filter (`updateFilters`, a changed ignore pattern or option, clearing a filter): they run on the ordered lane and hold the lock for the filtering and the snapshot, about the bracketed times of "Level loaded on demand" above. The user who typed waits for exactly that; nothing else does that could not wait.
-  - An event whose state changed between its steps (the plain way, see above): rare, and then as before.
+  - An event whose state changed between its steps and again while it was prepared the second time (the plain way, see above): that takes two commands that change the lists or the filters within one event, and is then as before.
   - Starting a generation copies the file list for the plan (`GenerationPlan::of`).
 
 - **Panics:** <a id="panics"></a>A panic in a command or a background task is isolated, in debug and in release builds alike (the release profile uses `panic = "unwind"`; with `abort` none of the following would exist at run time). The dispatcher catches a panicking command (`dispatch.rs`), Tokio catches a panicking task, and the guards in `tasks.rs` release the scanning/generating state of a task that ended that way (the guard of a scan covers its whole task, from the first look at the path). A content search whose worker panics is reported with `showError` and leaves the previous matches in place. A panic while the state lock is held poisons the mutex; `SharedState::lock()` takes such a lock over, logs the incident once and clears the mark, so one failed command does not make every later one fail. The state is plain data, so this is sound; the command that panicked may have left its own change incomplete. A panic on the UI thread itself (the event loop) still ends the application.
