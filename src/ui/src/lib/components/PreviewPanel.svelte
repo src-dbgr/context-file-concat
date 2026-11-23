@@ -130,7 +130,7 @@
 -->
 <div class="preview-fragment" style="display: contents">
   <div class="panel-header">
-    <h3 id="preview-title">
+    <h2 id="preview-title">
       {#if $previewMode === "generated"}
         <div class="preview-path-container">
           <span class="preview-filename">
@@ -158,12 +158,11 @@
         </div>
         <span class="preview-stats">{$t("preview.selectAFile")}</span>
       {/if}
-    </h3>
+    </h2>
 
     <div class="preview-header-buttons">
       <button
         id="copy-btn"
-        aria-label="Copy"
         class:button-cta={$copyFeedback === "copied"}
         class:button-cancel-action={$copyFeedback === "failed"}
         style:display={$previewMode !== "idle" ? "inline-block" : "none"}
@@ -191,7 +190,6 @@
 
       <button
         id="clear-preview-btn"
-        aria-label="Clear"
         style:display={$previewMode !== "idle" ? "inline-block" : "none"}
         onclick={clearPreview}
         disabled={$previewMode === "idle"}

@@ -29,6 +29,14 @@ type E2EHostAPI = {
    * default: the next task). For tests of what the UI does in the meantime.
    */
   setLatency: (milliseconds: number) => void;
+  /**
+   * Keep back every answer from now on, until `release`. For tests of what
+   * the UI does while the host has not answered: nothing arrives in between,
+   * however long the test takes (no race against a timer).
+   */
+  hold: () => void;
+  /** Deliver the answers kept back since `hold`, in order, and go on. */
+  release: () => void;
 };
 
 type E2EDebugAPI = {
@@ -76,6 +84,8 @@ function listVisibleFileNames(): string[] {
 function createTreeHost(): E2EHostAPI {
   const model = new TreeHostModel();
   let latencyMs = 0;
+  /** The number of answers kept back; `null` while the host is not held. */
+  let held: number | null = null;
   let intercepting = false;
 
   function deliver() {
@@ -92,7 +102,8 @@ function createTreeHost(): E2EHostAPI {
     }
     if (typeof posted.command !== "string") return;
     if (model.receive(posted.command, posted.payload ?? null)) {
-      setTimeout(deliver, latencyMs);
+      if (held !== null) held += 1;
+      else setTimeout(deliver, latencyMs);
     }
   }
 
@@ -117,6 +128,16 @@ function createTreeHost(): E2EHostAPI {
     },
     setLatency(milliseconds: number) {
       latencyMs = Math.max(0, milliseconds);
+    },
+    hold() {
+      held ??= 0;
+    },
+    release() {
+      const answers = held ?? 0;
+      held = null;
+      // One snapshot per answered command, each of the state as it is now:
+      // what a timer would have delivered as well, had it fired this late.
+      for (let i = 0; i < answers; i++) deliver();
     },
   };
 }

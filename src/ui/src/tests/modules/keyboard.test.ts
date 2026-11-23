@@ -106,6 +106,48 @@ describe("keyboard.ts – global handler integration", () => {
     expect(allowed).toBe(false); // blocked by safety guard
   });
 
+  it("leaves Tab alone wherever the focus is, so it can move on", () => {
+    commands.length = 0;
+    const button = document.createElement("button");
+    document.body.appendChild(button);
+    button.focus();
+
+    for (const shiftKey of [false, true]) {
+      const tab = new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey,
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(button.dispatchEvent(tab)).toBe(true);
+    }
+    button.blur();
+    const tab = new KeyboardEvent("keydown", {
+      key: "Tab",
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(document.body.dispatchEvent(tab)).toBe(true);
+    button.remove();
+  });
+
+  it("leaves Enter to the summary of a details element, which opens it", () => {
+    commands.length = 0;
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    details.appendChild(summary);
+    document.body.appendChild(details);
+    summary.focus();
+
+    const enter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(summary.dispatchEvent(enter)).toBe(true);
+    details.remove();
+  });
+
   it("leaves Enter to a focused button, which acts on it itself", () => {
     commands.length = 0;
     const button = document.createElement("button");

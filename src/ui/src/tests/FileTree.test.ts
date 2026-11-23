@@ -152,11 +152,10 @@ describe("FileTree", () => {
     const chevron = src.querySelector(".arrow");
     expect(chevron).not.toBeNull();
     expect(chevron).not.toHaveClass("expanded");
+    // It is a control without text; its name says what it does to which row.
+    expect(chevron).toHaveAttribute("aria-label", "Expand src");
     // ...and the selection of the hidden descendants is shown.
-    expect(src.querySelector("input[type=checkbox]")).toHaveAttribute(
-      "aria-checked",
-      "mixed",
-    );
+    expect(src.querySelector("input[type=checkbox]")).toBePartiallyChecked();
   });
 
   it("shows the selection state the backend computed for collapsed directories", async () => {
@@ -169,13 +168,19 @@ describe("FileTree", () => {
     const { container } = render(FileTree);
     await screen.findByRole("tree");
 
-    const checked = (path: string) =>
-      row(container, path)
-        .querySelector("input[type=checkbox]")
-        ?.getAttribute("aria-checked");
-    expect(checked("/repo/all")).toBe("true");
-    expect(checked("/repo/some")).toBe("mixed");
-    expect(checked("/repo/none")).toBe("false");
+    // A native checkbox: its own state is what a screen reader is told.
+    const checkbox = (path: string) =>
+      row(container, path).querySelector<HTMLInputElement>(
+        "input[type=checkbox]",
+      )!;
+    expect(checkbox("/repo/all")).toBeChecked();
+    expect(checkbox("/repo/all")).not.toBePartiallyChecked();
+    expect(checkbox("/repo/some")).toBePartiallyChecked();
+    expect(checkbox("/repo/none")).not.toBeChecked();
+    expect(checkbox("/repo/none")).not.toBePartiallyChecked();
+    for (const path of ["/repo/all", "/repo/some", "/repo/none"]) {
+      expect(checkbox(path)).not.toHaveAttribute("aria-checked");
+    }
   });
 
   it("expanding a collapsed directory asks the backend and changes nothing locally", async () => {
@@ -453,6 +458,79 @@ describe("FileTree", () => {
           "tabindex",
           "0",
         ),
+      );
+    });
+
+    it("Delete ignores the focused row, as its ignore button does", async () => {
+      const { treeEl } = await mountFocusedOn([
+        dir("/repo/src", true, [file("/repo/src/a.ts")]),
+      ]);
+      vi.mocked(post).mockClear();
+
+      await fireEvent.keyDown(treeEl, { key: "Delete" });
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["addIgnorePath", "/repo/src"],
+      ]);
+    });
+
+    it("Delete does nothing as a repeat of a held key or with a modifier", async () => {
+      const { treeEl } = await mountFocusedOn([
+        dir("/repo/src", true, [file("/repo/src/a.ts")]),
+      ]);
+      vi.mocked(post).mockClear();
+
+      for (const init of [
+        { repeat: true },
+        { shiftKey: true },
+        { metaKey: true },
+        { ctrlKey: true },
+        { altKey: true },
+      ]) {
+        await fireEvent.keyDown(treeEl, { key: "Delete", ...init });
+      }
+      // Backspace is the "delete" of a Mac keyboard: not this key.
+      await fireEvent.keyDown(treeEl, { key: "Backspace" });
+
+      expect(vi.mocked(post).mock.calls).toEqual([]);
+    });
+
+    it("names a row by its name, and the ignore button by the key of the platform", async () => {
+      const { container } = await mountFocusedOn([
+        dir("/repo/src", true, [file("/repo/src/a.ts")]),
+      ]);
+
+      expect(screen.getByRole("treeitem", { name: "src" })).toBe(
+        row(container, "/repo/src"),
+      );
+      expect(screen.getByRole("treeitem", { name: "a.ts" })).toBe(
+        row(container, "/repo/src/a.ts"),
+      );
+      // jsdom is no Mac.
+      expect(
+        row(container, "/repo/src/a.ts").querySelector(".ignore-btn"),
+      ).toHaveAttribute("title", "Add this file to ignore patterns (Delete)");
+    });
+
+    it("has one tab stop: the focused row, none of the controls in the rows", async () => {
+      const { treeEl, container } = await mountFocusedOn([
+        dir("/repo/src", true, [file("/repo/src/a.ts")]),
+      ]);
+
+      const stops = () =>
+        [treeEl, ...treeEl.querySelectorAll<HTMLElement>("*")].filter(
+          (el) => el.tabIndex >= 0,
+        );
+      expect(stops()).toEqual([row(container, "/repo/src")]);
+      // The controls can still take the focus (a click puts it there).
+      for (const control of treeEl.querySelectorAll(
+        ".arrow, input, .file-name, .ignore-btn",
+      )) {
+        expect(control).toHaveAttribute("tabindex", "-1");
+      }
+      expect(treeEl.querySelector(".ignore-btn")).toHaveAttribute(
+        "aria-keyshortcuts",
+        "Delete",
       );
     });
 

@@ -227,6 +227,32 @@ register("en", {
   "scan.starting": "Starting scan...",
   "scan.filesScanned": "Files scanned: {count}",
   "scan.largeFilesSkipped": "Large files skipped: {count}",
+
+  // ===== Names of controls and regions (screen readers, tooltips) =====
+  "app.title": "CFC – Context File Concatenator",
+  "aria.projectFiles": "Project files",
+  "aria.expandDirectory": "Expand {name}",
+  "aria.collapseDirectory": "Collapse {name}",
+  "aria.toggleDirectorySelection": "Toggle directory selection",
+  "aria.toggleFileSelection": "Toggle file selection",
+  "aria.ignoreDirectory": "Add directory to ignore patterns",
+  "aria.ignoreFile": "Add file to ignore patterns",
+  "aria.removePattern": "Remove pattern {pattern}",
+  "aria.notifications": "Notifications",
+  "aria.dismissNotification": "Dismiss notification",
+  "filetree.ignoreDirectoryTitle":
+    "Add this directory to ignore patterns ({key})",
+  "filetree.ignoreFileTitle": "Add this file to ignore patterns ({key})",
+  // Forward delete. On a Mac the key labelled "delete" is Backspace.
+  "key.delete": "Delete",
+  "key.deleteMac": "fn+⌫",
+  "sidebar.rescanRecommended": "Re-scan recommended after removing patterns",
+  "sidebar.addCommonPattern": 'Click to add "{pattern}" to ignore patterns',
+  "sidebar.patternActive":
+    "This pattern was active and matched one or more files/directories.",
+  "theme.switchToDark": "Switch to dark mode",
+  "theme.switchToLight": "Switch to light mode",
+  "locale.current": "Language: English",
 });
 
 register("de", {
@@ -358,4 +384,32 @@ register("de", {
   "scan.starting": "Scan wird gestartet...",
   "scan.filesScanned": "Gescannte Dateien: {count}",
   "scan.largeFilesSkipped": "Große Dateien übersprungen: {count}",
+
+  // ===== Names of controls and regions (screen readers, tooltips) =====
+  "app.title": "CFC – Context File Concatenator",
+  "aria.projectFiles": "Projektdateien",
+  "aria.expandDirectory": "{name} aufklappen",
+  "aria.collapseDirectory": "{name} einklappen",
+  "aria.toggleDirectorySelection": "Verzeichnisauswahl umschalten",
+  "aria.toggleFileSelection": "Dateiauswahl umschalten",
+  "aria.ignoreDirectory": "Verzeichnis zu den Ignore-Mustern hinzufügen",
+  "aria.ignoreFile": "Datei zu den Ignore-Mustern hinzufügen",
+  "aria.removePattern": "Muster {pattern} entfernen",
+  "aria.notifications": "Benachrichtigungen",
+  "aria.dismissNotification": "Benachrichtigung schließen",
+  "filetree.ignoreDirectoryTitle":
+    "Dieses Verzeichnis zu den Ignore-Mustern hinzufügen ({key})",
+  "filetree.ignoreFileTitle":
+    "Diese Datei zu den Ignore-Mustern hinzufügen ({key})",
+  "key.delete": "Entf",
+  "key.deleteMac": "fn+⌫",
+  "sidebar.rescanRecommended":
+    "Nach dem Entfernen von Mustern wird ein erneuter Scan empfohlen",
+  "sidebar.addCommonPattern":
+    'Klicken, um "{pattern}" zu den Ignore-Mustern hinzuzufügen',
+  "sidebar.patternActive":
+    "Dieses Muster war aktiv und traf auf mindestens eine Datei oder ein Verzeichnis zu.",
+  "theme.switchToDark": "Zum dunklen Design wechseln",
+  "theme.switchToLight": "Zum hellen Design wechseln",
+  "locale.current": "Sprache: Deutsch",
 });

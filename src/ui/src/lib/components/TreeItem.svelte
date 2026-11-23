@@ -3,6 +3,8 @@
   import { post } from "$lib/services/backend";
   import { formatFileSize } from "$lib/utils";
   import { toggleDirectory } from "$lib/modules/treeExpansion";
+  import { t } from "$lib/i18n";
+  import { isMac } from "$lib/platform";
 
   // Runes props (no `export let` in Svelte 5)
   // A pure row: it shows the row the host sent and posts commands, nothing
@@ -15,6 +17,9 @@
   let { node, index = 0, focused = false }: Props = $props();
 
   const level = $derived(node.depth);
+
+  // The key that ignores the row (`Delete`), as the keyboard at hand calls it.
+  const deleteKey = $derived(isMac() ? $t("key.deleteMac") : $t("key.delete"));
   const indentWidth = () => level * 21;
 
   // Auswahl-Zustände (nur für Directory relevant)
@@ -45,6 +50,11 @@
     post("addIgnorePath", node.path);
   }
 
+  // The row is the one thing of it the keyboard stops at (roving tabindex,
+  // see FileTree): its controls have `tabindex="-1"`. They are for the
+  // pointer; each has its key on the row (Enter, ArrowRight/ArrowLeft, Space,
+  // Delete), which the tree handles.
+  //
   // Pointer only. Keys are handled once, by the tree (FileTree's key handler
   // with the roving focus): a key pressed on a focused arrow or name bubbles
   // up to it and acts on the row. A key handler here would act a second time.
@@ -60,6 +70,7 @@
     data-type="directory"
     data-index={index}
     role="treeitem"
+    aria-label={node.name}
     aria-level={level + 1}
     aria-selected="false"
     aria-expanded={node.is_expanded ? "true" : "false"}
@@ -71,18 +82,23 @@
       class="arrow {node.is_expanded ? 'expanded' : ''}"
       data-type="directory"
       role="button"
-      tabindex="0"
+      tabindex="-1"
+      aria-label={$t(
+        node.is_expanded ? "aria.collapseDirectory" : "aria.expandDirectory",
+        { name: node.name }
+      )}
       onclick={toggleDir}
     ></span>
     <input
       type="checkbox"
       checked={isDirFull}
+      indeterminate={isDirPartial}
       data-indeterminate={isDirPartial ? "true" : "false"}
-      aria-checked={isDirPartial ? "mixed" : isDirFull ? "true" : "false"}
       onclick={toggleDirCheckbox}
       data-path={node.path}
       data-type="dir-checkbox"
-      aria-label="Toggle directory selection"
+      tabindex="-1"
+      aria-label={$t("aria.toggleDirectorySelection")}
     />
     <div class="name-and-button">
       <!-- svelte-ignore a11y_click_events_have_key_events (keys: see the script) -->
@@ -91,7 +107,7 @@
         data-path={node.path}
         data-type="label"
         role="button"
-        tabindex="0"
+        tabindex="-1"
         onclick={toggleDir}
       >
         <svg class="icon" viewBox="0 0 24 24"
@@ -103,11 +119,13 @@
       </span>
       <button
         class="ignore-btn"
-        title="Add this directory to ignore patterns"
-        aria-label="Add directory to ignore patterns"
+        title={$t("filetree.ignoreDirectoryTitle", { key: deleteKey })}
+        aria-label={$t("aria.ignoreDirectory")}
         onclick={addIgnore}
         data-path={node.path}
         data-type="ignore"
+        tabindex="-1"
+        aria-keyshortcuts="Delete"
       >
         <svg class="icon ignore-icon" viewBox="0 0 24 24"
           ><circle cx="12" cy="12" r="10" /><line
@@ -126,6 +144,7 @@
     data-path={node.path}
     data-index={index}
     role="treeitem"
+    aria-label={node.name}
     aria-level={level + 1}
     aria-selected={node.is_previewed ? "true" : "false"}
     tabindex={focused ? 0 : -1}
@@ -138,7 +157,8 @@
       onclick={toggleFileCheckbox}
       data-path={node.path}
       data-type="file-checkbox"
-      aria-label="Toggle file selection"
+      tabindex="-1"
+      aria-label={$t("aria.toggleFileSelection")}
     />
     <div class="name-and-button">
       <!-- svelte-ignore a11y_click_events_have_key_events (keys: see the script) -->
@@ -147,7 +167,7 @@
         data-path={node.path}
         data-type="label"
         role="button"
-        tabindex="0"
+        tabindex="-1"
         onclick={openFile}
       >
         {#if node.is_binary}
@@ -174,11 +194,13 @@
       </span>
       <button
         class="ignore-btn"
-        title="Add this file to ignore patterns"
-        aria-label="Add file to ignore patterns"
+        title={$t("filetree.ignoreFileTitle", { key: deleteKey })}
+        aria-label={$t("aria.ignoreFile")}
         onclick={addIgnore}
         data-path={node.path}
         data-type="ignore"
+        tabindex="-1"
+        aria-keyshortcuts="Delete"
       >
         <svg class="icon ignore-icon" viewBox="0 0 24 24"
           ><circle cx="12" cy="12" r="10" /><line

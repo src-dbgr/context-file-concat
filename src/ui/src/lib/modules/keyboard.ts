@@ -54,6 +54,13 @@ function globalKeydownHandler(e: KeyboardEvent) {
     }
   }
 
+  // Not unhandled: Tab moves the focus, which the web view does itself.
+  // Blocking it would leave every control but the text fields out of reach
+  // of the keyboard.
+  if (e.key === "Tab") {
+    return;
+  }
+
   // Not unhandled: the focused control acts on the key itself (Enter on a
   // button). Blocking it would keep the control from being activated.
   if (activatesNatively(context.activeEl, e.key)) {

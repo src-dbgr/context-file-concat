@@ -530,6 +530,14 @@
     return Math.max(1, Math.floor(viewportHeight / ITEM_HEIGHT) || 1);
   }
 
+  // The tree is one stop for Tab: the focused row (`tabindex="0"`, all other
+  // rows and the controls inside the rows have -1). While that row is not
+  // rendered (scrolled away, or on its way from the host) the stop is the
+  // tree itself, whose key handler works with the focused index.
+  const focusedRowRendered = $derived(
+    visibleSlice.some((item) => item.row && item.index === focusedIndex)
+  );
+
   // Delegated focus tracking (when user clicks or tabs into an item)
   function onTreeFocusIn(e: FocusEvent) {
     const target = (e.target as HTMLElement).closest<HTMLElement>(
@@ -585,7 +593,7 @@
     "PageDown",
     "PageUp",
   ];
-  const ROW_KEYS = ["ArrowRight", "ArrowLeft", "Enter", " "];
+  const ROW_KEYS = ["ArrowRight", "ArrowLeft", "Enter", " ", "Delete"];
 
   // Central key handler for roving navigation & item actions
   function onTreeKeyDown(e: KeyboardEvent) {
@@ -594,6 +602,16 @@
     // well would act on the row instead, or a second time. All other keys on
     // a control, and every key on the arrow and the name, are the tree's.
     if (activatesNatively(e.target, e.key)) return;
+
+    // Delete removes a row from the tree (it is ignored). One press, one
+    // row: not the repeats of a key held down, which would go on with the
+    // rows that move up, and not with a modifier, which means something else.
+    if (
+      e.key === "Delete" &&
+      (e.repeat || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey)
+    ) {
+      return;
+    }
 
     if (!NAVIGATION_KEYS.includes(e.key) && !ROW_KEYS.includes(e.key)) {
       // Typeahead; also possible while nothing is focused.
@@ -608,6 +626,9 @@
     e.preventDefault();
     if (focusLookupIsOpen()) {
       // The focus is about to move: the key belongs to where it will be.
+      // Not Delete: it acts on a row the user sees, and nobody has seen
+      // yet where the focus will be. It is dropped.
+      if (e.key === "Delete") return;
       if (keysAfterLookup.length < 8) {
         keysAfterLookup.push({ key: e.key, at: Date.now() });
       }
@@ -632,6 +653,19 @@
         return setFocusByIndex(focusedIndex + itemsPerPage());
       case "PageUp":
         return setFocusByIndex(focusedIndex - itemsPerPage());
+    }
+
+    // Delete acts on a row the user sees. If the focused row is out of
+    // sight (scrolled away) the key only brings it back; it is not kept
+    // for the row either. The next press acts.
+    if (key === "Delete") {
+      const visible = visibleRange(scrollTop, viewportHeight, totalRows);
+      const row = rowAt(focusedIndex);
+      const inSight =
+        focusedIndex >= visible.start && focusedIndex < visible.end;
+      if (row && inSight) actOnRow(key, row, focusedIndex);
+      else setFocusByIndex(focusedIndex);
+      return;
     }
 
     // The remaining keys act on the focused row itself.
@@ -674,8 +708,14 @@
     }
   }
 
-  /** ArrowRight, ArrowLeft, Enter or Space on the row at `index`. */
+  /** ArrowRight, ArrowLeft, Enter, Space or Delete on the row at `index`. */
   function actOnRow(key: string, node: TreeRow, index: number) {
+    // What the ignore button of the row does with the pointer.
+    if (key === "Delete") {
+      post("addIgnorePath", node.path);
+      return;
+    }
+
     // Expand/Collapse per WAI-ARIA Tree pattern
     if (key === "ArrowRight") {
       if (node.is_directory) {
@@ -725,7 +765,7 @@
   {#if $appState.current_path}
     <div class="panel-header files-header">
       <div class="files-title-section">
-        <h3>{$t("filetree.title")}</h3>
+        <h2>{$t("filetree.title")}</h2>
         <div class="button-group">
           <button
             onclick={onSelectAll}
@@ -779,10 +819,10 @@
         onkeydown={onTreeKeyDown}
         style="overflow:auto; height:100%; min-height:0; flex:1 1 auto;"
         role="tree"
-        aria-label="Project files"
+        aria-label={$t("aria.projectFiles")}
         aria-multiselectable="true"
         aria-busy={awaitingRows ? "true" : "false"}
-        tabindex="0"
+        tabindex={focusedRowRendered ? -1 : 0}
       >
         <div
           class="virtual-scroll-sizer"

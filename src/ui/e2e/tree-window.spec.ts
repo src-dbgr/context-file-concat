@@ -2,6 +2,8 @@ import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import {
   fileNode,
+  holdHost,
+  releaseHost,
   setHostLatency,
   setTree,
   waitForBridge,
@@ -270,11 +272,17 @@ test.describe("with a host that takes its time to answer", () => {
 
     // End, Space, Home: the Space is kept for the last row. Before the host
     // answers, the viewport moves on and reports another position, so the
-    // rows of the end never arrive (the answer is overtaken).
+    // rows of the end never arrive (the answer is overtaken). The host is
+    // held meanwhile: no answer comes in between the keys.
+    await holdHost(page);
     await page.keyboard.press("End");
     await page.keyboard.press("Space");
     await page.keyboard.press("Home");
     await tree.evaluate((el, top) => (el.scrollTop = top), 2_000 * ROW_HEIGHT);
+    await expect(
+      page.locator(".tree .virtual-scroll-item.pending").first(),
+    ).toBeVisible();
+    await releaseHost(page);
     await expect(rowAt(page, 2_005)).toBeVisible();
     await expect(tree).toHaveAttribute("aria-busy", "false");
     expect(await posted(page, "toggleSelection")).toEqual([]);
@@ -300,8 +308,29 @@ test.describe("with a host that takes its time to answer", () => {
     await expect(rowAt(page, LAST_ROW - 1)).toBeInViewport();
   });
 
+  test("typing, then Delete: nothing is ignored before the match is seen", async ({
+    page,
+  }) => {
+    // The host is held: the Delete comes while it is looking, for certain.
+    await holdHost(page);
+    await page.keyboard.type("ze");
+    await page.keyboard.press("Delete");
+    await releaseHost(page);
+
+    await expect(rowAt(page, LAST_ROW)).toBeFocused();
+    await expect(page.locator(".tree")).toHaveAttribute("aria-busy", "false");
+    expect(await posted(page, "addIgnorePath")).toEqual([]);
+
+    await page.keyboard.press("Delete");
+    expect(await posted(page, "addIgnorePath")).toEqual([
+      { command: "addIgnorePath", payload: "/repo/zebra.md" },
+    ]);
+  });
+
   test("placeholders take exactly the place of the rows", async ({ page }) => {
     const tree = page.locator(".tree");
+    // The placeholders stay for as long as the host is held.
+    await holdHost(page);
     await tree.evaluate((el, top) => (el.scrollTop = top), 3_000 * ROW_HEIGHT);
 
     const placeholder = page
@@ -315,6 +344,7 @@ test.describe("with a host that takes its time to answer", () => {
     expect(before.height).toBe(ROW_HEIGHT);
     const scrollTop = await tree.evaluate((el) => el.scrollTop);
 
+    await releaseHost(page);
     await expect(rowAt(page, 3_005)).toBeVisible();
     // Nothing has moved: same scroll position, the row where its placeholder was.
     expect(await tree.evaluate((el) => el.scrollTop)).toBe(scrollTop);
@@ -375,6 +405,8 @@ test("the tree has no critical a11y issue in the middle of a long list", async (
   await expect(rowAt(page, 2_505)).toBeVisible();
 
   const results = await new AxeBuilder({ page }).include(".tree").analyze();
-  const critical = results.violations.filter((v) => v.impact === "critical");
+  const critical = results.violations.filter(
+    (v) => v.impact === "critical" || v.impact === "serious",
+  );
   expect(critical.map((violation) => violation.id)).toEqual([]);
 });

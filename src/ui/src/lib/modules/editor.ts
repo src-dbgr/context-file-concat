@@ -53,7 +53,8 @@ function unchangedDocument() {
     : null;
 }
 
-const monacoTheme = (t: Theme) => (t === "light" ? "vs" : "vs-dark");
+/** The themes `monacoBundle` registers: Monaco's own, with readable colors. */
+const monacoTheme = (t: Theme) => (t === "light" ? "cfc-light" : "cfc-dark");
 
 export function layoutEditorSoon() {
   const editor = get(editorInstance);
@@ -139,6 +140,9 @@ async function createEditor(): Promise<Editor> {
     language: "plaintext",
     theme: monacoTheme(get(theme)),
     readOnly: true,
+    // Tab leaves an editor that cannot be typed in (no keyboard trap); in the
+    // editable output it indents, and Ctrl+M (Mac: Ctrl+Shift+M) switches.
+    tabFocusMode: true,
     automaticLayout: true,
     wordWrap: "on",
     stickyScroll: { enabled: true },
@@ -243,7 +247,7 @@ export async function showPreviewContent(
     matchCase: getState().config.case_sensitive_search,
   });
 
-  editor.updateOptions({ readOnly: true });
+  editor.updateOptions({ readOnly: true, tabFocusMode: true });
   editor.setPosition({ lineNumber: 1, column: 1 });
   editor.revealLine(1);
 
@@ -265,7 +269,7 @@ export async function showGeneratedContent(
   editor.setValue(content);
   setSearchHighlight(editor, null);
   setLanguage(editor, "plaintext");
-  editor.updateOptions({ readOnly: false });
+  editor.updateOptions({ readOnly: false, tabFocusMode: false });
 
   const model = editor.getModel();
   shownDocument = model
@@ -327,7 +331,7 @@ export function clearPreview() {
 
   editor.setValue("// Preview cleared.");
   setSearchHighlight(editor, null);
-  editor.updateOptions({ readOnly: true });
+  editor.updateOptions({ readOnly: true, tabFocusMode: true });
   setLanguage(editor, "plaintext");
 
   previewMode.set("idle");

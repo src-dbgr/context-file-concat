@@ -118,7 +118,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    color: var(--color-accent);
+    color: var(--color-accent-text);
     font-weight: 600;
   }
   #generate-btn.is-generating .cancel-content {

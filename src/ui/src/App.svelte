@@ -12,7 +12,14 @@
   import Footer from "$lib/components/Footer.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
   import ToastHost from "$lib/components/ToastHost.svelte";
+  import { t } from "$lib/i18n";
 </script>
+
+<!-- The heading of the page. The window shows the title; here it is for
+     screen readers only and takes no room in the layout. -->
+<header class="visually-hidden">
+  <h1>{$t("app.title")}</h1>
+</header>
 
 <div class="container" style="height: calc(100% - 30px)">
   <aside id="sidebar-root" class="sidebar" use:sidebarResizer>

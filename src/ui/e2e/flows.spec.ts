@@ -641,7 +641,9 @@ test("A11y sanity on main screen (no critical issues)", async ({ page }) => {
   await setAppState(page, withRepo());
 
   const results = await new AxeBuilder({ page }).analyze();
-  const critical = results.violations.filter((v) => v.impact === "critical");
+  const critical = results.violations.filter(
+    (v) => v.impact === "critical" || v.impact === "serious",
+  );
   expect(critical.length, "Expected no CRITICAL a11y violations").toBe(0);
 
   // With a toast on screen (its list must only own list items).
@@ -654,7 +656,7 @@ test("A11y sanity on main screen (no critical issues)", async ({ page }) => {
   const withToast = await new AxeBuilder({ page }).analyze();
   expect(
     withToast.violations
-      .filter((v) => v.impact === "critical")
+      .filter((v) => v.impact === "critical" || v.impact === "serious")
       .map((v) => v.id),
     "Expected no CRITICAL a11y violations with a toast shown",
   ).toEqual([]);
@@ -736,6 +738,67 @@ test.describe("Keyboard on the controls of a tree row", () => {
         "Space",
       ),
     ).toEqual([{ command: "toggleSelection", payload: "/repo/README.md" }]);
+  });
+
+  test("Delete on a row ignores it, as its ignore button does", async ({
+    page,
+  }) => {
+    expect(await press(page, inRow("/repo/README.md", ""), "Delete")).toEqual([
+      { command: "addIgnorePath", payload: "/repo/README.md" },
+    ]);
+    expect(await press(page, inRow("/repo/src", ""), "Delete")).toEqual([
+      { command: "addIgnorePath", payload: "/repo/src" },
+    ]);
+  });
+
+  test("Delete with a modifier, and Backspace, ignore nothing", async ({
+    page,
+  }) => {
+    for (const key of ["Shift+Delete", "Control+Delete", "Backspace"]) {
+      expect(await press(page, inRow("/repo/README.md", ""), key)).toEqual([]);
+    }
+  });
+
+  test("a row is named by its name, its ignore button by the key", async ({
+    page,
+  }) => {
+    await expect(
+      page.getByRole("treeitem", { name: "README.md", exact: true }),
+    ).toHaveAttribute("data-path", "/repo/README.md");
+    await expect(
+      page.getByRole("treeitem", { name: "src", exact: true }),
+    ).toHaveAttribute("data-path", "/repo/src");
+
+    // The platform as the browser under test reports it (an emulated
+    // device may say another one than the machine the test runs on).
+    const mac = await page.evaluate(() => {
+      const nav = navigator as Navigator & {
+        userAgentData?: { platform?: string };
+      };
+      return /^mac/i.test(nav.userAgentData?.platform || nav.platform);
+    });
+    await expect(
+      page.locator(inRow("/repo/README.md", ".ignore-btn")),
+    ).toHaveAttribute(
+      "title",
+      `Add this file to ignore patterns (${mac ? "fn+⌫" : "Delete"})`,
+    );
+  });
+
+  test("the tree is one stop for Tab: the focused row", async ({ page }) => {
+    const stops = () =>
+      page.evaluate(() => {
+        const tree = document.querySelector<HTMLElement>(".tree")!;
+        return [tree, ...tree.querySelectorAll<HTMLElement>("*")]
+          .filter((el) => el.tabIndex >= 0)
+          .map((el) => el.getAttribute("data-path") ?? el.className);
+      });
+    expect(await stops()).toEqual(["/repo"]);
+
+    await page.locator(inRow("/repo", "")).focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.locator(inRow("/repo/src", ""))).toBeFocused();
+    expect(await stops()).toEqual(["/repo/src"]);
   });
 
   test("Enter and Space on a row still act on the row", async ({ page }) => {

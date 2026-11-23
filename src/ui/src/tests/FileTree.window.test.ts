@@ -541,6 +541,29 @@ describe("FileTree – keyboard across the edge of the window", () => {
     );
   });
 
+  it("Delete pressed while the host looks for a typed name is dropped", async () => {
+    const rows = rowsOf([
+      ...Array.from({ length: 400 }, (_, i) =>
+        file(`/repo/file-${String(i).padStart(5, "0")}.txt`),
+      ),
+      file("/repo/zebra.txt"),
+    ]);
+    const { host, tree, container } = await mountFocused(rows);
+
+    await fireEvent.keyDown(tree, { key: "z" });
+    await fireEvent.keyDown(tree, { key: "e" });
+    await fireEvent.keyDown(tree, { key: "Delete" });
+    await answerAll(host);
+
+    // The focus is on the match; neither it nor the row before is ignored.
+    expect(focusedRow(container)).toBe(400);
+    expect(host.posted("addIgnorePath")).toEqual([]);
+
+    // Now the row is seen and has the focus: the key acts.
+    await fireEvent.keyDown(rowEl(container, 400), { key: "Delete" });
+    expect(host.posted("addIgnorePath")).toEqual(["/repo/zebra.txt"]);
+  });
+
   describe("keys pressed while the host looks for a row", () => {
     const withZebra = () =>
       rowsOf([
@@ -824,6 +847,25 @@ describe("FileTree – the focused row when the list changes", () => {
     await scrollToRow(tree, 0);
     await answerAll(host);
     expect(document.activeElement).toBe(rowEl(container, 5));
+  });
+
+  it("Delete on a row that is out of sight only brings it back; the next one acts", async () => {
+    const { host, tree, container } = await mountFocusedOnRow(
+      manyRows(1000),
+      5,
+    );
+    await scrollToRow(tree, 700);
+    await answerAll(host);
+    expect(document.activeElement).toBe(tree);
+
+    await fireEvent.keyDown(tree, { key: "Delete" });
+    await answerAll(host);
+    expect(host.posted("addIgnorePath")).toEqual([]);
+    expect(document.activeElement).toBe(rowEl(container, 5));
+    const path = rowEl(container, 5).getAttribute("data-path");
+
+    await fireEvent.keyDown(rowEl(container, 5), { key: "Delete" });
+    expect(host.posted("addIgnorePath")).toEqual([path]);
   });
 
   it("does not ask while the list is the same and the item is just out of sight", async () => {
