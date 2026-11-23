@@ -20,11 +20,11 @@ use super::correlation::{CommandSeq, SessionId};
 use super::dispatch::CommandDispatcher;
 use super::dispatch_ipc_message;
 use super::events::UserEvent;
-use super::file_dialog::DialogService;
 use super::filtering;
 use super::proxy::EventProxy;
 use super::shared_state::SharedState;
 use super::state::AppState;
+use super::test_support::MockDialogService;
 use super::view_model::rows::all_rows;
 use super::view_model::{UiState, Viewport};
 use crate::core::FileItem;
@@ -61,24 +61,6 @@ impl Snapshots {
     }
 }
 
-/// No message of the scenario opens a dialog.
-struct NoDialog;
-
-impl DialogService for NoDialog {
-    fn pick_directory(&self) -> Option<PathBuf> {
-        None
-    }
-    fn pick_config_to_import(&self) -> Option<PathBuf> {
-        None
-    }
-    fn export_config_path(&self) -> Option<PathBuf> {
-        None
-    }
-    fn save_output_file_path(&self, _config: &crate::config::AppConfig) -> Option<PathBuf> {
-        None
-    }
-}
-
 fn item(path: &str, is_directory: bool) -> FileItem {
     FileItem {
         path: PathBuf::from(path),
@@ -107,7 +89,7 @@ fn project() -> AppState {
     }
 
     let mut state = AppState::default();
-    state.config.remove_empty_directories = false;
+    state.config_mut().remove_empty_directories = false;
     state.current_path = "/project".to_string();
     state.loaded_dirs = items
         .iter()
@@ -195,7 +177,8 @@ impl Recorder {
         dispatch_ipc_message(
             &self.dispatcher,
             message.to_string(),
-            Arc::new(NoDialog),
+            // No message of the scenario opens a dialog.
+            Arc::new(MockDialogService::default()),
             self.snapshots.clone(),
             self.state.clone(),
         );

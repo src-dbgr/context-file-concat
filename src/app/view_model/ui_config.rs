@@ -8,8 +8,8 @@ use std::path::PathBuf;
 ///
 /// It holds exactly the settings the UI displays; each of them is edited with an
 /// intent command (`addIgnorePattern`, `removeIgnorePattern`, `clearIgnorePatterns`,
-/// `setConfigOption`, `pickOutputDirectory`). What only the host works with (window
-/// geometry, the last directory, the file size limit, the tree ignore patterns) is
+/// `setConfigOption`, `pickOutputDirectory`). What only the host works with (the
+/// last directory, the file size limit, the tree ignore patterns) is
 /// deliberately not part of it: the UI has no use for it, and what is never sent can
 /// never come back outdated.
 ///
@@ -61,9 +61,6 @@ mod tests {
             include_tree_by_default: false,
             use_relative_paths: true,
             remove_empty_directories: true,
-            window_size: (1234.0, 567.0),
-            window_position: (89.0, 10.0),
-            geometry_units: crate::config::GeometryUnits::Logical,
             max_file_size_mb: 42,
         }
     }

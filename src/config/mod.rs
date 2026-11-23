@@ -9,26 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-/// The unit [`AppConfig::window_size`] and [`AppConfig::window_position`] are stored in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GeometryUnits {
-    /// Physical pixels. This is what versions up to 0.3.1 stored, without saying so:
-    /// a configuration that does not name its unit is read as physical. Never written
-    /// any more; the geometry is converted when the application starts (see
-    /// `app::window_geometry`).
-    Physical,
-    /// Logical units, independent of the scale factor of the display.
-    Logical,
-}
-
-impl GeometryUnits {
-    /// The unit of a stored geometry that does not name one.
-    fn of_unmarked_config() -> Self {
-        Self::Physical
-    }
-}
-
 /// The persisted settings of the application.
 ///
 /// Fields that are not part of this struct are ignored when a configuration is read
@@ -38,9 +18,13 @@ impl GeometryUnits {
 ///
 /// A field that a file does not name has its value of [`AppConfig::default`]
 /// (`#[serde(default)]`): a file written before a setting existed keeps loading, with
-/// all its other settings, and no list of fields has to be kept in step for that. The
-/// one exception is `geometry_units`, see there; a stored configuration is read
-/// through [`settings::load_config`], which accounts for it.
+/// all its other settings, and no list of fields has to be kept in step for that.
+///
+/// The geometry of the window is not a setting and not kept here: the composition root
+/// owns it and keeps it in a file of its own (see `app::window_geometry`). Versions up
+/// to 0.3.1 stored it in this file (`window_size`, `window_position`,
+/// `geometry_units`); like any field this struct does not have, those are ignored when
+/// such a file is read and gone once it is written again.
 ///
 /// Which of the fields are settings to share and which describe this installation is
 /// defined by [`SharedConfig`].
@@ -56,14 +40,6 @@ pub struct AppConfig {
     pub include_tree_by_default: bool,
     pub use_relative_paths: bool,
     pub remove_empty_directories: bool,
-    pub window_size: (f64, f64),
-    pub window_position: (f64, f64),
-    /// The unit of `window_size` and `window_position`.
-    ///
-    /// Unlike every other field, a missing unit does not mean the default: a file that
-    /// does not name it was written by a version that stored physical pixels.
-    #[serde(default = "GeometryUnits::of_unmarked_config")]
-    pub geometry_units: GeometryUnits,
     /// Size limit for files in MiB: larger files are not listed by the scan, not read
     /// by the content search and not inlined into the generated output.
     ///
@@ -101,11 +77,11 @@ impl AppConfig {
     /// [`SharedConfig`]), and the output directory if the file names one.
     ///
     /// What describes this installation rather than a preference stays as it is: the
-    /// window geometry (an imported file may come from another display, or store it
-    /// in another unit) and the directory that was opened last. (Whether the directory
-    /// named by the imported file is opened is up to the caller; opening it is what
-    /// makes it the last directory.) An output directory the file does not name stays
-    /// as well: a file exported for sharing names none.
+    /// directory that was opened last. (Whether the directory named by the imported
+    /// file is opened is up to the caller; opening it is what makes it the last
+    /// directory.) An output directory the file does not name stays as well: a file
+    /// exported for sharing names none. A window geometry the file may hold (a complete
+    /// configuration file of an older version) is not read at all.
     pub fn adopt_user_settings(&mut self, imported: ImportedConfig) {
         imported.settings.apply_to(self);
         if let Some(output_directory) = imported.output_directory {
@@ -179,9 +155,6 @@ impl Default for AppConfig {
             include_tree_by_default: true,
             use_relative_paths: true,
             remove_empty_directories: false,
-            window_size: (1200.0, 800.0),
-            window_position: (100.0, 100.0),
-            geometry_units: GeometryUnits::Logical,
             max_file_size_mb: 20,
         }
     }
@@ -238,19 +211,30 @@ mod tests {
         assert_eq!(read_with_limit(4096), 4096);
     }
 
+    /// A file of a version that kept the window geometry in the configuration (up to
+    /// 0.3.1) is read like any other: the geometry is no field of the configuration.
     #[test]
-    fn a_config_that_does_not_name_its_geometry_unit_is_read_as_physical() {
-        let mut json = serde_json::to_value(AppConfig::default()).unwrap();
-        assert_eq!(json["geometry_units"], "logical");
+    fn a_config_that_holds_a_window_geometry_is_read_without_it() {
+        let mut json = serde_json::to_value(foreign_config()).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.insert("window_size".into(), serde_json::json!([4000.0, 3000.0]));
+        fields.insert(
+            "window_position".into(),
+            serde_json::json!([-900.0, -900.0]),
+        );
+        fields.insert("geometry_units".into(), serde_json::json!("physical"));
 
-        json.as_object_mut().unwrap().remove("geometry_units");
-        let unmarked: AppConfig = serde_json::from_value(json).unwrap();
+        let read: AppConfig = serde_json::from_value(json).unwrap();
 
-        assert_eq!(unmarked.geometry_units, GeometryUnits::Physical);
+        assert_eq!(read, foreign_config());
+        let written = serde_json::to_string(&read).unwrap();
+        for field in ["window_size", "window_position", "geometry_units"] {
+            assert!(!written.contains(field), "{field} in {written}");
+        }
     }
 
     /// A configuration that differs from the default in everything an import can
-    /// touch, with the geometry and last directory of another installation.
+    /// touch, with the last directory of another installation.
     fn foreign_config() -> AppConfig {
         AppConfig {
             ignore_patterns: HashSet::from(["*.imported".to_string()]),
@@ -262,18 +246,12 @@ mod tests {
             use_relative_paths: false,
             remove_empty_directories: true,
             max_file_size_mb: 3,
-            window_size: (4000.0, 3000.0),
-            window_position: (-900.0, -900.0),
-            geometry_units: GeometryUnits::Physical,
             last_directory: Some(PathBuf::from("/somebody/elses/project")),
         }
     }
 
     fn current_config() -> AppConfig {
         AppConfig {
-            window_size: (1000.0, 700.0),
-            window_position: (7.0, 8.0),
-            geometry_units: GeometryUnits::Logical,
             last_directory: Some(PathBuf::from("/current/project")),
             output_directory: Some(PathBuf::from("/current/out")),
             ..AppConfig::default()
@@ -282,7 +260,7 @@ mod tests {
 
     /// A complete configuration file, as earlier versions exported it.
     #[test]
-    fn adopting_user_settings_keeps_geometry_and_last_directory() {
+    fn adopting_user_settings_keeps_the_last_directory() {
         let mut current = current_config();
         let imported = foreign_config();
 
@@ -293,9 +271,6 @@ mod tests {
         assert_eq!(
             current,
             AppConfig {
-                window_size: (1000.0, 700.0),
-                window_position: (7.0, 8.0),
-                geometry_units: GeometryUnits::Logical,
                 last_directory: Some(PathBuf::from("/current/project")),
                 ..imported
             }
@@ -314,9 +289,6 @@ mod tests {
         assert_eq!(
             current,
             AppConfig {
-                window_size: (1000.0, 700.0),
-                window_position: (7.0, 8.0),
-                geometry_units: GeometryUnits::Logical,
                 last_directory: Some(PathBuf::from("/current/project")),
                 output_directory: Some(PathBuf::from("/current/out")),
                 ..foreign_config()
@@ -328,7 +300,7 @@ mod tests {
     /// The test goes through all fields, so one added later is covered without being
     /// named anywhere.
     #[test]
-    fn every_missing_field_but_the_geometry_unit_has_its_default() {
+    fn every_missing_field_has_its_default() {
         let complete = serde_json::to_value(foreign_config()).unwrap();
         let defaults = serde_json::to_value(AppConfig::default()).unwrap();
 
@@ -341,11 +313,7 @@ mod tests {
 
             // Compared as configurations: the order of a set in JSON is arbitrary.
             let mut expected = complete.clone();
-            expected[field] = if field == "geometry_units" {
-                serde_json::json!("physical")
-            } else {
-                defaults[field].clone()
-            };
+            expected[field] = defaults[field].clone();
             let expected: AppConfig = serde_json::from_value(expected).unwrap();
             assert_eq!(read, expected, "without {field}");
         }

@@ -63,12 +63,12 @@ enum LoadedDirs {
 impl FilterInputs {
     /// The inputs as they are in `state`.
     pub(crate) fn of(state: &AppState) -> Self {
-        let remove_empty_directories = state.config.remove_empty_directories;
+        let remove_empty_directories = state.config().remove_empty_directories;
         Self {
             root_path: PathBuf::from(&state.current_path),
             search_query: state.search_query.clone(),
             extension_filter: state.extension_filter.clone(),
-            case_sensitive: state.config.case_sensitive_search,
+            case_sensitive: state.config().case_sensitive_search,
             content_matches: state.shared_content_filter_matches(),
             remove_empty_directories,
             is_fully_scanned: state.is_fully_scanned,
@@ -111,8 +111,8 @@ impl FilterInputs {
             && self.root_path == Path::new(&state.current_path)
             && self.search_query == state.search_query
             && self.extension_filter == state.extension_filter
-            && self.case_sensitive == state.config.case_sensitive_search
-            && self.remove_empty_directories == state.config.remove_empty_directories
+            && self.case_sensitive == state.config().case_sensitive_search
+            && self.remove_empty_directories == state.config().remove_empty_directories
             && self.is_fully_scanned == state.is_fully_scanned
             && match &self.loaded_dirs {
                 LoadedDirs::NotAsked | LoadedDirs::All => true,
@@ -416,7 +416,7 @@ mod tests {
     /// `directories` directories below `/project`, each with one file `match.rs`.
     fn state_with_matches_in(directories: usize) -> AppState {
         let mut state = AppState::default();
-        state.config = create_test_config();
+        *state.config_mut() = create_test_config();
         state.current_path = "/project".to_string();
         for directory in 0..directories {
             let path = format!("/project/dir{directory:04}");
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn test_auto_expansion_below_the_limit_reveals_every_match() {
         let mut state = AppState::default();
-        state.config = create_test_config();
+        *state.config_mut() = create_test_config();
         state.current_path = "/project".to_string();
         state.set_full_file_list(vec![
             create_test_file_item("/project/a", true),
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn test_apply_filters_with_search_query() {
         let mut state = AppState::default();
-        state.config = create_test_config();
+        *state.config_mut() = create_test_config();
         state.current_path = "/project".to_string();
         state.set_full_file_list(vec![
             create_test_file_item("/project/src", true),
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn test_apply_filters_with_extension_filter() {
         let mut state = AppState::default();
-        state.config = create_test_config();
+        *state.config_mut() = create_test_config();
         state.current_path = "/project".to_string();
         state.set_full_file_list(vec![
             create_test_file_item("/project/src", true),
@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn test_apply_filters_content_search_with_no_results() {
         let mut state = AppState::default();
-        state.config = create_test_config();
+        *state.config_mut() = create_test_config();
         state.current_path = "/project".to_string();
         state.set_full_file_list(vec![
             create_test_file_item("/project/src", true),
@@ -581,7 +581,7 @@ mod tests {
     /// A state with one file whose name contains a blank and one whose name does not.
     fn state_with_and_without_blank() -> AppState {
         let mut state = AppState::default();
-        state.config = create_test_config();
+        *state.config_mut() = create_test_config();
         state.current_path = "/project".to_string();
         state.set_full_file_list(vec![
             create_test_file_item("/project/release notes.md", false),
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn test_filter_highlight_and_auto_expand_agree_on_matches() {
         let mut state = AppState::default();
-        state.config = create_test_config();
+        *state.config_mut() = create_test_config();
         state.current_path = "/project".to_string();
         state.set_full_file_list(vec![
             create_test_file_item("/project/build", true),
@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn test_auto_expand_expands_the_ancestors_of_matches_only() {
         let mut state = AppState::default();
-        state.config = create_test_config();
+        *state.config_mut() = create_test_config();
         state.current_path = "/project".to_string();
         state.set_full_file_list(vec![
             create_test_file_item("/project/src", true),
@@ -725,7 +725,7 @@ mod tests {
         let mut state = AppState::default();
         let mut config = create_test_config();
         config.remove_empty_directories = true; // Feature is ON
-        state.config = config;
+        *state.config_mut() = config;
         state.current_path = "/project".to_string();
 
         let empty_dir_path = PathBuf::from("/project/empty_dir");

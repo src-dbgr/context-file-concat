@@ -11,7 +11,7 @@
 use super::{generate_ui_state, LocatedRow, UiState, Viewport};
 use crate::app::selection::SelectionState;
 use crate::app::state::{AppState, StatusNotice};
-use crate::config::{AppConfig, GeometryUnits};
+use crate::config::AppConfig;
 use crate::core::FileItem;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -42,7 +42,7 @@ fn paths(paths: &[&str]) -> HashSet<PathBuf> {
 /// so that the output is deterministic.
 fn representative_state() -> AppState {
     let mut state = AppState::default();
-    state.config = AppConfig {
+    *state.config_mut() = AppConfig {
         ignore_patterns: HashSet::from(["target".to_string()]),
         tree_ignore_patterns: HashSet::new(),
         last_directory: Some(PathBuf::from("/project")),
@@ -52,9 +52,6 @@ fn representative_state() -> AppState {
         include_tree_by_default: true,
         use_relative_paths: true,
         remove_empty_directories: false,
-        window_size: (1200.0, 800.0),
-        window_position: (100.0, 50.0),
-        geometry_units: GeometryUnits::Logical,
         max_file_size_mb: 20,
     };
     state.current_path = "/project".to_string();

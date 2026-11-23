@@ -12,10 +12,9 @@
 //! * Writing a snapshot ([`ConfigSnapshot::save`]) may happen any time later, on any
 //!   thread. Writes are serialized, and a snapshot is skipped once a newer one has been
 //!   written.
-//! * The last save of a session ([`ConfigStore::finalize`]) is one step for every other
-//!   save: it takes the most recent snapshot, whether written or not, completes it,
-//!   writes it and closes the store. A save that is still queued in the background can
-//!   neither overtake it nor run after it, and no snapshot can be taken in between.
+//! * The last save of a session ([`ConfigStore::close`]) writes the most recent
+//!   snapshot if it is not on disk yet and closes the store. A save that is still
+//!   queued in the background can neither overtake it nor run after it.
 
 use super::{settings, AppConfig};
 use anyhow::Result;
@@ -38,8 +37,7 @@ struct Shared {
     /// The file the configuration is written to; `None` for a detached store.
     path: Option<PathBuf>,
     /// Locked only for a moment, so taking a snapshot is cheap for the holder of the
-    /// state lock. Never held during file IO, with one exception: the last write of a
-    /// session ([`ConfigStore::finalize`]).
+    /// state lock. Never held during file IO.
     issued: Mutex<Issued>,
     /// The revision of the newest snapshot written so far. Held while the file is
     /// written, which serializes the writes. Where both locks are needed, this one is
@@ -109,40 +107,40 @@ impl ConfigStore {
     }
 
     /// The configuration of the most recent snapshot, or the configuration as it was
-    /// loaded if none has been taken yet. This is what the store knows without asking
-    /// the application state.
-    pub fn latest(&self) -> AppConfig {
+    /// loaded if none has been taken yet.
+    #[cfg(test)]
+    pub(crate) fn latest(&self) -> AppConfig {
         AppConfig::clone(&lock(&self.shared.issued).latest)
     }
 
-    /// The last save of a session: completes the most recent configuration with
-    /// `complete`, writes it and closes the store.
+    /// The last save of a session: writes the most recent snapshot unless it is on
+    /// disk already, and closes the store.
     ///
-    /// "Most recent" is the newest snapshot taken, written or not; a caller that holds
-    /// a configuration the store may not know yet takes a snapshot of it first. All of
-    /// this is one step for every other user of the store: a write that is under way
-    /// is waited for, and until the file is written no snapshot can be taken (the one
-    /// case in which taking a snapshot waits for file IO). So every snapshot is either
-    /// part of what is written here, or it is taken afterwards and never written:
-    /// nothing is written to the file after this call, by this store or its clones.
+    /// "Most recent" is the newest snapshot taken, whether its own save has had its
+    /// turn or not. Every change of the configuration takes one (under the state
+    /// lock), so this is the configuration as the application holds it, and nothing
+    /// has to be asked of the application state. A write that is under way is waited
+    /// for. Nothing is written to the file after this call, by this store or its
+    /// clones: a save that was queued before is part of what is written here, and a
+    /// snapshot that is taken afterwards is skipped.
     ///
-    /// `complete` runs while the store is locked and must not use it. If the write
-    /// fails, the store stays open and unchanged.
-    pub fn finalize(&self, complete: impl FnOnce(&mut AppConfig)) -> Result<()> {
+    /// If the write fails, the store stays open and unchanged.
+    pub fn close(&self) -> Result<()> {
         let shared = &self.shared;
         let mut written = lock(&shared.written);
         if *written == CLOSED {
             tracing::debug!("The config store is closed already.");
             return Ok(());
         }
-        let mut issued = lock(&shared.issued);
-        let mut config = AppConfig::clone(&issued.latest);
-        complete(&mut config);
-        if let Some(path) = &shared.path {
-            settings::save_config(&config, path)?;
+        let (revision, latest) = {
+            let issued = lock(&shared.issued);
+            (issued.revision, issued.latest.clone())
+        };
+        if revision > *written {
+            if let Some(path) = &shared.path {
+                settings::save_config(&latest, path)?;
+            }
         }
-        issued.revision += 1;
-        issued.latest = Arc::new(config);
         *written = CLOSED;
         Ok(())
     }
@@ -274,68 +272,69 @@ mod tests {
         assert_eq!(name_on_disk(&store), "next.txt");
     }
 
-    fn finalize_as(store: &ConfigStore, tree_ignore_pattern: &str) {
-        store
-            .finalize(|config| {
-                config
-                    .tree_ignore_patterns
-                    .insert(tree_ignore_pattern.to_string());
-            })
-            .unwrap();
-    }
-
     fn on_disk(store: &ConfigStore) -> AppConfig {
         settings::load_config(store.path().unwrap()).unwrap()
     }
 
     #[test]
-    fn finalize_writes_the_newest_snapshot_completed_by_the_closure() {
+    fn close_writes_the_newest_snapshot_that_is_not_on_disk_yet() {
         let (_dir, store) = store_on_disk();
         store.snapshot(&named("written.txt")).save().unwrap();
         let _unsaved = store.snapshot(&named("newest.txt"));
 
-        finalize_as(&store, "final");
+        store.close().unwrap();
 
         let saved = on_disk(&store);
         assert_eq!(saved.output_filename, "newest.txt");
-        assert!(saved.tree_ignore_patterns.contains("final"));
         assert_eq!(store.latest(), saved, "the store knows what it wrote");
     }
 
+    /// Nothing to save: the file is left exactly as it is, also one that holds what
+    /// this version does not write (here: fields of an older version).
     #[test]
-    fn finalize_without_any_snapshot_completes_the_loaded_config() {
-        let (_dir, store) = store_on_disk();
+    fn close_without_an_unsaved_snapshot_leaves_the_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let stored = r#"{ "output_filename": "stored.txt", "window_size": [800.0, 600.0] }"#;
+        fs::write(&path, stored).unwrap();
+        let (store, _) = ConfigStore::open(path.clone());
 
-        finalize_as(&store, "final");
+        store.close().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), stored);
 
-        let saved = on_disk(&store);
-        assert_eq!(saved.output_filename, AppConfig::default().output_filename);
-        assert!(saved.tree_ignore_patterns.contains("final"));
+        // The same once every snapshot has been written.
+        let (store, _) = ConfigStore::open(path.clone());
+        store.snapshot(&named("saved.txt")).save().unwrap();
+        let saved = fs::read(&path).unwrap();
+        fs::write(&path, stored).unwrap();
+        store.close().unwrap();
+        assert_ne!(saved, stored.as_bytes());
+        assert_eq!(fs::read_to_string(&path).unwrap(), stored);
     }
 
     #[test]
-    fn nothing_is_written_after_finalize() {
+    fn nothing_is_written_after_close() {
         let (_dir, store) = store_on_disk();
         let queued = store.snapshot(&named("queued.txt"));
         let last = store.snapshot(&named("last.txt"));
 
-        finalize_as(&store, "final");
-        let finalized = fs::read(store.path().unwrap()).unwrap();
+        store.close().unwrap();
+        let closed = fs::read(store.path().unwrap()).unwrap();
 
         // Saves that were queued before, in either order, one that is requested
-        // afterwards (also through a clone), and a second finalize.
+        // afterwards (also through a clone), and a second close.
         last.save().unwrap();
         queued.save().unwrap();
         store.snapshot(&named("too-late.txt")).save().unwrap();
         store.clone().snapshot(&named("clone.txt")).save().unwrap();
-        finalize_as(&store, "again");
+        store.close().unwrap();
 
-        assert_eq!(fs::read(store.path().unwrap()).unwrap(), finalized);
+        assert_eq!(fs::read(store.path().unwrap()).unwrap(), closed);
         assert_eq!(on_disk(&store).output_filename, "last.txt");
     }
 
     #[test]
-    fn finalize_waits_for_a_write_that_is_under_way() {
+    fn close_waits_for_a_write_that_is_under_way() {
         let (_dir, store) = store_on_disk();
         let _last = store.snapshot(&named("last.txt"));
 
@@ -343,12 +342,12 @@ mod tests {
         let writing = lock(&store.shared.written);
         let closing = {
             let store = store.clone();
-            std::thread::spawn(move || finalize_as(&store, "final"))
+            std::thread::spawn(move || store.close().unwrap())
         };
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(
             !closing.is_finished(),
-            "finalize must not write while another write is under way"
+            "close must not write while another write is under way"
         );
         drop(writing);
 
@@ -356,49 +355,31 @@ mod tests {
         assert_eq!(name_on_disk(&store), "last.txt");
     }
 
-    /// No snapshot can slip in between the moment finalize reads the newest one and
-    /// the moment the file is written: taking one waits, and is then too late.
+    /// Taking a snapshot never waits for file IO, not even for the last write of a
+    /// session: whoever takes one holds the state lock.
     #[test]
-    fn no_snapshot_is_taken_while_finalize_is_under_way() {
+    fn a_snapshot_is_taken_without_waiting_for_a_write() {
         let (_dir, store) = store_on_disk();
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
 
-        let closing = {
-            let store = store.clone();
-            std::thread::spawn(move || {
-                store.finalize(|config| {
-                    config.output_filename = "final.txt".into();
-                    entered_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                })
-            })
-        };
-        entered_rx.recv().unwrap();
-        let concurrent = {
-            let store = store.clone();
-            std::thread::spawn(move || store.snapshot(&named("concurrent.txt")).save())
-        };
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(
-            !concurrent.is_finished(),
-            "a snapshot must wait for a finalize that is under way"
-        );
-        release_tx.send(()).unwrap();
+        // A writer (a save or the close) holds the store while it writes the file.
+        let writing = lock(&store.shared.written);
+        let snapshot = store.snapshot(&named("meanwhile.txt"));
+        drop(writing);
 
-        closing.join().unwrap().unwrap();
-        concurrent.join().unwrap().unwrap();
-        assert_eq!(name_on_disk(&store), "final.txt");
+        assert_eq!(store.latest().output_filename, "meanwhile.txt");
+        snapshot.save().unwrap();
+        assert_eq!(name_on_disk(&store), "meanwhile.txt");
     }
 
     #[test]
-    fn a_failed_finalize_leaves_the_store_open() {
+    fn a_failed_close_leaves_the_store_open() {
         let (_dir, store) = store_on_disk();
         let path = store.path().unwrap().to_path_buf();
+        let _unsaved = store.snapshot(&named("unsaved.txt"));
 
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        assert!(store.finalize(|_| {}).is_err());
+        assert!(store.close().is_err());
 
         fs::remove_dir(&path).unwrap();
         store.snapshot(&named("next.txt")).save().unwrap();
@@ -406,11 +387,10 @@ mod tests {
     }
 
     #[test]
-    fn a_detached_store_can_be_finalized() {
+    fn a_detached_store_can_be_closed() {
         let store = ConfigStore::detached();
-        store
-            .finalize(|config| config.output_filename = "final.txt".into())
-            .unwrap();
+        let _unsaved = store.snapshot(&named("final.txt"));
+        store.close().unwrap();
         assert_eq!(store.latest().output_filename, "final.txt");
     }
 

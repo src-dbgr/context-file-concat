@@ -25,7 +25,7 @@ fn item(path: &str, is_directory: bool) -> FileItem {
 
 fn state_of(items: Vec<FileItem>) -> AppState {
     let mut state = AppState::default();
-    state.config = AppConfig {
+    *state.config_mut() = AppConfig {
         ignore_patterns: HashSet::new(),
         remove_empty_directories: false,
         ..Default::default()

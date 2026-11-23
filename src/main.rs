@@ -3,9 +3,12 @@ use context_file_concat::app::file_dialog::NativeDialogService;
 use context_file_concat::app::proxy::EventProxy;
 use context_file_concat::app::shared_state::SharedState;
 use context_file_concat::app::state::AppState;
-use context_file_concat::app::window_geometry::{self, Rect, WindowGeometry, MIN_WINDOW_SIZE};
+use context_file_concat::app::window_geometry::{
+    GeometryStore, Rect, SaveDebounce, GEOMETRY_SAVE_DELAY, MIN_WINDOW_SIZE,
+};
 use context_file_concat::config::{settings, AppConfig, ConfigStore};
 use std::sync::Arc;
+use std::time::Instant;
 use tao::{
     dpi::{LogicalPosition, LogicalSize},
     event::{Event, StartCause, WindowEvent},
@@ -33,23 +36,30 @@ async fn main() {
     // in the transport's outbox (see `app::transport`).
     let event_loop = EventLoopBuilder::<app::transport::Wake>::with_user_event().build();
 
-    // Load the persisted config exactly once. This is the only place that decides
-    // which file that is; from here on the store is the way the config gets saved.
-    let (config_store, mut config) = match settings::default_config_path() {
-        Some(path) => ConfigStore::open(path),
-        None => {
-            tracing::warn!("No config directory available. Settings will not be persisted.");
-            (ConfigStore::detached(), AppConfig::default())
-        }
-    };
+    // This is the only place that decides which files the application keeps its own
+    // data in: the configuration, and beside it the geometry of the window.
+    let config_path = settings::default_config_path();
+    if config_path.is_none() {
+        tracing::warn!("No config directory available. Settings will not be persisted.");
+    }
 
-    // The window geometry is read from the config (converting what an older version
-    // stored in physical pixels), kept in the config in logical units from now on, and
-    // pulled back onto a visible monitor if necessary.
-    let monitors = logical_monitors(&event_loop);
-    let mut geometry = WindowGeometry::from_config(&config, primary_scale_factor(&event_loop));
-    geometry.apply_to(&mut config);
-    geometry = geometry.clamped_to_visible(&monitors);
+    // The window geometry belongs to this function, not to the application state: it
+    // is read here (taking over what an older version kept in the config file, before
+    // anything can rewrite that file), follows the window in the event loop below and
+    // is saved a moment after the window has come to rest and when the loop ends. For the start it is pulled back onto a visible
+    // monitor if necessary.
+    let (geometry_store, stored_geometry) = match &config_path {
+        Some(path) => GeometryStore::open(path, primary_scale_factor(&event_loop)),
+        None => (GeometryStore::detached(), Default::default()),
+    };
+    let mut geometry = stored_geometry.clamped_to_visible(&logical_monitors(&event_loop));
+
+    // Load the persisted config exactly once; from here on the store is the way the
+    // config gets saved.
+    let (config_store, config) = match config_path {
+        Some(path) => ConfigStore::open(path),
+        None => (ConfigStore::detached(), AppConfig::default()),
+    };
     let (min_width, min_height) = MIN_WINDOW_SIZE;
 
     let window = WindowBuilder::new()
@@ -184,9 +194,12 @@ async fn main() {
         .build(&*window)
         .expect("Failed to build WebView");
 
-    let state_for_events = state.clone();
     let window_for_events = window.clone();
-    let mut geometry_saved = false;
+    let mut session_saved = false;
+    // The geometry is also saved while the application runs, so that a crash does not
+    // cost it: once the window has rested after a resize/move, on the blocking pool.
+    let mut save_debounce = SaveDebounce::new(GEOMETRY_SAVE_DELAY);
+    let runtime = tokio::runtime::Handle::current();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -200,29 +213,39 @@ async fn main() {
                     tracing::info!("Close requested.");
                     *control_flow = ControlFlow::Exit;
                 }
-                // The geometry is tracked outside the application state: a worker
-                // holding the state lock must not make resizing/moving stutter.
+                // The geometry is tracked here, outside the application state: a
+                // worker holding the state lock cannot make resizing/moving stutter.
                 WindowEvent::Resized(size) => {
                     let scale = window_for_events.scale_factor();
-                    geometry.record_size((size.width.into(), size.height.into()), scale);
-                    geometry.sync_if_uncontended(&state_for_events);
+                    if geometry.record_size((size.width.into(), size.height.into()), scale) {
+                        save_debounce.changed(Instant::now());
+                    }
                 }
                 WindowEvent::Moved(position) => {
                     let scale = window_for_events.scale_factor();
-                    geometry.record_position((position.x.into(), position.y.into()), scale);
-                    geometry.sync_if_uncontended(&state_for_events);
+                    if geometry.record_position((position.x.into(), position.y.into()), scale) {
+                        save_debounce.changed(Instant::now());
+                    }
                 }
                 _ => (),
             },
             // The one event every way of quitting ends in: closing the window
             // (`ControlFlow::Exit`) as well as Cmd+Q / the Quit menu item on macOS,
             // which terminate the application without a `CloseRequested`.
-            Event::LoopDestroyed if !geometry_saved => {
-                geometry_saved = true;
+            //
+            // Both saves happen here and now instead of in the background (the process
+            // ends when this returns), and neither waits for the application state.
+            Event::LoopDestroyed if !session_saved => {
+                session_saved = true;
+                save_debounce.cancel();
                 tracing::info!("Exiting. Saving final window state...");
-                if let Err(e) = window_geometry::persist(geometry, &state_for_events, &config_store)
-                {
-                    tracing::error!("Failed to save config on exit: {}", e);
+                if let Err(e) = geometry_store.save(geometry) {
+                    tracing::error!("Failed to save the window geometry on exit: {e}");
+                }
+                // A change of the config whose background save has not run yet is
+                // written now; whatever is still queued is skipped afterwards.
+                if let Err(e) = config_store.close() {
+                    tracing::error!("Failed to save config on exit: {e}");
                 }
             }
             Event::UserEvent(app::transport::Wake) => {
@@ -231,7 +254,23 @@ async fn main() {
                     app::handle_user_event(user_event, &webview);
                 }
             }
+            // Among others the wake-up the pending save has asked for (see below).
             _ => (),
+        }
+
+        // The window has come to rest: its geometry is written in the background. The
+        // store serializes its writes and always writes the geometry it was handed
+        // last, so this cannot get in the way of a later save or of the one at exit.
+        if save_debounce.take_due(Instant::now()) {
+            let store = geometry_store.clone();
+            runtime.spawn_blocking(move || {
+                if let Err(e) = store.save(geometry) {
+                    tracing::warn!("Failed to save the window geometry: {e}");
+                }
+            });
+        }
+        if let (Some(due_at), ControlFlow::Wait) = (save_debounce.due_at(), *control_flow) {
+            *control_flow = ControlFlow::WaitUntil(due_at);
         }
     });
 }

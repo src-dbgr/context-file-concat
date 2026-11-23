@@ -97,7 +97,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
     };
 
     UiState {
-        config: UiConfig::from(&state.config),
+        config: UiConfig::from(state.config()),
         current_path: state.current_path.clone(),
         rows: tree.rows,
         rows_start: tree.rows_start,
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn test_stats_and_node_properties() {
         let mut state = AppState::default();
-        state.config = create_test_config();
+        *state.config_mut() = create_test_config();
         state.current_path = "/project".to_string();
         let src_path = PathBuf::from("/project/src");
         let main_rs_path = PathBuf::from("/project/src/main.rs");

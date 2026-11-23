@@ -2,9 +2,9 @@
 //!
 //! [`AppConfig`] holds two kinds of things: the settings a user edits and may want to
 //! share with a team (ignore patterns, search and output options, the size limit), and
-//! what describes one installation on one machine (the directories used last, the
-//! window geometry). An exported file is made to be shared, so it holds the first kind
-//! only: no path of the person who exported it leaves their machine.
+//! what describes one installation on one machine (the directories used last). An
+//! exported file is made to be shared, so it holds the first kind only: no path of the
+//! person who exported it leaves their machine.
 //!
 //! - [`SharedConfig`] is that view, and the format of an exported file.
 //! - [`ImportedConfig`] is what an import reads. It accepts the exported format as
@@ -60,7 +60,7 @@ impl From<&AppConfig> for SharedConfig {
 
 impl SharedConfig {
     /// Replaces the shared settings of `config` by these. Everything else in `config`
-    /// (directories, window geometry) stays as it is.
+    /// (the directories) stays as it is.
     pub fn apply_to(self, config: &mut AppConfig) {
         // Destructured without `..`: a setting added to the view cannot be forgotten.
         let Self {
@@ -88,8 +88,8 @@ impl SharedConfig {
 /// configuration file names besides them.
 ///
 /// An exported file names no directories. A complete configuration file does, and an
-/// import keeps honouring them as it always did; its window geometry is ignored (it
-/// belongs to another display, and may be stored in another unit).
+/// import keeps honouring them as it always did; a window geometry such a file may
+/// hold (versions up to 0.3.1 kept it there) is ignored.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ImportedConfig {
     #[serde(flatten)]
@@ -120,9 +120,6 @@ mod tests {
             include_tree_by_default: false,
             use_relative_paths: false,
             remove_empty_directories: true,
-            window_size: (1234.0, 567.0),
-            window_position: (-89.0, 10.0),
-            geometry_units: crate::config::GeometryUnits::Physical,
             max_file_size_mb: 7,
         }
     }
@@ -132,13 +129,7 @@ mod tests {
     }
 
     /// The fields of an `AppConfig` that describe the installation and are not shared.
-    const INSTALLATION_FIELDS: [&str; 5] = [
-        "last_directory",
-        "output_directory",
-        "window_size",
-        "window_position",
-        "geometry_units",
-    ];
+    const INSTALLATION_FIELDS: [&str; 2] = ["last_directory", "output_directory"];
 
     /// Every field of the configuration is either shared or named here as belonging
     /// to the installation. A field added to `AppConfig` fails this test until it is
@@ -206,9 +197,6 @@ mod tests {
             AppConfig {
                 last_directory: untouched.last_directory,
                 output_directory: untouched.output_directory,
-                window_size: untouched.window_size,
-                window_position: untouched.window_position,
-                geometry_units: untouched.geometry_units,
                 ..source
             }
         );
