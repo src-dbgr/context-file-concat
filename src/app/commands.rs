@@ -1031,7 +1031,7 @@ pub fn pick_output_directory<P: EventProxy, D: DialogService + ?Sized>(
 ///
 /// The settings a user edits and shares are taken from the file (ignore patterns,
 /// search and output options, the size limit, see [`AppConfig::adopt_user_settings`]).
-/// The window geometry of the file is ignored: it describes the display of whoever
+/// A window geometry the file may hold is ignored: it describes the display of whoever
 /// exported it, possibly in another unit.
 ///
 /// The import is treated as a "hard reset" of the application's context: the current
@@ -1075,8 +1075,8 @@ pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
 }
 
 /// Exports the settings that are meant to be shared to a JSON file: patterns, search
-/// and output options, the size limit. Directories and the window geometry of this
-/// installation are not part of the file (see [`config::SharedConfig`]).
+/// and output options, the size limit. The directories of this installation are not
+/// part of the file (see [`config::SharedConfig`]).
 ///
 /// The settings are copied under the state lock; the file is written without it, so
 /// a slow disk does not hold up everything else that needs the state.
@@ -1111,7 +1111,7 @@ mod tests {
     use crate::app::file_dialog::DialogService;
     use crate::app::state::AppState;
     use crate::app::view_model::UiState;
-    use crate::config::{ConfigStore, GeometryUnits};
+    use crate::config::ConfigStore;
     use crate::core::FileItem;
     use crate::utils::test_helpers::setup_test_logging;
     use serde_json::json;
@@ -1577,25 +1577,28 @@ mod tests {
         assert!(state.config.ignore_patterns.contains("/docs/"));
     }
 
-    /// A configuration as somebody else exported it: other settings, and the geometry
-    /// and last directory of *their* installation.
+    /// A configuration as somebody else exported it: other settings, and the last
+    /// directory of *their* installation.
     fn foreign_config(last_directory: Option<PathBuf>) -> AppConfig {
         AppConfig {
             ignore_patterns: HashSet::from(["*.log".to_string()]),
             case_sensitive_search: true,
             output_filename: "imported.txt".to_string(),
             max_file_size_mb: 3,
-            window_size: (4000.0, 3000.0),
-            window_position: (-900.0, -900.0),
-            geometry_units: GeometryUnits::Physical,
             last_directory,
             ..Default::default()
         }
     }
 
+    /// Imports `imported` as a complete configuration file of a version up to 0.3.1,
+    /// which held the window geometry of that installation as well.
     fn import_file(harness: &TestHarness, imported: &AppConfig) {
         let path = harness.root_path.join("imported_config.json");
-        std_fs::write(&path, serde_json::to_string(imported).unwrap()).unwrap();
+        let mut file = serde_json::to_value(imported).unwrap();
+        file["window_size"] = json!([4000.0, 3000.0]);
+        file["window_position"] = json!([-900.0, -900.0]);
+        file["geometry_units"] = json!("physical");
+        std_fs::write(&path, file.to_string()).unwrap();
         harness.dialog.set_pick_file(Some(path));
         import_config(
             harness.dialog.as_ref(),
@@ -1604,20 +1607,13 @@ mod tests {
         );
     }
 
-    const KEPT_GEOMETRY: ((f64, f64), (f64, f64)) = ((1000.0, 700.0), (7.0, 8.0));
-
-    /// Gives the state a geometry of its own, to tell it from the imported one.
-    fn set_kept_geometry(harness: &TestHarness) {
-        let mut state = harness.state.lock();
-        state.config.window_size = KEPT_GEOMETRY.0;
-        state.config.window_position = KEPT_GEOMETRY.1;
-        state.config.geometry_units = GeometryUnits::Logical;
-    }
-
+    /// The geometry of an imported file reaches neither the state nor the config file.
     #[track_caller]
-    fn assert_geometry_is_kept(config: &AppConfig) {
-        assert_eq!((config.window_size, config.window_position), KEPT_GEOMETRY);
-        assert_eq!(config.geometry_units, GeometryUnits::Logical);
+    fn assert_no_geometry_was_imported(store: &ConfigStore) {
+        let written = std_fs::read_to_string(store.path().unwrap()).unwrap();
+        for field in ["window_size", "window_position", "geometry_units"] {
+            assert!(!written.contains(field), "{field} in {written}");
+        }
     }
 
     /// The import is a hard reset: selection and filters of the loaded directory are
@@ -1633,7 +1629,6 @@ mod tests {
             state.selected_files.insert(kept.clone());
             state.search_query = "kept".to_string();
         }
-        set_kept_geometry(&harness);
         let project_to_open = harness.create_dir("new_project_dir");
         harness.create_file("new_project_dir/file.rs", "");
         harness.create_file("new_project_dir/debug.log", "");
@@ -1660,12 +1655,7 @@ mod tests {
         assert_eq!(final_state.current_path, project_to_open.to_string_lossy());
         assert!(final_state.is_fully_scanned);
 
-        let expected = AppConfig {
-            window_size: KEPT_GEOMETRY.0,
-            window_position: KEPT_GEOMETRY.1,
-            geometry_units: GeometryUnits::Logical,
-            ..imported
-        };
+        let expected = imported;
         {
             let state = harness.state.lock();
             assert!(state.selected_files.is_empty() && state.search_query.is_empty());
@@ -1680,13 +1670,13 @@ mod tests {
                 "the imported ignore pattern applies to the opened directory"
             );
             assert_eq!(state.config, expected);
-            assert_geometry_is_kept(&state.config);
         }
         let saved = config_on_disk(&store, |saved| {
             saved.last_directory.as_ref() == Some(&project_to_open)
         })
         .await;
         assert_eq!(saved, expected);
+        assert_no_geometry_was_imported(&store);
     }
 
     /// The imported file names no directory: the state is clean and nothing is
@@ -1696,7 +1686,6 @@ mod tests {
         let (mut harness, store) = TestHarness::with_config_file();
         harness.create_file("kept.txt", "");
         harness.set_initial_files(&["kept.txt"]);
-        set_kept_geometry(&harness);
         let last_directory = Some(harness.root_path.clone());
         harness.state.lock().config.last_directory = last_directory.clone();
         let imported = foreign_config(None);
@@ -1716,9 +1705,6 @@ mod tests {
             .await;
 
         let expected = AppConfig {
-            window_size: KEPT_GEOMETRY.0,
-            window_position: KEPT_GEOMETRY.1,
-            geometry_units: GeometryUnits::Logical,
             last_directory,
             ..imported
         };
@@ -1727,12 +1713,12 @@ mod tests {
             assert_eq!(state.current_path, "");
             assert!(state.full_file_list().is_empty() && !state.is_scanning());
             assert_eq!(state.config, expected);
-            assert_geometry_is_kept(&state.config);
         }
         assert_eq!(
             config_on_disk(&store, |saved| saved.output_filename == "imported.txt").await,
             expected
         );
+        assert_no_geometry_was_imported(&store);
     }
 
     /// Without a directory there is nothing to filter or scan, but the change is
@@ -2406,7 +2392,6 @@ mod tests {
         let mut harness = TestHarness::new();
         harness.create_file("kept.txt", "");
         harness.set_initial_files(&["kept.txt"]);
-        set_kept_geometry(&harness);
         let nonexistent = harness.root_path.join("nonexistent_dir");
 
         import_file(&harness, &foreign_config(Some(nonexistent)));
@@ -2429,7 +2414,6 @@ mod tests {
         let state = harness.state.lock();
         assert_eq!(state.current_path, "");
         assert!(!state.is_scanning());
-        assert_geometry_is_kept(&state.config);
     }
 
     // =========================================================================================
@@ -3557,7 +3541,6 @@ mod tests {
             state.config.output_filename = "shared.txt".to_string();
             state.config.output_directory = Some(PathBuf::from("/home/alice/out"));
             state.config.last_directory = Some(PathBuf::from("/home/alice/project"));
-            state.config.window_size = (1234.0, 567.0);
         }
 
         export_config(
@@ -3590,7 +3573,7 @@ mod tests {
     }
 
     /// The export of one installation, imported into another: the settings arrive,
-    /// the directories and the geometry of the importing installation stay.
+    /// the directories of the importing installation stay.
     #[tokio::test]
     async fn test_exported_config_can_be_imported() {
         let mut exporter = TestHarness::new();
@@ -3614,7 +3597,6 @@ mod tests {
         ));
 
         let mut importer = TestHarness::new();
-        set_kept_geometry(&importer);
         {
             let mut state = importer.state.lock();
             state.config.output_directory = Some(PathBuf::from("/home/bob/out"));
@@ -3647,7 +3629,6 @@ mod tests {
             config.last_directory,
             Some(PathBuf::from("/home/bob/project"))
         );
-        assert_geometry_is_kept(&config);
     }
 
     /// The file is written without the state lock: while the export writes, the state
@@ -4170,7 +4151,7 @@ mod tests {
         {
             let mut state = harness.state.lock();
             state.config.ignore_patterns = HashSet::from(["keep".to_string()]);
-            state.config.window_size = (640.0, 480.0);
+            state.config.max_file_size_mb = 7;
             state.config.last_directory = Some(PathBuf::from("/somewhere"));
         }
 
@@ -4197,7 +4178,7 @@ mod tests {
         assert!(state.config.case_sensitive_search);
         assert!(!state.config.use_relative_paths);
         // What the UI never edits cannot be touched by its commands.
-        assert_eq!(state.config.window_size, (640.0, 480.0));
+        assert_eq!(state.config.max_file_size_mb, 7);
         assert_eq!(
             state.config.last_directory,
             Some(PathBuf::from("/somewhere"))

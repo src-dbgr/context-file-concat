@@ -108,7 +108,8 @@ pub fn save_config(config: &AppConfig, config_path: &Path) -> Result<()> {
 }
 
 /// Writes `value` to `path` as indented JSON, atomically (see [`write_atomically`]).
-fn write_json(value: &impl Serialize, path: &Path) -> Result<()> {
+/// The directory of `path` has to exist.
+pub(crate) fn write_json(value: &impl Serialize, path: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     write_atomically(path, |file| file.write_all(json.as_bytes()))?;
     Ok(())
@@ -212,16 +213,10 @@ pub fn import_config(import_path: &PathBuf) -> Result<ImportedConfig> {
 ///
 /// Fields the file does not name have their default; that is what
 /// `#[serde(default)]` on [`AppConfig`] does, for every field there is or will be.
-/// This function adds the two things a file of an older version needs that serde
-/// cannot express:
-///
-/// * the unit of a geometry the file does not hold, see
-///   [`mark_default_geometry_as_logical`];
-/// * `null` in place of a value, see [`from_fields`].
+/// This function adds the one thing a file of an older version needs that serde
+/// cannot express: `null` in place of a value, see [`from_fields`].
 fn parse_stored_config(content: &str) -> Result<AppConfig> {
-    let mut fields = parse_object(content)?;
-    mark_default_geometry_as_logical(&mut fields)?;
-    from_fields(fields)
+    from_fields(parse_object(content)?)
 }
 
 /// Parses `content` as a JSON object.
@@ -230,23 +225,6 @@ fn parse_object(content: &str) -> Result<Map<String, Value>> {
         Value::Object(fields) => Ok(fields),
         _ => Err(anyhow!("Config is not a JSON object")),
     }
-}
-
-/// Names the unit of the window geometry where the file holds no geometry at all.
-///
-/// A geometry without a unit is in physical pixels (see
-/// [`GeometryUnits`](super::GeometryUnits)), and that is what a missing
-/// `geometry_units` is read as. A file that holds neither size nor position, however,
-/// gets the default geometry, which is in the unit of the defaults.
-fn mark_default_geometry_as_logical(fields: &mut Map<String, Value>) -> Result<()> {
-    let names = |key: &str| fields.get(key).is_some_and(|value| !value.is_null());
-    if !names("window_size") && !names("window_position") && !names("geometry_units") {
-        fields.insert(
-            "geometry_units".to_string(),
-            serde_json::to_value(AppConfig::default().geometry_units)?,
-        );
-    }
-    Ok(())
 }
 
 /// Deserializes `fields`, reading a `null` like a field that is missing where it is
@@ -267,7 +245,6 @@ fn from_fields<T: DeserializeOwned>(mut fields: Map<String, Value>) -> Result<T>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::GeometryUnits;
     #[cfg(unix)] // Only the permission-based tests need it.
     use crate::utils::test_helpers::running_as_root;
     use serde_json::json;
@@ -683,9 +660,6 @@ mod tests {
             include_tree_by_default: false,
             use_relative_paths: false,
             remove_empty_directories: true,
-            window_size: (1111.0, 777.0),
-            window_position: (11.0, 22.0),
-            geometry_units: GeometryUnits::Logical,
             max_file_size_mb: 7,
         };
         let complete = serde_json::to_value(&stored).unwrap();
@@ -706,8 +680,6 @@ mod tests {
 
                 let mut expected = complete.clone();
                 expected[field] = match (field.as_str(), is_null) {
-                    // A geometry without a unit is in physical pixels.
-                    ("geometry_units", _) => json!("physical"),
                     // `null` is a value of a directory: none.
                     ("last_directory" | "output_directory", true) => Value::Null,
                     _ => defaults[field].clone(),
@@ -719,52 +691,41 @@ mod tests {
         }
     }
 
-    /// The unit of the geometry: the one of the file if it holds a geometry, the one
-    /// of the defaults if it holds none.
+    /// A file of a version that kept the window geometry in the configuration: its
+    /// settings are read, and the next save writes the file without the geometry.
     #[test]
-    fn test_stored_config_geometry_unit() {
-        let geometry_of = |stored: Value| {
-            let config = parse_stored_config(&stored.to_string()).unwrap();
-            (
-                config.geometry_units,
-                config.window_size,
-                config.window_position,
-            )
-        };
-        let default = AppConfig::default();
-        let (size, position) = (default.window_size, default.window_position);
+    fn test_stored_config_with_a_window_geometry_is_rewritten_without_it() {
+        let harness = TestHarness::new();
+        harness.write_to_config_file(
+            &json!({
+                "output_filename": "kept.txt",
+                "window_size": [2400.0, 1600.0],
+                "window_position": [1.0, 2.0],
+                "geometry_units": "logical",
+            })
+            .to_string(),
+        );
 
-        // No geometry at all: the defaults, which are logical.
+        let loaded = load_config(&harness.config_path).unwrap();
         assert_eq!(
-            geometry_of(json!({})),
-            (GeometryUnits::Logical, size, position)
+            loaded,
+            AppConfig {
+                output_filename: "kept.txt".to_string(),
+                ..Default::default()
+            }
         );
-        assert_eq!(
-            geometry_of(json!({ "window_size": null, "geometry_units": null })),
-            (GeometryUnits::Logical, size, position)
-        );
-        // A geometry of a version that did not name the unit: physical pixels.
-        assert_eq!(
-            geometry_of(json!({ "window_size": [2400.0, 1600.0], "window_position": [1.0, 2.0] })),
-            (GeometryUnits::Physical, (2400.0, 1600.0), (1.0, 2.0))
-        );
-        assert_eq!(
-            geometry_of(json!({ "window_size": [2400.0, 1600.0] })),
-            (GeometryUnits::Physical, (2400.0, 1600.0), position)
-        );
-        assert_eq!(
-            geometry_of(json!({ "window_position": [1.0, 2.0] })),
-            (GeometryUnits::Physical, size, (1.0, 2.0))
-        );
-        // A unit that is named is kept, with or without a geometry.
-        assert_eq!(
-            geometry_of(json!({ "window_size": [800.0, 600.0], "geometry_units": "logical" })),
-            (GeometryUnits::Logical, (800.0, 600.0), position)
-        );
-        assert_eq!(
-            geometry_of(json!({ "geometry_units": "physical" })),
-            (GeometryUnits::Physical, size, position)
-        );
+        // Reading leaves the file alone.
+        assert!(fs::read_to_string(&harness.config_path)
+            .unwrap()
+            .contains("window_size"));
+
+        save_config(&loaded, &harness.config_path).unwrap();
+
+        let written = fs::read_to_string(&harness.config_path).unwrap();
+        for field in ["window_size", "window_position", "geometry_units"] {
+            assert!(!written.contains(field), "{field} in {written}");
+        }
+        assert_eq!(load_config(&harness.config_path).unwrap(), loaded);
     }
 
     /// `null` for a setting that has no such value is read like a missing field,
@@ -806,8 +767,6 @@ mod tests {
             output_directory: Some(PathBuf::from("/home/alice/out")),
             output_filename: "shared.txt".to_string(),
             case_sensitive_search: true,
-            window_size: (1234.0, 567.0),
-            window_position: (89.0, 10.0),
             max_file_size_mb: 7,
             ..Default::default()
         }
@@ -857,16 +816,12 @@ mod tests {
             last_directory: Some(PathBuf::from("/home/bob/project")),
             ..Default::default()
         };
-        let geometry = (receiver.window_size, receiver.window_position);
         receiver.adopt_user_settings(imported);
         assert_eq!(
             receiver,
             AppConfig {
                 output_directory: Some(PathBuf::from("/home/bob/out")),
                 last_directory: Some(PathBuf::from("/home/bob/project")),
-                window_size: geometry.0,
-                window_position: geometry.1,
-                geometry_units: GeometryUnits::Logical,
                 ..personal_config()
             }
         );

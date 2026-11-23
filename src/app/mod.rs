@@ -638,7 +638,7 @@ mod tests {
         {
             let mut state = harness.state.lock();
             state.config.ignore_patterns.clear();
-            state.config.window_size = (640.0, 480.0);
+            state.config.max_file_size_mb = 7;
         }
 
         harness.send("addIgnorePattern", serde_json::json!({ "pattern": "a" }));
@@ -656,7 +656,7 @@ mod tests {
         };
         assert_eq!(last.config.ignore_patterns, ["b", "c"]);
         assert!(!last.config.use_relative_paths);
-        assert_eq!(harness.state.lock().config.window_size, (640.0, 480.0));
+        assert_eq!(harness.state.lock().config.max_file_size_mb, 7);
 
         harness.send("clearIgnorePatterns", serde_json::Value::Null);
         harness.events(1).await;

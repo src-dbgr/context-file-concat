@@ -1,25 +1,37 @@
-//! Window geometry tracking and persistence.
+//! Window geometry: tracking, and persistence in a file of its own.
 //!
-//! The UI thread reports every resize/move here. The tracker is a small value owned by
-//! the event loop, so following the window never waits for the (potentially long-held)
-//! [`AppState`] mutex. The geometry only meets the configuration when it is persisted.
+//! The window belongs to the composition root (`main.rs`), and so does its geometry:
+//! the event loop owns a [`WindowGeometry`], reports every resize/move to it and hands
+//! it to a [`GeometryStore`] when the application quits. Neither the application state
+//! nor the configuration knows about it, so following the window never waits for the
+//! state lock, and saving the geometry never competes with a save of the configuration.
 //!
 //! All values are *logical* units: the window is restored with logical size/position,
 //! and mixing them with the physical pixels the windowing system reports would make the
 //! window grow on every restart on HiDPI displays.
 //!
-//! Versions up to 0.3.1 did mix them: they stored physical pixels. The configuration
-//! therefore names the unit of its geometry ([`GeometryUnits`]); a geometry without
-//! that mark is physical and is converted once, when it is read
-//! ([`WindowGeometry::from_config`]). Everything written from here is logical and
-//! marked as such.
+//! The geometry is kept in `window.json` beside the configuration file. Versions up to
+//! 0.3.1 kept it in the configuration file itself (and stored physical pixels, without
+//! saying so); a later version kept it there in logical units, marked as such. Where
+//! there is no `window.json` yet, the geometry of such a file is read once, converted
+//! if necessary, and written to `window.json` ([`GeometryStore::open`]). The
+//! configuration file loses it with its next save, as the configuration has no such
+//! fields any more.
 
-use crate::app::shared_state::SharedState;
-use crate::app::state::AppState;
-use crate::config::{AppConfig, ConfigStore, GeometryUnits};
+use crate::config::settings;
 use anyhow::Result;
-use std::sync::MutexGuard;
-use std::time::{Duration, Instant};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// The name of the file the geometry is kept in, in the directory of the configuration.
+pub const WINDOW_FILE: &str = "window.json";
+
+/// The geometry of a window nothing is known about.
+const DEFAULT_GEOMETRY: WindowGeometry = WindowGeometry {
+    size: (1200.0, 800.0),
+    position: (100.0, 100.0),
+};
 
 /// Smallest inner size the window may have, in logical units.
 pub const MIN_WINDOW_SIZE: (f64, f64) = (900.0, 600.0);
@@ -37,10 +49,6 @@ const MIN_VISIBLE: (f64, f64) = (120.0, 60.0);
 
 /// Offset from a monitor's top-left corner used when the stored position is unusable.
 const FALLBACK_OFFSET: (f64, f64) = (100.0, 100.0);
-
-/// How long persisting waits for the application state before bypassing it.
-const STATE_LOCK_BUDGET: Duration = Duration::from_millis(250);
-const STATE_LOCK_POLL: Duration = Duration::from_millis(5);
 
 /// An axis-aligned rectangle in logical units (a monitor's area).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,46 +115,26 @@ pub fn is_persistable_position(physical: (f64, f64)) -> bool {
         && physical.1 > PARKED_COORDINATE
 }
 
-/// Size and position of the main window in logical units.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Size and position of the main window in logical units. Serialized, this is the
+/// content of `window.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct WindowGeometry {
     pub size: (f64, f64),
     pub position: (f64, f64),
 }
 
 impl WindowGeometry {
-    /// Reads the stored geometry in logical units, replacing unusable values with the
-    /// defaults.
-    ///
-    /// A geometry stored in physical pixels (a configuration written by a version that
-    /// did not name the unit) is converted with `primary_scale`, the scale factor of
-    /// the primary monitor: that is where such a window is most likely to have been,
-    /// and the stored values do not say. Without the conversion the first start after
-    /// an upgrade would open the window at twice its size on a 2x display.
-    pub fn from_config(config: &AppConfig, primary_scale: f64) -> Self {
-        let (size, position) = match config.geometry_units {
-            GeometryUnits::Logical => (Some(config.window_size), Some(config.window_position)),
-            GeometryUnits::Physical => (
-                to_logical(config.window_size, primary_scale),
-                to_logical(config.window_position, primary_scale),
-            ),
-        };
-        let defaults = AppConfig::default();
+    /// A geometry of `size` and `position` in logical units where they are usable, of
+    /// the defaults where they are not (or not there).
+    fn from_stored(size: Option<(f64, f64)>, position: Option<(f64, f64)>) -> Self {
         Self {
             size: size
                 .filter(|size| is_persistable_size(*size))
-                .unwrap_or(defaults.window_size),
+                .unwrap_or(DEFAULT_GEOMETRY.size),
             position: position
                 .filter(|position| position.0.is_finite() && position.1.is_finite())
-                .unwrap_or(defaults.window_position),
+                .unwrap_or(DEFAULT_GEOMETRY.position),
         }
-    }
-
-    /// Writes the geometry into a configuration, in logical units and marked as such.
-    pub fn apply_to(&self, config: &mut AppConfig) {
-        config.window_size = self.size;
-        config.window_position = self.position;
-        config.geometry_units = GeometryUnits::Logical;
     }
 
     /// Records a new inner size reported in physical pixels; degenerate sizes are ignored.
@@ -193,83 +181,156 @@ impl WindowGeometry {
             }
         }
     }
+}
 
-    /// Mirrors the geometry into the in-memory configuration if the state is free right
-    /// now. Never blocks: a busy worker must not make resizing stutter, and the final
-    /// geometry is written by [`persist`] regardless.
-    pub fn sync_if_uncontended(&self, state: &SharedState) {
-        if let Some(mut guard) = state.try_lock() {
-            self.apply_to(&mut guard.config);
-        }
+impl Default for WindowGeometry {
+    fn default() -> Self {
+        DEFAULT_GEOMETRY
     }
 }
 
-/// Persists the geometry together with the current configuration. This is the last
-/// save of a session.
-///
-/// It is written here and now instead of in the background (the process ends when the
-/// caller returns), by [`ConfigStore::finalize`]: the store takes the most recent
-/// snapshot of the configuration, adds the geometry, writes the result and closes.
-/// That is one step for every other save, so it does not matter what else is going on:
-/// a save that is being written is waited for, snapshots that are still queued are
-/// either older than what is written here or the very configuration it is based on,
-/// and whatever is saved afterwards is skipped. Nothing can overwrite the final
-/// configuration, and the geometry is part of it in every case.
-///
-/// The in-memory configuration is the source of truth, so it is handed to the store
-/// first, as a snapshot taken under the state lock. The lock is only waited for
-/// [`STATE_LOCK_BUDGET`]: quitting must not hang behind a worker that holds the state
-/// during a large scan/filter. If the budget runs out, the store finalizes the most
-/// recent snapshot it knows. That is the configuration as of the last change that was
-/// saved, which every command does when it changes it, including a change the busy
-/// worker saves before the store is finalized. Disk I/O always happens without holding
-/// the state lock.
-pub fn persist(geometry: WindowGeometry, state: &SharedState, store: &ConfigStore) -> Result<()> {
-    persist_with(geometry, state, store, || {})
+/// What `window.json` holds, read leniently: a value that is missing or `null` is
+/// replaced by its default without costing the other one.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct StoredGeometry {
+    size: Option<(f64, f64)>,
+    position: Option<(f64, f64)>,
 }
 
-/// [`persist`] with a hook that runs between the look at the application state and the
-/// final save, for tests of what happens when another save gets in between.
-fn persist_with(
-    geometry: WindowGeometry,
-    state: &SharedState,
-    store: &ConfigStore,
-    before_finalize: impl FnOnce(),
-) -> Result<()> {
-    match lock_within(state, STATE_LOCK_BUDGET) {
-        Some(mut guard) => {
-            geometry.apply_to(&mut guard.config);
-            // Not saved from here: the snapshot only tells the store the configuration
-            // as it is now, which may contain changes nobody has asked to save yet.
-            let _ = guard.config_snapshot();
-        }
-        None => tracing::warn!(
-            "Application state is busy; saving window geometry with the last saved config."
-        ),
+/// The geometry as a configuration file of an older version holds it.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct LegacyGeometry {
+    window_size: Option<(f64, f64)>,
+    window_position: Option<(f64, f64)>,
+    geometry_units: Option<LegacyUnits>,
+}
+
+/// The unit of a geometry in a configuration file.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum LegacyUnits {
+    /// Physical pixels. This is what versions up to 0.3.1 stored, without saying so:
+    /// a geometry that does not name its unit is physical.
+    Physical,
+    /// Logical units, independent of the scale factor of the display.
+    Logical,
+}
+
+/// Reads the geometry out of the content of a configuration file of an older version,
+/// in logical units. `None` if the file holds no geometry (or cannot be read).
+///
+/// A geometry stored in physical pixels is converted with `primary_scale`, the scale
+/// factor of the primary monitor: that is where such a window is most likely to have
+/// been, and the stored values do not say. Without the conversion the first start
+/// after an upgrade would open the window at twice its size on a 2x display. Values
+/// that are unusable (also after the conversion) give way to the defaults.
+fn legacy_geometry(config_content: &str, primary_scale: f64) -> Option<WindowGeometry> {
+    let legacy: LegacyGeometry = serde_json::from_str(config_content).ok()?;
+    if legacy.window_size.is_none() && legacy.window_position.is_none() {
+        return None;
     }
-    before_finalize();
-    store.finalize(|latest| geometry.apply_to(latest))
+    let in_logical_units = |stored: (f64, f64)| match legacy.geometry_units {
+        Some(LegacyUnits::Logical) => Some(stored),
+        Some(LegacyUnits::Physical) | None => to_logical(stored, primary_scale),
+    };
+    Some(WindowGeometry::from_stored(
+        legacy.window_size.and_then(in_logical_units),
+        legacy.window_position.and_then(in_logical_units),
+    ))
 }
 
-/// Tries to lock the state for at most `budget`.
-fn lock_within(state: &SharedState, budget: Duration) -> Option<MutexGuard<'_, AppState>> {
-    let deadline = Instant::now() + budget;
-    loop {
-        if let Some(guard) = state.try_lock() {
-            return Some(guard);
+/// Keeps the geometry of the window in `window.json`.
+///
+/// The file is only ever written by the composition root: once when the geometry of an
+/// older configuration file is taken over, and when the application quits.
+#[derive(Debug, Clone)]
+pub struct GeometryStore {
+    /// The file the geometry is written to; `None` for a detached store.
+    path: Option<PathBuf>,
+}
+
+impl GeometryStore {
+    /// Opens the geometry that belongs to the configuration file at `config_path`
+    /// (`window.json` in the same directory) and returns the store together with the
+    /// geometry to start with:
+    ///
+    /// 1. what `window.json` holds;
+    /// 2. without such a file (or with one that cannot be read): the geometry an older
+    ///    version left in the configuration file, converted to logical units with
+    ///    `primary_scale` if necessary (see [`legacy_geometry`]). It is written to
+    ///    `window.json` right away, as the configuration file loses it with its next
+    ///    save;
+    /// 3. the default geometry otherwise. Nothing is written for it.
+    ///
+    /// The configuration file is only read here, never created or changed.
+    pub fn open(config_path: &Path, primary_scale: f64) -> (Self, WindowGeometry) {
+        let store = Self {
+            path: Some(config_path.with_file_name(WINDOW_FILE)),
+        };
+        if let Some(geometry) = store.read() {
+            return (store, geometry);
         }
-        if Instant::now() >= deadline {
-            return None;
+        let migrated = fs::read_to_string(config_path)
+            .ok()
+            .and_then(|content| legacy_geometry(&content, primary_scale));
+        let Some(geometry) = migrated else {
+            return (store, WindowGeometry::default());
+        };
+        tracing::info!("Taking over the window geometry from {config_path:?}.");
+        if let Err(e) = store.save(geometry) {
+            tracing::warn!("Failed to save the window geometry that was taken over: {e}");
         }
-        std::thread::sleep(STATE_LOCK_POLL);
+        (store, geometry)
+    }
+
+    /// A store that is not bound to a file: nothing is read, nothing is written. Used
+    /// when no configuration directory can be determined.
+    pub fn detached() -> Self {
+        Self { path: None }
+    }
+
+    /// The geometry in the file, `None` if there is no file or no geometry in it.
+    fn read(&self) -> Option<WindowGeometry> {
+        let content = fs::read_to_string(self.path.as_ref()?).ok()?;
+        match serde_json::from_str::<StoredGeometry>(&content) {
+            Ok(StoredGeometry {
+                size: None,
+                position: None,
+            }) => None,
+            Ok(stored) => Some(WindowGeometry::from_stored(stored.size, stored.position)),
+            Err(e) => {
+                tracing::warn!("Failed to read the window geometry: {e}");
+                None
+            }
+        }
+    }
+
+    /// Writes the geometry to the file (atomically, like the configuration), creating
+    /// its directory if necessary. Blocks on file IO and on nothing else.
+    pub fn save(&self, geometry: WindowGeometry) -> Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        settings::write_json(&geometry, path)?;
+        tracing::info!("Saved window geometry to {path:?}");
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::settings;
-    use std::path::Path;
+    use crate::app::shared_state::SharedState;
+    use crate::app::state::AppState;
+    use crate::config::{AppConfig, ConfigStore};
+    use serde_json::{json, Value};
 
     const MONITOR: Rect = Rect {
         x: 0.0,
@@ -343,30 +404,55 @@ mod tests {
         assert_eq!(g.position, (-200.0, 30.0));
     }
 
-    #[test]
-    fn from_config_falls_back_to_defaults_for_unusable_values() {
-        let defaults = AppConfig::default();
-        let config = AppConfig {
-            window_size: (0.0, 0.0),
-            window_position: (f64::NAN, 5.0),
+    // --- The geometry in a configuration file of an older version ---
+
+    /// The content of a configuration file of an older version: its settings and the
+    /// given geometry fields.
+    fn legacy_config(geometry: Value) -> String {
+        let mut config = serde_json::to_value(AppConfig {
+            output_filename: "kept.txt".into(),
             ..AppConfig::default()
-        };
-        let g = WindowGeometry::from_config(&config, 2.0);
-        assert_eq!(g.size, defaults.window_size);
-        assert_eq!(g.position, defaults.window_position);
+        })
+        .unwrap();
+        let fields = config.as_object_mut().unwrap();
+        fields.extend(geometry.as_object().unwrap().clone());
+        config.to_string()
+    }
+
+    fn legacy(geometry: Value, primary_scale: f64) -> Option<WindowGeometry> {
+        legacy_geometry(&legacy_config(geometry), primary_scale)
+    }
+
+    #[test]
+    fn legacy_geometry_falls_back_to_defaults_for_unusable_values() {
+        let g = legacy(
+            json!({ "window_size": [0.0, 0.0], "window_position": null, "geometry_units": "logical" }),
+            2.0,
+        )
+        .unwrap();
+        assert_eq!(g.size, DEFAULT_GEOMETRY.size);
+        assert_eq!(g.position, DEFAULT_GEOMETRY.position);
+
+        // A value that is no pair of numbers: nothing of the geometry is read.
+        assert_eq!(
+            legacy(
+                json!({ "window_size": [1000.0, 700.0], "window_position": [null, 5.0] }),
+                2.0
+            ),
+            None
+        );
     }
 
     /// A geometry that is marked as logical is taken as it is, whatever the display.
     #[test]
-    fn from_config_takes_a_logical_geometry_as_it_is() {
-        let config = AppConfig {
-            window_size: (1000.0, 700.0),
-            window_position: (-50.0, 20.0),
-            geometry_units: GeometryUnits::Logical,
-            ..AppConfig::default()
-        };
+    fn legacy_geometry_takes_a_logical_geometry_as_it_is() {
+        let stored = json!({
+            "window_size": [1000.0, 700.0],
+            "window_position": [-50.0, 20.0],
+            "geometry_units": "logical",
+        });
         for scale in [1.0, 1.5, 2.0, f64::NAN] {
-            let g = WindowGeometry::from_config(&config, scale);
+            let g = legacy(stored.clone(), scale).unwrap();
             assert_eq!((g.size, g.position), ((1000.0, 700.0), (-50.0, 20.0)));
         }
     }
@@ -374,90 +460,70 @@ mod tests {
     /// The upgrade from a version that stored physical pixels: on a 2x display the
     /// window comes back at the size and place it had, not at twice of both.
     #[test]
-    fn from_config_converts_a_physical_geometry_with_the_primary_scale() {
-        let stored_by_an_older_version = AppConfig {
-            window_size: (2400.0, 1600.0),
-            window_position: (200.0, -100.0),
-            geometry_units: GeometryUnits::Physical,
-            ..AppConfig::default()
-        };
+    fn legacy_geometry_converts_a_physical_geometry_with_the_primary_scale() {
+        let unmarked =
+            json!({ "window_size": [2400.0, 1600.0], "window_position": [200.0, -100.0] });
+        let mut marked = unmarked.clone();
+        marked["geometry_units"] = json!("physical");
+        let mut null_unit = unmarked.clone();
+        null_unit["geometry_units"] = Value::Null;
 
-        let g = WindowGeometry::from_config(&stored_by_an_older_version, 2.0);
-        assert_eq!((g.size, g.position), ((1200.0, 800.0), (100.0, -50.0)));
+        for stored_by_an_older_version in [unmarked, marked, null_unit] {
+            let g = legacy(stored_by_an_older_version.clone(), 2.0).unwrap();
+            assert_eq!((g.size, g.position), ((1200.0, 800.0), (100.0, -50.0)));
 
-        // At 1x physical and logical are the same.
-        let g = WindowGeometry::from_config(&stored_by_an_older_version, 1.0);
-        assert_eq!((g.size, g.position), ((2400.0, 1600.0), (200.0, -100.0)));
+            // At 1x physical and logical are the same.
+            let g = legacy(stored_by_an_older_version.clone(), 1.0).unwrap();
+            assert_eq!((g.size, g.position), ((2400.0, 1600.0), (200.0, -100.0)));
 
-        let g = WindowGeometry::from_config(&stored_by_an_older_version, 1.5);
-        assert_eq!(g.size, (1600.0, 1600.0 / 1.5));
+            let g = legacy(stored_by_an_older_version, 1.5).unwrap();
+            assert_eq!(g.size, (1600.0, 1600.0 / 1.5));
+        }
     }
 
     #[test]
-    fn from_config_falls_back_to_defaults_when_the_conversion_yields_nothing_usable() {
-        let defaults = AppConfig::default();
-        let physical = |window_size| AppConfig {
-            window_size,
-            window_position: (200.0, 100.0),
-            geometry_units: GeometryUnits::Physical,
-            ..AppConfig::default()
-        };
+    fn legacy_geometry_falls_back_to_defaults_when_the_conversion_yields_nothing_usable() {
+        let physical = |window_size: (f64, f64)| json!({ "window_size": window_size, "window_position": [200.0, 100.0] });
 
         // Smaller than the minimum once it is converted.
-        let g = WindowGeometry::from_config(&physical((1200.0, 800.0)), 2.0);
-        assert_eq!(g.size, defaults.window_size);
+        let g = legacy(physical((1200.0, 800.0)), 2.0).unwrap();
+        assert_eq!(g.size, DEFAULT_GEOMETRY.size);
         assert_eq!(g.position, (100.0, 50.0), "the position is still usable");
 
         // No usable scale factor: nothing can be converted.
         for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            let g = WindowGeometry::from_config(&physical((2400.0, 1600.0)), scale);
-            assert_eq!(g.size, defaults.window_size, "scale {scale}");
-            assert_eq!(g.position, defaults.window_position, "scale {scale}");
+            let g = legacy(physical((2400.0, 1600.0)), scale).unwrap();
+            assert_eq!(g.size, DEFAULT_GEOMETRY.size, "scale {scale}");
+            assert_eq!(g.position, DEFAULT_GEOMETRY.position, "scale {scale}");
         }
     }
 
-    /// What the upgrade looks like end to end: a file without the unit mark is read,
-    /// converted once and written back as logical, so the next start takes it as it is.
+    /// A configuration file that holds no geometry has none to take over: one written
+    /// by this version, an empty one, one that is no configuration at all.
     #[test]
-    fn a_config_file_of_an_older_version_is_migrated_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut json = serde_json::to_value(AppConfig {
-            window_size: (2400.0, 1600.0),
-            window_position: (200.0, 100.0),
-            ..AppConfig::default()
-        })
-        .unwrap();
-        json.as_object_mut().unwrap().remove("geometry_units");
-        std::fs::write(&path, json.to_string()).unwrap();
-
-        // First start after the upgrade, on a 2x display.
-        let mut config = settings::load_config(&path).unwrap();
-        let geometry = WindowGeometry::from_config(&config, 2.0);
-        geometry.apply_to(&mut config);
-        settings::save_config(&config, &path).unwrap();
-        assert_eq!(geometry.size, (1200.0, 800.0));
-
-        // Second start.
-        let config = settings::load_config(&path).unwrap();
-        assert_eq!(config.geometry_units, GeometryUnits::Logical);
-        assert_eq!(WindowGeometry::from_config(&config, 2.0), geometry);
+    fn legacy_geometry_is_none_for_a_config_without_a_geometry() {
+        assert_eq!(legacy(json!({}), 2.0), None);
+        assert_eq!(legacy(json!({ "geometry_units": "physical" }), 2.0), None);
+        assert_eq!(
+            legacy(json!({ "window_size": null, "window_position": null }), 2.0),
+            None
+        );
+        for content in ["", "{}", "[1, 2]", "not json"] {
+            assert_eq!(legacy_geometry(content, 2.0), None, "{content:?}");
+        }
     }
 
+    /// One of the two is enough; the other one has its default.
     #[test]
-    fn apply_to_writes_both_fields_and_marks_them_as_logical() {
-        let mut config = AppConfig {
-            geometry_units: GeometryUnits::Physical,
-            ..AppConfig::default()
-        };
-        let g = WindowGeometry {
-            size: (1000.0, 700.0),
-            position: (7.0, 8.0),
-        };
-        g.apply_to(&mut config);
-        assert_eq!(config.window_size, (1000.0, 700.0));
-        assert_eq!(config.window_position, (7.0, 8.0));
-        assert_eq!(config.geometry_units, GeometryUnits::Logical);
+    fn legacy_geometry_with_a_size_or_a_position_only() {
+        let g = legacy(json!({ "window_size": [2400.0, 1600.0] }), 2.0).unwrap();
+        assert_eq!(
+            (g.size, g.position),
+            ((1200.0, 800.0), DEFAULT_GEOMETRY.position)
+        );
+
+        let g = legacy(json!({ "window_position": [20.0, 40.0] }), 2.0).unwrap();
+        assert_eq!((g.size, g.position), (DEFAULT_GEOMETRY.size, (10.0, 20.0)));
     }
 
     #[test]
@@ -531,220 +597,396 @@ mod tests {
         assert_eq!(far_away.clamped_to_visible(&[]), far_away);
     }
 
-    #[test]
-    fn lock_within_gives_up_on_a_held_lock() {
-        let state = SharedState::new(AppState::default());
-        {
-            let _held = state.lock();
-            assert!(lock_within(&state, Duration::ZERO).is_none());
-            assert!(lock_within(&state, Duration::from_millis(20)).is_none());
-        }
-        assert!(lock_within(&state, Duration::ZERO).is_some());
-    }
-
-    #[test]
-    fn sync_if_uncontended_updates_free_state_and_skips_busy_state() {
-        let state = SharedState::new(AppState::default());
-        let g = WindowGeometry {
-            size: (1000.0, 700.0),
-            position: (7.0, 8.0),
-        };
-        g.sync_if_uncontended(&state);
-        assert_eq!(state.lock().config.window_size, (1000.0, 700.0));
-
-        let other = geometry();
-        {
-            let _held = state.lock();
-            other.sync_if_uncontended(&state); // must return immediately
-        }
-        assert_eq!(state.lock().config.window_size, (1000.0, 700.0));
-    }
-
-    /// A state whose configuration is kept in a file of a fresh temporary directory.
-    fn state_with_config_file(dir: &Path) -> (SharedState, ConfigStore) {
-        let (store, config) = ConfigStore::open(dir.join("config.json"));
-        (
-            SharedState::new(AppState::new(config, store.clone())),
-            store,
-        )
-    }
+    // --- The file ---
 
     const FINAL_GEOMETRY: WindowGeometry = WindowGeometry {
         size: (1000.0, 700.0),
-        position: (7.0, 8.0),
+        position: (-7.0, 8.0),
     };
 
-    #[test]
-    fn persist_saves_the_in_memory_config_with_the_geometry() {
+    /// A fresh configuration directory: the path of its `config.json` (which does not
+    /// exist yet) and of the `window.json` beside it.
+    fn config_dir() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let (state, store) = state_with_config_file(dir.path());
-        state.lock().config.output_filename = "in-memory.txt".into();
+        let config_path = dir.path().join("config.json");
+        let window_path = dir.path().join(WINDOW_FILE);
+        (dir, config_path, window_path)
+    }
 
-        persist(FINAL_GEOMETRY, &state, &store).unwrap();
+    fn file_names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
 
-        let saved = settings::load_config(store.path().unwrap()).unwrap();
-        assert_eq!(saved.output_filename, "in-memory.txt");
-        assert_eq!(saved.window_size, (1000.0, 700.0));
-        assert_eq!(saved.window_position, (7.0, 8.0));
-        assert_eq!(saved.geometry_units, GeometryUnits::Logical);
-        assert_eq!(state.lock().config, saved);
+    fn json_in(path: &Path) -> Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_window_file_is_kept_beside_the_config_file() {
+        let (dir, config_path, window_path) = config_dir();
+
+        let (store, _) = GeometryStore::open(&config_path, 1.0);
+        store.save(FINAL_GEOMETRY).unwrap();
+
+        assert_eq!(store.path.as_deref(), Some(window_path.as_path()));
+        // An isolated configuration directory (`CFC_CONFIG_DIR`) holds everything.
+        assert_eq!(file_names_in(dir.path()), [WINDOW_FILE]);
+    }
+
+    #[test]
+    fn open_without_any_file_yields_the_default_geometry_and_writes_nothing() {
+        let (dir, config_path, _) = config_dir();
+
+        let (_store, geometry) = GeometryStore::open(&config_path, 2.0);
+
+        assert_eq!(geometry, WindowGeometry::default());
+        assert_eq!(geometry, DEFAULT_GEOMETRY);
+        assert!(file_names_in(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_saved_geometry_is_restored_as_it_is_whatever_the_display() {
+        let (_dir, config_path, window_path) = config_dir();
+        let (store, _) = GeometryStore::open(&config_path, 1.0);
+
+        store.save(FINAL_GEOMETRY).unwrap();
+
+        assert_eq!(
+            json_in(&window_path),
+            json!({ "size": [1000.0, 700.0], "position": [-7.0, 8.0] })
+        );
+        for scale in [1.0, 1.5, 2.0, f64::NAN] {
+            let (_, restored) = GeometryStore::open(&config_path, scale);
+            assert_eq!(restored, FINAL_GEOMETRY, "scale {scale}");
+        }
+    }
+
+    /// What a session does: the geometry it started with follows the window, and the
+    /// last one is what the next session starts with.
+    #[test]
+    fn the_geometry_tracked_in_a_session_is_what_the_next_one_starts_with() {
+        let (_dir, config_path, _) = config_dir();
+        let (store, mut geometry) = GeometryStore::open(&config_path, 2.0);
+
+        geometry.record_size((2000.0, 1400.0), 2.0);
+        geometry.record_position((-400.0, 60.0), 2.0);
+        // Minimized on the way out: neither value is worth remembering.
+        geometry.record_size((0.0, 0.0), 2.0);
+        geometry.record_position((-32000.0, -32000.0), 2.0);
+        store.save(geometry).unwrap();
+
+        let (_, restored) = GeometryStore::open(&config_path, 2.0);
+        assert_eq!(
+            restored,
+            WindowGeometry {
+                size: (1000.0, 700.0),
+                position: (-200.0, 30.0),
+            }
+        );
+    }
+
+    #[test]
+    fn save_creates_a_missing_directory_and_leaves_no_other_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("not").join("there").join("yet");
+        let (store, _) = GeometryStore::open(&nested.join("config.json"), 1.0);
+
+        store.save(FINAL_GEOMETRY).unwrap();
+        store.save(geometry()).unwrap();
+
+        assert_eq!(file_names_in(&nested), [WINDOW_FILE]);
+        assert_eq!(
+            GeometryStore::open(&nested.join("config.json"), 1.0).1,
+            geometry()
+        );
+    }
+
+    #[test]
+    fn a_failed_save_is_reported_and_leaves_no_file_behind() {
+        let (dir, config_path, window_path) = config_dir();
+        let (store, _) = GeometryStore::open(&config_path, 1.0);
+
+        // A directory in place of the file makes the write fail.
+        fs::create_dir(&window_path).unwrap();
+        assert!(store.save(FINAL_GEOMETRY).is_err());
+        assert_eq!(file_names_in(dir.path()), [WINDOW_FILE]);
+
+        fs::remove_dir(&window_path).unwrap();
+        store.save(FINAL_GEOMETRY).unwrap();
+        assert_eq!(GeometryStore::open(&config_path, 1.0).1, FINAL_GEOMETRY);
+    }
+
+    #[test]
+    fn unusable_values_in_the_window_file_give_way_to_the_defaults() {
+        let (_dir, config_path, window_path) = config_dir();
+        let open_with = |content: &str| {
+            fs::write(&window_path, content).unwrap();
+            GeometryStore::open(&config_path, 2.0).1
+        };
+
+        // Each value on its own.
+        assert_eq!(
+            open_with(r#"{ "size": [100.0, 50.0], "position": [7.0, 8.0] }"#),
+            WindowGeometry {
+                size: DEFAULT_GEOMETRY.size,
+                position: (7.0, 8.0),
+            }
+        );
+        assert_eq!(
+            open_with(r#"{ "size": [1000.0, 700.0], "position": null }"#),
+            WindowGeometry {
+                size: (1000.0, 700.0),
+                position: DEFAULT_GEOMETRY.position,
+            }
+        );
+        assert_eq!(
+            open_with(r#"{ "position": [7.0, 8.0], "something": "else" }"#),
+            WindowGeometry {
+                size: DEFAULT_GEOMETRY.size,
+                position: (7.0, 8.0),
+            }
+        );
+        // No geometry at all.
+        for content in ["{}", "", "not json", r#"{ "size": "large" }"#] {
+            assert_eq!(open_with(content), DEFAULT_GEOMETRY, "{content:?}");
+        }
+    }
+
+    #[test]
+    fn a_detached_store_reads_and_writes_nothing() {
+        let store = GeometryStore::detached();
+        assert_eq!(store.read(), None);
+        store.save(FINAL_GEOMETRY).unwrap();
+        assert_eq!(store.read(), None);
+    }
+
+    // --- Taking over the geometry of an older configuration file ---
+
+    /// What the upgrade looks like end to end: the geometry of a configuration file
+    /// of a version up to 0.3.1 (physical pixels, no unit) is converted once and
+    /// written to `window.json`. The configuration file is left alone by that, and
+    /// loses the geometry with its next save.
+    #[test]
+    fn a_config_file_of_an_older_version_is_migrated_once() {
+        let (dir, config_path, window_path) = config_dir();
+        let old_config = legacy_config(
+            json!({ "window_size": [2400.0, 1600.0], "window_position": [200.0, 100.0] }),
+        );
+        fs::write(&config_path, &old_config).unwrap();
+
+        // First start after the upgrade, on a 2x display.
+        let (geometry_store, geometry) = GeometryStore::open(&config_path, 2.0);
+        let (config_store, config) = ConfigStore::open(config_path.clone());
+        assert_eq!(geometry.size, (1200.0, 800.0));
+        assert_eq!(geometry.position, (100.0, 50.0));
+        assert_eq!(config.output_filename, "kept.txt", "the settings are kept");
+        assert_eq!(
+            json_in(&window_path),
+            json!({ "size": [1200.0, 800.0], "position": [100.0, 50.0] }),
+            "window.json is written right away"
+        );
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            old_config,
+            "starting does not rewrite the config file"
+        );
+
+        // The next save of the configuration writes it without the geometry.
+        let changed = AppConfig {
+            case_sensitive_search: true,
+            ..config
+        };
+        config_store.snapshot(&changed).save().unwrap();
+        let rewritten = fs::read_to_string(&config_path).unwrap();
+        for field in ["window_size", "window_position", "geometry_units"] {
+            assert!(!rewritten.contains(field), "{field} in {rewritten}");
+        }
+        assert_eq!(settings::load_config(&config_path).unwrap(), changed);
+
+        // The session ends; the window has been moved meanwhile.
+        geometry_store.save(FINAL_GEOMETRY).unwrap();
+        config_store.close().unwrap();
+
+        // Second start: the geometry is taken as it is, nothing is converted again.
+        let (_, geometry) = GeometryStore::open(&config_path, 2.0);
+        assert_eq!(geometry, FINAL_GEOMETRY);
+        assert_eq!(settings::load_config(&config_path).unwrap(), changed);
+        assert_eq!(file_names_in(dir.path()), ["config.json", WINDOW_FILE]);
+    }
+
+    /// The geometry is not converted a second time if the configuration file is not
+    /// saved between two starts (it still holds the physical geometry then).
+    #[test]
+    fn the_window_file_wins_over_a_geometry_that_is_still_in_the_config_file() {
+        let (_dir, config_path, _) = config_dir();
+        fs::write(
+            &config_path,
+            legacy_config(
+                json!({ "window_size": [2400.0, 1600.0], "window_position": [200.0, 100.0] }),
+            ),
+        )
+        .unwrap();
+
+        let (_, first) = GeometryStore::open(&config_path, 2.0);
+        let (store, second) = GeometryStore::open(&config_path, 2.0);
+        assert_eq!(first.size, (1200.0, 800.0));
+        assert_eq!(second, first);
+
+        store.save(FINAL_GEOMETRY).unwrap();
+        assert_eq!(GeometryStore::open(&config_path, 2.0).1, FINAL_GEOMETRY);
+    }
+
+    /// A configuration file of the version that stored logical units and said so.
+    #[test]
+    fn a_logical_geometry_in_the_config_file_is_taken_over_as_it_is() {
+        let (_dir, config_path, window_path) = config_dir();
+        fs::write(
+            &config_path,
+            legacy_config(json!({
+                "window_size": [1000.0, 700.0],
+                "window_position": [-7.0, 8.0],
+                "geometry_units": "logical",
+            })),
+        )
+        .unwrap();
+
+        let (_, geometry) = GeometryStore::open(&config_path, 2.0);
+
+        assert_eq!(geometry, FINAL_GEOMETRY);
+        assert!(window_path.is_file());
+    }
+
+    /// A configuration file without a geometry (this version's, or a fresh one):
+    /// nothing to take over, and no file is written for the defaults.
+    #[test]
+    fn a_config_file_without_a_geometry_is_not_migrated() {
+        let (dir, config_path, _) = config_dir();
+        let (_, config) = ConfigStore::open(config_path.clone());
+        assert_eq!(config, AppConfig::default());
+
+        let (_, geometry) = GeometryStore::open(&config_path, 2.0);
+
+        assert_eq!(geometry, DEFAULT_GEOMETRY);
+        assert_eq!(file_names_in(dir.path()), ["config.json"]);
+    }
+
+    /// A window file that cannot be read does not cost the geometry the configuration
+    /// file still holds.
+    #[test]
+    fn a_damaged_window_file_is_replaced_by_the_geometry_of_the_config_file() {
+        let (_dir, config_path, window_path) = config_dir();
+        fs::write(
+            &config_path,
+            legacy_config(json!({ "window_size": [2400.0, 1600.0] })),
+        )
+        .unwrap();
+        fs::write(&window_path, "{ \"size\": [12").unwrap();
+
+        let (_, geometry) = GeometryStore::open(&config_path, 2.0);
+
+        assert_eq!(geometry.size, (1200.0, 800.0));
+        assert_eq!(GeometryStore::open(&config_path, 1.0).1, geometry);
+    }
+
+    /// If the geometry that was taken over cannot be written, the session still
+    /// starts with it.
+    #[test]
+    fn a_migration_that_cannot_be_written_still_yields_the_geometry() {
+        let (_dir, config_path, window_path) = config_dir();
+        fs::write(
+            &config_path,
+            legacy_config(json!({ "window_size": [2400.0, 1600.0] })),
+        )
+        .unwrap();
+        fs::create_dir(&window_path).unwrap();
+
+        let (store, geometry) = GeometryStore::open(&config_path, 2.0);
+
+        assert_eq!(geometry.size, (1200.0, 800.0));
+        assert!(store.save(geometry).is_err());
+    }
+
+    // --- The end of a session ---
+
+    /// Geometry and configuration are saved independently: neither file is touched by
+    /// the save of the other one.
+    #[test]
+    fn saving_the_geometry_and_saving_the_config_do_not_touch_each_other() {
+        let (_dir, config_path, window_path) = config_dir();
+        let (config_store, config) = ConfigStore::open(config_path.clone());
+        let (geometry_store, _) = GeometryStore::open(&config_path, 1.0);
+
+        let config_before = fs::read(&config_path).unwrap();
+        geometry_store.save(FINAL_GEOMETRY).unwrap();
+        assert_eq!(fs::read(&config_path).unwrap(), config_before);
+
+        let window_before = fs::read(&window_path).unwrap();
+        let changed = AppConfig {
+            output_filename: "changed.txt".into(),
+            ..config
+        };
+        config_store.snapshot(&changed).save().unwrap();
+        config_store.close().unwrap();
+        assert_eq!(fs::read(&window_path).unwrap(), window_before);
+        assert_eq!(settings::load_config(&config_path).unwrap(), changed);
+    }
+
+    /// Quitting must not hang behind a worker that holds the application state during
+    /// a large scan/filter: the last saves of a session do not ask for the state.
+    #[test]
+    fn the_last_saves_of_a_session_do_not_wait_for_the_application_state() {
+        let (_dir, config_path, _) = config_dir();
+        let (config_store, config) = ConfigStore::open(config_path.clone());
+        let (geometry_store, _) = GeometryStore::open(&config_path, 1.0);
+        let state = SharedState::new(AppState::new(config, config_store.clone()));
+
+        // A change whose background save has not had its turn, and a busy worker.
+        let queued = {
+            let mut guard = state.lock();
+            guard.config.output_filename = "changed.txt".into();
+            guard.config_snapshot()
+        };
+        let busy = state.lock();
+        geometry_store.save(FINAL_GEOMETRY).unwrap();
+        config_store.close().unwrap();
+        drop(busy);
+        queued.save().unwrap();
+
+        let saved = settings::load_config(&config_path).unwrap();
+        assert_eq!(saved.output_filename, "changed.txt");
+        assert_eq!(saved, state.lock().config);
+        assert_eq!(GeometryStore::open(&config_path, 1.0).1, FINAL_GEOMETRY);
     }
 
     /// The race the ordered path exists for: a command changed the configuration and
     /// its background save has not run yet when the application quits. Whenever that
     /// save gets its turn, it must not put its older content over the final one.
     #[test]
-    fn persist_cannot_be_overtaken_by_a_save_that_is_still_queued() {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, store) = state_with_config_file(dir.path());
+    fn the_last_config_save_cannot_be_overtaken_by_one_that_is_still_queued() {
+        let (_dir, config_path, _) = config_dir();
+        let (config_store, config) = ConfigStore::open(config_path.clone());
+        let state = SharedState::new(AppState::new(config, config_store.clone()));
         let queued = {
             let mut guard = state.lock();
             guard.config.output_filename = "first-change.txt".into();
             guard.config_snapshot()
         };
-        state.lock().config.output_filename = "second-change.txt".into();
-
-        persist(FINAL_GEOMETRY, &state, &store).unwrap();
-        queued.save().unwrap();
-
-        let saved = settings::load_config(store.path().unwrap()).unwrap();
-        assert_eq!(saved.output_filename, "second-change.txt");
-        assert_eq!(saved.window_size, (1000.0, 700.0));
-    }
-
-    #[test]
-    fn persist_falls_back_to_the_last_saved_config_when_the_state_is_busy() {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, store) = state_with_config_file(dir.path());
-        // A change whose save is still queued: it is not on disk yet.
-        let queued = {
+        let also_queued = {
             let mut guard = state.lock();
-            guard.config.output_filename = "changed.txt".into();
+            guard.config.output_filename = "second-change.txt".into();
             guard.config_snapshot()
         };
-        {
-            let _held = state.lock();
-            let started = Instant::now();
-            persist(FINAL_GEOMETRY, &state, &store).unwrap();
-            assert!(started.elapsed() < Duration::from_secs(5));
-        }
+
+        config_store.close().unwrap();
         queued.save().unwrap();
+        also_queued.save().unwrap();
 
-        let saved = settings::load_config(store.path().unwrap()).unwrap();
-        assert_eq!(saved.output_filename, "changed.txt");
-        assert_eq!(saved.window_size, (1000.0, 700.0));
-        assert_eq!(saved.window_position, (7.0, 8.0));
-    }
-
-    /// A save that is attempted after the session's last one must not reach the disk.
-    fn assert_store_is_closed(store: &ConfigStore) {
-        let before = std::fs::read_to_string(store.path().unwrap()).unwrap();
-        let late = AppConfig {
-            output_filename: "too-late.txt".into(),
-            ..store.latest()
-        };
-        store.snapshot(&late).save().unwrap();
-        let after = std::fs::read_to_string(store.path().unwrap()).unwrap();
-        assert_eq!(after, before, "the store must be closed");
-    }
-
-    fn assert_saved_with_final_geometry(store: &ConfigStore, output_filename: &str) {
-        let saved = settings::load_config(store.path().unwrap()).unwrap();
-        assert_eq!(saved.output_filename, output_filename, "the latest config");
-        assert_eq!(saved.window_size, (1000.0, 700.0), "with the geometry");
-        assert_eq!(saved.window_position, (7.0, 8.0));
-        assert_eq!(saved.geometry_units, GeometryUnits::Logical);
-    }
-
-    /// The worker that keeps the state busy changes the configuration and saves it
-    /// while the exit save is under way. The final save is based on that change.
-    #[test]
-    fn persist_includes_what_a_busy_worker_saves_meanwhile() {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, store) = state_with_config_file(dir.path());
-
-        let mut guard = state.lock(); // the busy worker
-        persist_with(FINAL_GEOMETRY, &state, &store, || {
-            guard.config.output_filename = "worker.txt".into();
-            guard.config_snapshot().save().unwrap();
-        })
-        .unwrap();
-        drop(guard);
-
-        assert_saved_with_final_geometry(&store, "worker.txt");
-        assert_store_is_closed(&store);
-    }
-
-    /// The same without the fallback: the state lock was free, and a command saved its
-    /// change right before the final save.
-    #[test]
-    fn persist_includes_what_a_command_saves_right_before_the_final_save() {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, store) = state_with_config_file(dir.path());
-
-        persist_with(FINAL_GEOMETRY, &state, &store, || {
-            let mut guard = state.lock();
-            guard.config.output_filename = "command.txt".into();
-            guard.config_snapshot().save().unwrap();
-        })
-        .unwrap();
-
-        assert_saved_with_final_geometry(&store, "command.txt");
-        assert_store_is_closed(&store);
-    }
-
-    /// A command changed the configuration right before the final save, and its
-    /// background save only gets its turn afterwards, when the store is closed. The
-    /// change must not be lost: the final save contains it.
-    #[test]
-    fn persist_includes_a_snapshot_that_is_only_saved_after_the_final_save() {
-        for state_is_busy in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let (state, store) = state_with_config_file(dir.path());
-
-            let busy = state_is_busy.then(|| state.lock());
-            let mut queued = None;
-            persist_with(FINAL_GEOMETRY, &state, &store, || {
-                let mut config = store.latest();
-                config.output_filename = "command.txt".into();
-                queued = Some(store.snapshot(&config));
-            })
-            .unwrap();
-            drop(busy);
-            queued.unwrap().save().unwrap();
-
-            assert_saved_with_final_geometry(&store, "command.txt");
-            assert_store_is_closed(&store);
-        }
-    }
-
-    /// A save of the very configuration the final save is about to write (same bytes,
-    /// newer snapshot) gets in between. The final save must still close the store.
-    #[test]
-    fn persist_closes_the_store_after_a_concurrent_save_of_an_identical_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, store) = state_with_config_file(dir.path());
-        state.lock().config.output_filename = "same.txt".into();
-
-        persist_with(FINAL_GEOMETRY, &state, &store, || {
-            // The state already carries the geometry here.
-            let guard = state.lock();
-            assert_eq!(guard.config, store.latest());
-            guard.config_snapshot().save().unwrap();
-        })
-        .unwrap();
-
-        assert_saved_with_final_geometry(&store, "same.txt");
-        assert_store_is_closed(&store);
-    }
-
-    #[test]
-    fn persist_closes_the_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, store) = state_with_config_file(dir.path());
-
-        persist(FINAL_GEOMETRY, &state, &store).unwrap();
-
-        assert_store_is_closed(&store);
+        let saved = settings::load_config(&config_path).unwrap();
+        assert_eq!(saved.output_filename, "second-change.txt");
     }
 }
