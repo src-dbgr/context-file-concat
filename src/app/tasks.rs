@@ -996,23 +996,72 @@ pub async fn refresh_content_search<P: EventProxy, S: FileSearcher>(
 /// A search that fails (its worker panicked) is reported with `ShowError` and leaves
 /// the matches of the search before it in place.
 ///
+/// Nothing is sent when the search starts: this is for repeating the search of a
+/// query the UI already shows (see [`refresh_content_search`]). For a query that has
+/// just been entered see [`search_for_new_query`].
+///
 /// [`ContentSearchToken`]: super::state::ContentSearchToken
 pub async fn search_in_files<P: EventProxy, S: FileSearcher>(
     proxy: P,
     state: SharedState,
     searcher: S,
 ) {
+    run_content_search(proxy, state, searcher, SearchStart::Silent).await;
+}
+
+/// Applies filter texts whose content query has changed: answers with a state update
+/// right away and then searches like [`search_in_files`], whose state update with the
+/// matches follows.
+///
+/// The first update carries the new filter texts while the search is pending. The UI
+/// waits for it (a filter input shows the host's text again if the text it has sent
+/// is not reported back), and a search can take arbitrarily long. The file name and
+/// extension filters are applied in it, and so is the content filter as far as it is
+/// known: the matches of the search before, or none at all while the first search
+/// for a query runs (the list is not emptied, see
+/// [`AppState::content_filter_matches`]).
+///
+/// [`AppState::content_filter_matches`]: super::state::AppState::content_filter_matches
+pub async fn search_for_new_query<P: EventProxy, S: FileSearcher>(
+    proxy: P,
+    state: SharedState,
+    searcher: S,
+) {
+    run_content_search(proxy, state, searcher, SearchStart::Announced).await;
+}
+
+/// What a content search sends when it starts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchStart {
+    /// Nothing; the UI hears of the search when its matches are there.
+    Silent,
+    /// A state update with the filters as they are while the search is pending.
+    Announced,
+}
+
+async fn run_content_search<P: EventProxy, S: FileSearcher>(
+    proxy: P,
+    state: SharedState,
+    searcher: S,
+    start: SearchStart,
+) {
     let (token, files_to_search, request) = {
         let mut state_guard = state.lock();
         // A blank query is no query: nothing is searched and earlier matches are dropped.
         if is_blank(&state_guard.content_search_query) {
             state_guard.clear_content_search();
-            filtering::apply_filters(&mut state_guard);
+            filtering::apply_filter_texts(&mut state_guard);
             let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
             proxy.send_event(event);
             return;
         }
         let token = state_guard.begin_content_search();
+        if start == SearchStart::Announced {
+            // After `begin_content_search`: the filters know that a search is running.
+            filtering::apply_filter_texts(&mut state_guard);
+            let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+            proxy.send_event(event);
+        }
         let request = ContentSearchRequest {
             query: state_guard.content_search_query.clone(),
             case_sensitive: state_guard.config.case_sensitive_search,

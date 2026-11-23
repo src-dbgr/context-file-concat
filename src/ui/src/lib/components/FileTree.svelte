@@ -2,6 +2,7 @@
   import { onMount, onDestroy, tick } from "svelte";
   import { appState } from "$lib/stores/app";
   import { post } from "$lib/services/backend";
+  import { activatesNatively } from "$lib/modules/nativeActivation";
   import type { AppState, TreeNode } from "$lib/types";
   import TreeItem from "./TreeItem.svelte";
   import {
@@ -397,6 +398,12 @@
 
   // Central key handler for roving navigation & item actions
   function onTreeKeyDown(e: KeyboardEvent) {
+    // A key on the checkbox or the ignore button of a row that activates the
+    // control by itself (its click handler runs once). Handling it here as
+    // well would act on the row instead, or a second time. All other keys on
+    // a control, and every key on the arrow and the name, are the tree's.
+    if (activatesNatively(e.target, e.key)) return;
+
     if (focusedIndex < 0 || focusedIndex >= flatTree.length) {
       // allow starting typeahead even if nothing focused
       if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {

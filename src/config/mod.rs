@@ -157,8 +157,9 @@ impl Default for AppConfig {
             tree_ignore_patterns: HashSet::new(),
             last_directory: None,
             output_directory: dirs::desktop_dir(),
-            // A static name keeps `Default` deterministic; timestamped names are assigned
-            // when a generation starts.
+            // A static name keeps `Default` deterministic. It stays until the user changes
+            // it: a generation only renews a name of the form `cfc_output_<timestamp>.txt`
+            // (see `commands::generate_preview`).
             output_filename: "cfc_output.txt".to_string(),
             case_sensitive_search: false,
             include_tree_by_default: true,

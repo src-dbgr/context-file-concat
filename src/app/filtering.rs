@@ -10,7 +10,7 @@
 
 use crate::app::state::AppState;
 use crate::config::AppConfig;
-use crate::core::{FileItem, FileNameMatcher, SearchEngine};
+use crate::core::{is_blank, FileItem, FileNameMatcher, SearchEngine};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -40,6 +40,19 @@ pub fn apply_filters(state: &mut AppState) {
         state.is_fully_scanned,
     );
     state.set_filtered_file_list(filtered);
+}
+
+/// Applies the filters after the filter texts have changed, and reveals what the
+/// file name and extension filters match.
+///
+/// The matches of a content search are revealed when the search delivers them (see
+/// `tasks::search_in_files`), not here: without a file name or extension filter
+/// nothing is expanded.
+pub fn apply_filter_texts(state: &mut AppState) {
+    apply_filters(state);
+    if !is_blank(&state.search_query) || !is_blank(&state.extension_filter) {
+        auto_expand_for_matches(state);
+    }
 }
 
 /// Expands the parent directories of files that match the current search criteria.

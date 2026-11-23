@@ -367,6 +367,102 @@ describe("text being typed survives snapshots", () => {
     expect(search.value).toBe("from-host");
   });
 
+  describe("a content search that takes longer than the wait", () => {
+    // A host that answers `updateFilters` only when the search has finished:
+    // no snapshot arrives in the meantime.
+    it("keeps the typed query, and the matches' snapshot is shown as usual", async () => {
+      render(Sidebar);
+      const content = input("content-search-query");
+
+      await type(content, "needle");
+      vi.advanceTimersByTime(300);
+      vi.advanceTimersByTime(ACK_TIMEOUT_MS * 3);
+      await tick();
+      expect(content.value).toBe("needle");
+
+      await hostSends({ content_search_query: "needle" });
+      expect(content.value).toBe("needle");
+    });
+
+    it("sends the query along when another filter is typed afterwards", async () => {
+      render(Sidebar);
+      const content = input("content-search-query");
+      const search = input("search-query");
+
+      await type(content, "needle");
+      vi.advanceTimersByTime(300);
+      vi.advanceTimersByTime(ACK_TIMEOUT_MS + 1);
+      await tick();
+
+      await type(search, "main");
+      vi.advanceTimersByTime(300);
+      expect(posted().map(([, payload]) => payload)).toEqual([
+        { searchQuery: "", extensionFilter: "", contentSearchQuery: "needle" },
+        {
+          searchQuery: "main",
+          extensionFilter: "",
+          contentSearchQuery: "needle",
+        },
+      ]);
+      expect(content.value).toBe("needle");
+    });
+
+    it("follows the host if its first snapshot after the wait says otherwise", async () => {
+      render(Sidebar);
+      const content = input("content-search-query");
+
+      await type(content, "needle");
+      vi.advanceTimersByTime(300);
+      vi.advanceTimersByTime(ACK_TIMEOUT_MS * 2);
+      await tick();
+
+      // E.g. the filters were cleared by another route.
+      await hostSends({ content_search_query: "" });
+      expect(content.value).toBe("");
+    });
+
+    it("still follows a host that keeps reporting the old filters", async () => {
+      render(Sidebar);
+      const content = input("content-search-query");
+
+      await type(content, "needle");
+      vi.advanceTimersByTime(300);
+      // The same values as before the send, but reported after it.
+      await hostSends({ status_message: "something else happened" });
+      expect(content.value).toBe("needle");
+
+      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
+      await tick();
+      expect(content.value).toBe("");
+    });
+  });
+
+  it("keeps a committed output file name while the host has not answered", async () => {
+    render(StatusBar);
+    const field = input("output-filename");
+
+    await type(field, "context.md");
+    await fireEvent.change(field);
+    vi.advanceTimersByTime(ACK_TIMEOUT_MS * 2);
+    await tick();
+    expect(field.value).toBe("context.md");
+  });
+
+  it("shows the host's output file name again when it answers with the old one", async () => {
+    render(StatusBar);
+    const field = input("output-filename");
+
+    await type(field, "context.md");
+    await fireEvent.change(field);
+    // The answer: the host has kept its value (the same as before the send).
+    await hostSends({ status_message: "answered" });
+    expect(field.value).toBe("context.md");
+
+    vi.advanceTimersByTime(ACK_TIMEOUT_MS);
+    await tick();
+    expect(field.value).toBe("output.txt");
+  });
+
   it("does not let the end of the wait reset text typed in the meantime", async () => {
     render(Sidebar);
     const search = input("search-query");

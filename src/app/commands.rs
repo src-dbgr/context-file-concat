@@ -6,13 +6,13 @@
 //! logic, and for sending `UserEvent`s back to the UI.
 
 use super::events::UserEvent;
-use super::filtering::{self, auto_expand_for_matches};
+use super::filtering;
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
 use super::shared_state::SharedState;
 use super::state::{AppState, StatusNotice};
 use super::tasks::{
-    self, refresh_content_search, search_in_files, start_lazy_load_scan, start_scan_on_path,
+    self, refresh_content_search, search_for_new_query, start_lazy_load_scan, start_scan_on_path,
 };
 use super::view_model::generate_ui_state;
 use crate::app::file_dialog::DialogService;
@@ -361,7 +361,9 @@ pub(crate) struct UpdateFiltersPayload {
 
 /// Updates the filename, extension, and content search filters.
 ///
-/// If the content search query has changed, it triggers a new content search task.
+/// If the content search query has changed, the content is searched again: the command
+/// answers with a state update right away (the new texts, the search pending) and with
+/// another one when the matches are there, see [`tasks::search_for_new_query`].
 /// Otherwise, it just re-applies the filename and extension filters on the existing file list.
 /// Either way the directories of the matches are expanded, except for those the user
 /// collapsed since the filters were last empty (see [`AppState::reveal_directory`]).
@@ -371,6 +373,16 @@ pub async fn update_filters<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
     state: SharedState,
+) {
+    update_filters_with(payload, proxy, state, tasks::RealFileSearcher).await;
+}
+
+/// [`update_filters`] with the searcher that looks through the file contents.
+async fn update_filters_with<P: EventProxy, S: tasks::FileSearcher>(
+    payload: serde_json::Value,
+    proxy: P,
+    state: SharedState,
+    searcher: S,
 ) {
     let Some(filters) = parse_payload::<UpdateFiltersPayload>("updateFilters", payload) else {
         return answer_unchanged(&proxy, &state);
@@ -382,15 +394,10 @@ pub async fn update_filters<P: EventProxy>(
     );
 
     if should_search_content {
-        let searcher = tasks::RealFileSearcher;
-        search_in_files(proxy, state, searcher).await;
+        // Answers right away as well, before it searches.
+        search_for_new_query(proxy, state, searcher).await;
     } else {
-        with_state_and_notify(&state, &proxy, |s| {
-            filtering::apply_filters(s);
-            if !is_blank(&s.search_query) || !is_blank(&s.extension_filter) {
-                auto_expand_for_matches(s);
-            }
-        });
+        with_state_and_notify(&state, &proxy, filtering::apply_filter_texts);
     }
 }
 
@@ -617,20 +624,19 @@ pub fn deselect_all<P: EventProxy>(proxy: P, state: SharedState) {
     });
 }
 
-/// Whether `filename` is a name the application chose itself: the static name of a
-/// fresh configuration (`cfc_output.txt`, see `AppConfig::default`) or the timestamped
-/// name an earlier generation assigned (`cfc_output_<timestamp>.txt`). Any other name
-/// was set by the user.
-fn is_default_output_filename(filename: &str) -> bool {
-    filename == "cfc_output.txt"
-        || (filename.starts_with("cfc_output_") && filename.ends_with(".txt"))
+/// Whether `filename` is a timestamped name an earlier generation assigned
+/// (`cfc_output_<timestamp>.txt`). Any other name is kept as it is: a name the user
+/// has set, and also the static name of a fresh configuration (`cfc_output.txt`, see
+/// `AppConfig::default`).
+fn is_timestamped_output_filename(filename: &str) -> bool {
+    filename.starts_with("cfc_output_") && filename.ends_with(".txt")
 }
 
 /// Generates the final concatenated output from selected files by spawning a cancellable task.
 ///
-/// A default output filename is replaced by one with the current time (see
-/// [`is_default_output_filename`]), so that successive outputs do not overwrite each
-/// other; the new name is persisted.
+/// A timestamped output filename is replaced by one with the current time (see
+/// [`is_timestamped_output_filename`]), so that successive outputs do not overwrite
+/// each other; the new name is persisted. Every other name stays.
 pub fn generate_preview<P: EventProxy>(proxy: P, state: SharedState) {
     let mut state_guard = state.lock();
 
@@ -640,8 +646,8 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: SharedState) {
     // content is still being read.
     state_guard.clear_preview();
 
-    // A default name gets the time of this generation; a name the user has set is kept.
-    if is_default_output_filename(&state_guard.config.output_filename) {
+    // A timestamped name gets the time of this generation; any other name is kept.
+    if is_timestamped_output_filename(&state_guard.config.output_filename) {
         let new_filename = format!(
             "cfc_output_{}.txt",
             chrono::Local::now().format("%Y%m%d_%H%M%S")
@@ -2950,40 +2956,188 @@ mod tests {
         let _ = harness.get_next_event().await;
     }
 
-    /// The name of a fresh configuration is a default name too: the first generation
-    /// gives it its timestamp.
-    #[tokio::test]
-    async fn test_generate_preview_timestamps_the_default_filename_of_a_fresh_config() {
+    /// Starts a generation with `filename` configured and returns the name that is
+    /// configured afterwards, which is also the one the UI is told.
+    async fn output_filename_after_generating(filename: &str) -> String {
         let mut harness = TestHarness::new();
-        assert_eq!(
-            harness.state.lock().config.output_filename,
-            AppConfig::default().output_filename
-        );
+        harness.state.lock().config.output_filename = filename.to_string();
 
         generate_preview(harness.proxy.clone(), harness.state.clone());
 
-        let assigned = harness.state.lock().config.output_filename.clone();
-        assert_ne!(assigned, AppConfig::default().output_filename);
-        assert!(assigned.starts_with("cfc_output_") && assigned.ends_with(".txt"));
-        let announced = harness.get_next_event().await;
-        match announced {
+        let configured = harness.state.lock().config.output_filename.clone();
+        match harness.get_next_event().await {
             Some(UserEvent::StateUpdate(ui_state)) => {
-                assert_eq!(ui_state.config.output_filename, assigned)
+                assert_eq!(ui_state.config.output_filename, configured)
             }
             other => panic!("Expected a state update, got {other:?}"),
         }
         let _ = harness.get_next_event().await;
+        configured
+    }
+
+    /// The static name of a fresh configuration is not a timestamped one: it stays
+    /// until the user changes it.
+    #[tokio::test]
+    async fn test_generate_preview_keeps_the_filename_of_a_fresh_config() {
+        let fresh = AppConfig::default().output_filename;
+        assert_eq!(fresh, "cfc_output.txt");
+        assert_eq!(output_filename_after_generating(&fresh).await, fresh);
+    }
+
+    #[tokio::test]
+    async fn test_generate_preview_gives_a_timestamped_filename_a_new_timestamp() {
+        let old = "cfc_output_20240101_000000.txt";
+        let assigned = output_filename_after_generating(old).await;
+        assert_ne!(assigned, old);
+        let stamp = assigned
+            .strip_prefix("cfc_output_")
+            .and_then(|rest| rest.strip_suffix(".txt"))
+            .unwrap_or_else(|| panic!("Not a timestamped name: {assigned}"));
+        assert!(
+            chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%d_%H%M%S").is_ok(),
+            "{assigned}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_preview_keeps_a_custom_filename() {
+        for custom in ["context.txt", "cfc_output.md", "my_cfc_output_1.txt"] {
+            assert_eq!(output_filename_after_generating(custom).await, custom);
+        }
     }
 
     #[test]
-    fn test_default_output_filenames_are_recognized() {
-        assert!(is_default_output_filename(
-            &AppConfig::default().output_filename
+    fn test_timestamped_output_filenames_are_recognized() {
+        assert!(is_timestamped_output_filename(
+            "cfc_output_20240101_120000.txt"
         ));
-        assert!(is_default_output_filename("cfc_output_20240101_120000.txt"));
-        for custom in ["context.txt", "cfc_output.md", "my_cfc_output.txt", ""] {
-            assert!(!is_default_output_filename(custom), "{custom}");
+        for other in [
+            "cfc_output.txt",
+            "context.txt",
+            "cfc_output.md",
+            "my_cfc_output.txt",
+            "",
+        ] {
+            assert!(!is_timestamped_output_filename(other), "{other}");
         }
+    }
+
+    /// A searcher that reports that it was started and then waits to be released.
+    struct GatedSearcher {
+        started: tokio::sync::mpsc::UnboundedSender<()>,
+        release: Arc<tokio::sync::Notify>,
+        matches: HashSet<PathBuf>,
+    }
+    impl tasks::FileSearcher for GatedSearcher {
+        async fn search(
+            &self,
+            _: Vec<FileItem>,
+            _: crate::core::ContentSearchRequest,
+        ) -> tasks::SearchOutcome {
+            let _ = self.started.send(());
+            self.release.notified().await;
+            Ok(self.matches.clone())
+        }
+    }
+
+    /// `updateFilters` with a new content query is answered before the search has
+    /// come to an end: the filter inputs of the UI wait for their texts to be
+    /// reported back, and a search can take long. The matches follow.
+    #[tokio::test]
+    async fn test_update_filters_answers_before_the_content_search_completes() {
+        let mut harness = TestHarness::new();
+        harness.set_initial_files(&["main.rs", "notes.md", "lib.rs"]);
+        let (started_tx, mut started) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let searcher = GatedSearcher {
+            started: started_tx,
+            release: release.clone(),
+            matches: HashSet::from([harness.root_path.join("main.rs")]),
+        };
+
+        let command = tokio::spawn(update_filters_with(
+            json!({ "searchQuery": "", "extensionFilter": "rs", "contentSearchQuery": "needle" }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            searcher,
+        ));
+        started.recv().await.expect("The search must start");
+
+        // The search is running: the answer is there, with the new texts.
+        let pending = harness
+            .last_state_update()
+            .expect("updateFilters must be answered while the search is running");
+        assert_eq!(pending.content_search_query, "needle");
+        assert_eq!(pending.extension_filter, "rs");
+        assert_eq!(pending.search_query, "");
+        // The extension filter applies; the content filter does not empty the list
+        // while its first matches are outstanding.
+        assert_eq!(pending.visible_files_count, 2);
+        assert!(!command.is_finished());
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "Nothing more until the search answers")
+            .await;
+
+        release.notify_one();
+        command.await.unwrap();
+        assert_eq!(harness.state_updates_sent(), 1);
+        let state = harness.state.lock();
+        assert_eq!(state.content_search_query, "needle");
+        assert_eq!(state.filtered_file_list().len(), 1);
+    }
+
+    /// The answer to a refined query shows the matches of the query before until the
+    /// new ones are there, and typing into another filter meanwhile does not end the
+    /// search.
+    #[tokio::test]
+    async fn test_update_filters_during_a_content_search_keeps_it_running() {
+        let mut harness = TestHarness::new();
+        harness.set_initial_files(&["main.rs", "notes.md", "lib.rs"]);
+        let (started_tx, mut started) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let searcher = GatedSearcher {
+            started: started_tx,
+            release: release.clone(),
+            matches: HashSet::from([
+                harness.root_path.join("main.rs"),
+                harness.root_path.join("notes.md"),
+            ]),
+        };
+        let command = tokio::spawn(update_filters_with(
+            json!({ "contentSearchQuery": "needle" }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            searcher,
+        ));
+        started.recv().await.expect("The search must start");
+        assert_eq!(harness.state_updates_sent(), 1);
+
+        // Another filter, with the content query as the UI shows it.
+        update_filters(
+            json!({ "searchQuery": "main", "contentSearchQuery": "needle" }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+        let meanwhile = harness.last_state_update().unwrap();
+        assert_eq!(meanwhile.search_query, "main");
+        assert_eq!(meanwhile.content_search_query, "needle");
+        assert_eq!(meanwhile.visible_files_count, 1);
+
+        release.notify_one();
+        command.await.unwrap();
+        let answered = harness
+            .last_state_update()
+            .expect("The running search must still publish its matches");
+        assert_eq!(answered.content_search_query, "needle");
+        assert_eq!(answered.visible_files_count, 1);
+        assert_eq!(
+            harness.state.lock().content_search_results,
+            HashSet::from([
+                harness.root_path.join("main.rs"),
+                harness.root_path.join("notes.md"),
+            ])
+        );
     }
 
     /// A file that names only some settings is completed with the defaults.

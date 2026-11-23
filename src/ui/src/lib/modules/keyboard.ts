@@ -1,5 +1,6 @@
 import { commands as allCommands } from "./commands.js";
 import type { FocusContext } from "../types.js";
+import { activatesNatively } from "./nativeActivation.js";
 
 function getFocusContext(): FocusContext {
   const activeEl = document.activeElement as HTMLElement | null;
@@ -51,6 +52,12 @@ function globalKeydownHandler(e: KeyboardEvent) {
     if (SAFE_KEYS_ALLOWLIST.includes(e.key) || isPrintableChar) {
       return;
     }
+  }
+
+  // Not unhandled: the focused control acts on the key itself (Enter on a
+  // button). Blocking it would keep the control from being activated.
+  if (activatesNatively(context.activeEl, e.key)) {
+    return;
   }
 
   if (

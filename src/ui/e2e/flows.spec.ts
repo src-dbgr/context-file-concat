@@ -408,3 +408,102 @@ test("A11y sanity on main screen (no critical issues)", async ({ page }) => {
   const critical = results.violations.filter((v) => v.impact === "critical");
   expect(critical.length, "Expected no CRITICAL a11y violations").toBe(0);
 });
+
+test.describe("Keyboard on the controls of a tree row", () => {
+  type Posted = { command: string; payload: unknown };
+
+  test.beforeEach(async ({ page }) => {
+    // Record what the UI posts to the host.
+    await page.addInitScript(() => {
+      const w = window as unknown as {
+        __posted: string[];
+        ipc: { postMessage: (message: string) => void };
+      };
+      w.__posted = [];
+      w.ipc = { postMessage: (message) => w.__posted.push(message) };
+    });
+    await page.goto("/?e2e=1");
+    await page.waitForFunction(() => {
+      const w = window as unknown as {
+        __e2e?: { store?: { setAppState?: (s: unknown) => void } };
+      };
+      return typeof w.__e2e?.store?.setAppState === "function";
+    });
+    await page.evaluate((next) => {
+      (
+        window as unknown as {
+          __e2e: { store: { setAppState: (s: AppState) => void } };
+        }
+      ).__e2e.store.setAppState(next);
+    }, withRepo());
+    await expect(page.locator(".tree .tree-item-container")).toHaveCount(5);
+  });
+
+  /** Focus a control of a row, press a key on it, return what was posted. */
+  async function press(
+    page: import("@playwright/test").Page,
+    selector: string,
+    key: string,
+  ): Promise<Posted[]> {
+    const control = page.locator(selector);
+    await control.focus();
+    await expect(control).toBeFocused();
+    await page.evaluate(() => {
+      (window as unknown as { __posted: string[] }).__posted.length = 0;
+    });
+    await page.keyboard.press(key);
+    return page.evaluate(() =>
+      (window as unknown as { __posted: string[] }).__posted.map(
+        (message) => JSON.parse(message) as Posted,
+      ),
+    );
+  }
+  const inRow = (path: string, control: string) =>
+    `.tree .tree-item-container[data-path="${path}"] ${control}`;
+
+  for (const key of ["Enter", "Space"]) {
+    test(`${key} on the ignore button of a directory ignores it`, async ({
+      page,
+    }) => {
+      const posted = await press(page, inRow("/repo/src", ".ignore-btn"), key);
+      expect(posted).toEqual([
+        { command: "addIgnorePath", payload: "/repo/src" },
+      ]);
+    });
+
+    test(`${key} on the ignore button of a file ignores it`, async ({
+      page,
+    }) => {
+      const posted = await press(
+        page,
+        inRow("/repo/README.md", ".ignore-btn"),
+        key,
+      );
+      expect(posted).toEqual([
+        { command: "addIgnorePath", payload: "/repo/README.md" },
+      ]);
+    });
+  }
+
+  test("Space on a checkbox toggles the selection once", async ({ page }) => {
+    expect(
+      await press(page, inRow("/repo/src", 'input[type="checkbox"]'), "Space"),
+    ).toEqual([{ command: "toggleDirectorySelection", payload: "/repo/src" }]);
+    expect(
+      await press(
+        page,
+        inRow("/repo/README.md", 'input[type="checkbox"]'),
+        "Space",
+      ),
+    ).toEqual([{ command: "toggleSelection", payload: "/repo/README.md" }]);
+  });
+
+  test("Enter and Space on a row still act on the row", async ({ page }) => {
+    expect(await press(page, inRow("/repo/README.md", ""), "Enter")).toEqual([
+      { command: "loadFilePreview", payload: "/repo/README.md" },
+    ]);
+    expect(await press(page, inRow("/repo/README.md", ""), "Space")).toEqual([
+      { command: "toggleSelection", payload: "/repo/README.md" },
+    ]);
+  });
+});
