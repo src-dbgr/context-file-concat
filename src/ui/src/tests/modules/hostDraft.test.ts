@@ -133,7 +133,51 @@ describe("HostDraft", () => {
     expect(draft.accepts({ q: "x" })).toBe(true);
 
     draft.sent({ q: "z" });
+    expect(draft.accepts({ q: "y" })).toBe(false);
     vi.advanceTimersByTime(10);
     expect(onAckTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  describe("a host that has not reported anything since the send", () => {
+    it("does not end the wait by the time alone", () => {
+      const onAckTimeout = vi.fn();
+      const draft = new HostDraft<string>({ onAckTimeout });
+      draft.sent("needle");
+
+      // E.g. a content search that takes longer than the wait.
+      vi.advanceTimersByTime(ACK_TIMEOUT_MS * 10);
+      expect(onAckTimeout).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("shows the first value the host reports afterwards, whatever it is", () => {
+      const draft = new HostDraft<string>();
+      draft.sent("needle");
+      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
+
+      // Newer than the send: the host's decision.
+      expect(draft.accepts("changed by the host")).toBe(true);
+      expect(draft.accepts("anything")).toBe(true);
+    });
+
+    it("still keeps an edit in progress when that value arrives", () => {
+      const draft = new HostDraft<string>();
+      draft.sent("needle");
+      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
+      draft.edit();
+      expect(draft.accepts("")).toBe(false);
+    });
+
+    it("starts a full wait again with the next send", () => {
+      const onAckTimeout = vi.fn();
+      const draft = new HostDraft<string>({ onAckTimeout });
+      draft.sent("needle");
+      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
+
+      draft.sent("needles");
+      expect(draft.accepts("")).toBe(false);
+      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
+      expect(onAckTimeout).toHaveBeenCalledTimes(1);
+    });
   });
 });

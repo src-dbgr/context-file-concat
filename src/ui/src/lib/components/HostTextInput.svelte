@@ -9,6 +9,7 @@
    */
   import { onDestroy, untrack } from "svelte";
   import { HostDraft } from "$lib/modules/hostDraft";
+  import { appState } from "$lib/stores/app";
 
   type Props = {
     id: string;
@@ -25,8 +26,10 @@
   const draft = new HostDraft<string>({ onAckTimeout: syncFromHost });
   let text = $state(untrack(() => value));
 
-  // Runs for every value the host reports.
+  // Runs for every snapshot of the host, also for one that reports the same
+  // value again: the draft goes by the reports that arrive after a send.
   $effect(() => {
+    void $appState;
     void value;
     untrack(syncFromHost);
   });
