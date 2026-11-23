@@ -2,6 +2,7 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
+import { tick } from "svelte";
 import FileTree from "$lib/components/FileTree.svelte";
 import { appState } from "$lib/stores/app";
 import type { TreeNode } from "$lib/types";
@@ -322,6 +323,32 @@ describe("FileTree", () => {
     ]);
   });
 
+  it("a click collapses a directory that is expanded but not loaded", async () => {
+    // Expanded while a scan ran that was cancelled: nothing to show, but the
+    // chevron points down and must close again.
+    seedState(
+      [dir("/repo/vendor", true, []), dir("/repo/other", true, [])].map(
+        (d) => ({ ...d, has_children: true, children_loaded: false }),
+      ),
+      { is_fully_scanned: false },
+    );
+
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    await fireEvent.click(
+      row(container, "/repo/vendor").querySelector(".arrow")!,
+    );
+    await fireEvent.click(
+      row(container, "/repo/other").querySelector(".file-name")!,
+    );
+
+    expect(vi.mocked(post).mock.calls).toEqual([
+      ["setExpansion", { path: "/repo/vendor", expanded: false }],
+      ["setExpansion", { path: "/repo/other", expanded: false }],
+    ]);
+  });
+
   it("expanding a directory whose children are not loaded requests them", async () => {
     seedState(
       [
@@ -551,6 +578,147 @@ describe("FileTree", () => {
         ["setExpansion", { path: "/repo/src", expanded: true }],
         ["toggleDirectorySelection", "/repo/src"],
       ]);
+    });
+
+    describe("on a directory that is expanded but not loaded", () => {
+      const expandedUnloaded = (): TreeNode[] => [
+        {
+          ...dir("/repo/vendor", true, []),
+          has_children: true,
+          children_loaded: false,
+        },
+      ];
+      const mount = () =>
+        mountFocusedOn(expandedUnloaded(), { is_fully_scanned: false });
+
+      it("Enter collapses it", async () => {
+        const { treeEl } = await mount();
+        await fireEvent.keyDown(treeEl, { key: "Enter" });
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["setExpansion", { path: "/repo/vendor", expanded: false }],
+        ]);
+      });
+
+      it("ArrowLeft collapses it", async () => {
+        const { treeEl } = await mount();
+        await fireEvent.keyDown(treeEl, { key: "ArrowLeft" });
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["setExpansion", { path: "/repo/vendor", expanded: false }],
+        ]);
+      });
+
+      it("ArrowRight sends nothing (it is expanded and has no rows to enter)", async () => {
+        const { treeEl, container } = await mount();
+        await fireEvent.keyDown(treeEl, { key: "ArrowRight" });
+        expect(post).not.toHaveBeenCalled();
+        expect(row(container, "/repo/vendor")).toHaveAttribute("tabindex", "0");
+      });
+
+      it("is loaded when it is expanded again after the collapse", async () => {
+        const { treeEl } = await mount();
+        await fireEvent.keyDown(treeEl, { key: "Enter" });
+        // The host answers: collapsed, still not loaded.
+        appState.update((s) => ({
+          ...s,
+          tree: s.tree.map((n) => ({ ...n, is_expanded: false })),
+        }));
+        await tick();
+        await fireEvent.keyDown(treeEl, { key: "Enter" });
+
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["setExpansion", { path: "/repo/vendor", expanded: false }],
+          ["loadDirectoryLevel", "/repo/vendor"],
+        ]);
+      });
+    });
+
+    describe("a key is handled once, wherever the focus is inside the row", () => {
+      const tree = (): TreeNode[] => [
+        file("/repo/a.txt"),
+        collapsedDir("/repo/src"),
+        file("/repo/z.txt"),
+      ];
+
+      /** Focus a part of a row and press a key on it, as the browser does. */
+      async function pressOn(el: Element, key: string) {
+        if (!(el instanceof HTMLElement)) throw new Error("not focusable");
+        el.focus();
+        expect(document.activeElement).toBe(el);
+        const notPrevented = await fireEvent.keyDown(el, { key });
+        // Handled by the tree: the default (page scroll on Space) is off.
+        expect(notPrevented).toBe(false);
+      }
+      const part = (container: HTMLElement, path: string, selector: string) =>
+        row(container, path).querySelector(selector)!;
+
+      it("Space on a focused directory name selects it and does not expand it", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await pressOn(part(container, "/repo/src", ".file-name"), " ");
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["toggleDirectorySelection", "/repo/src"],
+        ]);
+      });
+
+      it("Enter on a focused directory name toggles it once", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await pressOn(part(container, "/repo/src", ".file-name"), "Enter");
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["setExpansion", { path: "/repo/src", expanded: true }],
+        ]);
+      });
+
+      it("Space and Enter on a focused arrow act like on the row", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await pressOn(part(container, "/repo/src", ".arrow"), " ");
+        await pressOn(part(container, "/repo/src", ".arrow"), "Enter");
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["toggleDirectorySelection", "/repo/src"],
+          ["setExpansion", { path: "/repo/src", expanded: true }],
+        ]);
+      });
+
+      it("Space on a focused file name selects it and does not open it", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await pressOn(part(container, "/repo/z.txt", ".file-name"), " ");
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["toggleSelection", "/repo/z.txt"],
+        ]);
+      });
+
+      it("Enter on a focused file name opens it once", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await pressOn(part(container, "/repo/z.txt", ".file-name"), "Enter");
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["loadFilePreview", "/repo/z.txt"],
+        ]);
+      });
+
+      it("arrow keys work from a focused name", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await pressOn(part(container, "/repo/src", ".file-name"), "ArrowRight");
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["setExpansion", { path: "/repo/src", expanded: true }],
+        ]);
+        await pressOn(part(container, "/repo/src", ".file-name"), "ArrowDown");
+        await waitFor(() =>
+          expect(row(container, "/repo/z.txt")).toHaveAttribute(
+            "tabindex",
+            "0",
+          ),
+        );
+      });
+
+      it("the pointer still works on name and arrow", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await fireEvent.click(part(container, "/repo/src", ".arrow"));
+        await fireEvent.click(part(container, "/repo/src", ".file-name"));
+        await fireEvent.click(part(container, "/repo/z.txt", ".file-name"));
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["setExpansion", { path: "/repo/src", expanded: true }],
+          ["setExpansion", { path: "/repo/src", expanded: true }],
+          ["loadFilePreview", "/repo/z.txt"],
+        ]);
+      });
     });
 
     it("navigates only over the rows that were sent", async () => {

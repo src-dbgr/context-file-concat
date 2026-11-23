@@ -144,11 +144,16 @@ const SetExpansionPayload = z
   .strict();
 const SaveFilePayload = z.string();
 /** A pattern is set if it is not blank; the host ignores blank ones. */
-const IgnorePatternPayload = z
+const AddIgnorePatternPayload = z
   .object({
     pattern: z.string().refine((p) => p.trim().length > 0, "blank pattern"),
   })
   .strict();
+/**
+ * Any text can be removed: an imported configuration may contain a blank
+ * pattern, and its chip has to be removable like every other.
+ */
+const RemoveIgnorePatternPayload = z.object({ pattern: z.string() }).strict();
 
 const configOption = <N extends string, V extends z.ZodTypeAny>(
   option: N,
@@ -200,8 +205,8 @@ export const CommandSchemas = {
   exportConfig: NullPayload,
   importConfig: NullPayload,
   updateFilters: UpdateFiltersPayload,
-  addIgnorePattern: IgnorePatternPayload,
-  removeIgnorePattern: IgnorePatternPayload,
+  addIgnorePattern: AddIgnorePatternPayload,
+  removeIgnorePattern: RemoveIgnorePatternPayload,
   clearIgnorePatterns: NullPayload,
   addIgnorePath: PathPayload,
   setConfigOption: ConfigOptionSchema,

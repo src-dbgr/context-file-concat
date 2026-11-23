@@ -110,6 +110,90 @@ describe("commands.ts – keyboard command matching & execution (inputs)", () =>
     expect(el.value).toBe("foo bar ");
   });
 
+  describe("deleting with the keyboard tells the field's listeners", () => {
+    function inputEvents(el: HTMLInputElement): InputEvent[] {
+      const events: InputEvent[] = [];
+      // On the document: the event has to bubble, as a native one does.
+      document.addEventListener("input", (e) => {
+        if (e.target === el) events.push(e as InputEvent);
+      });
+      return events;
+    }
+
+    function press(el: HTMLInputElement, init: KeyboardEventInit) {
+      const evt = new KeyboardEvent("keydown", init);
+      const cmd = findCommandByEvent(evt);
+      expect(cmd).toBeTruthy();
+      cmd!.execute(evt, makeContextFor(el));
+    }
+
+    it("Alt+Backspace dispatches one input event (deleteWordBackward)", () => {
+      const el = makeInput("foo bar baz");
+      el.setSelectionRange(11, 11);
+      const events = inputEvents(el);
+
+      press(el, { key: "Backspace", altKey: true });
+
+      expect(el.value).toBe("foo bar ");
+      expect(events).toHaveLength(1);
+      expect(events[0]).toBeInstanceOf(InputEvent);
+      expect(events[0].inputType).toBe("deleteWordBackward");
+      expect(events[0].bubbles).toBe(true);
+      expect(el.selectionStart).toBe(8);
+      expect(el.selectionEnd).toBe(8);
+    });
+
+    it("Ctrl+Backspace does the same", () => {
+      const el = makeInput("foo bar");
+      el.setSelectionRange(7, 7);
+      const events = inputEvents(el);
+
+      press(el, { key: "Backspace", ctrlKey: true });
+
+      expect(el.value).toBe("foo ");
+      expect(events.map((e) => e.inputType)).toEqual(["deleteWordBackward"]);
+    });
+
+    it("Alt+Backspace with a selection removes the selection (deleteContentBackward)", () => {
+      const el = makeInput("foo bar baz");
+      el.setSelectionRange(4, 8);
+      const events = inputEvents(el);
+
+      press(el, { key: "Backspace", altKey: true });
+
+      expect(el.value).toBe("foo baz");
+      expect(el.selectionStart).toBe(4);
+      expect(events.map((e) => e.inputType)).toEqual(["deleteContentBackward"]);
+    });
+
+    it("Cmd+Backspace deletes to the start and dispatches deleteSoftLineBackward", () => {
+      const el = makeInput("foo bar baz");
+      el.setSelectionRange(8, 8);
+      const events = inputEvents(el);
+
+      press(el, { key: "Backspace", metaKey: true });
+
+      expect(el.value).toBe("baz");
+      expect(el.selectionStart).toBe(0);
+      expect(el.selectionEnd).toBe(0);
+      expect(events.map((e) => e.inputType)).toEqual([
+        "deleteSoftLineBackward",
+      ]);
+    });
+
+    it("dispatches nothing when there is nothing to delete", () => {
+      const el = makeInput("foo");
+      el.setSelectionRange(0, 0);
+      const events = inputEvents(el);
+
+      press(el, { key: "Backspace", altKey: true });
+      press(el, { key: "Backspace", metaKey: true });
+
+      expect(el.value).toBe("foo");
+      expect(events).toEqual([]);
+    });
+  });
+
   it("Alt+ArrowLeft/Right move by word; with Shift they select by word", () => {
     const el = makeInput("alpha beta");
     // Place caret after 'alpha ' (index 6)

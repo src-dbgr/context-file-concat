@@ -24,7 +24,12 @@ export type ExpandableNode = Pick<
 >;
 
 /**
- * True if the directory's children must be fetched before they can be shown.
+ * True if expanding the directory has to fetch its children first.
+ *
+ * Only a collapsed directory is loaded: the load is what expands it. A
+ * directory that is already expanded without loaded children (expanded during
+ * a scan that was cancelled) is not loaded again by a gesture; it can be
+ * collapsed like any other, and is loaded when it is expanded the next time.
  *
  * While a scan is running the backend refuses lazy loads: the scan itself
  * delivers the children, so nothing has to be requested.
@@ -33,7 +38,7 @@ export function needsLazyLoad(
   node: ExpandableNode,
   isScanning: boolean = getState().is_scanning,
 ): boolean {
-  return !node.children_loaded && !isScanning;
+  return !node.is_expanded && !node.children_loaded && !isScanning;
 }
 
 function setExpanded(node: ExpandableNode, expanded: boolean): void {
@@ -45,9 +50,10 @@ function setExpanded(node: ExpandableNode, expanded: boolean): void {
  * instead; the backend expands it as part of that load.
  */
 export function expandDirectory(node: ExpandableNode): void {
+  if (node.is_expanded) return;
   if (needsLazyLoad(node)) {
     post("loadDirectoryLevel", node.path);
-  } else if (!node.is_expanded) {
+  } else {
     setExpanded(node, true);
   }
 }
@@ -59,17 +65,17 @@ export function collapseDirectory(node: ExpandableNode): void {
 
 /**
  * Flip a directory to the opposite of what the user currently sees (chevron,
- * name, Enter). A directory without loaded children has nothing to show either
- * way, so toggling it loads it.
+ * name, Enter): an expanded directory is collapsed, loaded or not; a collapsed
+ * one is expanded, which loads it first if necessary.
  *
  * The target is derived from the rendered node, so two activations before the
  * next snapshot ask for the same state twice instead of flipping twice.
  */
 export function toggleDirectory(node: ExpandableNode): void {
-  if (needsLazyLoad(node)) {
-    post("loadDirectoryLevel", node.path);
+  if (node.is_expanded) {
+    setExpanded(node, false);
   } else {
-    setExpanded(node, !node.is_expanded);
+    expandDirectory(node);
   }
 }
 

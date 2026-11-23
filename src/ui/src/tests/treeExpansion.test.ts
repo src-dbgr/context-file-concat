@@ -50,10 +50,16 @@ describe("treeExpansion – expansion intents go to the backend", () => {
   });
 
   describe("needsLazyLoad", () => {
-    it("is true only for an unloaded directory while no scan is running", () => {
+    it("is true only for a collapsed, unloaded directory while no scan is running", () => {
       expect(needsLazyLoad(dir({ children_loaded: false }), false)).toBe(true);
       expect(needsLazyLoad(dir({ children_loaded: false }), true)).toBe(false);
       expect(needsLazyLoad(dir({ children_loaded: true }), false)).toBe(false);
+      expect(
+        needsLazyLoad(
+          dir({ children_loaded: false, is_expanded: true }),
+          false,
+        ),
+      ).toBe(false);
     });
 
     it("reads the scan state from the store by default", () => {
@@ -95,12 +101,13 @@ describe("treeExpansion – expansion intents go to the backend", () => {
       ]);
     });
 
-    it("loads an unloaded directory even if it is already expanded", () => {
-      // Expanded during a scan that was cancelled: it shows nothing yet.
+    it("collapses an expanded directory whose children are not loaded", () => {
+      // Expanded during a scan that was cancelled: it must not be loaded
+      // (and thereby kept open) by the gesture that is meant to close it.
       toggleDirectory(dir({ children_loaded: false, is_expanded: true }));
 
       expect(vi.mocked(post).mock.calls).toEqual([
-        ["loadDirectoryLevel", "/repo/src"],
+        ["setExpansion", { path: "/repo/src", expanded: false }],
       ]);
     });
 
@@ -148,6 +155,11 @@ describe("treeExpansion – expansion intents go to the backend", () => {
 
     it("does not collapse a directory that is already expanded", () => {
       expandDirectory(dir({ is_expanded: true }));
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("does not load a directory that is expanded but not loaded", () => {
+      expandDirectory(dir({ is_expanded: true, children_loaded: false }));
       expect(post).not.toHaveBeenCalled();
     });
 

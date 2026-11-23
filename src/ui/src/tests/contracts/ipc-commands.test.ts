@@ -38,13 +38,25 @@ describe("[IPC Contracts] config intents", () => {
         null,
         {},
         { pattern: 7 },
-        { pattern: "" },
-        { pattern: "   " },
         { pattern: "*.log", extra: true },
         { ignore_patterns: ["*.log"] },
       ]) {
         rejects(name, payload);
       }
+    }
+  });
+
+  it("rejects adding a blank pattern", () => {
+    rejects("addIgnorePattern", { pattern: "" });
+    rejects("addIgnorePattern", { pattern: "   " });
+  });
+
+  it("accepts removing a blank pattern (it can come from an imported config)", () => {
+    for (const pattern of ["", "   ", "\t"]) {
+      expect(validateCommand("removeIgnorePattern", { pattern })).toEqual({
+        command: "removeIgnorePattern",
+        payload: { pattern },
+      });
     }
   });
 

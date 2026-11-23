@@ -13,9 +13,11 @@ import Sidebar from "$lib/components/Sidebar.svelte";
 import StatusBar from "$lib/components/StatusBar.svelte";
 import { appState, getState } from "$lib/stores/app";
 import { ACK_TIMEOUT_MS } from "$lib/modules/hostDraft";
+import { deleteLineBackward, deleteWordBackward } from "$lib/modules/actions";
 import { UiStateSchema } from "$lib/ipc/schema";
 import type { AppState, Config } from "$lib/types";
 import { makeValidUiState } from "./contracts/factories";
+import { validateCommand } from "./contracts/helpers";
 
 vi.mock("$lib/services/backend", () => ({
   post: vi.fn(),
@@ -123,6 +125,21 @@ describe("Sidebar: ignore patterns are edited with intents", () => {
       ["removeIgnorePattern", { pattern: "b" }],
       ["clearIgnorePatterns"],
     ]);
+  });
+
+  it("removes a blank pattern of an imported config with a valid command", async () => {
+    appState.set(snapshot({ config: { ignore_patterns: ["a", "  "] } }));
+    render(Sidebar);
+
+    await fireEvent.click(
+      document.querySelector('[aria-label="Remove pattern   "]')!,
+    );
+
+    expect(posted()).toEqual([["removeIgnorePattern", { pattern: "  " }]]);
+    // What DEV and E2E builds check before sending.
+    expect(() =>
+      validateCommand("removeIgnorePattern", { pattern: "  " }),
+    ).not.toThrow();
   });
 });
 
@@ -329,6 +346,108 @@ describe("text being typed survives snapshots", () => {
     expect(search.value).toBe("");
   });
 
+  it("follows the host when the wait runs out, without another snapshot", async () => {
+    render(Sidebar);
+    const search = input("search-query");
+    const content = input("content-search-query");
+
+    await type(content, "needle");
+    vi.advanceTimersByTime(300);
+    // The host decided differently, and this is its last word for now.
+    await hostSends({ search_query: "from-host", content_search_query: "" });
+    expect(content.value).toBe("needle");
+
+    vi.advanceTimersByTime(ACK_TIMEOUT_MS - 1);
+    await tick();
+    expect(content.value).toBe("needle");
+
+    vi.advanceTimersByTime(1);
+    await tick();
+    expect(content.value).toBe("");
+    expect(search.value).toBe("from-host");
+  });
+
+  it("does not let the end of the wait reset text typed in the meantime", async () => {
+    render(Sidebar);
+    const search = input("search-query");
+
+    await type(search, "ma");
+    vi.advanceTimersByTime(300);
+    await hostSends({ search_query: "" });
+    vi.advanceTimersByTime(ACK_TIMEOUT_MS - 100);
+    await type(search, "main"); // debounce pending when the wait runs out
+
+    vi.advanceTimersByTime(100);
+    await tick();
+    expect(search.value).toBe("main");
+  });
+
+  it("shows the cleared filters when the directory is cleared right after typing", async () => {
+    render(Sidebar);
+    const content = input("content-search-query");
+
+    await type(content, "needle");
+    vi.advanceTimersByTime(300);
+    expect(posted()).toHaveLength(1);
+
+    // "Clear directory" within the wait for the acknowledgement: the only
+    // snapshot that follows differs from what was sent.
+    await hostSends({ current_path: "", content_search_query: "" });
+    expect(content.value).toBe("");
+
+    vi.advanceTimersByTime(ACK_TIMEOUT_MS * 2);
+    await tick();
+    expect(content.value).toBe("");
+    expect(posted()).toHaveLength(1);
+  });
+
+  it("does not apply an unsent filter text to another directory", async () => {
+    render(Sidebar);
+    const search = input("search-query");
+
+    await type(search, "main");
+    vi.advanceTimersByTime(200); // still within the debounce
+    await hostSends({ current_path: "/another/project", search_query: "" });
+    expect(search.value).toBe("");
+
+    vi.advanceTimersByTime(300);
+    await tick();
+    expect(posted()).toEqual([]);
+    expect(search.value).toBe("");
+  });
+
+  it("does not wait for the acknowledgement of a text sent to the previous directory", async () => {
+    render(Sidebar);
+    const search = input("search-query");
+
+    await type(search, "main");
+    vi.advanceTimersByTime(300);
+    await hostSends({ current_path: "/another/project", search_query: "" });
+    expect(search.value).toBe("");
+
+    // Typing for the new directory works as usual.
+    await type(search, "lib");
+    vi.advanceTimersByTime(300);
+    expect(posted().map(([, payload]) => payload)).toMatchObject([
+      { searchQuery: "main" },
+      { searchQuery: "lib" },
+    ]);
+  });
+
+  it("keeps the text being typed while snapshots of the same directory arrive", async () => {
+    appState.set(snapshot({ current_path: "/project" }));
+    render(Sidebar);
+    const search = input("search-query");
+
+    await type(search, "main");
+    await hostSends({ current_path: "/project", is_scanning: true });
+    await hostSends({ current_path: "/project", is_scanning: false });
+    expect(search.value).toBe("main");
+
+    vi.advanceTimersByTime(300);
+    expect(posted()).toHaveLength(1);
+  });
+
   it("drops a pending filter text when the directory is closed", async () => {
     render(Sidebar);
     const search = input("search-query");
@@ -340,6 +459,33 @@ describe("text being typed survives snapshots", () => {
 
     expect(posted()).toEqual([]);
     expect(search.value).toBe("");
+  });
+
+  it("sends the filters after a word or a line was deleted with the keyboard", async () => {
+    appState.set(snapshot({ search_query: "foo bar" }));
+    render(Sidebar);
+    const search = input("search-query");
+    expect(search.value).toBe("foo bar");
+
+    // Alt+Backspace: the command changes the field from script.
+    search.setSelectionRange(7, 7);
+    deleteWordBackward(search);
+    expect(search.value).toBe("foo ");
+    // A snapshot during the debounce must not bring the text back.
+    await hostSends({ search_query: "foo bar", status_message: "progress" });
+    expect(search.value).toBe("foo ");
+
+    vi.advanceTimersByTime(300);
+    expect(posted()).toMatchObject([
+      ["updateFilters", { searchQuery: "foo " }],
+    ]);
+
+    // Cmd+Backspace
+    search.setSelectionRange(4, 4);
+    deleteLineBackward(search);
+    vi.advanceTimersByTime(300);
+    expect(posted()).toHaveLength(2);
+    expect(posted()[1]).toMatchObject(["updateFilters", { searchQuery: "" }]);
   });
 
   it("shows the filters of the host when nothing is being typed", async () => {

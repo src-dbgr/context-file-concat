@@ -7,7 +7,7 @@
    * The edit is handed to `oncommit` when the field is left or Enter is
    * pressed (the `change` event); the caller sends it as an intent command.
    */
-  import { untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { HostDraft } from "$lib/modules/hostDraft";
 
   type Props = {
@@ -18,15 +18,19 @@
   };
   let { id, value, oncommit }: Props = $props();
 
-  const draft = new HostDraft<string>();
+  // Shows the host's value unless the draft holds it back.
+  function syncFromHost() {
+    if (draft.accepts(value)) text = value;
+  }
+  const draft = new HostDraft<string>({ onAckTimeout: syncFromHost });
   let text = $state(untrack(() => value));
 
+  // Runs for every value the host reports.
   $effect(() => {
-    const host = value;
-    untrack(() => {
-      if (draft.accepts(host)) text = host;
-    });
+    void value;
+    untrack(syncFromHost);
   });
+  onDestroy(() => draft.reset());
 
   function commit() {
     draft.sent(text);
