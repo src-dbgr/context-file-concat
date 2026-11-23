@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="952" viewBox="0 0 1600 952" role="img" aria-labelledby="t d">
 <title id="t">CFC architecture</title>
-<desc id="d">The Svelte UI in the system WebView sends typed commands over IPC to the Rust host. Command dispatch updates the central app state and starts background tasks for scanning, search and output generation; the tasks call the core (scanner, ignore rules, search, token count, file detection), which reads the project folder, and write their results into the app state. The host answers with full state snapshots that the UI renders. Settings are kept in config.json and window.json.</desc>
+<desc id="d">The Svelte UI in the system WebView sends typed commands over IPC to the Rust host. Command dispatch updates the central app state and starts background tasks for scanning, search and output generation; the tasks call the core (scanner, ignore rules, search, output, token count), which reads the project folder, and write their results into the app state. The host answers with full state snapshots that the UI renders. Settings are kept in config.json.</desc>
 <style>
 text{font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;}
 .t{font-size:30px;font-weight:600;fill:#E6EDF3;}
@@ -45,18 +45,18 @@ text{font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Hel
 <text class="s" data-in="tasks" x="248" y="636">Scan, search and output generation run off the UI thread</text>
 <rect id="core" class="b" x="220" y="776" width="840" height="120" rx="10"/>
 <text class="t" data-in="core" x="248" y="829">Core</text>
-<text class="s" data-in="core" x="248" y="866">Scanner · Ignore rules · Search · Token count · File detection</text>
+<text class="s" data-in="core" x="248" y="866">Scanner · Ignore rules · Search · Output · Token count</text>
 <rect id="cfg" class="bd" x="1220" y="316" width="332" height="120" rx="10"/>
 <text class="t" data-in="cfg" x="1248" y="369">Settings</text>
-<text class="s" data-in="cfg" x="1248" y="406">config.json · window.json</text>
+<text class="s" data-in="cfg" x="1248" y="406">config.json</text>
 <rect id="proj" class="bd" x="1220" y="776" width="332" height="120" rx="10"/>
 <text class="t" data-in="proj" x="1248" y="829">Project folder</text>
-<text class="s" data-in="proj" x="1248" y="866">Read, never modified</text>
+<text class="s" data-in="proj" x="1248" y="866">Scanned and read</text>
 </g>
 <g id="legend">
 <path class="k" d="M1281 96H1220"/>
 <polygon class="h" points="1296,96 1280,103 1280,89"/>
-<text class="l" x="1316" y="103">Command or call</text>
+<text class="l" x="1316" y="103">Command, call or data</text>
 <path class="ka" d="M1281 138H1220"/>
 <polygon class="ha" points="1296,138 1280,145 1280,131"/>
 <text class="l" x="1316" y="145">State snapshot</text>

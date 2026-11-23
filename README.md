@@ -122,10 +122,10 @@ The design emphasizes key principles like **Separation of Concerns**, **Unidirec
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/architecture-dark.svg">
-  <img src="./docs/assets/architecture-light.svg" width="880" alt="Architecture of CFC: the Svelte UI in the system WebView sends typed commands over IPC to the Rust host. Command dispatch updates the central app state and starts background tasks for scanning, search and output generation; the tasks call the core (scanner, ignore rules, search, token count, file detection), which reads the project folder, and write their results into the app state. The host answers with full state snapshots that the UI renders. Settings are kept in config.json and window.json.">
+  <img src="./docs/assets/architecture-light.svg" width="880" alt="Architecture of CFC: the Svelte UI in the system WebView sends typed commands over IPC to the Rust host. Command dispatch updates the central app state and starts background tasks for scanning, search and output generation; the tasks call the core (scanner, ignore rules, search, output, token count), which reads the project folder, and write their results into the app state. The host answers with full state snapshots that the UI renders. Settings are kept in config.json.">
 </picture>
 
-The UI never asks the host a question and waits for the answer: it sends a command, and the host replies with a complete snapshot of its state, which the UI renders. Commands update the app state directly or start a background task that calls the core and writes its results back. Solid arrows are commands and calls, the dashed arrow is the snapshot on its way to the UI.
+The UI never asks the host a question and waits for the answer: it sends a command, and the host replies with a complete snapshot of its state, which the UI renders. Commands update the app state directly or start a background task that calls the core and writes its results back. Solid arrows are commands, calls and data, the dashed arrow is the snapshot on its way to the UI.
 
 For a deep dive into the system's structure, data flows, IPC contracts, and development patterns, please see our comprehensive **[Developer Documentation](./docs/README.md)**.
 
