@@ -826,6 +826,25 @@ describe("FileTree – the focused row when the list changes", () => {
     expect(document.activeElement).toBe(rowEl(container, 5));
   });
 
+  it("Delete on a row that is out of sight only brings it back; the next one acts", async () => {
+    const { host, tree, container } = await mountFocusedOnRow(
+      manyRows(1000),
+      5,
+    );
+    await scrollToRow(tree, 700);
+    await answerAll(host);
+    expect(document.activeElement).toBe(tree);
+
+    await fireEvent.keyDown(tree, { key: "Delete" });
+    await answerAll(host);
+    expect(host.posted("addIgnorePath")).toEqual([]);
+    expect(document.activeElement).toBe(rowEl(container, 5));
+    const path = rowEl(container, 5).getAttribute("data-path");
+
+    await fireEvent.keyDown(rowEl(container, 5), { key: "Delete" });
+    expect(host.posted("addIgnorePath")).toEqual([path]);
+  });
+
   it("does not ask while the list is the same and the item is just out of sight", async () => {
     const { host, tree, container } = await mountFocusedOnRow(
       manyRows(1000),

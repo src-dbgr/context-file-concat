@@ -4,6 +4,7 @@
   import { formatFileSize } from "$lib/utils";
   import { toggleDirectory } from "$lib/modules/treeExpansion";
   import { t } from "$lib/i18n";
+  import { isMac } from "$lib/platform";
 
   // Runes props (no `export let` in Svelte 5)
   // A pure row: it shows the row the host sent and posts commands, nothing
@@ -16,6 +17,9 @@
   let { node, index = 0, focused = false }: Props = $props();
 
   const level = $derived(node.depth);
+
+  // The key that ignores the row (`Delete`), as the keyboard at hand calls it.
+  const deleteKey = $derived(isMac() ? $t("key.deleteMac") : $t("key.delete"));
   const indentWidth = () => level * 21;
 
   // Auswahl-Zustände (nur für Directory relevant)
@@ -66,6 +70,7 @@
     data-type="directory"
     data-index={index}
     role="treeitem"
+    aria-label={node.name}
     aria-level={level + 1}
     aria-selected="false"
     aria-expanded={node.is_expanded ? "true" : "false"}
@@ -114,7 +119,7 @@
       </span>
       <button
         class="ignore-btn"
-        title={$t("filetree.ignoreDirectoryTitle")}
+        title={$t("filetree.ignoreDirectoryTitle", { key: deleteKey })}
         aria-label={$t("aria.ignoreDirectory")}
         onclick={addIgnore}
         data-path={node.path}
@@ -139,6 +144,7 @@
     data-path={node.path}
     data-index={index}
     role="treeitem"
+    aria-label={node.name}
     aria-level={level + 1}
     aria-selected={node.is_previewed ? "true" : "false"}
     tabindex={focused ? 0 : -1}
@@ -188,7 +194,7 @@
       </span>
       <button
         class="ignore-btn"
-        title={$t("filetree.ignoreFileTitle")}
+        title={$t("filetree.ignoreFileTitle", { key: deleteKey })}
         aria-label={$t("aria.ignoreFile")}
         onclick={addIgnore}
         data-path={node.path}

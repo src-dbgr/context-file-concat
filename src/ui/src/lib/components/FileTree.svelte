@@ -603,6 +603,16 @@
     // a control, and every key on the arrow and the name, are the tree's.
     if (activatesNatively(e.target, e.key)) return;
 
+    // Delete removes a row from the tree (it is ignored). One press, one
+    // row: not the repeats of a key held down, which would go on with the
+    // rows that move up, and not with a modifier, which means something else.
+    if (
+      e.key === "Delete" &&
+      (e.repeat || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey)
+    ) {
+      return;
+    }
+
     if (!NAVIGATION_KEYS.includes(e.key) && !ROW_KEYS.includes(e.key)) {
       // Typeahead; also possible while nothing is focused.
       if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -640,6 +650,19 @@
         return setFocusByIndex(focusedIndex + itemsPerPage());
       case "PageUp":
         return setFocusByIndex(focusedIndex - itemsPerPage());
+    }
+
+    // Delete acts on a row the user sees. If the focused row is out of
+    // sight (scrolled away) the key only brings it back; it is not kept
+    // for the row either. The next press acts.
+    if (key === "Delete") {
+      const visible = visibleRange(scrollTop, viewportHeight, totalRows);
+      const row = rowAt(focusedIndex);
+      const inSight =
+        focusedIndex >= visible.start && focusedIndex < visible.end;
+      if (row && inSight) actOnRow(key, row, focusedIndex);
+      else setFocusByIndex(focusedIndex);
+      return;
     }
 
     // The remaining keys act on the focused row itself.

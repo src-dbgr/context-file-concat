@@ -751,6 +751,40 @@ test.describe("Keyboard on the controls of a tree row", () => {
     ]);
   });
 
+  test("Delete with a modifier, and Backspace, ignore nothing", async ({
+    page,
+  }) => {
+    for (const key of ["Shift+Delete", "Control+Delete", "Backspace"]) {
+      expect(await press(page, inRow("/repo/README.md", ""), key)).toEqual([]);
+    }
+  });
+
+  test("a row is named by its name, its ignore button by the key", async ({
+    page,
+  }) => {
+    await expect(
+      page.getByRole("treeitem", { name: "README.md", exact: true }),
+    ).toHaveAttribute("data-path", "/repo/README.md");
+    await expect(
+      page.getByRole("treeitem", { name: "src", exact: true }),
+    ).toHaveAttribute("data-path", "/repo/src");
+
+    // The platform as the browser under test reports it (an emulated
+    // device may say another one than the machine the test runs on).
+    const mac = await page.evaluate(() => {
+      const nav = navigator as Navigator & {
+        userAgentData?: { platform?: string };
+      };
+      return /^mac/i.test(nav.userAgentData?.platform || nav.platform);
+    });
+    await expect(
+      page.locator(inRow("/repo/README.md", ".ignore-btn")),
+    ).toHaveAttribute(
+      "title",
+      `Add this file to ignore patterns (${mac ? "fn+⌫" : "Delete"})`,
+    );
+  });
+
   test("the tree is one stop for Tab: the focused row", async ({ page }) => {
     const stops = () =>
       page.evaluate(() => {

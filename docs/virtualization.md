@@ -72,15 +72,15 @@ The focused row is known by its **index in the list** and, once the row has arri
 
 - **The tree is one stop for Tab** (roving tabindex): the focused row has `tabindex="0"`, every other row and every control inside a row (chevron, checkbox, name, ignore button) has `tabindex="-1"`. While the focused row is not rendered (scrolled away, or on its way from the host) the stop is the tree element itself, so the tree can always be reached and left with one `Tab`. The controls of a row are for the pointer; each has its key on the row:
 
-  | Key on a row | Does | Pointer |
-  | --- | --- | --- |
-  | `Enter` | toggles a directory, opens a file in the preview | chevron, name |
-  | `ArrowRight` / `ArrowLeft` | expands / collapses a directory, moves to the first child / the parent; `ArrowRight` on a file opens it | chevron |
-  | `Space` | toggles the selection | checkbox |
-  | `Delete` | adds the row to the ignore patterns (`addIgnorePath`) | ignore button (`aria-keyshortcuts="Delete"`) |
-  | a letter | type-ahead: moves to the next row whose name starts with what was typed | |
+  | Key on a row                                 | Does                                                                                                    | Pointer                                      |
+  | -------------------------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+  | `Enter`                                      | toggles a directory, opens a file in the preview                                                        | chevron, name                                |
+  | `ArrowRight` / `ArrowLeft`                   | expands / collapses a directory, moves to the first child / the parent; `ArrowRight` on a file opens it | chevron                                      |
+  | `Space`                                      | toggles the selection                                                                                   | checkbox                                     |
+  | `Delete` (macOS: `fn+⌫`, forward delete `⌦`) | adds the row to the ignore patterns (`addIgnorePath`)                                                   | ignore button (`aria-keyshortcuts="Delete"`) |
+  | a letter                                     | type-ahead: moves to the next row whose name starts with what was typed                                 |                                              |
 
-  `Delete` only, not `Backspace`: that key belongs to correcting what was typed. A control that got the focus by a click still acts on its own keys (`Space` on the checkbox, `Enter`/`Space` on the ignore button); every other key there is the tree's.
+  `Delete` only, not `Backspace`: that key belongs to correcting what was typed. On a Mac the key labelled "delete" is Backspace and does nothing here; the tooltip of the ignore button names the key of the platform (`fn+⌫` there, `$lib/platform.ts`). One press ignores one row: the repeats of a held key and `Delete` with a modifier are left alone, and if the focused row is out of sight the first press only scrolls it back into view. A control that got the focus by a click still acts on its own keys (`Space` on the checkbox, `Enter`/`Space` on the ignore button); every other key there is the tree's.
 
 - `ArrowUp`/`ArrowDown`, `PageUp`/`PageDown`, `Home`/`End` compute the new index (`rows_total` is known), scroll it into view and focus the row when it is rendered. If the row is outside the window, the scroll reports the viewport and the focus follows as soon as the row has arrived.
 - **No key is lost while a row is under way.** The element of a row exists only while the row is rendered. When the row that has the DOM focus is about to leave the DOM (scrolled away, or the focus has moved to a row that has not arrived), the focus is parked on the tree element itself instead of falling to the body; the key handler lives there and works with the focused index, so `End` followed by `ArrowUp` ends one row above the last. The focus returns to the row as soon as it is rendered. A key that acts on a row (`Space`, `Enter`, `ArrowLeft`/`ArrowRight`) and is pressed before that row has arrived is kept and carried out on that row when it is there (`End`, `Space` selects the last file). A key pressed while the host is still looking for the row the focus is to move to (type-ahead, the parent) is kept as well and acts from the row that is found (typing a name and then `ArrowUp` ends one row above the match).

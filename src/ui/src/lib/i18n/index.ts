@@ -241,8 +241,11 @@ register("en", {
   "aria.notifications": "Notifications",
   "aria.dismissNotification": "Dismiss notification",
   "filetree.ignoreDirectoryTitle":
-    "Add this directory to ignore patterns (Delete)",
-  "filetree.ignoreFileTitle": "Add this file to ignore patterns (Delete)",
+    "Add this directory to ignore patterns ({key})",
+  "filetree.ignoreFileTitle": "Add this file to ignore patterns ({key})",
+  // Forward delete. On a Mac the key labelled "delete" is Backspace.
+  "key.delete": "Delete",
+  "key.deleteMac": "fn+⌫",
   "sidebar.rescanRecommended": "Re-scan recommended after removing patterns",
   "sidebar.addCommonPattern": 'Click to add "{pattern}" to ignore patterns',
   "sidebar.patternActive":
@@ -395,9 +398,11 @@ register("de", {
   "aria.notifications": "Benachrichtigungen",
   "aria.dismissNotification": "Benachrichtigung schließen",
   "filetree.ignoreDirectoryTitle":
-    "Dieses Verzeichnis zu den Ignore-Mustern hinzufügen (Entf)",
+    "Dieses Verzeichnis zu den Ignore-Mustern hinzufügen ({key})",
   "filetree.ignoreFileTitle":
-    "Diese Datei zu den Ignore-Mustern hinzufügen (Entf)",
+    "Diese Datei zu den Ignore-Mustern hinzufügen ({key})",
+  "key.delete": "Entf",
+  "key.deleteMac": "fn+⌫",
   "sidebar.rescanRecommended":
     "Nach dem Entfernen von Mustern wird ein erneuter Scan empfohlen",
   "sidebar.addCommonPattern":
