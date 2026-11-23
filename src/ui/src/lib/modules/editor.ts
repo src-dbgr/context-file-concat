@@ -14,6 +14,7 @@ import {
   getState,
 } from "../stores/app.js";
 import { post } from "../services/backend.js";
+import type { SaveFilePayload } from "../ipc/schema.js";
 import { get } from "svelte/store";
 import { previewMode, generatedTokenCount } from "../stores/preview.js";
 import { theme, type Theme } from "../stores/theme.js";
@@ -29,6 +30,28 @@ let monaco: MonacoNS | null = null;
 
 /** The one creation of the editor; shared by every caller that needs it. */
 let editorReady: Promise<Editor> | null = null;
+
+/**
+ * The generated document the editor shows: the id the host keeps it under, the
+ * text as the host sent it and the version of the editor's text at the moment
+ * it was shown. `null` while the editor shows something else.
+ *
+ * The text is kept because the editor's own value is not it: Monaco gives a
+ * text one kind of line end, so an output of files with CRLF and LF line ends
+ * comes back from `getValue()` with all of them rewritten.
+ */
+let shownDocument: { id: number; text: string; versionId: number } | null =
+  null;
+
+/** The generated document, if the editor still shows it as it came. */
+function unchangedDocument() {
+  const model = get(editorInstance)?.getModel();
+  return shownDocument &&
+    model &&
+    model.getAlternativeVersionId() === shownDocument.versionId
+    ? shownDocument
+    : null;
+}
 
 const monacoTheme = (t: Theme) => (t === "light" ? "vs" : "vs-dark");
 
@@ -224,6 +247,7 @@ export async function showPreviewContent(
   editor.setPosition({ lineNumber: 1, column: 1 });
   editor.revealLine(1);
 
+  shownDocument = null;
   previewMode.set("file");
   generatedTokenCount.set(null);
 
@@ -233,6 +257,7 @@ export async function showPreviewContent(
 export async function showGeneratedContent(
   content: string,
   tokenCount: number,
+  documentId: number,
 ): Promise<void> {
   const editor = await ensureEditor();
 
@@ -242,6 +267,15 @@ export async function showGeneratedContent(
   setLanguage(editor, "plaintext");
   editor.updateOptions({ readOnly: false });
 
+  const model = editor.getModel();
+  shownDocument = model
+    ? {
+        id: documentId,
+        text: content,
+        versionId: model.getAlternativeVersionId(),
+      }
+    : null;
+
   // State for UI
   previewMode.set("generated");
   generatedTokenCount.set(tokenCount);
@@ -249,9 +283,44 @@ export async function showGeneratedContent(
   layoutEditorSoon();
 }
 
+/**
+ * What a save of the editor's content has to send to the host, or `null` if
+ * there is no editor yet.
+ *
+ * The host keeps the document it has generated, so an output that is saved as
+ * it was shown is only named (`generated`); its text does not cross the IPC
+ * boundary a second time. Only an output the user has changed is sent
+ * (`edited`). Whether it was changed is told by the version of the editor's
+ * text: Monaco's alternative version id changes with every edit and returns
+ * to its earlier value when the edits are undone, so an output that was
+ * edited and restored with undo counts as unchanged.
+ */
+export function outputToSave(): SaveFilePayload | null {
+  const editor = get(editorInstance);
+  if (!editor) return null;
+
+  const unchanged = unchangedDocument();
+  if (unchanged) return { kind: "generated", documentId: unchanged.id };
+  return { kind: "edited", content: editor.getValue() };
+}
+
+/**
+ * The text of the generated output exactly as the host produced it, or `null`
+ * if the editor shows something else or the user has changed it (by the same
+ * rule as {@link outputToSave}).
+ *
+ * This is what a copy of the whole output puts on the clipboard, so that it is
+ * the text a save writes, line ends included. Once the output has been edited,
+ * the editor's value is the one text there is, for copying and for saving.
+ */
+export function unchangedOutput(): string | null {
+  return unchangedDocument()?.text ?? null;
+}
+
 export function clearPreview() {
   post("clearPreviewState");
   previewedPath.set(null);
+  shownDocument = null;
 
   const editor = get(editorInstance);
   if (!editor) return;

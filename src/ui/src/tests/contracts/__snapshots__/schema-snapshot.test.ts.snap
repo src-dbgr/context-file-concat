@@ -429,7 +429,44 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
           "type": "string",
         },
         "payload": {
-          "type": "string",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "documentId": {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer",
+                },
+                "kind": {
+                  "const": "generated",
+                  "type": "string",
+                },
+              },
+              "required": [
+                "kind",
+                "documentId",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string",
+                },
+                "kind": {
+                  "const": "edited",
+                  "type": "string",
+                },
+              },
+              "required": [
+                "kind",
+                "content",
+              ],
+              "type": "object",
+            },
+          ],
         },
       },
       "required": [

@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import {
+  renderAsHost,
   setAppState,
   waitForBridge,
   type AppState,
@@ -293,11 +294,12 @@ test("Happy path: Select → Filter → Preview → Generate → Save", async ({
   await page.evaluate(() => {
     (
       window as unknown as {
-        showGeneratedContent: (c: string, t: number) => void;
+        showGeneratedContent: (c: string, t: number, id: number) => void;
       }
-    ).showGeneratedContent("// generated output\n", 1234);
+    ).showGeneratedContent("// generated output\n", 1234, 7);
   });
   await expect(previewTitle).toContainText(/Preview generated/i);
+  await expect(page.locator("#preview-panel")).toContainText("1.2K tokens");
 
   // 5) Save: click + backend ack
   const saveBtn = page.locator("#save-btn");
@@ -307,22 +309,329 @@ test("Happy path: Select → Filter → Preview → Generate → Save", async ({
   await page.evaluate(() => {
     (
       window as unknown as {
-        fileSaveStatus: (ok: boolean, p: string) => void;
-        __e2e: { savedPath?: string | null };
+        saveResult: (result: { status: "saved"; path: string }) => void;
       }
-    ).fileSaveStatus(true, "/tmp/output.txt");
-    (
-      window as unknown as { __e2e: { savedPath?: string | null } }
-    ).__e2e.savedPath = "/tmp/output.txt";
+    ).saveResult({ status: "saved", path: "/tmp/output.txt" });
   });
 
-  const savedPath = await page.evaluate(() => {
-    return (
-      (window as unknown as { __e2e: { savedPath?: string | null } }).__e2e
-        .savedPath ?? null
+  await expect(page.locator("#status-bar .status-text")).toHaveText(
+    "Status: Saved to /tmp/output.txt",
+  );
+  await expect(page.locator(".toast-list .toast.success")).toHaveCount(1);
+});
+
+test.describe("Saving the generated output", () => {
+  type Posted = { command: string; payload: unknown };
+  type SaveResult =
+    | { status: "saved"; path: string }
+    | { status: "cancelled" }
+    | { status: "failed"; error: string };
+
+  const GENERATED = "// generated output\nline two\n";
+
+  test.beforeEach(async ({ page }) => {
+    // Record what the UI posts to the host.
+    await page.addInitScript(() => {
+      const w = window as unknown as {
+        __posted: string[];
+        ipc: { postMessage: (message: string) => void };
+      };
+      w.__posted = [];
+      w.ipc = { postMessage: (message) => w.__posted.push(message) };
+    });
+    await page.goto("/?e2e=1");
+    await page.waitForFunction(() => {
+      const w = window as unknown as {
+        __e2e?: { store?: { setAppState?: (s: unknown) => void } };
+      };
+      return typeof w.__e2e?.store?.setAppState === "function";
+    });
+    await page.evaluate((content) => {
+      (
+        window as unknown as {
+          showGeneratedContent: (c: string, t: number, id: number) => void;
+        }
+      ).showGeneratedContent(content, 12, 7);
+    }, GENERATED);
+    await expect(page.locator("#preview-title")).toContainText(
+      /Preview generated/i,
+    );
+    await expect(page.locator("#save-btn")).toBeEnabled();
+  });
+
+  /** Click "Save" and return the one command it posts. */
+  async function save(page: import("@playwright/test").Page): Promise<Posted> {
+    await page.evaluate(() => {
+      (window as unknown as { __posted: string[] }).__posted.length = 0;
+    });
+    await page.locator("#save-btn").click();
+    const posted = await page.evaluate(() =>
+      (window as unknown as { __posted: string[] }).__posted.map(
+        (message) => JSON.parse(message) as Posted,
+      ),
+    );
+    expect(posted).toHaveLength(1);
+    return posted[0];
+  }
+
+  async function answer(
+    page: import("@playwright/test").Page,
+    result: SaveResult,
+  ) {
+    await page.evaluate((r) => {
+      (
+        window as unknown as { saveResult: (result: SaveResult) => void }
+      ).saveResult(r);
+    }, result);
+  }
+
+  /** Put the cursor at the start of the editor's text, as a click does. */
+  async function focusEditor(page: import("@playwright/test").Page) {
+    await page
+      .locator("#editor-container .view-line")
+      .first()
+      .click({ position: { x: 1, y: 5 } });
+  }
+
+  test("an unedited output is named, not sent back", async ({ page }) => {
+    expect(await save(page)).toEqual({
+      command: "saveFile",
+      payload: { kind: "generated", documentId: 7 },
+    });
+  });
+
+  test("an edited output is sent, and named again once the edit is undone", async ({
+    page,
+  }) => {
+    await focusEditor(page);
+    await page.keyboard.type("my note");
+    await expect(page.locator("#editor-container .view-lines")).toContainText(
+      "my note",
+    );
+
+    expect(await save(page)).toEqual({
+      command: "saveFile",
+      payload: { kind: "edited", content: "my note" + GENERATED },
+    });
+
+    await focusEditor(page);
+    // Monaco binds undo to the modifier of the platform the page reports.
+    const undo = (await page.evaluate(() => /Mac/.test(navigator.userAgent)))
+      ? "Meta+z"
+      : "Control+z";
+    // The note is more than one step of the undo history (a step per word).
+    const lines = page.locator("#editor-container .view-lines");
+    await page.keyboard.press(undo);
+    await expect(lines).not.toContainText("note");
+    await expect(lines).toContainText("my");
+    expect((await save(page)).payload).toMatchObject({ kind: "edited" });
+
+    await focusEditor(page);
+    await page.keyboard.press(undo);
+    await expect(lines).not.toContainText("my");
+
+    expect(await save(page)).toEqual({
+      command: "saveFile",
+      payload: { kind: "generated", documentId: 7 },
+    });
+  });
+
+  test("a newer output is the one a save names", async ({ page }) => {
+    await focusEditor(page);
+    await page.keyboard.type("edited");
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          showGeneratedContent: (c: string, t: number, id: number) => void;
+        }
+      ).showGeneratedContent("// second output\n", 3, 8);
+    });
+    await expect(page.locator("#editor-container .view-lines")).toContainText(
+      "second output",
+    );
+
+    expect(await save(page)).toEqual({
+      command: "saveFile",
+      payload: { kind: "generated", documentId: 8 },
+    });
+  });
+
+  test("the output can still be saved after another directory was opened", async ({
+    page,
+  }) => {
+    const render = (next: AppState) => renderAsHost(page, next);
+
+    // The host reports directory A, then directory B: the output stays on
+    // screen, and a save still names it.
+    await render(withRepo());
+    await render({ ...withRepo(), current_path: "/other" });
+    await expect(page.locator("#current-path")).toContainText("/other");
+    await expect(page.locator("#preview-title")).toContainText(
+      /Preview generated/i,
+    );
+    expect(await save(page)).toEqual({
+      command: "saveFile",
+      payload: { kind: "generated", documentId: 7 },
+    });
+
+    // No directory any more: the editor is cleared, and the host is told so
+    // (that is where it gives its copy of the output up).
+    await page.evaluate(() => {
+      (window as unknown as { __posted: string[] }).__posted.length = 0;
+    });
+    await render({ ...withRepo(), current_path: "", tree: [] });
+    await expect(page.locator("#save-btn")).toBeDisabled();
+    const posted = await page.evaluate(() =>
+      (window as unknown as { __posted: string[] }).__posted.map(
+        (message) => (JSON.parse(message) as Posted).command,
+      ),
+    );
+    expect(posted).toContain("clearPreviewState");
+  });
+
+  test("an unedited output is copied with the line ends of its files", async ({
+    page,
+  }) => {
+    // What is written to the clipboard, recorded.
+    await page.evaluate(() => {
+      const w = window as unknown as { __copied: string[] };
+      w.__copied = [];
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: (text: string) => {
+            w.__copied.push(text);
+            return Promise.resolve();
+          },
+        },
+      });
+    });
+    const copy = async () => {
+      await page.evaluate(() => {
+        (window as unknown as { __copied: string[] }).__copied.length = 0;
+      });
+      await page.locator("#copy-btn").click();
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => (window as unknown as { __copied: string[] }).__copied.length,
+          ),
+        )
+        .toBe(1);
+      return page.evaluate(
+        () => (window as unknown as { __copied: string[] }).__copied[0],
+      );
+    };
+
+    // One file with CRLF line ends among files with LF.
+    const mixed =
+      "# CFC Output\n\nwin.txt\n===FILE-START===\none\r\ntwo\r\n---FILE-END-----\n\n" +
+      "unix.txt\n===FILE-START===\none\ntwo\nthree\nfour\n---FILE-END-----\n\n";
+    await page.evaluate((content) => {
+      (
+        window as unknown as {
+          showGeneratedContent: (c: string, t: number, id: number) => void;
+        }
+      ).showGeneratedContent(content, 30, 9);
+    }, mixed);
+    await expect(page.locator("#editor-container .view-lines")).toContainText(
+      "win.txt",
+    );
+
+    // Unedited: the copy is the text of the host, and the save names it.
+    expect(await copy()).toBe(mixed);
+    expect((await save(page)).payload).toEqual({
+      kind: "generated",
+      documentId: 9,
+    });
+
+    // Edited: the editor's text is the one text there is, for both.
+    await focusEditor(page);
+    await page.keyboard.type("x");
+    await expect(page.locator("#editor-container .view-lines")).toContainText(
+      "x# CFC Output",
+    );
+    const copied = await copy();
+    expect(copied.startsWith("x# CFC Output")).toBe(true);
+    expect((await save(page)).payload).toEqual({
+      kind: "edited",
+      content: copied,
+    });
+  });
+
+  test("each result of a save has its own toast", async ({ page }) => {
+    const toasts = page.locator(".toast-list .toast");
+
+    await answer(page, { status: "cancelled" });
+    await expect(toasts.last()).toHaveClass(/info/);
+    await expect(toasts.last()).toContainText("Save cancelled");
+    await expect(page.locator("#status-bar .status-text")).toHaveText(
+      "Status: Save cancelled.",
+    );
+
+    await answer(page, {
+      status: "failed",
+      error: "Permission denied (os error 13)",
+    });
+    await expect(toasts.last()).toHaveClass(/error/);
+    await expect(toasts.last()).toContainText("Failed to save file");
+    await expect(toasts.last()).toContainText(
+      "Permission denied (os error 13)",
+    );
+    await expect(page.locator("#status-bar .status-text")).toHaveText(
+      "Error: Failed to save file.",
+    );
+
+    // A path is a path, whatever it is called.
+    await answer(page, { status: "saved", path: "/tmp/cancelled" });
+    await expect(toasts.last()).toHaveClass(/success/);
+    await expect(toasts.last()).toContainText("File saved");
+    await expect(page.locator("#status-bar .status-text")).toHaveText(
+      "Status: Saved to /tmp/cancelled",
     );
   });
-  expect(savedPath).toBe("/tmp/output.txt");
+
+  test("the size of the output is announced or refused with a toast", async ({
+    page,
+  }) => {
+    type Notice = {
+      status: "large" | "too_large";
+      estimated_bytes: number;
+      limit_bytes: number;
+    };
+    const notify = (notice: Notice) =>
+      page.evaluate((n) => {
+        (
+          window as unknown as { outputSizeNotice: (notice: Notice) => void }
+        ).outputSizeNotice(n);
+      }, notice);
+    const toasts = page.locator(".toast-list .toast");
+
+    await notify({
+      status: "large",
+      estimated_bytes: 52428800,
+      limit_bytes: 20971520,
+    });
+    await expect(toasts.last()).toHaveClass(/warning/);
+    await expect(toasts.last()).toContainText("Large output");
+    await expect(toasts.last()).toContainText("50 MB");
+
+    await notify({
+      status: "too_large",
+      estimated_bytes: 314572800,
+      limit_bytes: 209715200,
+    });
+    await expect(toasts.last()).toHaveClass(/error/);
+    await expect(toasts.last()).toContainText("Output too large");
+    await expect(toasts.last()).toContainText("300 MB");
+    await expect(toasts.last()).toContainText("200 MB");
+    // The output that is shown stays, and can still be saved.
+    await expect(page.locator("#save-btn")).toBeEnabled();
+    expect((await save(page)).payload).toEqual({
+      kind: "generated",
+      documentId: 7,
+    });
+  });
 });
 
 test("A11y sanity on main screen (no critical issues)", async ({ page }) => {

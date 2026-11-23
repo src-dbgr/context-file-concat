@@ -219,6 +219,34 @@ impl SearchEngine {
 
         (final_list, removed_dirs_set)
     }
+
+    /// Removes from `items` the directories below which `items` lists no file.
+    ///
+    /// The result is the list [`Self::remove_empty_directories`] returns for a list
+    /// that is filtered against itself with nothing to preserve, but the list is
+    /// neither copied nor are its paths: the paths are compared where they are.
+    pub fn retain_directories_with_files(items: &mut Vec<FileItem>) {
+        let keep: Vec<bool> = {
+            // Every directory above a file, found by walking up from each file until a
+            // directory that is known already.
+            let mut with_files: HashSet<&Path> = HashSet::new();
+            for file in items.iter().filter(|item| !item.is_directory) {
+                let mut current = file.path.parent();
+                while let Some(directory) = current {
+                    if !with_files.insert(directory) {
+                        break;
+                    }
+                    current = directory.parent();
+                }
+            }
+            items
+                .iter()
+                .map(|item| !item.is_directory || with_files.contains(item.path.as_path()))
+                .collect()
+        };
+        let mut keep = keep.into_iter();
+        items.retain(|_| keep.next().unwrap_or(true));
+    }
 }
 
 /// Describes one content search: what to look for and under which conditions.
@@ -815,5 +843,49 @@ mod tests {
         // An extension that is not Unicode cannot be named; it counts as missing.
         assert!(by_extension("no extension").matches_all(broken_extension));
         assert!(!by_extension("\u{fffd}").matches_all(broken_extension));
+    }
+
+    /// Pruning in place gives the list the copying variant gives for a list that is
+    /// filtered against itself.
+    #[test]
+    fn test_retain_directories_with_files_matches_remove_empty_directories() {
+        let item = |path: &str, is_directory: bool| FileItem {
+            path: PathBuf::from(path),
+            is_directory,
+            ..Default::default()
+        };
+        let lists = [
+            vec![],
+            vec![item("/p/empty", true)],
+            vec![item("/p/a.txt", false)],
+            vec![
+                item("/p/src", true),
+                item("/p/src/main.rs", false),
+                item("/p/src/empty", true),
+                item("/p/docs", true),
+                item("/p/docs/deep", true),
+                item("/p/docs/deep/er", true),
+                item("/p/docs/deep/er/a.md", false),
+                item("/p/docs/hollow", true),
+                item("/p/docs/hollow/hollow", true),
+                item("/p/top.txt", false),
+                // A file whose directories are not listed themselves.
+                item("/p/unlisted/dir/file.txt", false),
+                // The same name as a directory with files, elsewhere.
+                item("/p/other/src", true),
+            ],
+        ];
+
+        for list in lists {
+            let (expected, _) =
+                SearchEngine::remove_empty_directories(list.clone(), &list, &HashSet::new());
+            let mut pruned = list.clone();
+            SearchEngine::retain_directories_with_files(&mut pruned);
+
+            let paths = |items: &[FileItem]| -> Vec<PathBuf> {
+                items.iter().map(|item| item.path.clone()).collect()
+            };
+            assert_eq!(paths(&pruned), paths(&expected));
+        }
     }
 }

@@ -153,7 +153,7 @@ export function makeValidPayloadForCommand(name: CommandName): unknown {
       return { request: 1, target: { kind: "path", path: VALID_PATH } };
 
     case "saveFile":
-      return "// content to save";
+      return { kind: "edited", content: "// content to save" };
 
     case "updateFilters":
       // Provide empty object to test default injection

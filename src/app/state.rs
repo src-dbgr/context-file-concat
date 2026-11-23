@@ -154,6 +154,51 @@ impl GenerationToken {
     }
 }
 
+/// The output document of a finished generation, as the host keeps it.
+///
+/// The UI is sent the text for display, together with the `id`. A save names that id
+/// and the host writes its own copy, so the text does not travel back (see
+/// `commands::save_file`). The id is the one of the generation run that produced the
+/// document: no two documents of a session share it.
+///
+/// Cloning is cheap: the text is shared, not copied.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GeneratedDocument {
+    id: u64,
+    text: Arc<String>,
+}
+
+impl GeneratedDocument {
+    /// What the UI names when it refers to this document.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The text of the document.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(id: u64, text: &str) -> Self {
+        Self {
+            id,
+            text: Arc::new(text.to_string()),
+        }
+    }
+}
+
+/// Shows the size instead of the text: a document can weigh many megabytes, and a
+/// log line or a failed assertion that prints an event must not print all of it.
+impl std::fmt::Debug for GeneratedDocument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedDocument")
+            .field("id", &self.id)
+            .field("bytes", &self.text.len())
+            .finish()
+    }
+}
+
 /// Identifies one run of the content search.
 ///
 /// Handed out by [`AppState::begin_content_search`]. Beginning a search supersedes the
@@ -398,6 +443,9 @@ pub struct AppState {
     opening: Option<PendingOpen>,
     /// The content generation that is currently in progress, if any.
     generation: RunSlot,
+    /// The document the UI shows as generated output, see
+    /// [`AppState::complete_generation`].
+    generated_document: Option<GeneratedDocument>,
     /// The content search that is currently in progress, if any.
     content_search: RunSlot,
     /// The file preview that is currently being read, if any.
@@ -458,6 +506,7 @@ impl AppState {
             levels_before_walk: None,
             opening: None,
             generation: RunSlot::default(),
+            generated_document: None,
             content_search: RunSlot::default(),
             preview: RunSlot::default(),
             config_store,
@@ -701,6 +750,48 @@ impl AppState {
     /// generation, i.e. if its outcome may be published to the UI.
     pub fn finish_generation(&mut self, token: &GenerationToken) -> bool {
         self.generation.finish(&token.0)
+    }
+
+    /// Ends the generation identified by `token` with the document it has produced,
+    /// like [`Self::finish_generation`], and keeps the document for saving.
+    ///
+    /// Returns the document as it is kept, to be shown by the UI. For a stale token
+    /// nothing changes and `None` is returned: the document of a generation that was
+    /// cancelled or superseded is dropped, and the one that is kept stays.
+    ///
+    /// The document replaces the one of the generation before it. Until then the
+    /// earlier one stays available, also while a new generation is running: it is what
+    /// the UI shows during that time, and what a save refers to.
+    pub fn complete_generation(
+        &mut self,
+        token: &GenerationToken,
+        text: Arc<String>,
+    ) -> Option<GeneratedDocument> {
+        if !self.finish_generation(token) {
+            return None;
+        }
+        let document = GeneratedDocument {
+            id: token.0.id,
+            text,
+        };
+        self.generated_document = Some(document.clone());
+        Some(document)
+    }
+
+    /// The generated document with this id, if it is the one that is kept.
+    pub fn generated_document(&self, id: u64) -> Option<GeneratedDocument> {
+        self.generated_document
+            .as_ref()
+            .filter(|document| document.id == id)
+            .cloned()
+    }
+
+    /// Gives up the generated document, so that its memory is released. To be called
+    /// exactly where the UI stops showing it: a file preview takes its place
+    /// (`showPreviewContent`) or the preview is cleared (`clearPreviewState`).
+    /// Anything else would leave the UI with an output it can no longer save.
+    pub fn discard_generated_document(&mut self) {
+        self.generated_document = None;
     }
 
     /// Cancels the current generation, if any, and resets the generating state.
@@ -1126,6 +1217,10 @@ impl AppState {
 
     /// Forgets the loaded directory and everything derived from it. The scan slot is
     /// left alone: the caller decides what becomes of the scan that is running.
+    ///
+    /// The generated document is not part of that: the UI goes on showing an output
+    /// when another directory is opened, and gives it up itself where it stops
+    /// (`clearPreviewState`, which it also sends when the directory is closed).
     fn clear_directory_data(&mut self) {
         self.cancel_current_generation();
         self.invalidate_file_list();
@@ -1771,6 +1866,100 @@ mod tests {
         assert!(
             !state.finish_generation(&token),
             "Finishing twice is a no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_completed_generation_keeps_its_document_under_the_id_of_the_run() {
+        let mut state = AppState::default();
+        let token = state.begin_generation();
+
+        let document = state
+            .complete_generation(&token, Arc::new("output".to_string()))
+            .expect("the current generation may publish");
+
+        assert!(!state.is_generating());
+        assert_eq!(document.text(), "output");
+        assert_eq!(
+            state.generated_document(document.id()),
+            Some(document.clone())
+        );
+        assert_eq!(state.generated_document(document.id() + 1), None);
+        assert!(
+            state
+                .complete_generation(&token, Arc::new("again".to_string()))
+                .is_none(),
+            "a generation ends once"
+        );
+        assert_eq!(state.generated_document(document.id()), Some(document));
+    }
+
+    #[tokio::test]
+    async fn test_document_of_a_stale_generation_is_dropped() {
+        let mut state = AppState::default();
+        let first = state.begin_generation();
+        let shown = state
+            .complete_generation(&first, Arc::new("first".to_string()))
+            .unwrap();
+
+        // The document stays while the next generation is running ...
+        let superseded = state.begin_generation();
+        assert_eq!(state.generated_document(shown.id()), Some(shown.clone()));
+        // ... and when that generation is cancelled or superseded.
+        let current = state.begin_generation();
+        assert!(state
+            .complete_generation(&superseded, Arc::new("stale".to_string()))
+            .is_none());
+        assert_eq!(state.generated_document(shown.id()), Some(shown.clone()));
+        state.cancel_current_generation();
+        assert!(state
+            .complete_generation(&current, Arc::new("cancelled".to_string()))
+            .is_none());
+        assert_eq!(state.generated_document(shown.id()), Some(shown.clone()));
+
+        // The next document takes its place, under an id of its own.
+        let next = state.begin_generation();
+        let replaced = state
+            .complete_generation(&next, Arc::new("next".to_string()))
+            .unwrap();
+        assert_ne!(replaced.id(), shown.id());
+        assert_eq!(state.generated_document(shown.id()), None);
+        assert_eq!(state.generated_document(replaced.id()), Some(replaced));
+    }
+
+    #[tokio::test]
+    async fn test_generated_document_outlives_the_directory_it_was_generated_from() {
+        let mut state = AppState::default();
+        let token = state.begin_generation();
+        let document = state
+            .complete_generation(&token, Arc::new("output".to_string()))
+            .unwrap();
+
+        // Another directory is opened, or the state is reset by an import: the UI
+        // still shows the output, so it has to stay available for saving.
+        state.reset_directory_state();
+        assert_eq!(
+            state.generated_document(document.id()),
+            Some(document.clone())
+        );
+        let scan = state.begin_open(Path::new("/other"));
+        assert!(state.enter_opened_directory(&scan, Path::new("/other")));
+        assert_eq!(
+            state.generated_document(document.id()),
+            Some(document.clone())
+        );
+
+        // It is given up when it is told to.
+        state.discard_generated_document();
+        assert_eq!(state.generated_document(document.id()), None);
+    }
+
+    #[test]
+    fn test_debug_output_of_a_generated_document_does_not_contain_its_text() {
+        let document = GeneratedDocument::for_test(7, "secret text");
+        assert_eq!(
+            format!("{document:?}"),
+            "GeneratedDocument { id: 7, bytes: 11 }"
         );
     }
 

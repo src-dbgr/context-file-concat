@@ -54,8 +54,14 @@ describe("ipc/handlers – validation paths with real Zod schemas", () => {
     window.showGeneratedContent(
       {} as unknown as string,
       "x" as unknown as number,
+      1,
     );
-    expect(warn).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    // A document without the id it is kept under could not be saved.
+    window.showGeneratedContent("text", 3, undefined as unknown as number);
+    window.showGeneratedContent("text", 3, -1);
+    window.showGeneratedContent("text", 3, 1.5);
+    expect(warn).toHaveBeenCalledTimes(4);
   });
 
   it("showError/showStatus: non-string are ignored with a warning", () => {
@@ -65,10 +71,42 @@ describe("ipc/handlers – validation paths with real Zod schemas", () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it("fileSaveStatus: invalid tuple is ignored with a warning", () => {
+  it("saveResult: an invalid result is ignored with a warning", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    window.fileSaveStatus("yes" as unknown as boolean, 42 as unknown as string);
-    expect(warn).toHaveBeenCalled();
+    const before = get(appState).status_message;
+    const invalid: unknown[] = [
+      { status: "saved" }, // no path
+      { status: "saved", path: 42 },
+      { status: "failed" }, // no reason
+      { status: "cancelled", path: "/tmp/out.txt" }, // nothing was written
+      { status: "failed", error: "x", path: "/tmp/out.txt" },
+      { status: "done", path: "/tmp/out.txt" },
+      [true, "/tmp/out.txt"], // the call of earlier versions
+      "cancelled",
+      null,
+    ];
+    for (const result of invalid) {
+      window.saveResult(result as Parameters<typeof window.saveResult>[0]);
+    }
+    expect(warn).toHaveBeenCalledTimes(invalid.length);
+    expect(get(appState).status_message).toBe(before);
+  });
+
+  it("outputSizeNotice: an invalid notice is ignored with a warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const invalid: unknown[] = [
+      { status: "large" },
+      { status: "large", estimated_bytes: -1, limit_bytes: 1 },
+      { status: "huge", estimated_bytes: 2, limit_bytes: 1 },
+      { status: "too_large", estimated_bytes: 2, limit_bytes: 1, extra: 0 },
+      null,
+    ];
+    for (const notice of invalid) {
+      window.outputSizeNotice(
+        notice as Parameters<typeof window.outputSizeNotice>[0],
+      );
+    }
+    expect(warn).toHaveBeenCalledTimes(invalid.length);
   });
 
   it("setDragState: invalid boolean is ignored with a warning", () => {

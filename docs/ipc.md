@@ -54,9 +54,9 @@ The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on
 | `updateFilters`                 | `{ searchQuery, extensionFilter, contentSearchQuery }`  | Applies the filters; expands the ancestors of matches, up to a [limit](#expansion-one-source-of-truth) (no other fields). Changed texts show the list from the top                                                                                  |
 | `loadFilePreview`               | `string` (path)                                         | Marks the file as previewed; `showPreviewContent` follows once it has been read. Only an entry of the loaded list, see [File content](#file-content)                                                                                                |
 | `clearPreviewState`             | `null`                                                  | Clears the previewed file; a preview still being read is not shown any more                                                                                                                                                                         |
-| `generatePreview`               | `null`                                                  | Concatenates the selection; answers with `showGeneratedContent`. An output filename of the form `cfc_output_<timestamp>.txt` is replaced by one with the current time; every other name is kept, also the `cfc_output.txt` of a fresh configuration |
+| `generatePreview`               | `null`                                                  | Concatenates the selection; answers with `showGeneratedContent`, or refuses an output that is too large, see [The generated output](#the-generated-output). A filename `cfc_output_<timestamp>.txt` gets the current time; every other name is kept |
 | `cancelGeneration`              | `null`                                                  | Cancels the running generation                                                                                                                                                                                                                      |
-| `saveFile`                      | `string` (content)                                      | Opens the save dialog; answers with `fileSaveStatus`                                                                                                                                                                                                |
+| `saveFile`                      | `SaveFilePayload`, see [Saving](#saving)                | Opens the save dialog and writes the output; answers with `saveResult`                                                                                                                                                                              |
 | `pickOutputDirectory`           | `null`                                                  | Opens the dialog, stores the choice as output directory and persists it                                                                                                                                                                             |
 | `addIgnorePattern`              | `{ pattern: string }` (not blank, no other fields)      | Adds one ignore pattern, see [Config changes](#config-changes)                                                                                                                                                                                      |
 | `removeIgnorePattern`           | `{ pattern: string }` (any text, no other fields)       | Removes one ignore pattern                                                                                                                                                                                                                          |
@@ -138,7 +138,7 @@ The file is replaced atomically: the configuration is written to a temporary fil
 
 `window_size` and `window_position` are logical units, marked by `geometry_units: "logical"`. A config file without that mark was written by a version that stored physical pixels (up to 0.3.1); its geometry is converted once at startup, with the scale factor of the primary monitor.
 
-`max_file_size_mb` is the size limit in MiB (default 20) and the only size limit there is: larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search does not read larger files either. The value is not capped: a limit above the default is honoured by all of them, and nothing else depends on the size of a file (whether a file is text or binary is decided by its extension and its first kilobyte, see [File content](#file-content)). The smallest limit is 1: a smaller value in a config file (0 would hide every file that is not empty) is read as 1, on load and on import. It is not exposed in the UI; set it in the config file.
+`max_file_size_mb` is the size limit for a single file in MiB (default 20), and the only limit that is configured (the output as a whole has a fixed one, see [The generated output](#the-generated-output)): larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search does not read larger files either. The value is not capped: a limit above the default is honoured by all of them, and nothing else depends on the size of a file (whether a file is text or binary is decided by its extension and its first kilobyte, see [File content](#file-content)). The smallest limit is 1: a smaller value in a config file (0 would hide every file that is not empty) is read as 1, on load and on import. It is not exposed in the UI; set it in the config file.
 
 ### Text fields
 
@@ -189,18 +189,19 @@ What follows from that:
 
 Each `UserEvent` is turned into exactly one call of a `window.*` function installed by `installWindowIPCHandlers()`:
 
-| `UserEvent`            | Call                                                                                       | Schema                     |
-| ---------------------- | ------------------------------------------------------------------------------------------ | -------------------------- |
-| `StateUpdate`          | `window.render(uiState)`                                                                   | `UiStateSchema`            |
-| `ScanProgress`         | `window.updateScanProgress({ files_scanned, large_files_skipped, current_scanning_path })` | `ScanProgressSchema`       |
-| `ShowFilePreview`      | `window.showPreviewContent(content, language, searchTerm, path)`                           | `ShowPreviewArgsSchema`    |
-| `ShowGeneratedContent` | `window.showGeneratedContent(content, tokenCount)`                                         | `ShowGeneratedArgsSchema`  |
-| `ShowError`            | `window.showError(message)`                                                                | `StatusMessageSchema`      |
-| `ConfigExported`       | `window.showStatus(message)`                                                               | `StatusMessageSchema`      |
-| `SaveComplete`         | `window.fileSaveStatus(success, path)`                                                     | `FileSaveStatusArgsSchema` |
-| `DragStateChanged`     | `window.setDragState(isDragging)`                                                          | `DragStateSchema`          |
+| `UserEvent`            | Call                                                                                       | Schema                    |
+| ---------------------- | ------------------------------------------------------------------------------------------ | ------------------------- |
+| `StateUpdate`          | `window.render(uiState)`                                                                   | `UiStateSchema`           |
+| `ScanProgress`         | `window.updateScanProgress({ files_scanned, large_files_skipped, current_scanning_path })` | `ScanProgressSchema`      |
+| `ShowFilePreview`      | `window.showPreviewContent(content, language, searchTerm, path)`                           | `ShowPreviewArgsSchema`   |
+| `ShowGeneratedContent` | `window.showGeneratedContent(content, tokenCount, documentId)`                             | `ShowGeneratedArgsSchema` |
+| `OutputSize`           | `window.outputSizeNotice({ status, estimated_bytes, limit_bytes })`                        | `OutputSizeNoticeSchema`  |
+| `ShowError`            | `window.showError(message)`                                                                | `StatusMessageSchema`     |
+| `ConfigExported`       | `window.showStatus(message)`                                                               | `StatusMessageSchema`     |
+| `SaveResult`           | `window.saveResult({ status, … })`, see [Saving](#saving)                                  | `SaveResultSchema`        |
+| `DragStateChanged`     | `window.setDragState(isDragging)`                                                          | `DragStateSchema`         |
 
-Errors are reported as plain strings through `showError`; there is no error-code protocol.
+Errors are reported as plain strings through `showError`; there is no error-code protocol. Two outcomes have a type of their own because the UI words them itself, in its language: how a save ended (`saveResult`) and what the size of an output means for its generation (`outputSizeNotice`).
 
 ### File content
 
@@ -224,6 +225,69 @@ The generated output is a header (`# CFC Output - Generated: …`, `# Total file
 | `[FILE TOO LARGE: <n> bytes - CONTENT SKIPPED]` | The file is larger than `max_file_size_mb`                                                                                                |
 | `[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]`   | The content is binary by rule 1                                                                                                           |
 | `[FILE UNREADABLE: <reason> - CONTENT SKIPPED]` | The file could not be read, e.g. it was deleted or lost its permissions since the scan; `<reason>` is the message of the operating system |
+
+### The generated output
+
+`generatePreview` plans the generation while it holds the state lock (`GenerationPlan` in `src/app/tasks.rs`): the selected files in tree order, the options, the file list for the tree (copied only if the output gets a tree) and an **estimate of the size of the output**. The estimate is told from the file sizes the scan has recorded, without opening a file (`FileHandler::estimate_output_size`); for files that have not changed since the scan it is a few bytes per file above the real size. The generation works with this plan: what is selected or deselected while it runs belongs to the next one.
+
+The size decides what happens (`LARGE_OUTPUT_SIZE`, `MAX_OUTPUT_SIZE` in `src/app/tasks.rs`; constants, not configuration):
+
+| Estimated output | What happens                                                                                                                                                                                                                                                                |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| up to 20 MiB     | The output is generated                                                                                                                                                                                                                                                     |
+| above 20 MiB     | The output is generated; `outputSizeNotice({ status: "large", … })` follows the snapshot with `is_generating: true`. The UI shows a warning toast                                                                                                                           |
+| above 200 MiB    | **Refused**: `outputSizeNotice({ status: "too_large", … })` and a snapshot. Nothing changes: a generation that is running keeps running, the output that is shown stays (and can be saved), the output filename is not touched. The UI shows an error toast with both sizes |
+
+Why these numbers: the output is handed to the WebView as one string and shown by the editor as a whole, on the UI thread, where it cannot be cancelled. The editor needs about 23 ms per megabyte to take a text over (measured in Chromium and WebKit: 20 MB 0.5 s, 50 MB 1.2 s, 200 MB 4.7 s). Below 20 MiB a generation is a matter of well under a second; 200 MiB block the UI for about 5 s, are within a factor of 2.5 of what a string can hold in the WebView of Windows (V8: 512 MiB of characters) and amount to roughly 50 million tokens, far more than the output is made for.
+
+The limit is enforced a second time while the document is built: should it grow beyond 200 MiB all the same (files have grown since the scan), the generation ends with `showError("The output would be larger than 200 MiB. Select fewer files.")` (`CoreError::OutputTooLarge`).
+
+The tokens of the output (`tokenCount`, the `cl100k_base` encoding) are counted on the blocking thread pool, from the document itself (it is shared, not copied), in pieces of about 1 MiB on up to four threads (`src/core/token_counter.rs`). The pieces end where the encoding splits the text in any case (behind a line end that is followed by text), so the count is the count of the whole text. Between two pieces the count looks at the cancellation flag of its generation: `cancelGeneration`, a new generation or closing the directory end it within a piece. A piece cannot end inside a line, so a line that is longer than 1 MiB (a minified bundle, a dump on one line) is one piece however long it is: it is counted on one thread and cannot be cancelled before it is done, which takes about 50 ms per megabyte (1 s for a line of 20 MiB, the most a single file holds with the default limit).
+
+**The host keeps the document.** A finished generation stores its document in the state (`AppState::complete_generation`, `GeneratedDocument` in `src/app/state.rs`) under the id of its run and sends it with that id: `showGeneratedContent(content, tokenCount, documentId)`. The document stays until the next one replaces it, also while a newer generation is running or after one was cancelled, because the UI still shows it during that time. It is given up exactly where the UI stops showing it: when a file preview is shown (`showPreviewContent`) and when the preview is cleared (`clearPreviewState`). Opening another directory (a drop, the directory dialog, reopening the same directory, an import) does **not** give it up: the output stays in the editor then, and can still be saved. Closing the directory (`clearDirectory`) empties the editor, and the UI reports that with `clearPreviewState` like any other clearing.
+
+#### Saving
+
+The UI does not send the output back to have it saved. `saveFile` says what is to be written (`SaveFilePayload` in `commands.rs`, `SaveFilePayloadSchema`):
+
+| Payload                               | When                                                                           | What the host writes        |
+| ------------------------------------- | ------------------------------------------------------------------------------ | --------------------------- |
+| `{ kind: "generated", documentId }`   | The editor shows the output as it came (`outputToSave` in `modules/editor.ts`) | Its own copy, byte for byte |
+| `{ kind: "edited", content: string }` | The user has changed the text in the editor                                    | `content`                   |
+
+Whether the text was changed is told by the version of the editor's model: Monaco's alternative version id is recorded when the output is shown; it changes with every edit and returns to the recorded value when the edits are undone, so an output that was edited and restored with undo is saved as `generated` again.
+
+What is saved is decided when the command starts, before the dialog opens; a generation that ends while the user chooses the file does not change it. The command is answered with exactly one `saveResult`:
+
+| Result                        | Meaning                                                                                                                                                                                |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{ status: "saved", path }`   | The file was written                                                                                                                                                                   |
+| `{ status: "cancelled" }`     | The dialog was dismissed; nothing was written                                                                                                                                          |
+| `{ status: "failed", error }` | Nothing was saved. `error` is the message of the operating system, or the host's own if it does not hold the document that was named (any more); the dialog is not opened in that case |
+
+#### Copying
+
+Copying is done by the UI (`handleCopy` in `modules/clipboard.ts`), and it follows the same rule as saving, so that the clipboard and the saved file hold the same text:
+
+- While the output is unchanged, a copy of the whole output (the Copy button, or a copy with nothing or everything selected) puts the **text the host sent** on the clipboard. The UI keeps that string next to the editor (`unchangedOutput` in `modules/editor.ts`).
+- Once the user has edited the output, the editor's text is the one text there is: it is what a copy takes and what a save sends.
+- A copy of a selected part is always taken from the editor.
+
+The distinction matters for line ends. The output keeps the line ends of its files, and Monaco gives a text one kind of line end: for an output of files with CRLF and LF line ends, the editor's value (`getValue()`) has all of them rewritten to the more frequent kind. An unedited output is therefore neither saved nor copied through the editor. The first edit makes the editor's text the output, with its uniform line ends, for the copy and the save alike.
+
+A payload that is neither of the two kinds is logged and not answered. The UI shows a toast per result (success, info, error with the reason) in its language.
+
+Measured for a selection of 2,560 files of 20 KiB each, an output of 52.8 MB (`large_output_benchmark` in `src/app/commands.rs`, release build, Apple M-series; the time until the output is shown adds the 1.2 s of the editor in both columns):
+
+|                                                    | Output sent back for saving (before) | Host keeps the document |
+| -------------------------------------------------- | ------------------------------------ | ----------------------- |
+| Generation and token count                         | 2.6 s                                | 1.2–1.6 s               |
+| Script for the WebView                             | 29 ms                                | 37 ms                   |
+| Save: message from the UI                          | 53 MB                                | 68 bytes                |
+| Save: parsing and writing on the host              | 32 ms                                | 6 ms                    |
+| Peak memory of the host: generated / shown / saved | 204 / 255 / 298 MB                   | 107 / 163 / 163 MB      |
+
+For an output of 200 MB (just below the limit) the host needs 4.5 s instead of 10.3 s and 471 MB instead of 1,049 MB.
 
 The preview shows the first 1500 lines, followed by `...` and `[Preview truncated]` if the file has more. It reads only the beginning of the file: it stops once it has these lines and never reads more than 4 MiB, so a file whose first lines are longer than that is cut there (never inside a character). Rule 3 is applied to what was read. Instead of text the preview is `[DIRECTORY]` or `[BINARY FILE]` where that applies.
 
@@ -408,7 +472,8 @@ There is no optimistic update: a row changes when the snapshot arrives. Snapshot
   UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture
   ```
 
-- **TypeScript → Rust fixture (commands).** `src/app/command_contract_tests.rs` writes the routing table `COMMANDS` with example payloads into `src/ui/src/tests/contracts/fixtures/commands.json`; payloads with a type on the host (`ConfigOption`, `IgnorePatternPayload`, `SetExpansionPayload`, `SetViewportPayload`, `LocateRowPayload`, `UpdateFiltersPayload`) are serialized from that type, one example per `ConfigOption` and per kind of `RowTarget`. These types reject unknown fields, and so do their schemas (`.strict()`). `rust-fixture.test.ts` checks that `CommandSchemas` has exactly the same command names, that every example passes the schema of its command unchanged, and that both sides know the same options of `setConfigOption` and the same kinds of row lookup. `COMMANDS` is what the router resolves names with, so a command cannot be routed without being part of the contract. The fixture is regenerated with the same command as above.
+- **TypeScript → Rust fixture (commands).** `src/app/command_contract_tests.rs` writes the routing table `COMMANDS` with example payloads into `src/ui/src/tests/contracts/fixtures/commands.json`; payloads with a type on the host (`ConfigOption`, `IgnorePatternPayload`, `SaveFilePayload`, `SetExpansionPayload`, `SetViewportPayload`, `LocateRowPayload`, `UpdateFiltersPayload`) are serialized from that type, one example per `ConfigOption` and per kind of `RowTarget` and of `SaveFilePayload`. These types reject unknown fields, and so do their schemas (`.strict()`). `rust-fixture.test.ts` checks that `CommandSchemas` has exactly the same command names, that every example passes the schema of its command unchanged, and that both sides know the same options of `setConfigOption` and the same kinds of row lookup. `COMMANDS` is what the router resolves names with, so a command cannot be routed without being part of the contract. The fixture is regenerated with the same command as above.
+- **Rust → TypeScript fixture (host calls of the output).** `src/app/event_contract_tests.rs` builds every form of `ShowGeneratedContent`, `OutputSize` and `SaveResult`, turns each into the script the WebView evaluates and writes the arguments of those calls into `src/ui/src/tests/contracts/fixtures/output_events.json`. `rust-fixture.test.ts` checks that every example passes the schema of its handler unchanged and that both sides know the same statuses. Regenerated with the same command.
 - **Schema tests.** `src/ui/src/tests/contracts/` covers the command union, the state schema, property tests and JSON-schema snapshots (`npm run test:contracts`).
 - **The window, replayed (Rust → TypeScript).** The UI's tests have no host; what stands in for it (the E2E bridge and the fake host of the component tests) is one model, `src/ui/src/lib/dev/treeHostModel.ts`. `src/app/window_contract_tests.rs` runs a scenario through the real commands and writes what the host answered at every step into `fixtures/tree_window_scenario.json`: `setViewport` (also too large, behind the end, malformed), `locateRow` of every kind (also wrapping around, without a match, malformed), a list that changes, a selection that changes, filters that change, `initialize`; per step `rows_start`, the number of rows, `rows_total`, whether `rows_revision` changed, `located`, the first and last path. `tree-window-scenario.test.ts` replays the file against the model and requires the same answers, and that every snapshot of the model passes `UiStateSchema`. The fixture also states `Viewport::DEFAULT_ROWS` and `Viewport::MAX_ROWS`, which the test compares with the UI's constants and with what the schema accepts.
 - **Rows.** `src/app/view_model/pruning_tests.rs` and the property tests in `cache_tests.rs` compare the rows with the original full-tree algorithm, pruned to the expanded part (the rows are put back into nested form for that, `reference::nest`). `windowing_tests.rs` covers the window (a property test: any viewport yields exactly that slice of the list), when the list is rebuilt, the row lookup, and the cost of a snapshot.

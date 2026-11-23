@@ -4,6 +4,7 @@ import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import {
   AnyCommandMessageSchema,
+  CommandSchemas,
   UiStateSchema,
   type CommandName,
   type NullaryCommandName,
@@ -55,12 +56,43 @@ describe("IPC contracts – outgoing commands (positive)", () => {
       ["toggleSelection", "/repo/src/main.rs"],
       ["toggleDirectorySelection", "/repo/src"],
       ["addIgnorePath", "/repo/dist"],
-      ["saveFile", "Hello world"], // content to save
     ] as const;
 
     for (const [name, payload] of cases) {
       const parsed = validateCommand(name, payload);
       expect(parsed.command).toBe(name);
+    }
+  });
+
+  it("accepts both kinds of saveFile and nothing in between", () => {
+    const generated = { kind: "generated", documentId: 7 } as const;
+    const edited = { kind: "edited", content: "Hello world" } as const;
+    expect(validateCommand("saveFile", generated).payload).toEqual(generated);
+    expect(validateCommand("saveFile", edited).payload).toEqual(edited);
+    // An empty text is a text: the user may have deleted everything.
+    expect(
+      CommandSchemas.saveFile.safeParse({ kind: "edited", content: "" })
+        .success,
+    ).toBe(true);
+
+    const invalid: unknown[] = [
+      "Hello world", // the payload of earlier versions
+      null,
+      {},
+      { kind: "generated" },
+      { kind: "generated", documentId: "7" },
+      { kind: "generated", documentId: -1 },
+      { kind: "generated", documentId: 1.5 },
+      { kind: "generated", documentId: 7, content: "Hello world" },
+      { kind: "edited" },
+      { kind: "edited", content: "x", documentId: 7 },
+      { kind: "other", content: "x" },
+    ];
+    for (const payload of invalid) {
+      expect(
+        CommandSchemas.saveFile.safeParse(payload).success,
+        JSON.stringify(payload),
+      ).toBe(false);
     }
   });
 

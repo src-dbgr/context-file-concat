@@ -144,13 +144,54 @@ export const ShowPreviewArgsSchema = z.tuple([
   z.string(), // path
 ]);
 
+/**
+ * The id under which the host keeps a generated document (`GeneratedDocument`
+ * in `src/app/state.rs`). The UI gets it with the document and names it when
+ * the document is to be saved.
+ */
+const DocumentId = z.number().int().nonnegative();
+
 export const ShowGeneratedArgsSchema = z.tuple([
   z.string(), // content
   z.number().int().nonnegative(), // tokenCount
+  DocumentId, // documentId
 ]);
 
 export const StatusMessageSchema = z.string();
-export const FileSaveStatusArgsSchema = z.tuple([z.boolean(), z.string()]);
+
+/**
+ * How a save ended (`SaveResult` in `src/app/events.rs`). A failed save names
+ * its reason, a cancelled one is a case of its own, and only a successful one
+ * has a path.
+ */
+export const SaveResultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("saved"), path: z.string() }).strict(),
+  z.object({ status: z.literal("cancelled") }).strict(),
+  z.object({ status: z.literal("failed"), error: z.string() }).strict(),
+]);
+export type SaveResult = z.infer<typeof SaveResultSchema>;
+
+const ByteCount = z.number().int().nonnegative();
+const outputSizeNotice = <S extends string>(status: S) =>
+  z
+    .object({
+      status: z.literal(status),
+      estimated_bytes: ByteCount,
+      limit_bytes: ByteCount,
+    })
+    .strict();
+
+/**
+ * What the size of the output means for a generation that was asked for
+ * (`OutputSizeNotice` in `src/app/events.rs`): `large` – it runs, but showing
+ * the output takes a moment; `too_large` – it was refused.
+ */
+export const OutputSizeNoticeSchema = z.discriminatedUnion("status", [
+  outputSizeNotice("large"),
+  outputSizeNotice("too_large"),
+]);
+export type OutputSizeNotice = z.infer<typeof OutputSizeNoticeSchema>;
+
 export const DragStateSchema = z.boolean();
 
 /* ------------------------------ Outgoing IPC ------------------------------- */
@@ -208,7 +249,17 @@ const LocateRowPayload = z
     target: RowTargetSchema,
   })
   .strict();
-const SaveFilePayload = z.string();
+/**
+ * What is to be saved (`SaveFilePayload` in `src/app/commands.rs`): the
+ * generated output as the host produced it, named by its id (the host writes
+ * its own copy, the text is not sent back), or the text of the editor if the
+ * user has changed it.
+ */
+export const SaveFilePayloadSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("generated"), documentId: DocumentId }).strict(),
+  z.object({ kind: z.literal("edited"), content: z.string() }).strict(),
+]);
+export type SaveFilePayload = z.infer<typeof SaveFilePayloadSchema>;
 /** A pattern is set if it is not blank; the host ignores blank ones. */
 const AddIgnorePatternPayload = z
   .object({
@@ -268,7 +319,7 @@ export const CommandSchemas = {
   deselectAll: NullPayload,
   cancelGeneration: NullPayload,
   clearPreviewState: NullPayload,
-  saveFile: SaveFilePayload,
+  saveFile: SaveFilePayloadSchema,
   pickOutputDirectory: NullPayload,
   exportConfig: NullPayload,
   importConfig: NullPayload,

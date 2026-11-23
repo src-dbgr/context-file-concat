@@ -4,6 +4,7 @@ import type { FocusContext } from "../types.js";
 import { get } from "svelte/store";
 import { toast } from "../stores/toast.js";
 import { flashCopyFeedback } from "../stores/preview.js";
+import { unchangedOutput } from "./editor.js";
 
 async function readFromClipboardWithFallback(): Promise<string | null> {
   try {
@@ -63,7 +64,18 @@ export async function handleCopy(context: FocusContext) {
     if (!model) return;
 
     const selection = editor.getSelection();
-    if (selection && !selection.isEmpty()) {
+    const hasSelection = !!selection && !selection.isEmpty();
+    // A generated output the user has not changed is copied as the host
+    // produced it (the text a save writes), not as the editor holds it:
+    // the editor gives every line the same line end.
+    const original = unchangedOutput();
+    const copiesEverything = () =>
+      !hasSelection || selection.equalsRange(model.getFullModelRange());
+
+    if (original !== null && copiesEverything()) {
+      textToCopy = original;
+      statusMessage = `✓ Copied entire editor content.`;
+    } else if (hasSelection) {
       textToCopy = model.getValueInRange(selection);
       statusMessage = `✓ Copied selected text from editor.`;
     } else {

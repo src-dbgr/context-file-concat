@@ -270,9 +270,9 @@ test("Search matches are highlighted once and follow the content search", async 
   await page.evaluate(() => {
     (
       window as unknown as {
-        showGeneratedContent: (c: string, t: number) => void;
+        showGeneratedContent: (c: string, t: number, id: number) => void;
       }
-    ).showGeneratedContent("alpha alpha\n", 2);
+    ).showGeneratedContent("alpha alpha\n", 2, 1);
   });
   await expect(page.locator("#preview-title")).toContainText(
     /Preview generated/i,

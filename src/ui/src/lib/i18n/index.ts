@@ -213,6 +213,12 @@ register("en", {
   "toast.fileSaved": "File saved",
   "toast.saveCancelled": "Save cancelled",
   "toast.saveFailed": "Failed to save file",
+  "toast.outputLargeTitle": "Large output",
+  "toast.outputLarge":
+    "About {size} are being generated (more than {limit}). Showing the output will take a moment.",
+  "toast.outputTooLargeTitle": "Output too large",
+  "toast.outputTooLarge":
+    "The selection would produce about {size}; the limit is {limit}. Select fewer files.",
   "toast.renderFailed": "An error occurred",
   "toast.errorTitle": "Error",
   "preview.copied": "Copied!",
@@ -338,6 +344,12 @@ register("de", {
   "toast.fileSaved": "Datei gespeichert",
   "toast.saveCancelled": "Speichern abgebrochen",
   "toast.saveFailed": "Datei konnte nicht gespeichert werden",
+  "toast.outputLargeTitle": "Große Ausgabe",
+  "toast.outputLarge":
+    "Es werden etwa {size} erzeugt (mehr als {limit}). Die Anzeige der Ausgabe dauert einen Moment.",
+  "toast.outputTooLargeTitle": "Ausgabe zu groß",
+  "toast.outputTooLarge":
+    "Die Auswahl ergäbe etwa {size}; die Grenze liegt bei {limit}. Wähle weniger Dateien aus.",
   "toast.renderFailed": "Ein Fehler ist aufgetreten",
   "toast.errorTitle": "Fehler",
   "preview.copied": "Kopiert!",

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { editorInstance } from "$lib/stores/app";
   import { post } from "$lib/services/backend";
+  import { outputToSave } from "$lib/modules/editor";
   import { canGenerate, canSave, isGenerating } from "$lib/stores/uiStores";
   import LogoMark from "$lib/components/LogoMark.svelte";
   import { t } from "$lib/i18n";
@@ -30,8 +30,8 @@
   }
 
   function onSaveClick() {
-    const editor = $editorInstance;
-    if (editor) post("saveFile", editor.getValue());
+    const output = outputToSave();
+    if (output) post("saveFile", output);
   }
 </script>
 

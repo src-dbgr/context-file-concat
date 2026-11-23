@@ -140,11 +140,11 @@ const SNAPSHOT_DEFAULTS = {
 
 let revisions = 0;
 
-/** Replaces the state of the UI with a snapshot that holds every row. */
-export async function setAppState(page: Page, state: AppState): Promise<void> {
+/** A complete host snapshot of `state` whose window holds every row. */
+function snapshotOf(state: AppState) {
   const { tree, ...rest } = state;
   const rows = rowsOf(tree);
-  const snapshot = {
+  return {
     ...SNAPSHOT_DEFAULTS,
     ...rest,
     rows,
@@ -153,6 +153,21 @@ export async function setAppState(page: Page, state: AppState): Promise<void> {
     rows_revision: ++revisions,
     located: null,
   };
+}
+
+/**
+ * Delivers `state` the way the host does, through `window.render`, so the
+ * snapshot is validated and every reaction of the UI to a host snapshot runs.
+ */
+export async function renderAsHost(page: Page, state: AppState): Promise<void> {
+  await page.evaluate((next) => {
+    (window as unknown as { render: (s: unknown) => void }).render(next);
+  }, snapshotOf(state));
+}
+
+/** Replaces the state of the UI with a snapshot that holds every row. */
+export async function setAppState(page: Page, state: AppState): Promise<void> {
+  const snapshot = snapshotOf(state);
   await page.evaluate((next) => {
     (
       window as unknown as {

@@ -18,21 +18,42 @@ vi.mock("$lib/modules/editor", () => ({
 }));
 import { clearPreview } from "$lib/modules/editor";
 
+type ContentChange = { isFlush: boolean };
+
 // Minimal fake Monaco editor
 function makeFakeEditor(
   content = "Hello world",
 ): monaco.editor.IStandaloneCodeEditor {
-  const disposable: monaco.IDisposable = { dispose: () => {} };
+  return makeEditableFakeEditor(content).editor;
+}
+
+/** A fake editor whose text can be changed the way Monaco reports it. */
+function makeEditableFakeEditor(initial: string) {
+  let content = initial;
+  let listener: ((change: ContentChange) => void) | null = null;
+  const getValue = vi.fn(() => content);
   const model = {
-    onDidChangeContent: (_cb: () => void) => disposable,
+    onDidChangeContent: (cb: (change: ContentChange) => void) => {
+      listener = cb;
+      return { dispose: () => (listener = null) };
+    },
   } as unknown as monaco.editor.ITextModel;
+  const fake = { getModel: () => model, getValue } as unknown;
 
-  const fake = {
-    getModel: () => model,
-    getValue: () => content,
-  } as unknown;
-
-  return fake as monaco.editor.IStandaloneCodeEditor;
+  return {
+    editor: fake as monaco.editor.IStandaloneCodeEditor,
+    getValue,
+    /** An edit of the user (typing, paste, undo). */
+    edit(next: string) {
+      content = next;
+      listener?.({ isFlush: false });
+    },
+    /** The whole text is replaced (`setValue`). */
+    replace(next: string) {
+      content = next;
+      listener?.({ isFlush: true });
+    },
+  };
 }
 
 function seedApp(overrides: Partial<Parameters<typeof appState.set>[0]> = {}) {
@@ -127,6 +148,47 @@ describe("PreviewPanel", () => {
     expect(clearBtn).toBeVisible();
     expect(copyBtn).not.toBeDisabled();
     expect(clearBtn).not.toBeDisabled();
+  });
+
+  it("counts new content at once, and edits after a pause instead of per keystroke", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = makeEditableFakeEditor("a b c");
+      editorInstance.set(fake.editor);
+      previewMode.set("generated");
+      generatedTokenCount.set(3);
+      render(PreviewPanel);
+      const stats = () => document.querySelector(".preview-stats")?.textContent;
+      expect(stats()).toContain("3 words");
+
+      // Typing: the text is not read again for every key ...
+      const readsBefore = fake.getValue.mock.calls.length;
+      fake.edit("a b c d");
+      fake.edit("a b c d e");
+      await tick();
+      expect(stats()).toContain("3 words");
+      expect(fake.getValue.mock.calls.length).toBe(readsBefore);
+      await vi.advanceTimersByTimeAsync(150);
+      fake.edit("a b c d e f");
+      await vi.advanceTimersByTimeAsync(150);
+      expect(stats()).toContain("3 words");
+
+      // ... but once, when the typing pauses.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(stats()).toContain("6 words");
+
+      // Content that replaces the text is counted right away, and an update
+      // that was still pending for the old text does not follow it.
+      fake.edit("a b c d e f g");
+      fake.replace("one two");
+      await tick();
+      expect(stats()).toContain("2 words");
+      const readsAfter = fake.getValue.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(fake.getValue.mock.calls.length).toBe(readsAfter);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows the outcome of a copy on the Copy button, then the normal label again", async () => {

@@ -27,9 +27,15 @@ type Decoration = {
 
 function makeFakeMonaco() {
   let value = "";
+  // Monaco's alternative version id: a new one for every change of the text,
+  // the earlier one again when a change is undone.
+  let nextVersion = 1;
+  let version = nextVersion;
+  const undoStack: Array<{ value: string; version: number }> = [];
   const collections: Array<{ set: Mock<(d: Decoration[]) => void> }> = [];
 
   const model = {
+    getAlternativeVersionId: () => version,
     findMatches: vi.fn(
       (term: string, _scope: boolean, _regex: boolean, matchCase: boolean) => {
         const haystack = matchCase ? value : value.toLowerCase();
@@ -55,8 +61,20 @@ function makeFakeMonaco() {
   const editor = {
     setValue: vi.fn((v: string) => {
       value = v;
+      version = ++nextVersion;
+      undoStack.length = 0;
     }),
     getValue: () => value,
+    /** What typing does: a change that can be undone. */
+    type: (text: string) => {
+      undoStack.push({ value, version });
+      value += text;
+      version = ++nextVersion;
+    },
+    undo: () => {
+      const previous = undoStack.pop();
+      if (previous) ({ value, version } = previous);
+    },
     getModel: () => model,
     createDecorationsCollection: vi.fn(() => {
       const collection = { set: vi.fn<(d: Decoration[]) => void>() };
@@ -108,6 +126,97 @@ describe("editor module", () => {
     loadMonaco.mockReset();
   });
 
+  describe("what a save sends", () => {
+    async function withEditor() {
+      const fake = makeFakeMonaco();
+      loadMonaco.mockResolvedValue(fake.ns);
+      const m = await freshModules();
+      return { fake, m };
+    }
+
+    it("is nothing before there is an editor", async () => {
+      const { m } = await withEditor();
+      expect(m.outputToSave()).toBeNull();
+    });
+
+    it("names the generated document instead of sending its text", async () => {
+      const { m } = await withEditor();
+      await m.showGeneratedContent("generated output", 3, 7);
+
+      expect(m.outputToSave()).toEqual({ kind: "generated", documentId: 7 });
+    });
+
+    it("sends the text once the user has edited it", async () => {
+      const { fake, m } = await withEditor();
+      await m.showGeneratedContent("generated output", 3, 7);
+      fake.editor.type(" and a note");
+
+      expect(m.outputToSave()).toEqual({
+        kind: "edited",
+        content: "generated output and a note",
+      });
+    });
+
+    it("names the document again when the edits were undone", async () => {
+      const { fake, m } = await withEditor();
+      await m.showGeneratedContent("generated output", 3, 7);
+      fake.editor.type("x");
+      fake.editor.type("y");
+      fake.editor.undo();
+      expect(m.outputToSave()).toMatchObject({ kind: "edited" });
+      fake.editor.undo();
+
+      expect(m.outputToSave()).toEqual({ kind: "generated", documentId: 7 });
+    });
+
+    it("names the document that is shown, not an earlier one", async () => {
+      const { fake, m } = await withEditor();
+      await m.showGeneratedContent("first", 1, 7);
+      fake.editor.type(" edited");
+      await m.showGeneratedContent("second", 1, 8);
+
+      expect(m.outputToSave()).toEqual({ kind: "generated", documentId: 8 });
+    });
+
+    it("keeps the text of the host for copying while it is unchanged", async () => {
+      const { fake, m } = await withEditor();
+      expect(m.unchangedOutput()).toBeNull();
+
+      // Line ends as the files have them; an editor rewrites them.
+      const text = "a.txt\r\nline\r\nb.txt\nline\n";
+      await m.showGeneratedContent(text, 3, 7);
+      expect(m.unchangedOutput()).toBe(text);
+
+      fake.editor.type("x");
+      expect(m.unchangedOutput()).toBeNull();
+      fake.editor.undo();
+      expect(m.unchangedOutput()).toBe(text);
+
+      await m.showGeneratedContent("second", 1, 8);
+      expect(m.unchangedOutput()).toBe("second");
+      await m.showPreviewContent("file content", "plaintext", "", "/a.txt");
+      expect(m.unchangedOutput()).toBeNull();
+
+      await m.showGeneratedContent("third", 1, 9);
+      m.clearPreview();
+      expect(m.unchangedOutput()).toBeNull();
+    });
+
+    it("does not name a document the editor no longer shows", async () => {
+      const { m } = await withEditor();
+      await m.showGeneratedContent("generated output", 3, 7);
+      await m.showPreviewContent("file content", "plaintext", "", "/a.txt");
+      expect(m.outputToSave()).toEqual({
+        kind: "edited",
+        content: "file content",
+      });
+
+      await m.showGeneratedContent("generated output", 3, 9);
+      m.clearPreview();
+      expect(m.outputToSave()).toMatchObject({ kind: "edited" });
+    });
+  });
+
   describe("creation of the editor", () => {
     it("creates one editor when two previews arrive before Monaco is loaded", async () => {
       const fake = makeFakeMonaco();
@@ -132,7 +241,7 @@ describe("editor module", () => {
       const m = await freshModules();
 
       await m.showPreviewContent("one", "plaintext", "", "/a.txt");
-      await m.showGeneratedContent("out", 3);
+      await m.showGeneratedContent("out", 3, 1);
       await m.initEditor();
 
       expect(fake.ns.editor.create).toHaveBeenCalledTimes(1);
@@ -257,7 +366,7 @@ describe("editor module", () => {
       const m = await freshModules();
 
       await m.showPreviewContent("foo bar Foo", "plaintext", "foo", "/a.txt");
-      await m.showGeneratedContent("foo foo foo", 3);
+      await m.showGeneratedContent("foo foo foo", 3, 1);
       expect(fake.shown()).toEqual([]);
 
       m.appState.update((s) => ({ ...s, content_search_query: "foo" }));

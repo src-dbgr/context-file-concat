@@ -1,0 +1,49 @@
+{
+  "outputSizeNotice": [
+    [
+      {
+        "estimated_bytes": 20971521,
+        "limit_bytes": 20971520,
+        "status": "large"
+      }
+    ],
+    [
+      {
+        "estimated_bytes": 209715201,
+        "limit_bytes": 209715200,
+        "status": "too_large"
+      }
+    ]
+  ],
+  "saveResult": [
+    [
+      {
+        "path": "/home/user/out/cfc_output.txt",
+        "status": "saved"
+      }
+    ],
+    [
+      {
+        "status": "cancelled"
+      }
+    ],
+    [
+      {
+        "error": "Permission denied (os error 13)",
+        "status": "failed"
+      }
+    ]
+  ],
+  "showGeneratedContent": [
+    [
+      "# CFC Output\n\nsrc/a.rs\n===FILE-START===\nlet s = \"ä\";\n---FILE-END-----\n\n",
+      21,
+      7
+    ],
+    [
+      "",
+      0,
+      8
+    ]
+  ]
+}

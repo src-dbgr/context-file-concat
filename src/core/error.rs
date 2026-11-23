@@ -24,6 +24,13 @@ pub enum CoreError {
     /// Represents a user-initiated cancellation of an operation.
     #[error("Operation was cancelled by the user")]
     Cancelled,
+
+    /// The output document would be larger than the caller allows (`limit` bytes).
+    #[error(
+        "The output would be larger than {} MiB. Select fewer files.",
+        .limit / (1024 * 1024)
+    )]
+    OutputTooLarge { limit: u64 },
 }
 
 // Manual From implementations because the source errors are not Clone
