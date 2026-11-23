@@ -2,8 +2,8 @@
 name = "context-file-concat"
 version = "0.3.1"
 edition = "2021"
-# MSRV of the dependency tree (wry 0.57 / tao 0.37 require 1.85).
-rust-version = "1.85"
+# MSRV of the dependency tree (time 0.3.47+ requires 1.88); verified by the CI job "msrv".
+rust-version = "1.88"
 description = "Context File Concatenator - Intelligently select, filter, and combine project files for LLM context"
 authors = ["src dbgr"]
 license = "MIT"

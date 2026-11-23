@@ -60,7 +60,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Create macOS app bundle and DMG
         if: runner.os == 'macOS'

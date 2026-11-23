@@ -10,11 +10,13 @@ This project enforces **bundle** and **runtime** budgets in CI.
 - **LAZY** – all other non-worker chunks, fetched on demand through `import()` (Monaco and its language modes).
 - **WORKERS** – `*.worker*.js` (Monaco workers: ts/css/html/json/editor).
 
-**Defaults (Brotli):**
+**Defaults (Brotli, in bytes; 1 kB = 1000 bytes):**
 
-- INITIAL ≤ **150 kB**
-- LAZY total ≤ **1.0 MB**
-- WORKERS total ≤ **1.5 MB**
+- INITIAL ≤ **150 000** (150 kB)
+- LAZY total ≤ **1 000 000** (1.0 MB)
+- WORKERS total ≤ **1 600 000** (1.6 MB) – about 10 % above the five Monaco workers of today (1 456 760); lower it to about 110 % of the new total when workers are removed
+
+The report prints the exact byte counts and, for readability, sizes in binary units (1 KiB = 1024 bytes).
 
 A chunk that the entry imports statically counts as INITIAL, whatever its name: importing Monaco eagerly puts about 660 kB onto the initial load and fails the budget.
 
@@ -23,7 +25,7 @@ The limits live in the script; override them for an experiment via environment v
 ```bash
 INITIAL_BROTLI=150000
 LAZY_TOTAL_BROTLI=1000000
-WORKER_TOTAL_BROTLI=1500000
+WORKER_TOTAL_BROTLI=1600000
 ```
 
 ## Runtime budgets (E2E)

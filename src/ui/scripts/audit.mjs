@@ -13,7 +13,8 @@ const IGNORED = {
   // tinypool <= 2.1.1 (via vitest 3): prototype-pollution *gadgets* – they need an
   // already polluted Object.prototype inside the test runner process. tinypool is a
   // dev-only dependency of the unit test runner and is not part of the shipped bundle.
-  // The fix requires vitest >= 5 (two majors); remove both entries with that upgrade.
+  // The fix requires vitest >= 4.1.12 (one major up); remove both entries with that
+  // upgrade.
   "GHSA-5gmw-xhrv-c9v3": "tinypool via vitest 3, dev-only test runner",
   "GHSA-85c8-ppgw-ccpr": "tinypool via vitest 3, dev-only test runner",
 };

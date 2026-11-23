@@ -128,7 +128,7 @@ For a deep dive into the system's structure, data flows, IPC contracts, and deve
 
 - **Unit Tests**: The `core` logic is tested with unit tests to ensure the correctness of individual components.
 - **Integration Tests**: Key application workflows are covered by integration tests that validate the interaction between the `app` and `core` layers without requiring a live UI.
-- **Continuous Integration (CI)**: GitHub Actions run on every push and pull request to `main`. The Rust job (`cargo fmt`, `cargo clippy --all-targets`, `cargo test`) runs on Linux, macOS and Windows; the UI job runs Prettier, ESLint, the type check, the unit and IPC contract tests, the build, the bundle budgets and the Playwright end-to-end tests in Chromium and WebKit; one release build embeds the fresh bundle. A separate workflow checks the dependencies against the RustSec and npm advisory databases (`cargo audit`, `npm run audit:deps`).
+- **Continuous Integration (CI)**: GitHub Actions run on every push and pull request to `main`. The Rust job (`cargo fmt`, `cargo clippy --all-targets`, `cargo test`) runs on Linux, macOS and Windows; the UI job runs Prettier, ESLint, the type check, the unit and IPC contract tests, the build, the bundle budgets and the Playwright end-to-end tests in Chromium and WebKit; one release build embeds the fresh bundle, and a `cargo check` with the minimum supported Rust version (1.88) keeps `rust-version` honest. A separate workflow checks the dependencies against the RustSec and npm advisory databases (`cargo audit`, `npm run audit:deps`).
 
 ---
 

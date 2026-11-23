@@ -45,10 +45,6 @@ jobs:
 
       - name: Build bundle
         run: npm run build
-      # Limits live in scripts/check-budgets.mjs (see docs/ci-budgets.md).
-      - name: Bundle budgets (initial load / lazy chunks / workers)
-        run: npm run budget:bundle
-
       # The app runs in WebKit (WKWebView, WebKitGTK) and Chromium (WebView2).
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium webkit
@@ -62,6 +58,12 @@ jobs:
         env:
           BUDGET_INIT_MS: "1500"
           BUDGET_VTREE_MS: "4000" # GitHub runners are slow
+
+      # After the tests, so that a budget violation does not hide their results.
+      # Limits live in scripts/check-budgets.mjs (see docs/ci-budgets.md).
+      - name: Bundle budgets (initial load / lazy chunks / workers)
+        if: ${{ !cancelled() }}
+        run: npm run budget:bundle
 
       - name: Upload bundle for the release build
         uses: actions/upload-artifact@v7
@@ -96,11 +98,27 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt -- --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests with snapshot verification
         env:
           INSTA_UPDATE: "no"
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
+
+  # Keeps `rust-version` in Cargo.toml honest: the locked dependency tree must build
+  # with exactly that toolchain.
+  msrv:
+    name: MSRV (Rust 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/linux-deps
+      - name: Install Rust 1.88 (rust-version in Cargo.toml)
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: cargo check
+        run: cargo check --locked
 
   # The one optimized (LTO) build: proves that the release profile compiles and that the
   # freshly built bundle can be embedded. Runs beside the tests, not in front of them.
@@ -122,4 +140,4 @@ jobs:
           name: ui-dist
           path: src/ui/dist
       - name: Build (release)
-        run: cargo build --release
+        run: cargo build --locked --release

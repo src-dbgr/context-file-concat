@@ -12,7 +12,9 @@
  * Env overrides (bytes, Brotli):
  *   INITIAL_BROTLI        default:   150_000
  *   LAZY_TOTAL_BROTLI     default: 1_000_000
- *   WORKER_TOTAL_BROTLI   default: 1_500_000
+ *   WORKER_TOTAL_BROTLI   default: 1_600_000
+ *
+ * Limits are byte counts; the report prints sizes in binary units (1 KiB = 1024 bytes).
  */
 
 import fs from "node:fs";
@@ -25,7 +27,11 @@ const INDEX_HTML = path.join(DIST_DIR, "index.html");
 
 const INITIAL_LIMIT = num(process.env.INITIAL_BROTLI, 150_000);
 const LAZY_LIMIT = num(process.env.LAZY_TOTAL_BROTLI, 1_000_000);
-const WORKER_LIMIT = num(process.env.WORKER_TOTAL_BROTLI, 1_500_000);
+// The five Monaco workers weigh 1_456_760 bytes today (ts 992_686, css 173_929, html
+// 141_928, json 89_385, editor 58_264). The limit leaves about 10 % (143 kB) for Monaco
+// updates; a regression beyond that, e.g. one more worker the size of css, fails.
+// Lower it to about 110 % of the new total whenever workers are removed.
+const WORKER_LIMIT = num(process.env.WORKER_TOTAL_BROTLI, 1_600_000);
 
 function num(v, d) {
   const n = Number(v);
@@ -39,7 +45,7 @@ function brotliSize(buf) {
 }
 
 function prettyBytes(n) {
-  const units = ["B", "KB", "MB"];
+  const units = ["B", "KiB", "MiB"];
   let u = 0;
   let v = n;
   while (v >= 1024 && u < units.length - 1) {
@@ -62,7 +68,8 @@ function htmlReferences(html) {
     if (!isScript && !/^(modulepreload|preload|stylesheet)$/.test(rel)) {
       continue;
     }
-    const url = tag.match(/\b(?:src|href)="([^"]+)"/)?.[1];
+    // Without query string and fragment ("./assets/index.js?v=3#x").
+    const url = tag.match(/\b(?:src|href)="([^"?#]+)/)?.[1];
     if (url && /\.(js|css)$/.test(url) && !/^([a-z]+:)?\/\//.test(url)) {
       refs.push(path.resolve(DIST_DIR, url.replace(/^\//, "")));
     }

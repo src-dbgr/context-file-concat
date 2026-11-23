@@ -1,12 +1,5 @@
-# Configuration of `cargo audit` (CI job "Supply chain"; run it locally with `cargo audit`).
+# Configuration of `cargo audit` (CI workflow "Supply chain"; run it locally with `cargo audit`).
 #
 # Every ignored advisory needs a reason and the condition under which the entry goes away.
 [advisories]
-ignore = [
-    # time 0.3.44 – denial of service via stack exhaustion while parsing crafted input.
-    # `time` reaches us only through wry -> cookie (cookie dates of the pages the webview
-    # shows); the app loads nothing but its own embedded UI. Every patched release
-    # (>= 0.3.47) requires Rust 1.88, above this crate's `rust-version` (1.85).
-    # Remove this entry together with the MSRV bump (`cargo update -p time`).
-    "RUSTSEC-2026-0009",
-]
+ignore = []
