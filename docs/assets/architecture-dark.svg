@@ -1,0 +1,299 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1900" viewBox="0 0 1600 1900" role="img" aria-labelledby="t d">
+<title id="t">CFC architecture: Rust host, Svelte UI and the IPC cycle between them</title>
+<desc id="d">The Svelte UI in the system WebView posts numbered commands through window.ipc. On the main thread of the Rust host an origin gate accepts them, IpcMessage::parse turns them into a Command, and the CommandDispatcher runs them on its ordered, continuation or blocking lane. Commands mutate AppState behind the SharedState lock and start token-guarded background tasks that use the core services. Under the lock send_snapshot builds a windowed UiState; the Correlated proxy stamps it with the last processed command, the coalescing outbox queues it, and the tao event loop delivers it with evaluate_script to window.render, where it is validated with Zod and put into the Svelte store. ConfigStore writes config.json and GeometryStore writes window.json.</desc>
+<style>
+  .bg{fill:#0F1216}
+  .zone{fill:#151A20;stroke:#2A323B;stroke-width:1}
+  .box{fill:#1B2129;stroke:#56616D;stroke-width:1}
+  .scope{fill:none;stroke:#E7EAEE;stroke-width:1;stroke-dasharray:2 4}
+  .rule{stroke:#E7EAEE;stroke-width:1;fill:none}
+  .lane{stroke:#56616D;stroke-width:1;fill:none}
+  .bound{stroke:#F08A52;stroke-width:1.25;stroke-dasharray:10 5 2 5;fill:none}
+  .file{fill:#151A20;stroke:#A3ADB8;stroke-width:1}
+  text{font-family:ui-sans-serif,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;font-size:20px;fill:#E7EAEE}
+  .t{fill:#E7EAEE}
+  .m{fill:#A3ADB8}
+  .c,.k,.cm{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .cm{fill:#A3ADB8}
+  .k{font-weight:700}
+  .n{font-weight:600;font-size:21px}
+  .title{font-size:34px;font-weight:600;letter-spacing:-.3px}
+  .kick,.zl{font-weight:600;letter-spacing:2.2px}
+  .kick{fill:#F08A52}
+  .tag{fill:#F08A52;font-style:italic}
+  .ln{fill:none;stroke:#E7EAEE;stroke-width:1.25}
+  .ln.d{stroke-dasharray:7 5}
+  .ln.p{stroke:#A3ADB8;stroke-dasharray:1.5 5;stroke-linecap:round;stroke-width:1.5}
+  .ah{fill:#E7EAEE}
+  .ah.p{fill:#A3ADB8}
+  .mk{fill:#F08A52}
+  .mkt{fill:#0F1216;font-weight:700}
+</style>
+<rect x="0" y="0" width="1600" height="1900" class="bg"/>
+<!-- Title strip -->
+<text x="40" y="38" class="kick">ARCHITECTURE</text>
+<text x="40" y="78" class="title">CFC — Context File Concatenator</text>
+<text x="40" y="108" class="t m">A Rust host and a Svelte UI in one window: typed commands go in, complete snapshots come back.</text>
+<path d="M1180 36 L1235 36" class="ln s"/>
+<path d="M1244 36 L1234 40 L1234 32 Z" class="ah s"/>
+<text x="1260" y="43" class="t m">command or call</text>
+<path d="M1180 64 L1235 64" class="ln d"/>
+<path d="M1244 64 L1234 68 L1234 60 Z" class="ah d"/>
+<text x="1260" y="71" class="t m">snapshot or event for the UI</text>
+<path d="M1180 92 L1235 92" class="ln p"/>
+<path d="M1244 92 L1234 96 L1234 88 Z" class="ah p"/>
+<text x="1260" y="99" class="t m">persistence, assets</text>
+<path d="M40 126 H1560" class="rule"/>
+<!-- UI: Svelte inside the system WebView -->
+<rect x="40" y="146" width="1520" height="190" class="zone"/>
+<text x="64" y="175" class="zl">WEBVIEW · SVELTE UI</text>
+<text x="584" y="175" class="t m"><tspan class="c">src/ui</tspan><tspan class="m"> · Svelte 5 + TypeScript in WKWebView / WebView2 / WebKitGTK</tspan></text>
+<rect x="64" y="192" width="376" height="124" class="box"/>
+<text x="80" y="220" class="t"><tspan class="k">services/backend.ts</tspan></text>
+<text x="80" y="246" class="t"><tspan class="c">post(command, payload)</tspan></text>
+<text x="80" y="272" class="t"><tspan class="m">numbers each command and</tspan></text>
+<text x="80" y="298" class="t"><tspan class="m">returns its id </tspan><tspan class="c">{session, seq}</tspan></text>
+<rect x="480" y="192" width="364" height="124" class="box"/>
+<text x="496" y="220" class="t"><tspan class="k">components/*.svelte</tspan></text>
+<text x="496" y="246" class="t"><tspan class="m">FileTree: virtualized row window</tspan></text>
+<text x="496" y="272" class="t"><tspan class="m">PreviewPanel: Monaco, lazy import</tspan></text>
+<text x="496" y="298" class="t"><tspan class="m">user intent leaves through </tspan><tspan class="c">post</tspan></text>
+<rect x="884" y="192" width="260" height="124" class="box"/>
+<text x="900" y="220" class="t"><tspan class="k">stores/app.ts</tspan></text>
+<text x="900" y="246" class="t"><tspan class="c">appState</tspan></text>
+<text x="900" y="272" class="t"><tspan class="m">one writable store,</tspan></text>
+<text x="900" y="298" class="t"><tspan class="m">derived stores on top</tspan></text>
+<rect x="1208" y="192" width="328" height="124" class="box"/>
+<text x="1224" y="220" class="t"><tspan class="k">ipc/handlers.ts</tspan></text>
+<text x="1224" y="246" class="t"><tspan class="c">window.render(state)</tspan></text>
+<text x="1224" y="272" class="t"><tspan class="c">UiStateSchema.safeParse</tspan></text>
+<text x="1224" y="298" class="t"><tspan class="m">Zod; invalid input is ignored</tspan></text>
+<path d="M1208 254 L1153 254" class="ln s"/>
+<path d="M1144 254 L1154 250 L1154 258 Z" class="ah s"/>
+<circle cx="1181" cy="254" r="13" class="mk"/>
+<text x="1181" y="261" class="mkt" text-anchor="middle">8</text>
+<path d="M884 254 L853 254" class="ln s"/>
+<path d="M844 254 L854 250 L854 258 Z" class="ah s"/>
+<path d="M480 254 L449 254" class="ln s"/>
+<path d="M440 254 L450 250 L450 258 Z" class="ah s"/>
+<!-- WebView boundary: the three things that cross it -->
+<text x="40" y="391" class="kick">WEBVIEW BOUNDARY</text>
+<path d="M312 384 H1560" class="bound"/>
+<path d="M400 316 L400 469" class="ln s"/>
+<path d="M400 478 L396 468 L404 468 Z" class="ah s"/>
+<circle cx="400" cy="360" r="13" class="mk"/>
+<text x="400" y="367" class="mkt" text-anchor="middle">1</text>
+<text x="424" y="416" class="t"><tspan class="c">window.ipc.postMessage(json)</tspan></text>
+<path d="M976 478 L976 345" class="ln p"/>
+<path d="M976 336 L980 346 L972 346 Z" class="ah p"/>
+<text x="960" y="416" class="t" text-anchor="end"><tspan class="c">cfc://</tspan><tspan class="m"> assets</tspan></text>
+<path d="M1248 478 L1248 325" class="ln d"/>
+<path d="M1248 316 L1252 326 L1244 326 Z" class="ah d"/>
+<circle cx="1248" cy="360" r="13" class="mk"/>
+<text x="1248" y="367" class="mkt" text-anchor="middle">7</text>
+<text x="1272" y="416" class="t"><tspan class="c">evaluate_script(js)</tspan></text>
+<!-- Host, main thread: composition root and platform policies -->
+<rect x="40" y="432" width="1520" height="190" class="zone"/>
+<text x="64" y="461" class="zl">HOST · MAIN THREAD</text>
+<text x="584" y="461" class="t m"><tspan class="c">src/main.rs</tspan><tspan class="m"> · </tspan><tspan class="c">src/platform</tspan></text>
+<text x="1536" y="461" class="t m" text-anchor="end">tao event loop, wry WebView</text>
+<rect x="64" y="478" width="432" height="124" class="box"/>
+<text x="80" y="506" class="t"><tspan class="n">IPC origin gate</tspan></text>
+<text x="80" y="532" class="t"><tspan class="c">platform::ipc::accepted_message</tspan></text>
+<text x="80" y="558" class="t"><tspan class="m">only the UI's own origin may send;</tspan></text>
+<text x="80" y="584" class="t"><tspan class="m">other documents are dropped unparsed</tspan></text>
+<rect x="584" y="478" width="432" height="124" class="box"/>
+<text x="600" y="506" class="t"><tspan class="n">Asset protocol</tspan></text>
+<text x="600" y="532" class="t"><tspan class="c">cfc://</tspan><tspan class="m"> embedded bundle + CSP header</tspan></text>
+<text x="600" y="558" class="t"><tspan class="c">AppOrigin::classify</tspan><tspan class="m"> on navigation</tspan></text>
+<text x="600" y="584" class="t"><tspan class="m">debug builds load the Vite dev server</tspan></text>
+<text x="1002" y="506" class="tag" text-anchor="end">release builds</text>
+<rect x="1104" y="478" width="432" height="124" class="box"/>
+<text x="1120" y="506" class="t"><tspan class="n">Event loop delivery</tspan></text>
+<text x="1120" y="532" class="t"><tspan class="c">Event::UserEvent(Wake)</tspan></text>
+<text x="1120" y="558" class="t"><tspan class="c">next_event → handle_user_event</tspan></text>
+<text x="1120" y="584" class="t"><tspan class="c">webview.evaluate_script(js)</tspan></text>
+<path d="M400 602 L400 699" class="ln s"/>
+<path d="M400 708 L396 698 L404 698 Z" class="ah s"/>
+<circle cx="400" cy="642" r="13" class="mk"/>
+<text x="400" y="649" class="mkt" text-anchor="middle">2</text>
+<text x="424" y="649" class="t"><tspan class="c">dispatch_ipc_message(message)</tspan></text>
+<path d="M1248 708 L1248 611" class="ln d"/>
+<path d="M1248 602 L1252 612 L1244 612 Z" class="ah d"/>
+<circle cx="1248" cy="642" r="13" class="mk"/>
+<text x="1248" y="649" class="mkt" text-anchor="middle">6</text>
+<text x="1272" y="649" class="t"><tspan class="c">Wake</tspan></text>
+<!-- Application layer -->
+<rect x="40" y="662" width="1520" height="724" class="zone"/>
+<text x="64" y="691" class="zl">APPLICATION LAYER</text>
+<text x="584" y="691" class="t m"><tspan class="c">src/app</tspan><tspan class="m"> · on the tokio runtime</tspan></text>
+<rect x="64" y="708" width="432" height="124" class="box"/>
+<text x="80" y="736" class="t"><tspan class="n">Envelope to command</tspan></text>
+<text x="80" y="762" class="t"><tspan class="c">IpcMessage::parse → Command</tspan></text>
+<text x="80" y="788" class="t"><tspan class="m">serde enum of 28 commands, strict;</tspan></text>
+<text x="80" y="814" class="t"><tspan class="m">a refused message changes nothing</tspan></text>
+<text x="482" y="736" class="tag" text-anchor="end">main thread</text>
+<path d="M400 832 L400 867" class="ln s"/>
+<path d="M400 876 L396 866 L404 866 Z" class="ah s"/>
+<circle cx="400" cy="850" r="13" class="mk"/>
+<text x="400" y="857" class="mkt" text-anchor="middle">3</text>
+<text x="376" y="857" class="t" text-anchor="end"><tspan class="c">Work::Ordered | Blocking</tspan></text>
+<rect x="64" y="876" width="432" height="344" class="box"/>
+<text x="80" y="904" class="t"><tspan class="k">CommandDispatcher</tspan></text>
+<text x="80" y="930" class="t"><tspan class="m">three lanes; what runs is not its concern</tspan></text>
+<path d="M64 944 H496" class="lane"/>
+<text x="80" y="971" class="tag">ordered lane</text>
+<text x="80" y="997" class="t m">strict arrival order; a command runs</text>
+<text x="80" y="1023" class="t m">until it finishes or first suspends</text>
+<path d="M64 1036 H496" class="lane"/>
+<text x="80" y="1063" class="tag">continuation lane</text>
+<text x="80" y="1089" class="t m">suspended commands (content search)</text>
+<text x="80" y="1115" class="t m">complete one at a time, in order</text>
+<path d="M64 1128 H496" class="lane"/>
+<text x="80" y="1155" class="tag">blocking lane</text>
+<text x="80" y="1181" class="t m">native dialogs on spawn_blocking, each</text>
+<text x="80" y="1207" class="t m">after its barrier on the ordered lane</text>
+<path d="M200 1220 L200 1255" class="ln s"/>
+<path d="M200 1264 L196 1254 L204 1254 Z" class="ah s"/>
+<text x="216" y="1249" class="t"><tspan class="c">DialogService</tspan></text>
+<rect x="64" y="1264" width="432" height="98" class="box"/>
+<text x="80" y="1292" class="t"><tspan class="n">Native dialogs</tspan></text>
+<text x="80" y="1318" class="t"><tspan class="c">NativeDialogService</tspan><tspan class="m"> (rfd)</tspan></text>
+<text x="80" y="1344" class="t"><tspan class="m">parented to the application window</tspan></text>
+<text x="482" y="1292" class="tag" text-anchor="end">blocking pool</text>
+<rect x="584" y="708" width="432" height="394" class="scope"/>
+<text x="600" y="736" class="t"><tspan class="k">SharedState</tspan></text>
+<text x="1000" y="736" class="tag" text-anchor="end">lock scope</text>
+<rect x="600" y="750" width="400" height="176" class="box"/>
+<text x="616" y="778" class="t"><tspan class="k">AppState</tspan></text>
+<text x="616" y="804" class="t"><tspan class="m">file lists with revisions</tspan></text>
+<text x="616" y="830" class="t"><tspan class="m">selection, expanded_dirs, filters</tspan></text>
+<text x="616" y="856" class="t"><tspan class="m">viewport, TreeIndexCache, AppConfig</tspan></text>
+<text x="616" y="882" class="t"><tspan class="m">one RunSlot each: scan, generation,</tspan></text>
+<text x="616" y="908" class="t"><tspan class="m">content search, preview</tspan></text>
+<path d="M496 903 L591 903" class="ln s"/>
+<path d="M600 903 L590 907 L590 899 Z" class="ah s"/>
+<circle cx="542" cy="903" r="13" class="mk"/>
+<text x="542" y="910" class="mkt" text-anchor="middle">4</text>
+<path d="M800 926 L800 953" class="ln s"/>
+<path d="M800 962 L796 952 L804 952 Z" class="ah s"/>
+<rect x="600" y="962" width="400" height="124" class="box"/>
+<text x="616" y="990" class="t"><tspan class="k">send_snapshot</tspan></text>
+<text x="616" y="1016" class="t"><tspan class="c">generate_ui_state → UiState</tspan></text>
+<text x="616" y="1042" class="t"><tspan class="c">rows, rows_start, rows_total</tspan></text>
+<text x="616" y="1068" class="t"><tspan class="m">a window of rows plus counters</tspan></text>
+<text x="986" y="990" class="tag" text-anchor="end">under the lock</text>
+<path d="M640 1102 L640 1155" class="ln s"/>
+<path d="M640 1164 L636 1154 L644 1154 Z" class="ah s"/>
+<text x="656" y="1140" class="t m">spawn with token</text>
+<path d="M860 1164 L860 1111" class="ln s"/>
+<path d="M860 1102 L864 1112 L856 1112 Z" class="ah s"/>
+<text x="876" y="1140" class="t m">stage, then commit</text>
+<rect x="584" y="1164" width="432" height="202" class="box"/>
+<text x="600" y="1192" class="t"><tspan class="n">Background tasks</tspan></text>
+<text x="600" y="1218" class="t"><tspan class="m">scan (streamed batches), lazy directory</tspan></text>
+<text x="600" y="1244" class="t"><tspan class="m">load, content search, preview, generation</tspan></text>
+<text x="600" y="1270" class="t"><tspan class="m">token-guarded: a superseded or cancelled</tspan></text>
+<text x="600" y="1296" class="t"><tspan class="m">run changes nothing</tspan></text>
+<text x="600" y="1322" class="t"><tspan class="m">staged commit: stage (locked), prepare</tspan></text>
+<text x="600" y="1348" class="t"><tspan class="m">(unlocked), commit if still current</tspan></text>
+<text x="1002" y="1192" class="tag" text-anchor="end">off the lanes</text>
+<rect x="1104" y="708" width="432" height="150" class="box"/>
+<text x="1120" y="736" class="t"><tspan class="n">Coalescing outbox</tspan></text>
+<text x="1120" y="762" class="t"><tspan class="c">CoalescingProxy → EventOutbox</tspan></text>
+<text x="1120" y="788" class="t"><tspan class="m">FIFO; a newer snapshot replaces a</tspan></text>
+<text x="1120" y="814" class="t"><tspan class="m">pending one at the tail; one Wake</tspan></text>
+<text x="1120" y="840" class="t"><tspan class="m">per appended entry</tspan></text>
+<text x="1522" y="736" class="tag" text-anchor="end">any thread</text>
+<path d="M1248 962 L1248 867" class="ln d"/>
+<path d="M1248 858 L1252 868 L1244 868 Z" class="ah d"/>
+<text x="1272" y="917" class="t"><tspan class="c">send_event(UserEvent)</tspan></text>
+<rect x="1104" y="962" width="432" height="254" class="box"/>
+<text x="1120" y="990" class="t"><tspan class="k">Correlated&lt;P&gt;</tspan></text>
+<text x="1120" y="1016" class="t"><tspan class="m">stamps every StateUpdate with</tspan></text>
+<text x="1120" y="1042" class="t"><tspan class="c">last_processed_session</tspan></text>
+<text x="1120" y="1068" class="t"><tspan class="c">last_processed_seq</tspan></text>
+<text x="1120" y="1094" class="t"><tspan class="m">from CommandProgress, as it is sent</tspan></text>
+<text x="1120" y="1172" class="t"><tspan class="m">ScanProgress, ShowFilePreview,</tspan></text>
+<text x="1120" y="1198" class="t"><tspan class="m">ShowGeneratedContent pass unchanged</tspan></text>
+<path d="M1000 1024 L1095 1024" class="ln d"/>
+<path d="M1104 1024 L1094 1028 L1094 1020 Z" class="ah d"/>
+<circle cx="1052" cy="1024" r="13" class="mk"/>
+<text x="1052" y="1031" class="mkt" text-anchor="middle">5</text>
+<path d="M1016 1190 L1095 1190" class="ln d"/>
+<path d="M1104 1190 L1094 1194 L1094 1186 Z" class="ah d"/>
+<!-- Persistence -->
+<rect x="40" y="1426" width="480" height="278" class="zone"/>
+<text x="64" y="1455" class="zl">PERSISTENCE</text>
+<rect x="64" y="1472" width="432" height="102" class="box"/>
+<text x="80" y="1500" class="t"><tspan class="k">ConfigStore</tspan></text>
+<rect x="324" y="1480" width="160" height="28" class="file"/>
+<text x="404" y="1500" class="t" text-anchor="middle"><tspan class="c">config.json</tspan></text>
+<path d="M232.6 1494 L315 1494" class="ln p"/>
+<path d="M324 1494 L314 1498 L314 1490 Z" class="ah p"/>
+<text x="80" y="1530" class="t m">snapshots numbered under the lock,</text>
+<text x="80" y="1556" class="t m">ordered atomic writes (temp + rename)</text>
+<rect x="64" y="1590" width="432" height="102" class="box"/>
+<text x="80" y="1618" class="t"><tspan class="k">GeometryStore</tspan></text>
+<rect x="324" y="1598" width="160" height="28" class="file"/>
+<text x="404" y="1618" class="t" text-anchor="middle"><tspan class="c">window.json</tspan></text>
+<path d="M257.8 1612 L315 1612" class="ln p"/>
+<path d="M324 1612 L314 1616 L314 1608 Z" class="ah p"/>
+<text x="80" y="1648" class="t m">owned by the event loop in main.rs;</text>
+<text x="80" y="1674" class="t m">saved when the window rests and at exit</text>
+<path d="M584 944 L540 944 L540 1523 L505 1523" class="ln p"/>
+<path d="M496 1523 L506 1519 L506 1527 Z" class="ah p"/>
+<text x="556" y="1413" class="t"><tspan class="c">ConfigSnapshot</tspan></text>
+<path d="M40 540 L20 540 L20 1641 L55 1641" class="ln p"/>
+<path d="M64 1641 L54 1645 L54 1637 Z" class="ah p"/>
+<!-- Core -->
+<rect x="560" y="1426" width="1000" height="278" class="zone"/>
+<text x="584" y="1455" class="zl">CORE</text>
+<text x="1536" y="1455" class="t" text-anchor="end"><tspan class="c">src/core</tspan><tspan class="m"> · </tspan><tspan class="c">src/utils</tspan><tspan class="m"> · no dependency on app or UI</tspan></text>
+<path d="M584 1472 H1536" class="lane"/>
+<text x="584" y="1500" class="t"><tspan class="k">DirectoryScanner</tspan><tspan class="cm">  scanner</tspan></text>
+<text x="584" y="1526" class="t m">cancellable walk, delivered in batches</text>
+<text x="1072" y="1500" class="t"><tspan class="k">FileHandler</tspan><tspan class="cm">  file_handler</tspan></text>
+<text x="1072" y="1526" class="t m">preview, decoding, output document</text>
+<path d="M584 1542 H1536" class="lane"/>
+<text x="584" y="1570" class="t"><tspan class="k">IgnoreRules</tspan><tspan class="cm">  ignore_rules</tspan></text>
+<text x="584" y="1596" class="t m">gitignore semantics incl. negation</text>
+<text x="1072" y="1570" class="t"><tspan class="k">count_tokens</tspan><tspan class="cm">  token_counter</tspan></text>
+<text x="1072" y="1596" class="t m">cl100k_base token count, cancellable</text>
+<path d="M584 1612 H1536" class="lane"/>
+<text x="584" y="1640" class="t"><tspan class="k">ContentSearch</tspan><tspan class="cm">  search</tspan></text>
+<text x="584" y="1666" class="t m">cancellable, bounded by the size limit</text>
+<text x="1072" y="1640" class="t"><tspan class="k">is_text_file</tspan><tspan class="cm">  utils::file_detection</tspan></text>
+<text x="1072" y="1666" class="t m">the one binary / text rule</text>
+<path d="M584 1682 H1536" class="lane"/>
+<path d="M800 1366 L800 1417" class="ln s"/>
+<path d="M800 1426 L796 1416 L804 1416 Z" class="ah s"/>
+<text x="816" y="1413" class="t"><tspan class="c">Scanner · FileSearcher · ContentGenerator · Tokenizer</tspan></text>
+<!-- The request / response cycle -->
+<path d="M40 1728 H1560" class="rule"/>
+<text x="40" y="1762" class="kick">ONE REQUEST, ONE ANSWER</text>
+<circle cx="53" cy="1789" r="13" class="mk"/>
+<text x="53" y="1796" class="mkt" text-anchor="middle">1</text>
+<text x="78" y="1796" class="t"><tspan class="c">post()</tspan> numbers the command and posts the envelope via <tspan class="c">window.ipc</tspan></text>
+<circle cx="53" cy="1817" r="13" class="mk"/>
+<text x="53" y="1824" class="mkt" text-anchor="middle">2</text>
+<text x="78" y="1824" class="t">The origin gate accepts it; <tspan class="c">IpcMessage::parse</tspan> reads it into a <tspan class="c">Command</tspan></text>
+<circle cx="53" cy="1845" r="13" class="mk"/>
+<text x="53" y="1852" class="mkt" text-anchor="middle">3</text>
+<text x="78" y="1852" class="t">The dispatcher queues it on its lane; commands start in arrival order</text>
+<circle cx="53" cy="1873" r="13" class="mk"/>
+<text x="53" y="1880" class="mkt" text-anchor="middle">4</text>
+<text x="78" y="1880" class="t">The command locks <tspan class="c">SharedState</tspan>, mutates <tspan class="c">AppState</tspan>, may start a task</text>
+<circle cx="821" cy="1789" r="13" class="mk"/>
+<text x="821" y="1796" class="mkt" text-anchor="middle">5</text>
+<text x="846" y="1796" class="t">Still under the lock, <tspan class="c">send_snapshot</tspan> builds the windowed <tspan class="c">UiState</tspan></text>
+<circle cx="821" cy="1817" r="13" class="mk"/>
+<text x="821" y="1824" class="mkt" text-anchor="middle">6</text>
+<text x="846" y="1824" class="t">Stamped, queued, coalesced; a <tspan class="c">Wake</tspan> token goes to the event loop</text>
+<circle cx="821" cy="1845" r="13" class="mk"/>
+<text x="821" y="1852" class="mkt" text-anchor="middle">7</text>
+<text x="846" y="1852" class="t">The loop takes one event: <tspan class="c">evaluate_script</tspan> calls <tspan class="c">window.render</tspan></text>
+<circle cx="821" cy="1873" r="13" class="mk"/>
+<text x="821" y="1880" class="mkt" text-anchor="middle">8</text>
+<text x="846" y="1880" class="t"><tspan class="c">window.render</tspan> validates it with Zod and replaces <tspan class="c">appState</tspan></text>
+</svg>

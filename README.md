@@ -120,6 +120,13 @@ CFC is built on a modern hybrid architecture, combining a high-performance **Rus
 
 The design emphasizes key principles like **Separation of Concerns**, **Unidirectional Data Flow**, and **Performance by Design**. Heavy I/O operations are handled asynchronously in Rust to ensure a non-blocking UI, while the frontend uses virtualization to render tens of thousands of files with ease.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/architecture-dark.svg">
+  <img src="./docs/assets/architecture-light.svg" width="880" alt="Architecture of CFC: the Svelte UI in the system WebView posts numbered commands through window.ipc; on the host's main thread an origin gate accepts them and they are parsed into a typed Command; the CommandDispatcher runs them on its ordered, continuation or blocking lane; commands change AppState behind the SharedState lock and start token-guarded background tasks that use the core services; send_snapshot builds a windowed UiState under the lock, which is stamped with the last processed command, coalesced in an outbox and delivered by the event loop with evaluate_script to window.render, validated with Zod and put into the Svelte store. ConfigStore writes config.json, GeometryStore writes window.json.">
+</picture>
+
+_How to read it:_ follow the numbers. A command leaves the UI (1), passes the origin gate and becomes a typed `Command` (2), is queued on a lane of the `CommandDispatcher` (3) and changes `AppState` under the one lock (4). The answer is always a complete snapshot: `send_snapshot` builds a windowed `UiState` under that lock (5), the transport stamps it with the last command it accounts for and drops snapshots a newer one has superseded (6), and the event loop hands it to `window.render` (7), where it is validated and replaces the store (8). Solid lines are commands and calls, dashed lines are snapshots and events on their way to the UI, dotted lines are persistence and the embedded assets. Italic tags name the thread or lane a part runs on.
+
 For a deep dive into the system's structure, data flows, IPC contracts, and development patterns, please see our comprehensive **[Developer Documentation](./docs/README.md)**.
 
 ---
