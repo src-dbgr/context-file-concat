@@ -2,6 +2,7 @@
 
 use crate::config::AppConfig;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use tao::rwh_06::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, WindowHandle,
@@ -71,13 +72,17 @@ impl HasDisplayHandle for ParentWindow {
 
 /// The production implementation that uses the `rfd` crate to show native OS dialogs.
 ///
-/// The dialogs are children of the application window if the service was given one
-/// ([`NativeDialogService::parented_to`]): they stay in front of it and block it
-/// while they are open, instead of being windows of their own that can end up behind
-/// it. A [`Default`] service shows free-standing dialogs.
+/// The dialogs are children of the application window once the service has been
+/// given its handles ([`NativeDialogService::set_parent`]): they stay in front of it
+/// and block it while they are open, instead of being windows of their own that can
+/// end up behind it. Until then, and for a [`Default`] service, they are free-standing.
+///
+/// The parent is set after construction because the right handle only exists once
+/// the web view has been built (see `platform::dialog_parent_handles`), while the
+/// service is already needed to build the IPC handler of that web view.
 #[derive(Default)]
 pub struct NativeDialogService {
-    parent: Option<ParentWindow>,
+    parent: OnceLock<ParentWindow>,
 }
 
 impl NativeDialogService {
@@ -88,17 +93,31 @@ impl NativeDialogService {
     /// lives until the process ends. If the window does not hand out its handles, the
     /// dialogs are free-standing.
     pub fn parented_to(window: &(impl HasWindowHandle + HasDisplayHandle)) -> Self {
-        let parent = ParentWindow::of(window);
-        if parent.is_none() {
-            tracing::warn!("No window handle available; dialogs will not be parented.");
+        let service = Self::default();
+        match ParentWindow::of(window) {
+            Some(parent) => service.adopt(parent),
+            None => tracing::warn!("No window handle available; dialogs will not be parented."),
         }
-        Self { parent }
+        service
+    }
+
+    /// Attaches the dialogs to the window named by these handles, taken on the thread
+    /// that owns the window. The window must stay open for as long as the service is
+    /// used. Only the first parent counts.
+    pub fn set_parent(&self, window: RawWindowHandle, display: RawDisplayHandle) {
+        self.adopt(ParentWindow { window, display });
+    }
+
+    fn adopt(&self, parent: ParentWindow) {
+        if self.parent.set(parent).is_err() {
+            tracing::warn!("The dialogs already have a parent window; keeping it.");
+        }
     }
 
     /// A dialog that belongs to the parent window, if there is one.
     fn dialog(&self) -> rfd::FileDialog {
         let dialog = rfd::FileDialog::new();
-        match &self.parent {
+        match self.parent.get() {
             Some(parent) => dialog.set_parent(parent),
             None => dialog,
         }
@@ -164,7 +183,7 @@ mod tests {
     fn service_keeps_the_handles_of_its_window() {
         let service = NativeDialogService::parented_to(&FakeWindow { available: true });
 
-        let parent = service.parent.expect("parent");
+        let parent = service.parent.get().expect("parent");
         assert_eq!(
             parent.window_handle().unwrap().as_raw(),
             RawWindowHandle::Web(tao::rwh_06::WebWindowHandle::new(7))
@@ -178,8 +197,21 @@ mod tests {
     #[test]
     fn service_without_a_window_handle_shows_free_standing_dialogs() {
         let service = NativeDialogService::parented_to(&FakeWindow { available: false });
-        assert!(service.parent.is_none());
-        assert!(NativeDialogService::default().parent.is_none());
+        assert!(service.parent.get().is_none());
+        assert!(NativeDialogService::default().parent.get().is_none());
+    }
+
+    #[test]
+    fn a_parent_set_later_is_used_and_the_first_one_wins() {
+        let service = NativeDialogService::default();
+        let first = RawWindowHandle::Web(tao::rwh_06::WebWindowHandle::new(1));
+        let second = RawWindowHandle::Web(tao::rwh_06::WebWindowHandle::new(2));
+
+        service.set_parent(first, DisplayHandle::web().as_raw());
+        service.set_parent(second, DisplayHandle::web().as_raw());
+
+        let parent = service.parent.get().expect("parent");
+        assert_eq!(parent.window_handle().unwrap().as_raw(), first);
     }
 
     /// The service is shared with the worker threads the dialogs are requested from.

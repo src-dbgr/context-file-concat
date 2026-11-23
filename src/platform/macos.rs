@@ -5,3 +5,6 @@
 
 /// Public menu builder.
 pub mod menu;
+
+/// The view native dialogs are attached to.
+pub mod dialog_parent;

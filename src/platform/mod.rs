@@ -17,3 +17,20 @@ pub mod asset_protocol;
 pub mod csp;
 #[cfg(any(test, not(debug_assertions)))]
 pub mod navigation;
+
+/// The raw handles native dialogs are to be attached to, taken on the main thread
+/// once the web view has been built (on macOS the web view replaces the window's
+/// original content view, see [`macos::dialog_parent`]).
+pub fn dialog_parent_handles(
+    window: &tao::window::Window,
+) -> Option<(tao::rwh_06::RawWindowHandle, tao::rwh_06::RawDisplayHandle)> {
+    use tao::rwh_06::HasDisplayHandle;
+    #[cfg(not(target_os = "macos"))]
+    use tao::rwh_06::HasWindowHandle;
+    let display = window.display_handle().ok()?.as_raw();
+    #[cfg(target_os = "macos")]
+    let window = macos::dialog_parent::content_view_handle(window)?;
+    #[cfg(not(target_os = "macos"))]
+    let window = window.window_handle().ok()?.as_raw();
+    Some((window, display))
+}

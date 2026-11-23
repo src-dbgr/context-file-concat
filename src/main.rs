@@ -82,9 +82,9 @@ async fn main() {
     // Create the shared application state and the coalescing transport to the UI thread
     let (proxy, ui_events) = app::transport::channel(event_loop.create_proxy());
     let state = SharedState::new(AppState::new(config, config_store.clone()));
-    // The dialogs belong to the window (the handle has to be taken here, on the main
-    // thread), so they cannot end up behind it.
-    let dialog_service = Arc::new(NativeDialogService::parented_to(&*window));
+    // The dialogs belong to the window, so they cannot end up behind it. Their parent
+    // is set once the web view exists (see below).
+    let dialog_service = Arc::new(NativeDialogService::default());
 
     // To avoid code duplication, we define the handlers first.
     let ipc_handler_state = state.clone();
@@ -193,6 +193,13 @@ async fn main() {
         .with_download_started_handler(|_url, _destination| false)
         .build(&*window)
         .expect("Failed to build WebView");
+
+    // Taken here, on the main thread and after the web view has become the content of
+    // the window: on macOS the view tao created is no longer inside the window then.
+    match platform::dialog_parent_handles(&window) {
+        Some((parent, display)) => dialog_service.set_parent(parent, display),
+        None => tracing::warn!("No window handle available; dialogs will not be parented."),
+    }
 
     let window_for_events = window.clone();
     let mut session_saved = false;
