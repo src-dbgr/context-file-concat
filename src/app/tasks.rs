@@ -1087,12 +1087,14 @@ fn directory_to_scan(path: PathBuf) -> Result<PathBuf, String> {
 
 /// Writes `snapshot` to the configuration file on the blocking thread pool, so that
 /// neither the command lane nor the holder of the state lock waits for the disk.
-/// Take the snapshot under the lock ([`AppState::config_snapshot`]); of several saves
-/// under way, the most recent snapshot is the one that ends up on disk.
+/// The snapshot is the one [`AppState::edit_config`] hands out, taken under the lock;
+/// of several saves under way, the most recent snapshot is the one that ends up on
+/// disk.
 ///
 /// This is how every change of the configuration is persisted while the application
-/// runs. The save at exit takes a snapshot the same way and writes it itself (see
-/// `window_geometry::persist`).
+/// runs. The save at exit takes no snapshot of its own: it writes the most recent one
+/// if this save has not had its turn yet, and closes the store (see
+/// [`ConfigStore::close`](crate::config::ConfigStore::close)).
 pub fn save_config_in_background(snapshot: ConfigSnapshot) {
     tokio::spawn(async move {
         match tokio::task::spawn_blocking(move || snapshot.save()).await {

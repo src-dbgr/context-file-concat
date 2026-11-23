@@ -3,9 +3,12 @@ use context_file_concat::app::file_dialog::NativeDialogService;
 use context_file_concat::app::proxy::EventProxy;
 use context_file_concat::app::shared_state::SharedState;
 use context_file_concat::app::state::AppState;
-use context_file_concat::app::window_geometry::{GeometryStore, Rect, MIN_WINDOW_SIZE};
+use context_file_concat::app::window_geometry::{
+    GeometryStore, Rect, SaveDebounce, GEOMETRY_SAVE_DELAY, MIN_WINDOW_SIZE,
+};
 use context_file_concat::config::{settings, AppConfig, ConfigStore};
 use std::sync::Arc;
+use std::time::Instant;
 use tao::{
     dpi::{LogicalPosition, LogicalSize},
     event::{Event, StartCause, WindowEvent},
@@ -43,7 +46,7 @@ async fn main() {
     // The window geometry belongs to this function, not to the application state: it
     // is read here (taking over what an older version kept in the config file, before
     // anything can rewrite that file), follows the window in the event loop below and
-    // is saved when the loop ends. For the start it is pulled back onto a visible
+    // is saved a moment after the window has come to rest and when the loop ends. For the start it is pulled back onto a visible
     // monitor if necessary.
     let (geometry_store, stored_geometry) = match &config_path {
         Some(path) => GeometryStore::open(path, primary_scale_factor(&event_loop)),
@@ -193,6 +196,10 @@ async fn main() {
 
     let window_for_events = window.clone();
     let mut session_saved = false;
+    // The geometry is also saved while the application runs, so that a crash does not
+    // cost it: once the window has rested after a resize/move, on the blocking pool.
+    let mut save_debounce = SaveDebounce::new(GEOMETRY_SAVE_DELAY);
+    let runtime = tokio::runtime::Handle::current();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -210,11 +217,15 @@ async fn main() {
                 // worker holding the state lock cannot make resizing/moving stutter.
                 WindowEvent::Resized(size) => {
                     let scale = window_for_events.scale_factor();
-                    geometry.record_size((size.width.into(), size.height.into()), scale);
+                    if geometry.record_size((size.width.into(), size.height.into()), scale) {
+                        save_debounce.changed(Instant::now());
+                    }
                 }
                 WindowEvent::Moved(position) => {
                     let scale = window_for_events.scale_factor();
-                    geometry.record_position((position.x.into(), position.y.into()), scale);
+                    if geometry.record_position((position.x.into(), position.y.into()), scale) {
+                        save_debounce.changed(Instant::now());
+                    }
                 }
                 _ => (),
             },
@@ -226,6 +237,7 @@ async fn main() {
             // ends when this returns), and neither waits for the application state.
             Event::LoopDestroyed if !session_saved => {
                 session_saved = true;
+                save_debounce.cancel();
                 tracing::info!("Exiting. Saving final window state...");
                 if let Err(e) = geometry_store.save(geometry) {
                     tracing::error!("Failed to save the window geometry on exit: {e}");
@@ -242,7 +254,23 @@ async fn main() {
                     app::handle_user_event(user_event, &webview);
                 }
             }
+            // Among others the wake-up the pending save has asked for (see below).
             _ => (),
+        }
+
+        // The window has come to rest: its geometry is written in the background. The
+        // store serializes its writes and always writes the geometry it was handed
+        // last, so this cannot get in the way of a later save or of the one at exit.
+        if save_debounce.take_due(Instant::now()) {
+            let store = geometry_store.clone();
+            runtime.spawn_blocking(move || {
+                if let Err(e) = store.save(geometry) {
+                    tracing::warn!("Failed to save the window geometry: {e}");
+                }
+            });
+        }
+        if let (Some(due_at), ControlFlow::Wait) = (save_debounce.due_at(), *control_flow) {
+            *control_flow = ControlFlow::WaitUntil(due_at);
         }
     });
 }

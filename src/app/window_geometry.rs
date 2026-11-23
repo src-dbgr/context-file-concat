@@ -2,7 +2,9 @@
 //!
 //! The window belongs to the composition root (`main.rs`), and so does its geometry:
 //! the event loop owns a [`WindowGeometry`], reports every resize/move to it and hands
-//! it to a [`GeometryStore`] when the application quits. Neither the application state
+//! it to a [`GeometryStore`]: a moment after the window has come to rest
+//! ([`SaveDebounce`]; written in the background, so that a crash costs at most the
+//! last move), and when the application quits. Neither the application state
 //! nor the configuration knows about it, so following the window never waits for the
 //! state lock, and saving the geometry never competes with a save of the configuration.
 //!
@@ -23,6 +25,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 /// The name of the file the geometry is kept in, in the directory of the configuration.
 pub const WINDOW_FILE: &str = "window.json";
@@ -137,22 +141,27 @@ impl WindowGeometry {
         }
     }
 
-    /// Records a new inner size reported in physical pixels; degenerate sizes are ignored.
-    pub fn record_size(&mut self, physical: (f64, f64), scale: f64) {
+    /// Records a new inner size reported in physical pixels; degenerate sizes are
+    /// ignored. Returns whether the geometry has changed.
+    pub fn record_size(&mut self, physical: (f64, f64), scale: f64) -> bool {
+        let before = *self;
         if let Some(size) = to_logical(physical, scale).filter(|size| is_persistable_size(*size)) {
             self.size = size;
         }
+        *self != before
     }
 
     /// Records a new outer position reported in physical pixels; the position of a
-    /// minimized window is ignored.
-    pub fn record_position(&mut self, physical: (f64, f64), scale: f64) {
+    /// minimized window is ignored. Returns whether the geometry has changed.
+    pub fn record_position(&mut self, physical: (f64, f64), scale: f64) -> bool {
         if !is_persistable_position(physical) {
-            return;
+            return false;
         }
+        let before = *self;
         if let Some(position) = to_logical(physical, scale) {
             self.position = position;
         }
+        *self != before
     }
 
     /// Moves the window back onto a monitor if (almost) none of it would be visible,
@@ -241,17 +250,93 @@ fn legacy_geometry(config_content: &str, primary_scale: f64) -> Option<WindowGeo
     ))
 }
 
+/// How long the window has to rest after a resize/move before its geometry is saved.
+pub const GEOMETRY_SAVE_DELAY: Duration = Duration::from_millis(750);
+
+/// Decides when the geometry is saved while the application runs: once the window has
+/// rested for a while after the last resize/move, not for every step of a drag.
+///
+/// A pure value: it is told the time (`now`) by its caller, the event loop, and starts
+/// nothing itself. The save at exit does not depend on it.
+#[derive(Debug)]
+pub struct SaveDebounce {
+    delay: Duration,
+    due_at: Option<Instant>,
+}
+
+impl SaveDebounce {
+    pub fn new(delay: Duration) -> Self {
+        Self {
+            delay,
+            due_at: None,
+        }
+    }
+
+    /// The geometry changed at `now`: a save is due once `delay` has passed without
+    /// another change. A save that was due before is put off with it.
+    pub fn changed(&mut self, now: Instant) {
+        self.due_at = Some(now + self.delay);
+    }
+
+    /// When the pending save is due, `None` if there is nothing to save. This is the
+    /// time the event loop has to wake up at.
+    pub fn due_at(&self) -> Option<Instant> {
+        self.due_at
+    }
+
+    /// Whether the geometry is to be saved at `now`. Answers `true` once for the
+    /// changes made so far; after that there is nothing pending until the next change.
+    pub fn take_due(&mut self, now: Instant) -> bool {
+        let due = self.due_at.is_some_and(|due_at| now >= due_at);
+        if due {
+            self.due_at = None;
+        }
+        due
+    }
+
+    /// Forgets a pending save (the caller saves by itself, as at exit).
+    pub fn cancel(&mut self) {
+        self.due_at = None;
+    }
+}
+
 /// Keeps the geometry of the window in `window.json`.
 ///
-/// The file is only ever written by the composition root: once when the geometry of an
-/// older configuration file is taken over, and when the application quits.
+/// The file is only ever written on behalf of the composition root: when the geometry
+/// of an older configuration file is taken over, a moment after the window has been
+/// resized or moved (in the background, see [`SaveDebounce`]), and when the
+/// application quits.
+///
+/// Cloning is cheap; all clones are the same store. Saves may run on any thread: they
+/// are serialized, and each writes the geometry that was handed to the store last, so
+/// a save that gets its turn late cannot put an older geometry over a newer one.
 #[derive(Debug, Clone)]
 pub struct GeometryStore {
+    shared: Arc<Shared>,
+}
+
+#[derive(Debug)]
+struct Shared {
     /// The file the geometry is written to; `None` for a detached store.
     path: Option<PathBuf>,
+    /// The geometry handed to [`GeometryStore::save`] last. Locked only for a moment.
+    latest: Mutex<Option<WindowGeometry>>,
+    /// The geometry this store wrote last. Held while the file is written, which
+    /// serializes the writes.
+    written: Mutex<Option<WindowGeometry>>,
 }
 
 impl GeometryStore {
+    fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                path,
+                latest: Mutex::new(None),
+                written: Mutex::new(None),
+            }),
+        }
+    }
+
     /// Opens the geometry that belongs to the configuration file at `config_path`
     /// (`window.json` in the same directory) and returns the store together with the
     /// geometry to start with:
@@ -261,14 +346,13 @@ impl GeometryStore {
     ///    version left in the configuration file, converted to logical units with
     ///    `primary_scale` if necessary (see [`legacy_geometry`]). It is written to
     ///    `window.json` right away, as the configuration file loses it with its next
-    ///    save;
+    ///    save. (If `window.json` can never be written while the configuration file
+    ///    can, e.g. in a read-only directory, that geometry is lost with that save.)
     /// 3. the default geometry otherwise. Nothing is written for it.
     ///
     /// The configuration file is only read here, never created or changed.
     pub fn open(config_path: &Path, primary_scale: f64) -> (Self, WindowGeometry) {
-        let store = Self {
-            path: Some(config_path.with_file_name(WINDOW_FILE)),
-        };
+        let store = Self::new(Some(config_path.with_file_name(WINDOW_FILE)));
         if let Some(geometry) = store.read() {
             return (store, geometry);
         }
@@ -288,12 +372,12 @@ impl GeometryStore {
     /// A store that is not bound to a file: nothing is read, nothing is written. Used
     /// when no configuration directory can be determined.
     pub fn detached() -> Self {
-        Self { path: None }
+        Self::new(None)
     }
 
     /// The geometry in the file, `None` if there is no file or no geometry in it.
     fn read(&self) -> Option<WindowGeometry> {
-        let content = fs::read_to_string(self.path.as_ref()?).ok()?;
+        let content = fs::read_to_string(self.shared.path.as_ref()?).ok()?;
         match serde_json::from_str::<StoredGeometry>(&content) {
             Ok(StoredGeometry {
                 size: None,
@@ -307,21 +391,43 @@ impl GeometryStore {
         }
     }
 
-    /// Writes the geometry to the file (atomically, like the configuration), creating
-    /// its directory if necessary. Blocks on file IO and on nothing else.
+    /// Saves `geometry`: writes it to the file (atomically, like the configuration),
+    /// creating its directory if necessary. Blocks on file IO and on nothing else, in
+    /// particular not on the application state.
+    ///
+    /// What is written is the geometry the store was handed last, by this call or by
+    /// one that came after it and is waiting for its turn; a geometry this store has
+    /// written already is not written again. If the write fails, the next save tries
+    /// again.
     pub fn save(&self, geometry: WindowGeometry) -> Result<()> {
-        let Some(path) = &self.path else {
+        let shared = &self.shared;
+        *lock(&shared.latest) = Some(geometry);
+
+        let mut written = lock(&shared.written);
+        let latest = *lock(&shared.latest);
+        if latest == *written {
             return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)?;
-            }
         }
-        settings::write_json(&geometry, path)?;
-        tracing::info!("Saved window geometry to {path:?}");
+        if let (Some(path), Some(latest)) = (&shared.path, latest) {
+            if let Some(parent) = path.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            settings::write_json(&latest, path)?;
+            tracing::debug!("Saved window geometry to {path:?}");
+        }
+        *written = latest;
         Ok(())
     }
+}
+
+/// Locks one of the store's own mutexes. They guard plain values that are valid at any
+/// time, so a lock poisoned by a panicking writer is simply taken over.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

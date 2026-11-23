@@ -1097,12 +1097,14 @@ impl AppState {
         &mut self.config
     }
 
-    /// Captures the configuration for saving it outside the state lock.
+    /// Captures the configuration for saving it outside the state lock. A change of
+    /// the configuration gets its snapshot from [`Self::edit_config`]; this is for a
+    /// save that follows no change.
     ///
-    /// Take the snapshot while holding the lock, right after the change, and save it
-    /// afterwards: the snapshots are numbered in the order they are taken, which is
-    /// what keeps a save that is overtaken by a later one from overwriting it (see
-    /// [`ConfigStore`]). This is the only way the application saves its configuration.
+    /// Take the snapshot while holding the lock and save it afterwards: the snapshots
+    /// are numbered in the order they are taken, which is what keeps a save that is
+    /// overtaken by a later one from overwriting it (see [`ConfigStore`]). This is the
+    /// only way the application saves its configuration.
     pub fn config_snapshot(&self) -> ConfigSnapshot {
         self.config_store.snapshot(&self.config)
     }

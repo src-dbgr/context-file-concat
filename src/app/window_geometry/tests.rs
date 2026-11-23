@@ -304,7 +304,7 @@ fn the_window_file_is_kept_beside_the_config_file() {
     let (store, _) = GeometryStore::open(&config_path, 1.0);
     store.save(FINAL_GEOMETRY).unwrap();
 
-    assert_eq!(store.path.as_deref(), Some(window_path.as_path()));
+    assert_eq!(store.shared.path.as_deref(), Some(window_path.as_path()));
     // An isolated configuration directory (`CFC_CONFIG_DIR`) holds everything.
     assert_eq!(file_names_in(dir.path()), [WINDOW_FILE]);
 }
@@ -659,4 +659,163 @@ fn the_last_config_save_cannot_be_overtaken_by_one_that_is_still_queued() {
 
     let saved = settings::load_config(&config_path).unwrap();
     assert_eq!(saved.output_filename, "second-change.txt");
+}
+
+// --- Saving while the application runs ---
+
+#[test]
+fn recording_tells_whether_the_geometry_has_changed() {
+    let mut g = geometry();
+    assert!(g.record_size((2000.0, 1400.0), 2.0));
+    assert!(!g.record_size((2000.0, 1400.0), 2.0), "the same size again");
+    assert!(!g.record_size((0.0, 0.0), 2.0), "a size that is ignored");
+
+    assert!(g.record_position((-400.0, 60.0), 2.0));
+    assert!(!g.record_position((-400.0, 60.0), 2.0));
+    assert!(!g.record_position((-32000.0, -32000.0), 2.0));
+    assert!(!g.record_position((10.0, 10.0), f64::NAN));
+}
+
+const DELAY: Duration = Duration::from_millis(750);
+
+fn ms(millis: u64) -> Duration {
+    Duration::from_millis(millis)
+}
+
+#[test]
+fn nothing_is_due_without_a_change() {
+    let start = Instant::now();
+    let mut debounce = SaveDebounce::new(DELAY);
+
+    assert_eq!(debounce.due_at(), None);
+    assert!(!debounce.take_due(start));
+    assert!(!debounce.take_due(start + ms(10_000)));
+}
+
+#[test]
+fn a_change_is_due_once_the_window_has_rested_for_the_delay() {
+    let start = Instant::now();
+    let mut debounce = SaveDebounce::new(DELAY);
+
+    debounce.changed(start);
+
+    assert_eq!(debounce.due_at(), Some(start + DELAY));
+    assert!(!debounce.take_due(start));
+    assert!(!debounce.take_due(start + ms(749)));
+    assert!(debounce.take_due(start + ms(750)));
+}
+
+/// A drag is a run of changes: the save waits for the last one, and all of them
+/// are one save.
+#[test]
+fn changes_in_quick_succession_are_saved_once_after_the_last_one() {
+    let start = Instant::now();
+    let mut debounce = SaveDebounce::new(DELAY);
+
+    for step in 0..100 {
+        debounce.changed(start + ms(step * 16));
+        assert!(
+            !debounce.take_due(start + ms(step * 16 + 15)),
+            "step {step}"
+        );
+    }
+    let last_change = start + ms(99 * 16);
+
+    assert_eq!(debounce.due_at(), Some(last_change + DELAY));
+    assert!(!debounce.take_due(last_change + ms(749)));
+    assert!(debounce.take_due(last_change + ms(751)));
+    assert!(!debounce.take_due(last_change + ms(752)), "saved only once");
+    assert_eq!(debounce.due_at(), None);
+}
+
+#[test]
+fn a_change_after_a_save_is_due_again() {
+    let start = Instant::now();
+    let mut debounce = SaveDebounce::new(DELAY);
+    debounce.changed(start);
+    assert!(debounce.take_due(start + ms(1000)));
+
+    debounce.changed(start + ms(2000));
+
+    assert!(!debounce.take_due(start + ms(2100)));
+    assert!(debounce.take_due(start + ms(2750)));
+}
+
+/// At exit the event loop saves by itself; a save that was pending is dropped.
+#[test]
+fn a_cancelled_save_is_not_due() {
+    let start = Instant::now();
+    let mut debounce = SaveDebounce::new(DELAY);
+    debounce.changed(start);
+
+    debounce.cancel();
+
+    assert_eq!(debounce.due_at(), None);
+    assert!(!debounce.take_due(start + ms(10_000)));
+}
+
+/// What the event loop does with the two: the geometry that is saved when the window
+/// rests is on disk before the application ends, so a crash does not cost it.
+#[test]
+fn the_geometry_is_on_disk_once_the_window_has_rested() {
+    let (_dir, config_path, _) = config_dir();
+    let (store, mut geometry) = GeometryStore::open(&config_path, 2.0);
+    let mut debounce = SaveDebounce::new(DELAY);
+    let start = Instant::now();
+
+    if geometry.record_size((2000.0, 1400.0), 2.0) {
+        debounce.changed(start);
+    }
+    assert!(debounce.take_due(start + DELAY));
+    store.save(geometry).unwrap();
+
+    // No save at exit: the next start still finds the geometry.
+    assert_eq!(GeometryStore::open(&config_path, 2.0).1, geometry);
+}
+
+#[test]
+fn a_geometry_the_store_has_written_is_not_written_again() {
+    let (_dir, config_path, window_path) = config_dir();
+    let (store, _) = GeometryStore::open(&config_path, 1.0);
+    store.save(FINAL_GEOMETRY).unwrap();
+
+    // Seen by what is on disk afterwards: nothing has replaced the file.
+    fs::write(&window_path, "untouched").unwrap();
+    store.save(FINAL_GEOMETRY).unwrap();
+    store.clone().save(FINAL_GEOMETRY).unwrap();
+    assert_eq!(fs::read_to_string(&window_path).unwrap(), "untouched");
+
+    store.save(geometry()).unwrap();
+    assert_eq!(GeometryStore::open(&config_path, 1.0).1, geometry());
+}
+
+/// A background save that gets its turn late (here: after a newer geometry has been
+/// handed to the store, as by the save at exit) must not put its older geometry on
+/// disk.
+#[test]
+fn a_save_that_runs_late_does_not_overwrite_a_newer_geometry() {
+    let (_dir, config_path, _) = config_dir();
+    let (store, _) = GeometryStore::open(&config_path, 1.0);
+
+    // A writer holds the store exactly as `save` does while it writes the file.
+    let writing = lock(&store.shared.written);
+    let older = {
+        let store = store.clone();
+        std::thread::spawn(move || store.save(geometry()))
+    };
+    while lock(&store.shared.latest).is_none() {
+        std::thread::yield_now();
+    }
+    let newer = {
+        let store = store.clone();
+        std::thread::spawn(move || store.save(FINAL_GEOMETRY))
+    };
+    while *lock(&store.shared.latest) != Some(FINAL_GEOMETRY) {
+        std::thread::yield_now();
+    }
+    drop(writing);
+
+    older.join().unwrap().unwrap();
+    newer.join().unwrap().unwrap();
+    assert_eq!(GeometryStore::open(&config_path, 1.0).1, FINAL_GEOMETRY);
 }
