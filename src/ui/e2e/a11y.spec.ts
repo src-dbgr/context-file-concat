@@ -319,6 +319,16 @@ async function expectKeyboardReach(
     ),
     "the editor is a stop, and Tab leaves it again",
   ).toBe(true);
+  // The tree is one stop (its focused row), however many rows it shows.
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as KeyboardWindow).__tabStops.filter((el) =>
+          el.closest(".tree"),
+        ).length,
+    ),
+    "stops in the tree",
+  ).toBe(1);
   const keys = stops.map((stop) => stop.key);
   for (const id of ["#search-query", "#copy-btn", "#generate-btn"]) {
     expect(keys).toContain(id);
@@ -436,3 +446,60 @@ for (const theme of THEMES) {
     });
   });
 }
+
+/**
+ * The global key guard (keyboard.ts) blocks keys that nothing handles. Tab
+ * and the keys a control acts on by itself are not among them. Checked with
+ * the plain keys in every browser: the walk above uses Option+Tab in WebKit,
+ * which the guard never looked at.
+ */
+test("the key guard leaves Tab and Enter on a summary to the browser", async ({
+  page,
+}) => {
+  await open(page, "dark");
+  await setAppState(page, withRepo());
+  await expect(page.locator(".tree .tree-item-container")).toHaveCount(7);
+
+  // Bubble phase on the document: after every handler that could prevent it.
+  await page.evaluate(() => {
+    const w = window as unknown as { __tabPrevented: boolean[] };
+    w.__tabPrevented = [];
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Tab") w.__tabPrevented.push(e.defaultPrevented);
+    });
+  });
+  const summary = page.locator(".status-output-settings summary");
+  const from = [
+    page.locator("#import-config-btn"),
+    summary,
+    page.locator('.tree .tree-item-container[tabindex="0"]'),
+  ];
+  for (const control of from) {
+    await control.focus();
+    await expect(control).toBeFocused();
+    await page.keyboard.press("Tab");
+  }
+  await from[0].focus();
+  await page.keyboard.press("Shift+Tab");
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { __tabPrevented: boolean[] }).__tabPrevented,
+    ),
+  ).toEqual([false, false, false, false]);
+
+  // Tab from the focused row leaves the tree (it is one stop).
+  await from[2].focus();
+  await page.keyboard.press("Alt+Tab");
+  expect(
+    await page.evaluate(() => !!document.activeElement?.closest(".tree")),
+  ).toBe(false);
+
+  // Enter opens and closes the output settings.
+  const details = page.locator(".status-output-settings");
+  await summary.focus();
+  await expect(summary).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(details).toHaveJSProperty("open", true);
+  await page.keyboard.press("Enter");
+  await expect(details).toHaveJSProperty("open", false);
+});

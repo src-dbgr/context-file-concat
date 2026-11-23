@@ -46,6 +46,11 @@
     post("addIgnorePath", node.path);
   }
 
+  // The row is the one thing of it the keyboard stops at (roving tabindex,
+  // see FileTree): its controls have `tabindex="-1"`. They are for the
+  // pointer; each has its key on the row (Enter, ArrowRight/ArrowLeft, Space,
+  // Delete), which the tree handles.
+  //
   // Pointer only. Keys are handled once, by the tree (FileTree's key handler
   // with the roving focus): a key pressed on a focused arrow or name bubbles
   // up to it and acts on the row. A key handler here would act a second time.
@@ -72,7 +77,7 @@
       class="arrow {node.is_expanded ? 'expanded' : ''}"
       data-type="directory"
       role="button"
-      tabindex="0"
+      tabindex="-1"
       aria-label={$t(
         node.is_expanded ? "aria.collapseDirectory" : "aria.expandDirectory",
         { name: node.name }
@@ -87,6 +92,7 @@
       onclick={toggleDirCheckbox}
       data-path={node.path}
       data-type="dir-checkbox"
+      tabindex="-1"
       aria-label={$t("aria.toggleDirectorySelection")}
     />
     <div class="name-and-button">
@@ -96,7 +102,7 @@
         data-path={node.path}
         data-type="label"
         role="button"
-        tabindex="0"
+        tabindex="-1"
         onclick={toggleDir}
       >
         <svg class="icon" viewBox="0 0 24 24"
@@ -113,6 +119,8 @@
         onclick={addIgnore}
         data-path={node.path}
         data-type="ignore"
+        tabindex="-1"
+        aria-keyshortcuts="Delete"
       >
         <svg class="icon ignore-icon" viewBox="0 0 24 24"
           ><circle cx="12" cy="12" r="10" /><line
@@ -143,6 +151,7 @@
       onclick={toggleFileCheckbox}
       data-path={node.path}
       data-type="file-checkbox"
+      tabindex="-1"
       aria-label={$t("aria.toggleFileSelection")}
     />
     <div class="name-and-button">
@@ -152,7 +161,7 @@
         data-path={node.path}
         data-type="label"
         role="button"
-        tabindex="0"
+        tabindex="-1"
         onclick={openFile}
       >
         {#if node.is_binary}
@@ -184,6 +193,8 @@
         onclick={addIgnore}
         data-path={node.path}
         data-type="ignore"
+        tabindex="-1"
+        aria-keyshortcuts="Delete"
       >
         <svg class="icon ignore-icon" viewBox="0 0 24 24"
           ><circle cx="12" cy="12" r="10" /><line

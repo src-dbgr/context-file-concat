@@ -461,6 +461,41 @@ describe("FileTree", () => {
       );
     });
 
+    it("Delete ignores the focused row, as its ignore button does", async () => {
+      const { treeEl } = await mountFocusedOn([
+        dir("/repo/src", true, [file("/repo/src/a.ts")]),
+      ]);
+      vi.mocked(post).mockClear();
+
+      await fireEvent.keyDown(treeEl, { key: "Delete" });
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["addIgnorePath", "/repo/src"],
+      ]);
+    });
+
+    it("has one tab stop: the focused row, none of the controls in the rows", async () => {
+      const { treeEl, container } = await mountFocusedOn([
+        dir("/repo/src", true, [file("/repo/src/a.ts")]),
+      ]);
+
+      const stops = () =>
+        [treeEl, ...treeEl.querySelectorAll<HTMLElement>("*")].filter(
+          (el) => el.tabIndex >= 0,
+        );
+      expect(stops()).toEqual([row(container, "/repo/src")]);
+      // The controls can still take the focus (a click puts it there).
+      for (const control of treeEl.querySelectorAll(
+        ".arrow, input, .file-name, .ignore-btn",
+      )) {
+        expect(control).toHaveAttribute("tabindex", "-1");
+      }
+      expect(treeEl.querySelector(".ignore-btn")).toHaveAttribute(
+        "aria-keyshortcuts",
+        "Delete",
+      );
+    });
+
     it("ArrowLeft collapses an expanded directory via the backend", async () => {
       const { treeEl } = await mountFocusedOn([
         dir("/repo/src", true, [file("/repo/src/a.ts")]),

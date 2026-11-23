@@ -70,6 +70,7 @@ describe.each<Theme>(["light", "dark"])(
         "on-solid",
         "on-info",
         "control-border",
+        "focus",
       ]) {
         expect(p[name], `--palette-${theme}-${name}`).toMatch(
           /^#[0-9a-f]{6}$/i,
@@ -120,13 +121,21 @@ describe.each<Theme>(["light", "dark"])(
     });
 
     it("what shows a control, its state or the focus stands out (3:1)", () => {
-      for (const name of ["accent", "control-border"]) {
-        for (const surface of ["bg", "surface-1"]) {
+      // The edge of a form control and the focus ring: on every surface
+      // (the text fields of the sidebar stand on surface-2).
+      for (const name of ["control-border", "focus"]) {
+        for (const surface of surfaces) {
           expect(
             contrastRatio(p[name], p[surface]),
             `${name} on ${surface}`,
           ).toBeGreaterThanOrEqual(3);
         }
+      }
+      for (const surface of ["bg", "surface-1"]) {
+        expect(
+          contrastRatio(p.accent, p[surface]),
+          `accent on ${surface}`,
+        ).toBeGreaterThanOrEqual(3);
       }
     });
   },

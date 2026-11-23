@@ -70,6 +70,18 @@ Consequences for UI code:
 
 The focused row is known by its **index in the list** and, once the row has arrived, by its **path**.
 
+- **The tree is one stop for Tab** (roving tabindex): the focused row has `tabindex="0"`, every other row and every control inside a row (chevron, checkbox, name, ignore button) has `tabindex="-1"`. While the focused row is not rendered (scrolled away, or on its way from the host) the stop is the tree element itself, so the tree can always be reached and left with one `Tab`. The controls of a row are for the pointer; each has its key on the row:
+
+  | Key on a row | Does | Pointer |
+  | --- | --- | --- |
+  | `Enter` | toggles a directory, opens a file in the preview | chevron, name |
+  | `ArrowRight` / `ArrowLeft` | expands / collapses a directory, moves to the first child / the parent; `ArrowRight` on a file opens it | chevron |
+  | `Space` | toggles the selection | checkbox |
+  | `Delete` | adds the row to the ignore patterns (`addIgnorePath`) | ignore button (`aria-keyshortcuts="Delete"`) |
+  | a letter | type-ahead: moves to the next row whose name starts with what was typed | |
+
+  `Delete` only, not `Backspace`: that key belongs to correcting what was typed. A control that got the focus by a click still acts on its own keys (`Space` on the checkbox, `Enter`/`Space` on the ignore button); every other key there is the tree's.
+
 - `ArrowUp`/`ArrowDown`, `PageUp`/`PageDown`, `Home`/`End` compute the new index (`rows_total` is known), scroll it into view and focus the row when it is rendered. If the row is outside the window, the scroll reports the viewport and the focus follows as soon as the row has arrived.
 - **No key is lost while a row is under way.** The element of a row exists only while the row is rendered. When the row that has the DOM focus is about to leave the DOM (scrolled away, or the focus has moved to a row that has not arrived), the focus is parked on the tree element itself instead of falling to the body; the key handler lives there and works with the focused index, so `End` followed by `ArrowUp` ends one row above the last. The focus returns to the row as soon as it is rendered. A key that acts on a row (`Space`, `Enter`, `ArrowLeft`/`ArrowRight`) and is pressed before that row has arrived is kept and carried out on that row when it is there (`End`, `Space` selects the last file). A key pressed while the host is still looking for the row the focus is to move to (type-ahead, the parent) is kept as well and acts from the row that is found (typing a name and then `ArrowUp` ends one row above the match).
 - **A kept key is never carried out late.** It is an intention of the moment it was pressed. It is dropped when it is older than one second (`KEPT_KEY_MS`), when the user takes over with the pointer or the wheel, when the list becomes another one (the position then means another row), and when a snapshot arrives without its row while the viewport is no longer where that row is (the answer was overtaken by another viewport report). So a selection is never toggled seconds later, when the row happens to scroll into view.
@@ -128,7 +140,7 @@ We ship three benches in `src/ui/e2e/benchmarks.spec.ts`:
 - **Filter (\~1k subset)** — apply a representative filter under `BMARK_FILTER_MS` (default 600 ms).
 - **Scroll jump to end** — a programmatic jump to the end, including the round trip for the window, under `BMARK_SCROLL_MS` (default 300 ms).
 
-There is no host in E2E tests. The benches and `e2e/tree-window.spec.ts` (scrolling, keyboard and type-ahead across the edge of the window, in Chromium and WebKit) hand the rows to the stand-in host of the E2E bridge (`window.__e2e.host.setTree`), which answers `setViewport` and `locateRow` asynchronously with windows, as the real host does: it is the model in `$lib/dev/treeHostModel.ts`, which a contract test replays against a scenario recorded from the host (see [IPC Contracts](./ipc.md#contract-tests)), and it delivers its snapshots through `window.render`. `tree-window.spec.ts` also runs with a host that answers late (`host.setLatency`): 40 times `PageDown`, `End` + `ArrowUp`, `End` + `Space`. Run via `npm run bench` (or the VS Code test runner); `npm run bench:strict` uses 1500/500/200 ms. Thresholds are env-driven.
+There is no host in E2E tests. The benches and `e2e/tree-window.spec.ts` (scrolling, keyboard and type-ahead across the edge of the window, in Chromium and WebKit) hand the rows to the stand-in host of the E2E bridge (`window.__e2e.host.setTree`), which answers `setViewport` and `locateRow` asynchronously with windows, as the real host does: it is the model in `$lib/dev/treeHostModel.ts`, which a contract test replays against a scenario recorded from the host (see [IPC Contracts](./ipc.md#contract-tests)), and it delivers its snapshots through `window.render`. `tree-window.spec.ts` also runs with a host that answers late (`host.setLatency`): 40 times `PageDown`, `End` + `ArrowUp`, `End` + `Space`. Where a test needs several steps to happen before any answer (keys that are overtaken, the measure of a placeholder) it does not race a timer: `host.hold()` keeps the answers back until `host.release()`. Run via `npm run bench` (or the VS Code test runner); `npm run bench:strict` uses 1500/500/200 ms. Thresholds are env-driven.
 
 ## Anti-Patterns
 

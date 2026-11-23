@@ -530,6 +530,14 @@
     return Math.max(1, Math.floor(viewportHeight / ITEM_HEIGHT) || 1);
   }
 
+  // The tree is one stop for Tab: the focused row (`tabindex="0"`, all other
+  // rows and the controls inside the rows have -1). While that row is not
+  // rendered (scrolled away, or on its way from the host) the stop is the
+  // tree itself, whose key handler works with the focused index.
+  const focusedRowRendered = $derived(
+    visibleSlice.some((item) => item.row && item.index === focusedIndex)
+  );
+
   // Delegated focus tracking (when user clicks or tabs into an item)
   function onTreeFocusIn(e: FocusEvent) {
     const target = (e.target as HTMLElement).closest<HTMLElement>(
@@ -585,7 +593,7 @@
     "PageDown",
     "PageUp",
   ];
-  const ROW_KEYS = ["ArrowRight", "ArrowLeft", "Enter", " "];
+  const ROW_KEYS = ["ArrowRight", "ArrowLeft", "Enter", " ", "Delete"];
 
   // Central key handler for roving navigation & item actions
   function onTreeKeyDown(e: KeyboardEvent) {
@@ -674,8 +682,14 @@
     }
   }
 
-  /** ArrowRight, ArrowLeft, Enter or Space on the row at `index`. */
+  /** ArrowRight, ArrowLeft, Enter, Space or Delete on the row at `index`. */
   function actOnRow(key: string, node: TreeRow, index: number) {
+    // What the ignore button of the row does with the pointer.
+    if (key === "Delete") {
+      post("addIgnorePath", node.path);
+      return;
+    }
+
     // Expand/Collapse per WAI-ARIA Tree pattern
     if (key === "ArrowRight") {
       if (node.is_directory) {
@@ -782,7 +796,7 @@
         aria-label={$t("aria.projectFiles")}
         aria-multiselectable="true"
         aria-busy={awaitingRows ? "true" : "false"}
-        tabindex="0"
+        tabindex={focusedRowRendered ? -1 : 0}
       >
         <div
           class="virtual-scroll-sizer"

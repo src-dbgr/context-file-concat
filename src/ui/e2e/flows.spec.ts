@@ -740,6 +740,33 @@ test.describe("Keyboard on the controls of a tree row", () => {
     ).toEqual([{ command: "toggleSelection", payload: "/repo/README.md" }]);
   });
 
+  test("Delete on a row ignores it, as its ignore button does", async ({
+    page,
+  }) => {
+    expect(await press(page, inRow("/repo/README.md", ""), "Delete")).toEqual([
+      { command: "addIgnorePath", payload: "/repo/README.md" },
+    ]);
+    expect(await press(page, inRow("/repo/src", ""), "Delete")).toEqual([
+      { command: "addIgnorePath", payload: "/repo/src" },
+    ]);
+  });
+
+  test("the tree is one stop for Tab: the focused row", async ({ page }) => {
+    const stops = () =>
+      page.evaluate(() => {
+        const tree = document.querySelector<HTMLElement>(".tree")!;
+        return [tree, ...tree.querySelectorAll<HTMLElement>("*")]
+          .filter((el) => el.tabIndex >= 0)
+          .map((el) => el.getAttribute("data-path") ?? el.className);
+      });
+    expect(await stops()).toEqual(["/repo"]);
+
+    await page.locator(inRow("/repo", "")).focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.locator(inRow("/repo/src", ""))).toBeFocused();
+    expect(await stops()).toEqual(["/repo/src"]);
+  });
+
   test("Enter and Space on a row still act on the row", async ({ page }) => {
     expect(await press(page, inRow("/repo/README.md", ""), "Enter")).toEqual([
       { command: "loadFilePreview", payload: "/repo/README.md" },

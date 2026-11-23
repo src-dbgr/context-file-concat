@@ -240,8 +240,9 @@ register("en", {
   "aria.removePattern": "Remove pattern {pattern}",
   "aria.notifications": "Notifications",
   "aria.dismissNotification": "Dismiss notification",
-  "filetree.ignoreDirectoryTitle": "Add this directory to ignore patterns",
-  "filetree.ignoreFileTitle": "Add this file to ignore patterns",
+  "filetree.ignoreDirectoryTitle":
+    "Add this directory to ignore patterns (Delete)",
+  "filetree.ignoreFileTitle": "Add this file to ignore patterns (Delete)",
   "sidebar.rescanRecommended": "Re-scan recommended after removing patterns",
   "sidebar.addCommonPattern": 'Click to add "{pattern}" to ignore patterns',
   "sidebar.patternActive":
@@ -394,8 +395,9 @@ register("de", {
   "aria.notifications": "Benachrichtigungen",
   "aria.dismissNotification": "Benachrichtigung schließen",
   "filetree.ignoreDirectoryTitle":
-    "Dieses Verzeichnis zu den Ignore-Mustern hinzufügen",
-  "filetree.ignoreFileTitle": "Diese Datei zu den Ignore-Mustern hinzufügen",
+    "Dieses Verzeichnis zu den Ignore-Mustern hinzufügen (Entf)",
+  "filetree.ignoreFileTitle":
+    "Diese Datei zu den Ignore-Mustern hinzufügen (Entf)",
   "sidebar.rescanRecommended":
     "Nach dem Entfernen von Mustern wird ein erneuter Scan empfohlen",
   "sidebar.addCommonPattern":

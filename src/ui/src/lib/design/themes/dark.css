@@ -30,4 +30,5 @@
   --color-on-solid: var(--palette-dark-on-solid);
   --color-on-info: var(--palette-dark-on-info);
   --color-control-border: var(--palette-dark-control-border);
+  --color-focus: var(--palette-dark-focus);
 }

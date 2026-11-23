@@ -10,9 +10,10 @@
  *   tinted surfaces they stand on (the previewed row, the active chip).
  * - `--color-on-solid` has at least 4.5:1 on the `--color-*-solid` tokens,
  *   `--color-on-info` on `--color-info`.
- * - `--color-accent`, `--color-control-border` and `--focus-ring-color` (what
- *   shows a control, its state or the focus) have at least 3:1 on
- *   `--color-bg` and `--surface-1`.
+ * - `--color-control-border` and `--focus-ring-color` (`--color-focus`: the
+ *   edge of a form control, the focus) have at least 3:1 on `--color-bg`,
+ *   `--surface-1` and `--surface-2`; `--color-accent` (the state of a
+ *   control) on `--color-bg` and `--surface-1`.
  * The plain `--color-success|warning|error|info` tokens are for fills, borders
  * and icons; text in one of these hues takes the `-text` token, a filled
  * button the `-solid` one. src/tests/design/tokens.contrast.test.ts checks
@@ -83,7 +84,7 @@
     var(--surface-2) 85%,
     var(--color-bg) 15%
   );
-  --focus-ring-color: var(--color-accent);
+  --focus-ring-color: var(--color-focus);
   --focus-ring-width: 2px;
   --focus-ring-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring-color);
 
@@ -122,6 +123,7 @@
   --palette-light-on-solid: #ffffff;
   --palette-light-on-info: #1f2328;
   --palette-light-control-border: #7f8a9a;
+  --palette-light-focus: #3a7fd5;
 }
 
 /* Dark palette */
@@ -150,7 +152,8 @@
   --palette-dark-error-solid: #d23c3c;
   --palette-dark-on-solid: #ffffff;
   --palette-dark-on-info: #1e1f22;
-  --palette-dark-control-border: #777c88;
+  --palette-dark-control-border: #868b97;
+  --palette-dark-focus: #6ea8ee;
 }
 
 /* ---------- Semantic color mapping (Light) ---------- */
@@ -179,4 +182,5 @@
   --color-on-solid: var(--palette-light-on-solid);
   --color-on-info: var(--palette-light-on-info);
   --color-control-border: var(--palette-light-control-border);
+  --color-focus: var(--palette-light-focus);
 }
