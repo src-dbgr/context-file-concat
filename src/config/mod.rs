@@ -51,7 +51,33 @@ pub struct AppConfig {
     pub geometry_units: GeometryUnits,
     /// Size limit for files in MiB: larger files are not listed by the scan, not read
     /// by the content search and not inlined into the generated output.
+    ///
+    /// A configuration that is read never holds less than
+    /// [`MIN_MAX_FILE_SIZE_MB`]: smaller values are raised when the file is loaded.
+    #[serde(deserialize_with = "deserialize_max_file_size_mb")]
     pub max_file_size_mb: u64,
+}
+
+/// The smallest file size limit a stored configuration can ask for, in MiB.
+///
+/// The limit is not editable in the UI, so a value of 0 in the file (which would hide
+/// every file that is not empty, without a word) is a mistake rather than a wish.
+pub const MIN_MAX_FILE_SIZE_MB: u64 = 1;
+
+/// Reads [`AppConfig::max_file_size_mb`], raising it to [`MIN_MAX_FILE_SIZE_MB`] if it
+/// is smaller. Being part of the deserialization, this holds for every way a
+/// configuration is read: the application's own file, an import, a migrated file.
+fn deserialize_max_file_size_mb<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let stored = u64::deserialize(deserializer)?;
+    if stored < MIN_MAX_FILE_SIZE_MB {
+        tracing::warn!(
+            "max_file_size_mb is {stored}; using the minimum of {MIN_MAX_FILE_SIZE_MB} instead"
+        );
+    }
+    Ok(stored.max(MIN_MAX_FILE_SIZE_MB))
 }
 
 impl AppConfig {
@@ -172,6 +198,22 @@ mod tests {
         assert_eq!(limit_of(3), 3 * 1024 * 1024);
         assert_eq!(limit_of(0), 0);
         assert_eq!(limit_of(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn file_size_limit_below_the_minimum_is_raised_when_a_config_is_read() {
+        let read_with_limit = |limit: u64| {
+            let mut json = serde_json::to_value(AppConfig::default()).unwrap();
+            json["max_file_size_mb"] = limit.into();
+            serde_json::from_value::<AppConfig>(json)
+                .unwrap()
+                .max_file_size_mb
+        };
+
+        assert_eq!(read_with_limit(0), MIN_MAX_FILE_SIZE_MB);
+        assert_eq!(read_with_limit(1), 1);
+        assert_eq!(read_with_limit(20), 20);
+        assert_eq!(read_with_limit(4096), 4096);
     }
 
     #[test]

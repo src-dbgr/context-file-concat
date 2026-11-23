@@ -4,7 +4,9 @@ use serde::Serialize;
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::AppConfig;
 
@@ -94,6 +96,10 @@ pub fn load_config(config_path: &Path) -> Result<AppConfig> {
 }
 
 /// Writes the configuration to `config_path`, creating its directory if necessary.
+///
+/// The file is replaced atomically (see [`write_atomically`]): whatever goes wrong
+/// while writing, the file holds either the previous or the new configuration, never
+/// a part of one.
 pub fn save_config(config: &AppConfig, config_path: &Path) -> Result<()> {
     if let Some(parent) = config_path.parent() {
         if !parent.exists() {
@@ -101,9 +107,80 @@ pub fn save_config(config: &AppConfig, config_path: &Path) -> Result<()> {
         }
     }
     let config_json = serde_json::to_string_pretty(config)?;
-    fs::write(config_path, config_json)?;
+    write_atomically(config_path, |file| file.write_all(config_json.as_bytes()))?;
     tracing::info!("Saved config to {:?}", config_path);
     Ok(())
+}
+
+/// Replaces the content of `path` with what `write_content` writes, atomically.
+///
+/// The content goes to a temporary file in the same directory, which then takes the
+/// place of `path` by a rename. Nobody ever sees a half-written file, and if writing
+/// fails (disk full, crash, error in `write_content`) the previous file is untouched
+/// and the temporary file is removed.
+///
+/// A symbolic link at `path` is followed: the file it points to is replaced, the link
+/// stays. The permissions of an existing file are kept.
+///
+/// If the directory does not allow creating the temporary file while the file itself
+/// can be written, the content is written in place instead (not atomically), as there
+/// is no other way to save.
+fn write_atomically(
+    path: &Path,
+    write_content: impl Fn(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    // Renaming over a link would replace the link, not the file behind it.
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let temp_path = temp_path_beside(&target);
+
+    let mut temp_file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied && target.is_file() => {
+            tracing::warn!(
+                "Cannot create a temporary file beside {:?} ({}); writing it in place.",
+                target,
+                error
+            );
+            return write_content(&mut fs::File::create(&target)?);
+        }
+        Err(error) => return Err(error),
+    };
+
+    let written = (|| {
+        write_content(&mut temp_file)?;
+        // The content has to be on disk before the rename makes it the file.
+        temp_file.sync_all()?;
+        if let Ok(metadata) = fs::metadata(&target) {
+            fs::set_permissions(&temp_path, metadata.permissions())?;
+        }
+        drop(temp_file);
+        fs::rename(&temp_path, &target)
+    })();
+
+    if written.is_err() {
+        // Best effort; the error worth reporting is the one of the write.
+        let _ = fs::remove_file(&temp_path);
+    }
+    written
+}
+
+/// A name for a temporary file in the directory of `target` that no other write uses,
+/// neither of this process nor of another one.
+fn temp_path_beside(target: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut name = OsString::from(".");
+    name.push(target.file_name().unwrap_or_default());
+    name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    target.with_file_name(name)
 }
 
 /// Exports the current configuration to a user-specified JSON file.
@@ -297,6 +374,157 @@ mod tests {
         save_config(&original_config, &harness.config_path).unwrap();
         let loaded_config = load_config(&harness.config_path).unwrap();
         assert_eq!(original_config, loaded_config);
+    }
+
+    /// The names of the files in `dir`, sorted.
+    fn file_names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn test_failed_write_leaves_the_previous_file_intact() {
+        let harness = TestHarness::new();
+        save_config(&AppConfig::default(), &harness.config_path).unwrap();
+        let previous = fs::read_to_string(&harness.config_path).unwrap();
+
+        // The write breaks off after a part of the content, as with a full disk.
+        let result = write_atomically(&harness.config_path, |file| {
+            file.write_all(b"{ \"ignore_patterns\": [")?;
+            Err(io::Error::other("disk full"))
+        });
+
+        assert_eq!(result.unwrap_err().to_string(), "disk full");
+        assert_eq!(
+            fs::read_to_string(&harness.config_path).unwrap(),
+            previous,
+            "the previous configuration must survive a failed write"
+        );
+        assert_eq!(
+            file_names_in(harness.temp_path()),
+            ["test-config.json"],
+            "no temporary file may be left behind"
+        );
+        assert_eq!(
+            load_config(&harness.config_path).unwrap(),
+            AppConfig::default()
+        );
+    }
+
+    #[test]
+    fn test_failed_first_write_creates_no_file() {
+        let harness = TestHarness::new();
+
+        let result = write_atomically(&harness.config_path, |file| {
+            file.write_all(b"partial")?;
+            Err(io::Error::other("disk full"))
+        });
+
+        assert!(result.is_err());
+        assert!(file_names_in(harness.temp_path()).is_empty());
+    }
+
+    #[test]
+    fn test_save_config_replaces_the_file_and_leaves_no_temporary_file() {
+        let harness = TestHarness::new();
+        let first = AppConfig {
+            output_filename: "first.txt".to_string(),
+            ..AppConfig::default()
+        };
+        let second = AppConfig {
+            output_filename: "second.txt".to_string(),
+            ..AppConfig::default()
+        };
+
+        save_config(&first, &harness.config_path).unwrap();
+        save_config(&second, &harness.config_path).unwrap();
+
+        assert_eq!(load_config(&harness.config_path).unwrap(), second);
+        assert_eq!(file_names_in(harness.temp_path()), ["test-config.json"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_config_keeps_permissions_and_follows_a_symbolic_link() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let harness = TestHarness::new();
+        let real_dir = harness.temp_path().join("dotfiles");
+        fs::create_dir(&real_dir).unwrap();
+        let real_file = real_dir.join("cfc.json");
+        fs::write(&real_file, "{}").unwrap();
+        fs::set_permissions(&real_file, fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&real_file, &harness.config_path).unwrap();
+
+        save_config(&AppConfig::default(), &harness.config_path).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&harness.config_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link must stay a link"
+        );
+        assert_eq!(load_config(&real_file).unwrap(), AppConfig::default());
+        assert_eq!(
+            fs::metadata(&real_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(file_names_in(&real_dir), ["cfc.json"]);
+    }
+
+    /// A file that can be written in a directory that cannot: saving still works, as
+    /// it did before writes went through a temporary file.
+    #[cfg(unix)]
+    #[test]
+    fn test_save_config_writes_in_place_when_the_directory_is_read_only() {
+        if running_as_root() {
+            return;
+        }
+        let harness = TestHarness::new();
+        let dir = harness.temp_path().join("locked");
+        fs::create_dir(&dir).unwrap();
+        let config_path = dir.join("config.json");
+        fs::write(&config_path, "{}").unwrap();
+        let writable = fs::metadata(&dir).unwrap().permissions();
+        let mut read_only = writable.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&dir, read_only).unwrap();
+
+        let result = save_config(&AppConfig::default(), &config_path);
+
+        fs::set_permissions(&dir, writable).unwrap();
+        result.unwrap();
+        assert_eq!(load_config(&config_path).unwrap(), AppConfig::default());
+    }
+
+    #[test]
+    fn test_load_and_import_raise_a_file_size_limit_of_zero() {
+        let harness = TestHarness::new();
+        let mut json = serde_json::to_value(AppConfig::default()).unwrap();
+        json["max_file_size_mb"] = json!(0);
+        harness.write_to_config_file(&json.to_string());
+
+        let loaded = load_config(&harness.config_path).unwrap();
+        let imported = import_config(&harness.config_path).unwrap();
+
+        assert_eq!(loaded.max_file_size_mb, crate::config::MIN_MAX_FILE_SIZE_MB);
+        assert_eq!(
+            imported.max_file_size_mb,
+            crate::config::MIN_MAX_FILE_SIZE_MB
+        );
+        // Nothing else is touched by that.
+        assert_eq!(
+            AppConfig {
+                max_file_size_mb: AppConfig::default().max_file_size_mb,
+                ..loaded
+            },
+            AppConfig::default()
+        );
     }
 
     #[test]

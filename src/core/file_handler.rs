@@ -8,7 +8,9 @@
 //!   generate is described by a [`GenerationRequest`]; a [`GenerationObserver`] can
 //!   follow the progress.
 
-use super::{CoreError, FileItem, TreeGenerator, MAX_FILE_SIZE};
+#[cfg(test)]
+use super::MAX_FILE_SIZE;
+use super::{CoreError, FileItem, TreeGenerator};
 use crate::utils::file_detection::{classify_by_extension, is_text_content, is_text_file};
 use std::collections::HashSet;
 use std::fs;
@@ -123,18 +125,64 @@ fn decode_file_bytes(file_path: &Path, bytes: Vec<u8>) -> String {
 ///
 /// This is the one place that defines how the application reads text, shared by the
 /// output generation, the file preview and the content search, so all of them always
-/// see the same characters.
-/// Valid UTF-8 is used as is. Anything else that still looks like text is taken to be
-/// in a legacy single-byte encoding and decoded as Windows-1252, the superset of
-/// ISO-8859-1 (Latin-1) that such files are overwhelmingly written in. Every byte maps
-/// to exactly one character, so no content is lost or replaced.
+/// see the same characters. The rule:
+///
+/// 1. Valid UTF-8 is used as is.
+/// 2. Anything else is binary if the application-wide detection says so (a known
+///    binary extension, NUL bytes, many control characters).
+/// 3. The remaining files are text with bytes that are not UTF-8, and
+///    [`guess_encoding`] decides what they are: UTF-8 with damaged places, which are
+///    replaced by U+FFFD while everything around them stays intact, or a legacy
+///    single-byte encoding, read as Windows-1252.
 pub(crate) fn decode_text(file_path: &Path, bytes: Vec<u8>) -> Option<String> {
-    match String::from_utf8(bytes) {
-        Ok(text) => Some(text),
-        Err(error) if is_legacy_encoded_text(file_path, error.as_bytes()) => {
-            Some(decode_windows_1252(error.as_bytes()))
+    let bytes = match String::from_utf8(bytes) {
+        Ok(text) => return Some(text),
+        Err(error) => error.into_bytes(),
+    };
+    if !is_text_despite_invalid_utf8(file_path, &bytes) {
+        return None;
+    }
+    Some(match guess_encoding(&bytes) {
+        TextEncoding::Utf8 => String::from_utf8_lossy(&bytes).into_owned(),
+        TextEncoding::Windows1252 => decode_windows_1252(&bytes),
+    })
+}
+
+/// What text that is not valid UTF-8 as a whole is taken to be.
+#[derive(Debug, PartialEq, Eq)]
+enum TextEncoding {
+    /// UTF-8 with some invalid sequences.
+    Utf8,
+    /// A legacy single-byte encoding. Windows-1252 is the superset of ISO-8859-1
+    /// (Latin-1) that such files are overwhelmingly written in; every byte maps to
+    /// exactly one character, so nothing is lost or replaced.
+    Windows1252,
+}
+
+/// Decides how to read text that is not valid UTF-8 as a whole.
+///
+/// The content is UTF-8 if it holds at least one valid multi-byte UTF-8 sequence
+/// (a non-ASCII character) and at least as many of them as invalid sequences;
+/// otherwise it is Windows-1252. ASCII says nothing, it is the same in both.
+///
+/// The reasoning: in a legacy encoding a non-ASCII character is a single byte that is
+/// followed by ASCII nearly always, which is invalid UTF-8, so such a file has many
+/// invalid sequences and (but for rare coincidences) no valid multi-byte one. A UTF-8
+/// file with a few damaged places is the opposite. Reading that one as Windows-1252
+/// would garble every non-ASCII character of it.
+fn guess_encoding(bytes: &[u8]) -> TextEncoding {
+    let mut valid_multi_byte_sequences = 0usize;
+    let mut invalid_sequences = 0usize;
+    for chunk in bytes.utf8_chunks() {
+        valid_multi_byte_sequences += chunk.valid().chars().filter(|c| !c.is_ascii()).count();
+        if !chunk.invalid().is_empty() {
+            invalid_sequences += 1;
         }
-        Err(_) => None,
+    }
+    if valid_multi_byte_sequences > 0 && valid_multi_byte_sequences >= invalid_sequences {
+        TextEncoding::Utf8
+    } else {
+        TextEncoding::Windows1252
     }
 }
 
@@ -160,10 +208,10 @@ fn decode_windows_1252(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Decides whether non-UTF-8 bytes are still text (e.g. Latin-1), reusing the
+/// Decides whether bytes that are not valid UTF-8 are still text, reusing the
 /// application-wide detection: a known binary extension or binary-looking content
 /// (NUL bytes, many control characters) disqualifies the file.
-fn is_legacy_encoded_text(file_path: &Path, bytes: &[u8]) -> bool {
+fn is_text_despite_invalid_utf8(file_path: &Path, bytes: &[u8]) -> bool {
     classify_by_extension(file_path) != Some(false) && is_text_content(bytes)
 }
 
@@ -175,28 +223,68 @@ async fn load_selected_entry_off_runtime(
     Ok(tokio::task::spawn_blocking(move || load_selected_entry(&file_path, max_file_size)).await?)
 }
 
-/// Reads at most `limit` bytes of a file. The second value tells whether the file is
-/// longer than that.
+/// The most a preview reads of a file, however long its lines are. A file whose
+/// first lines are longer than this (minified code, a dump on one line) is cut here.
+const PREVIEW_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// How much a preview reads at a time. It reads at most this much beyond the lines
+/// it shows.
+const PREVIEW_CHUNK_SIZE: usize = 16 * 1024;
+
+/// Reads the beginning of `reader`: enough for `max_lines` lines, at most `max_bytes`
+/// bytes. The second value tells whether something was left unread.
+///
+/// Reading stops as soon as more than `max_lines` line ends were seen, so the size of
+/// what lies behind them does not matter.
 ///
 /// A cut never ends inside a UTF-8 character: an incomplete sequence at the end of the
 /// bytes read is dropped, so the cut alone cannot turn valid UTF-8 into something else.
-fn read_file_prefix(file_path: &Path, limit: u64) -> io::Result<(Vec<u8>, bool)> {
+fn read_preview_prefix(
+    mut reader: impl Read,
+    max_lines: usize,
+    max_bytes: usize,
+) -> io::Result<(Vec<u8>, bool)> {
     let mut bytes = Vec::new();
-    // One byte more than allowed tells a longer file from one of exactly `limit` bytes.
-    fs::File::open(file_path)?
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    let is_cut = bytes.len() as u64 > limit;
-    if is_cut {
-        bytes.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-        if let Err(error) = std::str::from_utf8(&bytes) {
+    let mut line_ends = 0usize;
+    let mut chunk = [0u8; PREVIEW_CHUNK_SIZE];
+
+    let reached_end = loop {
+        if line_ends > max_lines || bytes.len() > max_bytes {
+            break false;
+        }
+        // One byte more than allowed tells a longer input from one of exactly
+        // `max_bytes` bytes.
+        let wanted = chunk.len().min(max_bytes + 1 - bytes.len());
+        let read = match reader.read(&mut chunk[..wanted]) {
+            Ok(0) => break true,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        line_ends += chunk[..read].iter().filter(|&&byte| byte == b'\n').count();
+        bytes.extend_from_slice(&chunk[..read]);
+    };
+
+    if !reached_end {
+        bytes.truncate(max_bytes);
+        drop_incomplete_utf8_tail(&mut bytes);
+    }
+    Ok((bytes, !reached_end))
+}
+
+/// Removes a UTF-8 sequence the bytes end in the middle of. Sequences that are
+/// invalid rather than incomplete stay.
+fn drop_incomplete_utf8_tail(bytes: &mut Vec<u8>) {
+    // An incomplete sequence is at most three bytes long, so only the end is checked.
+    for start in bytes.len().saturating_sub(3)..bytes.len() {
+        if let Err(error) = std::str::from_utf8(&bytes[start..]) {
             // `error_len() == None`: the input ended in the middle of a character.
-            if error.error_len().is_none() {
-                bytes.truncate(error.valid_up_to());
+            if error.error_len().is_none() && error.valid_up_to() == 0 {
+                bytes.truncate(start);
+                return;
             }
         }
     }
-    Ok((bytes, is_cut))
 }
 
 /// What a generation produces: which files, in which layout, under which limits.
@@ -292,14 +380,16 @@ impl FileHandler {
     /// Retrieves a truncated preview of a text file's content.
     ///
     /// Shows up to `max_lines` lines. Identifies directories and binary files. The text
-    /// is decoded exactly as for the generated output (see [`decode_text`]), so a file
-    /// in a legacy encoding looks the same in the preview and in the document.
+    /// is decoded by the same rule as for the generated output (see [`decode_text`]),
+    /// so a file in a legacy encoding looks the same in the preview and in the document.
     ///
-    /// At most [`MAX_FILE_SIZE`] bytes are read, however long the file is.
+    /// Only the beginning of the file is read: about as much as the lines shown take,
+    /// and never more than [`PREVIEW_MAX_BYTES`], however large the file is.
     pub fn get_file_preview(file_path: &Path, max_lines: usize) -> Result<String, CoreError> {
         if file_path.is_dir() {
             return Ok("[DIRECTORY]".to_string());
         }
+        let io_error = |e: io::Error| CoreError::Io(e.to_string(), file_path.to_path_buf());
 
         // Use a utility to quickly check if the file is likely text-based.
         if !is_text_file(file_path)
@@ -308,23 +398,30 @@ impl FileHandler {
             return Ok("[BINARY FILE]".to_string());
         }
 
-        let (bytes, is_cut) = read_file_prefix(file_path, MAX_FILE_SIZE)
-            .map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
-        let Some(text) = decode_text(file_path, bytes) else {
-            return Ok("[BINARY FILE]".to_string());
-        };
-
-        let mut preview = String::new();
-        let mut lines = text.lines();
-        for line in lines.by_ref().take(max_lines) {
-            preview.push_str(line);
-            preview.push('\n');
-        }
-        if is_cut || lines.next().is_some() {
-            preview.push_str("...\n[Preview truncated]");
-        }
-        Ok(preview)
+        let file = fs::File::open(file_path).map_err(io_error)?;
+        let (bytes, is_cut) =
+            read_preview_prefix(file, max_lines, PREVIEW_MAX_BYTES).map_err(io_error)?;
+        Ok(preview_of(file_path, bytes, is_cut, max_lines))
     }
+}
+
+/// Formats the preview of a file from the beginning of its content (pure, no IO).
+/// `is_cut` tells that the file goes on after `bytes`.
+fn preview_of(file_path: &Path, bytes: Vec<u8>, is_cut: bool, max_lines: usize) -> String {
+    let Some(text) = decode_text(file_path, bytes) else {
+        return "[BINARY FILE]".to_string();
+    };
+
+    let mut preview = String::new();
+    let mut lines = text.lines();
+    for line in lines.by_ref().take(max_lines) {
+        preview.push_str(line);
+        preview.push('\n');
+    }
+    if is_cut || lines.next().is_some() {
+        preview.push_str("...\n[Preview truncated]");
+    }
+    preview
 }
 
 #[cfg(test)]
@@ -1131,29 +1228,211 @@ mod tests {
         );
     }
 
-    #[test]
-    fn file_prefix_is_never_cut_inside_a_utf8_character() {
-        let (_dir, root) = setup_test_environment();
-        let path = root.join("umlaut.txt");
-        fs::write(&path, "aö").unwrap(); // 'ö' takes two bytes.
+    /// A reader that counts the bytes handed out, to observe how much is read.
+    struct CountingReader<R> {
+        inner: R,
+        bytes_read: usize,
+    }
 
-        assert_eq!(
-            read_file_prefix(&path, 3).unwrap(),
-            (b"a\xC3\xB6".to_vec(), false)
-        );
-        assert_eq!(read_file_prefix(&path, 2).unwrap(), (b"a".to_vec(), true));
-        assert_eq!(read_file_prefix(&path, 1).unwrap(), (b"a".to_vec(), true));
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let read = self.inner.read(buffer)?;
+            self.bytes_read += read;
+            Ok(read)
+        }
+    }
+
+    /// An input that repeats `pattern` and never ends: reading it to the end is not
+    /// an option.
+    fn endless(pattern: &'static [u8]) -> CountingReader<impl Read> {
+        CountingReader {
+            inner: Repeating {
+                pattern,
+                position: 0,
+            },
+            bytes_read: 0,
+        }
+    }
+
+    struct Repeating {
+        pattern: &'static [u8],
+        position: usize,
+    }
+
+    impl Read for Repeating {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            for byte in buffer.iter_mut() {
+                *byte = self.pattern[self.position];
+                self.position = (self.position + 1) % self.pattern.len();
+            }
+            Ok(buffer.len())
+        }
     }
 
     #[test]
-    fn file_prefix_keeps_bytes_that_are_invalid_rather_than_incomplete() {
-        let (_dir, root) = setup_test_environment();
-        let path = root.join("latin1.txt");
-        fs::write(&path, b"a\xF6bc").unwrap();
+    fn preview_prefix_stops_reading_once_it_has_the_lines() {
+        let mut reader = endless(b"0123456789abcde\n");
 
+        let (bytes, is_cut) = read_preview_prefix(&mut reader, 1500, PREVIEW_MAX_BYTES).unwrap();
+
+        assert!(is_cut);
+        let line_ends = bytes.iter().filter(|&&byte| byte == b'\n').count();
+        assert!(line_ends > 1500, "only {line_ends} lines were read");
+        // 1501 lines of 16 bytes, rounded up to the chunks they were read in.
+        assert_eq!(reader.bytes_read, bytes.len());
+        assert!(
+            reader.bytes_read <= 1501 * 16 + PREVIEW_CHUNK_SIZE,
+            "{} bytes were read",
+            reader.bytes_read
+        );
+    }
+
+    #[test]
+    fn preview_prefix_is_capped_for_input_without_line_ends() {
+        let mut reader = endless(b"x");
+
+        let (bytes, is_cut) = read_preview_prefix(&mut reader, 1500, 100_000).unwrap();
+
+        assert!(is_cut);
+        assert_eq!(bytes.len(), 100_000);
+        // One byte beyond the cap is what tells that the input goes on.
+        assert_eq!(reader.bytes_read, 100_001);
+    }
+
+    #[test]
+    fn preview_prefix_of_short_input_is_complete() {
+        let read = |input: &'static [u8], max_lines, max_bytes| {
+            read_preview_prefix(input, max_lines, max_bytes).unwrap()
+        };
+
+        assert_eq!(read(b"", 10, 100), (b"".to_vec(), false));
+        assert_eq!(read(b"one\ntwo", 10, 100), (b"one\ntwo".to_vec(), false));
+        // Exactly as many lines, or bytes, as allowed: nothing is left out.
+        assert_eq!(read(b"one\ntwo\n", 2, 100), (b"one\ntwo\n".to_vec(), false));
+        assert_eq!(read(b"one\ntwo", 10, 7), (b"one\ntwo".to_vec(), false));
+        assert_eq!(read(b"one\ntwo", 10, 6), (b"one\ntw".to_vec(), true));
+    }
+
+    #[test]
+    fn preview_prefix_is_never_cut_inside_a_utf8_character() {
+        let read =
+            |input: &'static [u8], max_bytes| read_preview_prefix(input, 10, max_bytes).unwrap();
+        let umlaut = "aö".as_bytes(); // 'ö' takes two bytes.
+        let crab = "a🦀b".as_bytes(); // '🦀' takes four bytes.
+
+        assert_eq!(read(umlaut, 3), (b"a\xC3\xB6".to_vec(), false));
+        assert_eq!(read(umlaut, 2), (b"a".to_vec(), true));
+        assert_eq!(read(umlaut, 1), (b"a".to_vec(), true));
+        for max_bytes in 1..=4 {
+            assert_eq!(read(crab, max_bytes), (b"a".to_vec(), true));
+        }
+        assert_eq!(read(crab, 5), ("a🦀".as_bytes().to_vec(), true));
+    }
+
+    #[test]
+    fn preview_prefix_keeps_bytes_that_are_invalid_rather_than_incomplete() {
         assert_eq!(
-            read_file_prefix(&path, 3).unwrap(),
+            read_preview_prefix(&b"a\xF6bc"[..], 10, 3).unwrap(),
             (b"a\xF6b".to_vec(), true)
         );
+        // A lone continuation byte at the end is invalid, not incomplete.
+        assert_eq!(
+            read_preview_prefix(&b"ab\x99c"[..], 10, 3).unwrap(),
+            (b"ab\x99".to_vec(), true)
+        );
+    }
+
+    /// The preview of a file that is larger than what a preview reads at most.
+    #[test]
+    fn preview_of_a_huge_file_shows_its_beginning() {
+        let (_dir, root) = setup_test_environment();
+
+        // Short lines: the preview has its lines long before the cap.
+        let many_lines = root.join("many_lines.txt");
+        let line = b"a line of text\n";
+        fs::write(&many_lines, line.repeat(2 * PREVIEW_MAX_BYTES / line.len())).unwrap();
+        let preview = FileHandler::get_file_preview(&many_lines, 3).unwrap();
+        assert_eq!(
+            preview,
+            "a line of text\na line of text\na line of text\n...\n[Preview truncated]"
+        );
+
+        // One line longer than the cap: the preview ends at the cap.
+        let one_line = root.join("one_line.txt");
+        fs::write(&one_line, vec![b'x'; PREVIEW_MAX_BYTES + 10]).unwrap();
+        let preview = FileHandler::get_file_preview(&one_line, 3).unwrap();
+        let marker = "\n...\n[Preview truncated]";
+        assert_eq!(preview.len(), PREVIEW_MAX_BYTES + marker.len());
+        assert!(preview.ends_with(marker));
+    }
+
+    /// The regression this rule exists for: one stray byte must not make the whole
+    /// file be read as Windows-1252, which would garble every umlaut of it.
+    #[test]
+    fn utf8_text_with_a_stray_byte_keeps_its_characters() {
+        let mut bytes = "Größe: Können wir? Ja.\nzweite Zeile -> "
+            .as_bytes()
+            .to_vec();
+        bytes.push(0x99);
+        bytes.extend_from_slice(" so good. Ärger über Öl.\n".as_bytes());
+
+        assert_eq!(
+            decode_text(Path::new("mixed.txt"), bytes).unwrap(),
+            "Größe: Können wir? Ja.\nzweite Zeile -> \u{FFFD} so good. Ärger über Öl.\n"
+        );
+    }
+
+    #[test]
+    fn encoding_of_text_that_is_not_valid_utf8_is_guessed_by_its_sequences() {
+        use TextEncoding::{Utf8, Windows1252};
+        let cases: [(&str, &[u8], TextEncoding); 7] = [
+            ("pure Latin-1", b"Gr\xF6\xDFe: K\xF6nnen wir?", Windows1252),
+            (
+                "ASCII with one stray byte",
+                b"not -> \x99 so good",
+                Windows1252,
+            ),
+            (
+                "Windows-1252 punctuation",
+                b"\x93quoted\x94 \x85",
+                Windows1252,
+            ),
+            (
+                "UTF-8 with one stray byte",
+                b"Gr\xC3\xB6\xC3\x9Fe \x99",
+                Utf8,
+            ),
+            (
+                "UTF-8 cut inside a character",
+                b"\xC3\xA4\xC3\xB6 \xE2\x82",
+                Utf8,
+            ),
+            ("as many valid as invalid", b"\xC3\xA4 \xFF", Utf8),
+            (
+                "Latin-1 with a coincidental UTF-8 pair",
+                b"\xC3\xA9 K\xF6nnen Gr\xF6\xDFe",
+                Windows1252,
+            ),
+        ];
+
+        for (name, bytes, expected) in cases {
+            assert_eq!(guess_encoding(bytes), expected, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_and_generation_show_the_same_text_for_utf8_with_a_stray_byte() {
+        let (_dir, root) = setup_test_environment();
+        let path = root.join("mixed.txt");
+        fs::write(&path, b"Gr\xC3\xB6\xC3\x9Fe\nkaputt: \x99\n\xC3\x84rger\n").unwrap();
+
+        let preview = FileHandler::get_file_preview(&path, 10).unwrap();
+        let generated = generate_plain(std::slice::from_ref(&path), &root)
+            .await
+            .unwrap();
+
+        let expected = "Größe\nkaputt: \u{FFFD}\nÄrger\n";
+        assert_eq!(preview, expected);
+        assert_eq!(file_block_body(&generated, "mixed.txt"), expected);
     }
 }

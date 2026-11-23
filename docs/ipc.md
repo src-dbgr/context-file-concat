@@ -92,6 +92,22 @@ What a change of the ignore patterns does (`addIgnorePattern`, `removeIgnorePatt
 | Ignore pattern removed, no scan running           | Sets `patterns_need_rescan`; the UI offers `rescanDirectory`.                                                                                                                                                                                                                                                                                                                                 |
 | No directory loaded                               | The configuration is changed; there is nothing to apply it to.                                                                                                                                                                                                                                                                                                                                |
 
+#### Ignore pattern semantics
+
+One type decides what the ignore patterns hide: `core::IgnoreRules` (`src/core/ignore_rules.rs`). The scan, the local application of a changed pattern set and the generated tree (`tree_ignore_patterns`) all ask it, so they cannot disagree. The patterns use the `.gitignore` syntax and are anchored at the loaded directory:
+
+| Pattern         | Hides                                                          |
+| --------------- | -------------------------------------------------------------- |
+| `name`, `*.log` | Files and directories of that name, at any depth               |
+| `dir/`          | Directories of that name only                                  |
+| `/x`, `a/b`     | The entry at that path relative to the loaded directory only   |
+| `!pattern`      | Nothing: a negation **re-includes** what another pattern hides |
+
+- A hidden directory hides everything below it. As in git, a negation cannot re-include an entry below a hidden directory (`out` + `!out/keep.txt` hides the file; `out/*` + `!out/keep.txt` keeps it).
+- The patterns are a set without an order, so there is no "last line wins": **a negation takes precedence over every other pattern**, whenever it was added.
+- Blank patterns, comments (`#…`) and invalid globs are not rules and hide nothing.
+- `active_ignore_patterns` holds the patterns that decided about at least one entry of the scan: those that hid one and the negations that re-included one. Of several patterns matching the same entry only the deciding one is reported.
+
 The commands are idempotent (adding a pattern that is set, removing one that is not, and setting an option to its current value change nothing), a changed configuration is persisted, and **every config command is answered with a snapshot**, also when nothing changed. The UI relies on that: controls show the host's `config` and do not write to the store.
 
 #### Config import
@@ -102,9 +118,11 @@ The commands are idempotent (adding a pattern that is set, removing one that is 
 
 A changed configuration is written to the config file in the background. Every writer goes the same way: a numbered snapshot of the configuration is taken under the state lock, and of several saves under way the most recent snapshot is the one that ends up on disk (`ConfigStore` in `src/config/store.rs`). The window geometry is written with the last save of a session, at exit, which also goes that way and cannot be overtaken by a save that is still queued.
 
+The file is replaced atomically: the configuration is written to a temporary file in the same directory, which is then renamed over the config file (`config::settings::save_config`; the same holds for `exportConfig`). A write that fails or is interrupted leaves the previous file untouched. A symbolic link at the place of the config file is followed, and the permissions of the file are kept. Only if the directory does not allow creating the temporary file is the file written in place.
+
 `window_size` and `window_position` are logical units, marked by `geometry_units: "logical"`. A config file without that mark was written by a version that stored physical pixels (up to 0.3.1); its geometry is converted once at startup, with the scale factor of the primary monitor.
 
-`max_file_size_mb` is the size limit in MiB (default 20): larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search does not read larger files either. The value is not capped: a limit above the default is honoured by all of them. It is not exposed in the UI; set it in the config file.
+`max_file_size_mb` is the size limit in MiB (default 20) and the only size limit there is: larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search does not read larger files either. The value is not capped: a limit above the default is honoured by all of them, and nothing else depends on the size of a file (whether a file is text or binary is decided by its extension or its first kilobyte, see [File content](#file-content)). The smallest limit is 1: a smaller value in a config file (0 would hide every file that is not empty) is read as 1, on load and on import. It is not exposed in the UI; set it in the config file.
 
 ### Text fields
 
@@ -161,6 +179,24 @@ Each `UserEvent` is turned into exactly one call of a `window.*` function instal
 | `DragStateChanged`     | `window.setDragState(isDragging)`                                                          | `DragStateSchema`          |
 
 Errors are reported as plain strings through `showError`; there is no error-code protocol.
+
+### File content
+
+The text of a file is decoded by one rule (`decode_text` in `src/core/file_handler.rs`), for the file preview (`showPreviewContent`), the generated output (`showGeneratedContent`) and the content search alike:
+
+1. Valid UTF-8 is used as it is.
+2. Otherwise the content is binary if the file has a known binary extension, or if its first kilobyte holds a NUL byte or many control characters.
+3. Otherwise it is text that is not valid UTF-8 as a whole. If it holds at least one valid multi-byte UTF-8 sequence, and at least as many of them as invalid sequences, it is UTF-8 with damaged places: each invalid sequence becomes U+FFFD (`�`), everything else stays as it is. If not (a file in a legacy single-byte encoding has invalid sequences but practically never a valid multi-byte one), it is decoded as **Windows-1252**, the superset of ISO-8859-1 (Latin-1), which maps every byte to one character.
+
+The generated output is a header (`# CFC Output - Generated: …`, `# Total files: n`), optionally the directory tree, and one block per selected file: the path, `===FILE-START===`, the content, `---FILE-END-----`. Where the content cannot be embedded, the block holds a marker instead; the generation never fails because of a single file:
+
+| Marker                                          | When                                                                                                                                      |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `[FILE TOO LARGE: <n> bytes - CONTENT SKIPPED]` | The file is larger than `max_file_size_mb`                                                                                                |
+| `[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]`   | The content is binary by rule 2                                                                                                           |
+| `[FILE UNREADABLE: <reason> - CONTENT SKIPPED]` | The file could not be read, e.g. it was deleted or lost its permissions since the scan; `<reason>` is the message of the operating system |
+
+The preview shows the first 1500 lines, followed by `...` and `[Preview truncated]` if the file has more. It reads only the beginning of the file: it stops once it has these lines and never reads more than 4 MiB, so a file whose first lines are longer than that is cut there (never inside a character). Rule 3 is applied to what was read. Instead of text the preview is `[DIRECTORY]` or `[BINARY FILE]` where that applies.
 
 ### Scan progress
 
