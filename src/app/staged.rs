@@ -16,9 +16,23 @@
 //!    the filtered list has the same revision and the inputs of the filters are the
 //!    same (`Base::is_current`). None of this is assumed: every change of the
 //!    file list gives it a new revision, and the matches of a content search are a
-//!    new set whenever they are replaced. Otherwise what was prepared is dropped
-//!    and the event takes the plain way under the lock (the methods of
-//!    [`AppState`], then [`apply_filters`]); the result is the same.
+//!    new set whenever they are replaced.
+//!
+//! If the state is another one in step 3, what was prepared is dropped and the
+//! event is staged again there and then, for the state as it is
+//! ([`Committed::Again`]): the caller prepares once more without the lock and
+//! comes back. Only an event that meets a changed state a second time takes the
+//! plain way under the lock (the methods of [`AppState`], then [`apply_filters`]),
+//! which works on the whole list while everything else waits; the result is the
+//! same. It is one more attempt and not a loop, so that an event is never kept
+//! from happening by a state that keeps changing.
+//!
+//! An event that leaves the file list and the filters as they are (a batch of
+//! items that are all listed already, a walk that ends with nothing to remove) has
+//! nothing to build: the lists stay, with their revisions and with what is derived
+//! from them. That holds if the filtered list is known to be what these filters
+//! make of the file list ([`AppState::filters_of_filtered_list`]), or if it is the
+//! file list and the filters let everything through.
 //!
 //! Between 1 and 3 the state is consistent and anything may happen to it: until 3
 //! the event has simply not happened yet. Whether the event may happen at all is
@@ -51,6 +65,8 @@ struct Base {
     /// The filtered list is the file list.
     mirrored: bool,
     inputs: FilterInputs,
+    /// The filters that made the filtered list out of `full`, if that is known.
+    made_with: Option<Arc<FilterInputs>>,
 }
 
 impl Base {
@@ -61,6 +77,7 @@ impl Base {
             filtered_revision: state.filtered_revision(),
             mirrored: state.filtered_list_is_file_list(),
             inputs: FilterInputs::of(state),
+            made_with: state.filters_of_filtered_list(),
         }
     }
 
@@ -78,6 +95,27 @@ impl Base {
 pub(crate) struct Staged<C> {
     base: Base,
     change: C,
+    /// This is the second time the event was staged: the state had changed when
+    /// the first preparation came back.
+    again: bool,
+}
+
+impl<C> Staged<C> {
+    fn first(state: &AppState, change: C) -> Self {
+        Self {
+            base: Base::of(state),
+            change,
+            again: false,
+        }
+    }
+
+    fn again(state: &AppState, change: C) -> Self {
+        Self {
+            base: Base::of(state),
+            change,
+            again: true,
+        }
+    }
 }
 
 /// An event after step 2: the lists as they are to be, and what step 3 needs of the
@@ -86,6 +124,27 @@ pub(crate) struct Prepared<R> {
     base: Base,
     lists: FileLists,
     rest: R,
+    /// See [`Staged::again`].
+    again: bool,
+}
+
+/// What step 3 made of an event.
+pub(crate) enum Committed<C> {
+    /// The event has happened (`true`), or it is outdated and nothing was changed
+    /// (`false`). What the [`Discarded`] holds is to be dropped after the lock has
+    /// been released.
+    Done(bool, Discarded),
+    /// The state is not the one the event was prepared for, and nothing was
+    /// changed. The event has been staged again, for the state as it is: prepare
+    /// it without the lock and commit it. That commit does not ask for another.
+    Again(Staged<C>, Discarded),
+}
+
+impl<C> Committed<C> {
+    /// The event is outdated: `prepared` is dropped, nothing happens.
+    fn outdated<R: Send + 'static>(prepared: Prepared<R>) -> Self {
+        Self::Done(false, unused(prepared))
+    }
 }
 
 /// What an event does to the file list and to the inputs of the filters. This is
@@ -114,17 +173,27 @@ impl<C: Change> Staged<C> {
     /// Step 2: builds the lists. This is the expensive part; call it without the
     /// lock.
     pub(crate) fn prepare(self) -> Prepared<C::Rest> {
-        let Staged { base, change } = self;
+        let Staged {
+            base,
+            change,
+            again,
+        } = self;
         let outcome = change.apply(&base.full, &base.inputs);
         let identity = outcome.inputs.lets_everything_through();
 
-        // The file list stays, and the filtered list is it and remains it: there
-        // is nothing to build.
-        let lists = if outcome.full.is_none() && base.mirrored && identity {
+        // The file list stays, and so does the filtered list: it is the file list
+        // and remains it, or it is what the filters made of the file list and they
+        // go on making the same of it. There is nothing to build.
+        let filters_stay = || {
+            let made_with = base.made_with.as_ref();
+            made_with.is_some_and(|made_with| made_with.filters_like(&outcome.inputs))
+        };
+        let lists = if outcome.full.is_none() && (base.mirrored && identity || filters_stay()) {
             FileLists {
                 full: None,
                 filtered: None,
                 appended_from: None,
+                made_with: Arc::new(outcome.inputs),
             }
         } else {
             let filtered = outcome
@@ -136,12 +205,14 @@ impl<C: Change> Staged<C> {
                     .then_some(base.full.len()),
                 filtered: Some(IndexedList::build(filtered, root_path)),
                 full: outcome.full,
+                made_with: Arc::new(outcome.inputs),
             }
         };
         Prepared {
             base,
             lists,
             rest: outcome.rest,
+            again,
         }
     }
 }
@@ -157,7 +228,7 @@ fn appended(list: &[FileItem], items: &[FileItem]) -> Arc<Vec<FileItem>> {
 /// What is dropped with a [`Prepared`] that is not used.
 fn unused<R: Send + 'static>(prepared: Prepared<R>) -> Discarded {
     let mut discarded = Discarded::default();
-    discarded.add((prepared.base.full, prepared.lists, prepared.rest));
+    discarded.add((prepared.base, prepared.lists, prepared.rest));
     discarded
 }
 
@@ -192,38 +263,49 @@ pub(crate) fn stage_scanned_items(
     items: Vec<FileItem>,
 ) -> Option<Staged<ScannedItems>> {
     let new_items = state.confirm_scanned_items(token, items)?;
-    Some(Staged {
-        base: Base::of(state),
-        change: ScannedItems(new_items),
-    })
+    Some(Staged::first(state, ScannedItems(new_items)))
 }
 
-/// Step 3 of publishing scanned items. Call it with the state locked; afterwards
-/// the state holds the items, filtered, and a state update can be sent.
+/// Step 3 of publishing scanned items. Call it with the state locked; after
+/// [`Committed::Done`] with `true` the state holds the items, filtered, and a state
+/// update can be sent.
 ///
-/// Returns `false` without touching anything for a stale token: a scan that was
-/// cancelled or superseded since step 1 publishes nothing. What the returned
-/// [`Discarded`] holds is to be dropped after the lock has been released.
+/// A scan that was cancelled or superseded since step 1 publishes nothing.
 pub(crate) fn commit_scanned_items(
     state: &mut AppState,
     token: &ScanToken,
     prepared: Prepared<Vec<FileItem>>,
-) -> (bool, Discarded) {
+) -> Committed<ScannedItems> {
     if !state.is_current_scan(token) {
-        return (false, unused(prepared));
+        return Committed::outdated(prepared);
     }
-    if prepared.base.is_current(state) {
-        let mut discarded = state.install_file_lists(prepared.lists);
-        discarded.add((prepared.base.full, prepared.rest));
-        return (true, discarded);
+    let Prepared {
+        base,
+        lists,
+        rest: items,
+        again,
+    } = prepared;
+    if base.is_current(state) {
+        let mut discarded = state.install_file_lists(lists);
+        discarded.add((base, items));
+        return Committed::Done(true, discarded);
     }
-    let Prepared { base, lists, rest } = prepared;
-    // Some of the items may have been listed meanwhile.
-    state.merge_scanned_items(token, rest);
-    apply_filters(state);
     let mut discarded = Discarded::default();
-    discarded.add((base.full, lists));
-    (true, discarded)
+    discarded.add((base, lists));
+    if again {
+        // Some of the items may have been listed meanwhile.
+        state.merge_scanned_items(token, items);
+        apply_filters(state);
+        return Committed::Done(true, discarded);
+    }
+    // Some of the items may have been listed meanwhile: they are told from the
+    // others again.
+    match state.confirm_scanned_items(token, items) {
+        Some(new_items) => {
+            Committed::Again(Staged::again(state, ScannedItems(new_items)), discarded)
+        }
+        None => Committed::Done(false, discarded),
+    }
 }
 
 //================================================================================//
@@ -236,10 +318,13 @@ pub(crate) struct Completion {
     /// What is selected: selected paths that are not in the complete list are
     /// deselected.
     selection: SelectionSnapshot,
+    /// The ignore patterns that were active in the walk.
+    active_patterns: HashSet<String>,
 }
 
 /// What step 3 of a completion needs.
 pub(crate) struct CompletionRest {
+    active_patterns: HashSet<String>,
     loaded_dirs: HashSet<PathBuf>,
     /// The selected paths that are not in the complete list.
     not_listed: Rejected,
@@ -269,6 +354,7 @@ impl Change for Completion {
             inputs: inputs.clone().of_the_complete_list(),
             appended: false,
             rest: CompletionRest {
+                active_patterns: self.active_patterns,
                 loaded_dirs: directories_of(complete),
                 not_listed,
                 listed,
@@ -280,44 +366,64 @@ impl Change for Completion {
 }
 
 /// Step 1 of declaring the file list complete on behalf of the scan identified by
-/// `token`, whose walk has ended and has delivered all its items. Call it with the
-/// state locked; nothing is changed.
+/// `token`, whose walk has ended and has delivered all its items; `active_patterns`
+/// are the ignore patterns that were active in the walk. Call it with the state
+/// locked; nothing is changed.
 ///
 /// Returns `None` for a stale token.
 pub(crate) fn stage_scan_completion(
     state: &AppState,
     token: &ScanToken,
+    active_patterns: HashSet<String>,
 ) -> Option<Staged<Completion>> {
     let not_found = state.items_the_walk_did_not_find(token)?;
-    Some(Staged {
-        base: Base::of(state),
-        change: Completion {
-            not_found,
-            selection: state.selected_files.snapshot(),
-        },
-    })
+    let completion = Completion {
+        not_found,
+        selection: state.selected_files.snapshot(),
+        active_patterns,
+    };
+    Some(Staged::first(state, completion))
 }
 
-/// Step 3 of declaring the file list complete: afterwards it is
-/// ([`AppState::complete_scanned_file_list`]) and the filters are applied to it;
-/// `active_patterns` are the ignore patterns that were active in the walk.
+/// Step 3 of declaring the file list complete: after [`Committed::Done`] with
+/// `true` it is ([`AppState::complete_scanned_file_list`]) and the filters are
+/// applied to it.
 ///
-/// Returns `false` without touching anything for a stale token.
+/// Nothing is touched for a stale token.
 pub(crate) fn commit_scan_completion(
     state: &mut AppState,
     token: &ScanToken,
     prepared: Prepared<CompletionRest>,
-    active_patterns: HashSet<String>,
-) -> (bool, Discarded) {
+) -> Committed<Completion> {
     if !state.is_current_scan(token) {
-        return (false, unused(prepared));
+        return Committed::outdated(prepared);
     }
-    if !prepared.base.is_current(state) {
-        state.complete_scanned_file_list(token, active_patterns);
-        apply_filters(state);
-        return (true, unused(prepared));
+    let Prepared {
+        base,
+        lists,
+        rest,
+        again,
+    } = prepared;
+    if !base.is_current(state) {
+        let mut discarded = Discarded::default();
+        discarded.add((base, lists, rest.loaded_dirs, rest.listed));
+        discarded.add((rest.not_listed, rest.full));
+        if again {
+            state.complete_scanned_file_list(token, rest.active_patterns);
+            apply_filters(state);
+            return Committed::Done(true, discarded);
+        }
+        return match stage_scan_completion(state, token, rest.active_patterns) {
+            Some(staged) => {
+                let staged = Staged {
+                    again: true,
+                    ..staged
+                };
+                Committed::Again(staged, discarded)
+            }
+            None => Committed::Done(false, discarded),
+        };
     }
-    let Prepared { base, lists, rest } = prepared;
     // Nothing was selected in step 1 and something is now: the lookup is made here.
     let listed = match rest.listed {
         None if !state.selected_files.is_empty() => Some(ListedPaths::build(rest.full)),
@@ -325,14 +431,14 @@ pub(crate) fn commit_scan_completion(
     };
     state.complete_walk(
         token,
-        active_patterns,
+        rest.active_patterns,
         rest.loaded_dirs,
         rest.not_listed,
         |path| listed.as_ref().is_some_and(|listed| listed.contains(path)),
     );
     let mut discarded = state.install_file_lists(lists);
-    discarded.add((base.full, listed));
-    (true, discarded)
+    discarded.add((base, listed));
+    Committed::Done(true, discarded)
 }
 
 //================================================================================//
@@ -343,6 +449,8 @@ pub(crate) fn commit_scan_completion(
 pub(crate) struct DirectoryLevel {
     directory: PathBuf,
     items: Vec<FileItem>,
+    /// The ignore patterns that were active in the level.
+    active_patterns: HashSet<String>,
 }
 
 /// What step 3 of a directory level needs.
@@ -352,6 +460,7 @@ pub(crate) struct DirectoryLevelRest {
     items: Vec<FileItem>,
     /// The items of the level that were not in the list.
     added: Vec<FileItem>,
+    active_patterns: HashSet<String>,
 }
 
 impl Change for DirectoryLevel {
@@ -367,13 +476,15 @@ impl Change for DirectoryLevel {
                 directory: self.directory,
                 items: self.items,
                 added,
+                active_patterns: self.active_patterns,
             },
         }
     }
 }
 
 /// Step 1 of adding `items`, the content of `directory` as the lazy load identified
-/// by `token` has listed it. Call it with the state locked; nothing is changed.
+/// by `token` has listed it; `active_patterns` are the ignore patterns that were
+/// active in the level. Call it with the state locked; nothing is changed.
 ///
 /// Returns `None` if the file list is no longer the one the lazy load was started
 /// for.
@@ -382,48 +493,62 @@ pub(crate) fn stage_directory_level(
     token: &LazyLoadToken,
     directory: &Path,
     items: Vec<FileItem>,
+    active_patterns: HashSet<String>,
 ) -> Option<Staged<DirectoryLevel>> {
-    state.is_current_lazy_load(token).then(|| Staged {
-        base: Base::of(state),
-        change: DirectoryLevel {
+    state.is_current_lazy_load(token).then(|| {
+        let level = DirectoryLevel {
             directory: directory.to_path_buf(),
             items,
-        },
+            active_patterns,
+        };
+        Staged::first(state, level)
     })
 }
 
-/// Step 3 of adding a directory level: afterwards the level is in the list
-/// ([`AppState::merge_directory_level`]) and the filters are applied;
-/// `active_patterns` are the ignore patterns that were active in the level.
+/// Step 3 of adding a directory level: after [`Committed::Done`] with `true` the
+/// level is in the list ([`AppState::merge_directory_level`]) and the filters are
+/// applied.
 ///
-/// Returns `false` without touching anything for a stale token.
+/// Nothing is touched for a stale token.
 pub(crate) fn commit_directory_level(
     state: &mut AppState,
     token: &LazyLoadToken,
     prepared: Prepared<DirectoryLevelRest>,
-    active_patterns: HashSet<String>,
-) -> (bool, Discarded) {
+) -> Committed<DirectoryLevel> {
     if !state.is_current_lazy_load(token) {
-        return (false, unused(prepared));
+        return Committed::outdated(prepared);
     }
-    let Prepared { base, lists, rest } = prepared;
-    let mut discarded = Discarded::default();
+    let Prepared {
+        base,
+        lists,
+        rest,
+        again,
+    } = prepared;
     if base.is_current(state) {
         state.record_directory_level(
             token,
             &rest.directory,
             rest.items,
             &rest.added,
-            active_patterns,
+            rest.active_patterns,
         );
-        discarded = state.install_file_lists(lists);
-        discarded.add((base.full, rest.added));
-    } else {
-        state.merge_directory_level(token, &rest.directory, rest.items, active_patterns);
-        apply_filters(state);
-        discarded.add((base.full, lists, rest.added));
+        let mut discarded = state.install_file_lists(lists);
+        discarded.add((base, rest.added));
+        return Committed::Done(true, discarded);
     }
-    (true, discarded)
+    let mut discarded = Discarded::default();
+    discarded.add((base, lists, rest.added));
+    if again {
+        state.merge_directory_level(token, &rest.directory, rest.items, rest.active_patterns);
+        apply_filters(state);
+        return Committed::Done(true, discarded);
+    }
+    let level = DirectoryLevel {
+        directory: rest.directory,
+        items: rest.items,
+        active_patterns: rest.active_patterns,
+    };
+    Committed::Again(Staged::again(state, level), discarded)
 }
 
 //================================================================================//
@@ -434,15 +559,14 @@ pub(crate) fn commit_directory_level(
 pub(crate) struct ContentMatches(Arc<HashSet<PathBuf>>);
 
 impl Change for ContentMatches {
-    type Rest = (Arc<HashSet<PathBuf>>, FilterInputs);
+    type Rest = Arc<HashSet<PathBuf>>;
 
     fn apply(self, _: &Arc<Vec<FileItem>>, inputs: &FilterInputs) -> Outcome<Self::Rest> {
-        let inputs = inputs.clone().with_content_matches(Arc::clone(&self.0));
         Outcome {
             full: None,
             appended: false,
-            rest: (self.0, inputs.clone()),
-            inputs,
+            inputs: inputs.clone().with_content_matches(Arc::clone(&self.0)),
+            rest: self.0,
         }
     }
 }
@@ -456,40 +580,49 @@ pub(crate) fn stage_content_matches(
     token: &ContentSearchToken,
     matches: HashSet<PathBuf>,
 ) -> Option<Staged<ContentMatches>> {
-    state.is_current_content_search(token).then(|| Staged {
-        base: Base::of(state),
-        change: ContentMatches(Arc::new(matches)),
-    })
+    state
+        .is_current_content_search(token)
+        .then(|| Staged::first(state, ContentMatches(Arc::new(matches))))
 }
 
-/// Step 3 of applying the matches of a content search: afterwards they are the
-/// matches of the state ([`AppState::finish_content_search`]) and the filters are
-/// applied.
+/// Step 3 of applying the matches of a content search: after [`Committed::Done`]
+/// with `true` they are the matches of the state
+/// ([`AppState::finish_content_search`]) and the filters are applied.
 ///
-/// Returns `false` without touching anything for a stale token.
+/// Nothing is touched for a stale token.
 pub(crate) fn commit_content_matches(
     state: &mut AppState,
     token: &ContentSearchToken,
-    prepared: Prepared<(Arc<HashSet<PathBuf>>, FilterInputs)>,
-) -> (bool, Discarded) {
+    prepared: Prepared<Arc<HashSet<PathBuf>>>,
+) -> Committed<ContentMatches> {
     if !state.is_current_content_search(token) {
-        return (false, unused(prepared));
+        return Committed::outdated(prepared);
     }
-    let Prepared { base, lists, rest } = prepared;
-    let (matches, inputs_with_matches) = rest;
+    let Prepared {
+        base,
+        lists,
+        rest: matches,
+        again,
+    } = prepared;
     let was_current = base.is_current(state);
-    state.finish_content_search_shared(token, matches);
     let mut discarded = Discarded::default();
+    discarded.add(base);
+    if !was_current && !again {
+        discarded.add(lists);
+        let staged = Staged::again(state, ContentMatches(matches));
+        return Committed::Again(staged, discarded);
+    }
+    state.finish_content_search_shared(token, matches);
     // With the matches in, the filters of the state have to be the ones the lists
-    // were made with (they are not if there is no content query to apply them to).
-    if was_current && inputs_with_matches.is_current(state) {
-        discarded = state.install_file_lists(lists);
-        discarded.add(base.full);
+    // were made with. They are not if there is no content query to apply them to,
+    // and preparing again would not change that.
+    if was_current && lists.made_with.is_current(state) {
+        discarded.add(state.install_file_lists(lists));
     } else {
         apply_filters(state);
-        discarded.add((base.full, lists));
+        discarded.add(lists);
     }
-    (true, discarded)
+    Committed::Done(true, discarded)
 }
 
 #[cfg(test)]

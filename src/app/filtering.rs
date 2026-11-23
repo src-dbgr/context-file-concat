@@ -20,8 +20,10 @@ use std::sync::Arc;
 /// Where the filters let everything through, the visible list is the file list
 /// itself (shared, not copied).
 pub fn apply_filters(state: &mut AppState) {
-    let filtered = FilterInputs::of(state).apply(&state.shared_full_file_list());
+    let inputs = FilterInputs::of(state);
+    let filtered = inputs.apply(&state.shared_full_file_list());
     state.set_shared_filtered_file_list(filtered);
+    state.note_filters_of_filtered_list(Arc::new(inputs));
 }
 
 /// Everything the filters make their result of, apart from the file list: the
@@ -84,13 +86,28 @@ impl FilterInputs {
     /// The matches of the content filter are the same if they are the same set (the
     /// same allocation: the state gets another one whenever they are replaced), not
     /// if they are equal.
+    ///
+    /// Every input is compared, none is left to a revision of the lists, because
+    /// none of them is tied to one. The path changes with a re-scan that is started
+    /// (`start_scan_on_path`), case sensitivity with the configuration, and whether
+    /// the list is complete with the walk that begins
+    /// ([`AppState::begin_scan_walk`]): each of them while the lists stay as they
+    /// are.
+    ///
+    /// The loaded directories are the one input that nothing changes on its own
+    /// today where they are compared, i.e. while empty directories are removed
+    /// from a complete list: a level that is merged gives the file list a new
+    /// revision, a level that is recorded for lists prepared outside the lock
+    /// comes with a new filtered list unless the directory was loaded already, and
+    /// the end of a walk is followed by the filters under the same lock. The
+    /// comparison stays all the same: `loaded_dirs` is a public field, and nothing
+    /// but these call sequences ties it to a revision. A wrong answer would show
+    /// or hide an empty directory wrongly until the filters are applied again; the
+    /// comparison costs one look at two sets, and only where it is needed. The
+    /// test of the steps against the plain way changes the field directly to hold
+    /// it in place (`Command::ForgetLoadedDirectory`).
     pub(crate) fn is_current(&self, state: &AppState) -> bool {
-        let same_matches = match (&self.content_matches, state.shared_content_filter_matches()) {
-            (None, None) => true,
-            (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, &theirs),
-            _ => false,
-        };
-        same_matches
+        self.same_content_matches(state.shared_content_filter_matches().as_ref())
             && self.root_path == Path::new(&state.current_path)
             && self.search_query == state.search_query
             && self.extension_filter == state.extension_filter
@@ -101,6 +118,35 @@ impl FilterInputs {
                 LoadedDirs::NotAsked | LoadedDirs::All => true,
                 LoadedDirs::These(loaded_dirs) => *loaded_dirs == state.loaded_dirs,
             }
+    }
+
+    fn same_content_matches(&self, theirs: Option<&Arc<HashSet<PathBuf>>>) -> bool {
+        match (&self.content_matches, theirs) {
+            (None, None) => true,
+            (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs),
+            _ => false,
+        }
+    }
+
+    /// `true` if these inputs make of any list what `other` make of it.
+    ///
+    /// That is less than being equal: whether the list is complete and which
+    /// directories are loaded matters only where empty directories are removed.
+    /// Where they are, "every directory" and a set of directories are not compared
+    /// (the answer is `false`): that would take the list.
+    pub(crate) fn filters_like(&self, other: &FilterInputs) -> bool {
+        self.same_content_matches(other.content_matches.as_ref())
+            && self.root_path == other.root_path
+            && self.search_query == other.search_query
+            && self.extension_filter == other.extension_filter
+            && self.case_sensitive == other.case_sensitive
+            && self.removes_empty_directories() == other.removes_empty_directories()
+            && (!self.removes_empty_directories()
+                || match (&self.loaded_dirs, &other.loaded_dirs) {
+                    (LoadedDirs::All, LoadedDirs::All) => true,
+                    (LoadedDirs::These(mine), LoadedDirs::These(theirs)) => mine == theirs,
+                    _ => false,
+                })
     }
 
     /// The path the list lies below.
