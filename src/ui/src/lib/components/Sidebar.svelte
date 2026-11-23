@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onDestroy, untrack } from "svelte";
   import { appState, patternFilter } from "$lib/stores/app";
+  import { HostDraft } from "$lib/modules/hostDraft";
   import { post } from "$lib/services/backend";
   import { COMMON_IGNORE_PATTERNS } from "$lib/config";
   import { t } from "$lib/i18n";
@@ -18,50 +20,102 @@
   );
   const activeSet = $derived(new Set($appState.active_ignore_patterns || []));
 
-  let filterTimer: ReturnType<typeof setTimeout> | null = null;
+  // --- Filters -------------------------------------------------------------
+  // The inputs show a local draft, not the app state: a snapshot that arrives
+  // while the user is typing (scan progress, the answer to another command)
+  // would otherwise reset the text. The host's values are adopted whenever
+  // the draft allows it, see HostDraft.
+  type Filters = {
+    searchQuery: string;
+    extensionFilter: string;
+    contentSearchQuery: string;
+  };
+  const FILTER_DEBOUNCE_MS = 300;
 
-  function pushFilters() {
-    if (!$appState.current_path) return;
-    post("updateFilters", {
+  function hostFilters(): Filters {
+    return {
       searchQuery: $appState.search_query,
       extensionFilter: $appState.extension_filter,
       contentSearchQuery: $appState.content_search_query,
-    });
+    };
   }
-  function onFiltersInput() {
+  // Shows the host's filters unless the draft holds them back.
+  function syncFiltersFromHost() {
+    if (filterDraft.accepts($appState)) {
+      filters = hostFilters();
+    }
+  }
+  const filterDraft = new HostDraft();
+  let filters = $state(untrack(hostFilters));
+  let filterTimer: ReturnType<typeof setTimeout> | null = null;
+  let filtersPath = untrack(() => $appState.current_path);
+
+  function cancelPendingFilters() {
     if (filterTimer) clearTimeout(filterTimer);
-    filterTimer = setTimeout(pushFilters, 300);
+    filterTimer = null;
   }
 
-  function onCaseSensitiveChange() {
-    post("updateConfig", $appState.config);
-    pushFilters();
+  // Runs for every snapshot of the host.
+  $effect(() => {
+    const path = $appState.current_path;
+    hostFilters();
+    untrack(() => {
+      if (path !== filtersPath) {
+        // Another directory (or none): filters belong to the directory they
+        // were typed for. Text that has not been sent is not sent to the new
+        // one, and a sent text is no longer waited for.
+        filtersPath = path;
+        cancelPendingFilters();
+        filterDraft.reset();
+      }
+      syncFiltersFromHost();
+    });
+  });
+
+  function pushFilters() {
+    filterTimer = null;
+    if (!$appState.current_path) {
+      // Nothing to filter anymore: the host's (reset) filters apply.
+      filterDraft.reset();
+      filters = hostFilters();
+      return;
+    }
+    filterDraft.sent(post("updateFilters", { ...filters }));
   }
-  function onRemoveEmptyDirsChange() {
-    post("updateConfig", $appState.config);
+  function onFiltersInput() {
+    filterDraft.edit();
+    cancelPendingFilters();
+    filterTimer = setTimeout(pushFilters, FILTER_DEBOUNCE_MS);
+  }
+  onDestroy(cancelPendingFilters);
+
+  // --- Config ---------------------------------------------------------------
+  // Every edit is an intent: it names the one thing the user changed. The
+  // host applies it to its configuration and answers with a snapshot.
+  function setFlag(
+    option: "case_sensitive_search" | "remove_empty_directories",
+    e: Event
+  ) {
+    const value = (e.currentTarget as HTMLInputElement).checked;
+    post("setConfigOption", { option, value });
   }
 
   let newPattern = $state("");
 
-  function addPattern() {
+  function addPattern(pattern: string) {
+    post("addIgnorePattern", { pattern });
+  }
+  function addNewPattern() {
     const p = newPattern.trim();
     if (!p) return;
-    if (!$appState.config.ignore_patterns.includes(p)) {
-      post("updateConfig", {
-        ...$appState.config,
-        ignore_patterns: [...$appState.config.ignore_patterns, p],
-      });
-    }
+    addPattern(p);
     newPattern = "";
   }
-  function removePattern(p: string) {
-    post("updateConfig", {
-      ...$appState.config,
-      ignore_patterns: $appState.config.ignore_patterns.filter((x) => x !== p),
-    });
+  function removePattern(pattern: string) {
+    post("removeIgnorePattern", { pattern });
   }
   function deleteAllPatterns() {
-    post("updateConfig", { ...$appState.config, ignore_patterns: [] });
+    post("clearIgnorePatterns");
   }
 
   function handleRescan() {
@@ -92,7 +146,7 @@
 
 <div class="panel">
   <div class="panel-header">
-    <h3>
+    <h2>
       <svg
         class="icon"
         viewBox="0 0 24 24"
@@ -104,7 +158,7 @@
         <path d="m21 21-4.35-4.35" />
       </svg>
       {$t("sidebar.title")}
-    </h3>
+    </h2>
   </div>
 
   <input
@@ -113,7 +167,7 @@
     placeholder={searchEnabled
       ? $t("sidebar.ph.searchFileNames")
       : $t("sidebar.ph.selectDirFirst")}
-    bind:value={$appState.search_query}
+    bind:value={filters.searchQuery}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
   />
@@ -124,7 +178,7 @@
     placeholder={searchEnabled
       ? $t("sidebar.ph.extensionFilter")
       : $t("sidebar.ph.selectDirFirst")}
-    bind:value={$appState.extension_filter}
+    bind:value={filters.extensionFilter}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
   />
@@ -135,7 +189,7 @@
     placeholder={searchEnabled
       ? $t("sidebar.ph.contentSearch")
       : $t("sidebar.ph.selectDirFirst")}
-    bind:value={$appState.content_search_query}
+    bind:value={filters.contentSearchQuery}
     disabled={!searchEnabled}
     oninput={onFiltersInput}
   />
@@ -144,8 +198,8 @@
     <input
       type="checkbox"
       id="case-sensitive"
-      bind:checked={$appState.config.case_sensitive_search}
-      onchange={onCaseSensitiveChange}
+      checked={$appState.config.case_sensitive_search}
+      onchange={(e) => setFlag("case_sensitive_search", e)}
     />
     {$t("sidebar.caseSensitive")}
   </label>
@@ -153,7 +207,7 @@
 
 <div class="panel ignore-patterns-panel">
   <div class="panel-header">
-    <h3>
+    <h2>
       <svg
         class="icon"
         viewBox="0 0 24 24"
@@ -165,7 +219,7 @@
         <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
       </svg>
       {$t("sidebar.ignoreTitle")}
-    </h3>
+    </h2>
 
     <button
       id="rescan-btn"
@@ -173,7 +227,7 @@
       disabled={$appState.is_scanning || !$appState.current_path}
       onclick={handleRescan}
       title={$appState.patterns_need_rescan
-        ? "Re-scan recommended after removing patterns"
+        ? $t("sidebar.rescanRecommended")
         : $t("action.rescan")}
     >
       {#if $appState.is_scanning}
@@ -214,9 +268,9 @@
       id="new-ignore-pattern"
       placeholder={$t("sidebar.ph.addPattern")}
       bind:value={newPattern}
-      onkeydown={(e) => e.key === "Enter" && addPattern()}
+      onkeydown={(e) => e.key === "Enter" && addNewPattern()}
     />
-    <button id="add-pattern-btn" onclick={addPattern}>{$t("action.add")}</button
+    <button id="add-pattern-btn" onclick={addNewPattern}>{$t("action.add")}</button
     >
   </div>
 
@@ -233,8 +287,8 @@
         <input
           type="checkbox"
           id="remove-empty-dirs"
-          bind:checked={$appState.config.remove_empty_directories}
-          onchange={onRemoveEmptyDirsChange}
+          checked={$appState.config.remove_empty_directories}
+          onchange={(e) => setFlag("remove_empty_directories", e)}
         />
         {$t("sidebar.removeEmptyDirs")}
       </label>
@@ -258,12 +312,8 @@
       {#each availableCommon as pattern (pattern)}
         <button
           class="common-pattern-chip"
-          onclick={() =>
-            post("updateConfig", {
-              ...$appState.config,
-              ignore_patterns: [...$appState.config.ignore_patterns, pattern],
-            })}
-          title={`Click to add "${pattern}" to ignore patterns`}
+          onclick={() => addPattern(pattern)}
+          title={$t("sidebar.addCommonPattern", { pattern })}
         >
           {pattern}
         </button>
@@ -284,7 +334,7 @@
       <div
         class="current-pattern-chip {activeSet.has(p) ? 'active-pattern' : ''}"
         title={activeSet.has(p)
-          ? "This pattern was active and matched one or more files/directories."
+          ? $t("sidebar.patternActive")
           : ""}
         role="listitem"
       >
@@ -292,7 +342,7 @@
         <button
           class="remove-pattern-btn"
           onclick={() => removePattern(p)}
-          aria-label={`Remove pattern ${p}`}
+          aria-label={$t("aria.removePattern", { pattern: p })}
         >
           <svg
             class="icon"

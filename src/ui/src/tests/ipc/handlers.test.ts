@@ -9,6 +9,8 @@ vi.mock("$lib/modules/editor", () => ({
   showPreviewContent: vi.fn(),
   showGeneratedContent: vi.fn(),
   clearPreview: vi.fn(),
+  retrySaveOfUnavailableDocument: vi.fn(() => false),
+  saveSettled: vi.fn(),
 }));
 
 // Import after mocks are set up
@@ -22,7 +24,7 @@ declare global {
 }
 
 function toFn(
-  l: EventListenerOrEventListenerObject
+  l: EventListenerOrEventListenerObject,
 ): ((ev: Event) => void) | null {
   if (typeof l === "function") {
     const fn = l as (evt: Event) => unknown;
@@ -115,7 +117,7 @@ describe("ipc/handlers – installWindowIPCHandlers", () => {
     // Accept either guarded (same count) or additive (count increased) behavior
     expect(addSpy.mock.calls.length).toBeGreaterThanOrEqual(addsAfterFirst);
     expect(setOnMessageSpy.mock.calls.length).toBeGreaterThanOrEqual(
-      setsAfterFirst
+      setsAfterFirst,
     );
   });
 });

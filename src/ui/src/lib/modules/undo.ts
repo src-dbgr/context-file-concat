@@ -17,36 +17,58 @@ class UndoManager {
     this.recordState(true);
   }
 
+  /**
+   * Records the text of the field as a step that can be undone, at once
+   * (`force`) or after the typing has paused.
+   *
+   * A step is a change of the *text*. A state that differs from the last one
+   * in its selection only is no new step and leaves the redo history alone:
+   * restoring a state (undo, redo) fires an `input` event like typing does,
+   * so it ends up here as well, and whoever re-renders the field in between
+   * may have moved the caret. Counting that as an edit dropped the redo
+   * history half a second after every undo.
+   */
   public recordState(force = false) {
-    if (this.coalesceTimeoutId) {
-      clearTimeout(this.coalesceTimeoutId);
-      this.coalesceTimeoutId = null;
-    }
-
-    const record = () => {
-      const currentState = this.getCurrentState();
-      const lastState = this.undoStack[this.undoStack.length - 1];
-
-      if (
-        lastState &&
-        lastState.value === currentState.value &&
-        lastState.selectionStart === currentState.selectionStart
-      ) {
-        return;
-      }
-
-      this.undoStack.push(currentState);
-      this.redoStack = [];
-    };
-
+    this.cancelPendingRecord();
     if (force) {
-      record();
+      this.record();
     } else {
-      this.coalesceTimeoutId = window.setTimeout(record, COALESCE_TIMEOUT);
+      this.coalesceTimeoutId = window.setTimeout(() => {
+        this.coalesceTimeoutId = null;
+        this.record();
+      }, COALESCE_TIMEOUT);
     }
   }
 
+  private record() {
+    const currentState = this.getCurrentState();
+    const lastState = this.undoStack[this.undoStack.length - 1];
+
+    if (lastState && lastState.value === currentState.value) {
+      // Same text: remember where the caret is now, nothing else.
+      lastState.selectionStart = currentState.selectionStart;
+      lastState.selectionEnd = currentState.selectionEnd;
+      return;
+    }
+
+    this.undoStack.push(currentState);
+    this.redoStack = [];
+  }
+
+  private cancelPendingRecord(): boolean {
+    if (this.coalesceTimeoutId === null) return false;
+    clearTimeout(this.coalesceTimeoutId);
+    this.coalesceTimeoutId = null;
+    return true;
+  }
+
+  /** Typing that has not been recorded yet becomes a step before undo/redo. */
+  private flushPendingRecord() {
+    if (this.cancelPendingRecord()) this.record();
+  }
+
   public undo() {
+    this.flushPendingRecord();
     if (this.undoStack.length <= 1) return;
 
     const currentState = this.undoStack.pop();
@@ -61,6 +83,7 @@ class UndoManager {
   }
 
   public redo() {
+    this.flushPendingRecord();
     const stateToRestore = this.redoStack.pop();
     if (stateToRestore) {
       this.undoStack.push(stateToRestore);
@@ -86,7 +109,7 @@ class UndoManager {
 const elementUndoManagers = new Map<HTMLElement, UndoManager>();
 
 export function getUndoManagerForElement(
-  element: HTMLInputElement | HTMLTextAreaElement
+  element: HTMLInputElement | HTMLTextAreaElement,
 ): UndoManager {
   if (!elementUndoManagers.has(element)) {
     elementUndoManagers.set(element, new UndoManager(element));

@@ -1,89 +1,60 @@
 /**
- * Monaco Editor integration – lazily code-split & loaded on first use.
- * - No top-level Monaco imports → smaller initial bundle & faster TTI.
- * - Workers are prepared before editor.create so getWorker is synchronous.
- * - Public API kept, but preview/generate functions are async for first-load safety.
+ * Monaco Editor integration – the imperative glue between the stores and the
+ * editor instance.
+ * - Monaco is loaded on first use (see `monacoLoader`); nothing here imports
+ *   it statically.
+ * - This module owns the editor instance and its search highlighting.
  */
 
 import { elements } from "../dom.js";
 import {
+  appState,
   editorInstance,
-  editorDecorations,
   previewedPath,
   getState,
 } from "../stores/app.js";
 import { post } from "../services/backend.js";
+import type { SaveFilePayload } from "../ipc/schema.js";
 import { get } from "svelte/store";
 import { previewMode, generatedTokenCount } from "../stores/preview.js";
-import { theme } from "../stores/theme.js";
+import { theme, type Theme } from "../stores/theme.js";
+import { translate } from "../i18n/index.js";
+import { loadMonaco, type MonacoNS } from "./monacoLoader.js";
 
 // Types only – no runtime cost
-import type * as MonacoTypes from "monaco-editor";
+import type * as MonacoTypes from "monaco-editor/esm/vs/editor/editor.api";
 
-type MonacoNS = typeof import("monaco-editor");
+type Editor = MonacoTypes.editor.IStandaloneCodeEditor;
 
-// Lazy-loaded module singleton
 let monaco: MonacoNS | null = null;
 
-// Worker constructors captured before editor.create()
-type WorkerCtor = new () => Worker;
-let workers: {
-  editorWorker: WorkerCtor;
-  jsonWorker: WorkerCtor;
-  cssWorker: WorkerCtor;
-  htmlWorker: WorkerCtor;
-  tsWorker: WorkerCtor;
-} | null = null;
+/** The one creation of the editor; shared by every caller that needs it. */
+let editorReady: Promise<Editor> | null = null;
 
-let contentChangeListener: MonacoTypes.IDisposable | null = null;
-let themeUnsub: (() => void) | null = null;
+/**
+ * The generated document the editor shows: the id the host keeps it under, the
+ * text as the host sent it and the version of the editor's text at the moment
+ * it was shown. `null` while the editor shows something else.
+ *
+ * The text is kept because the editor's own value is not it: Monaco gives a
+ * text one kind of line end, so an output of files with CRLF and LF line ends
+ * comes back from `getValue()` with all of them rewritten.
+ */
+let shownDocument: { id: number; text: string; versionId: number } | null =
+  null;
 
-/** Load Monaco and wire workers exactly once. */
-async function loadMonacoAndWorkers(): Promise<MonacoNS> {
-  if (monaco) return monaco;
-
-  // Parallelize all imports
-  const [monacoMod, editorW, jsonW, cssW, htmlW, tsW] = await Promise.all([
-    import("monaco-editor"),
-    import("monaco-editor/esm/vs/editor/editor.worker?worker"),
-    import("monaco-editor/esm/vs/language/json/json.worker?worker"),
-    import("monaco-editor/esm/vs/language/css/css.worker?worker"),
-    import("monaco-editor/esm/vs/language/html/html.worker?worker"),
-    import("monaco-editor/esm/vs/language/typescript/ts.worker?worker"),
-  ]);
-
-  workers = {
-    editorWorker: editorW.default as unknown as WorkerCtor,
-    jsonWorker: jsonW.default as unknown as WorkerCtor,
-    cssWorker: cssW.default as unknown as WorkerCtor,
-    htmlWorker: htmlW.default as unknown as WorkerCtor,
-    tsWorker: tsW.default as unknown as WorkerCtor,
-  };
-
-  // Install synchronous getWorker hook before editor.create()
-  (self as unknown as Window).MonacoEnvironment = {
-    getWorker(_moduleId: string, label: string): Worker {
-      const w = workers!;
-      if (label === "json") return new w.jsonWorker();
-      if (label === "css" || label === "scss" || label === "less")
-        return new w.cssWorker();
-      if (label === "html" || label === "handlebars" || label === "razor")
-        return new w.htmlWorker();
-      if (label === "typescript" || label === "javascript")
-        return new w.tsWorker();
-      return new w.editorWorker();
-    },
-  };
-
-  monaco = monacoMod as unknown as MonacoNS;
-  return monaco;
+/** The generated document, if the editor still shows it as it came. */
+function unchangedDocument() {
+  const model = get(editorInstance)?.getModel();
+  return shownDocument &&
+    model &&
+    model.getAlternativeVersionId() === shownDocument.versionId
+    ? shownDocument
+    : null;
 }
 
-function applyMonacoThemeFromAppTheme() {
-  if (!monaco) return;
-  const t = get(theme);
-  monaco.editor.setTheme(t === "light" ? "vs" : "vs-dark");
-}
+/** The themes `monacoBundle` registers: Monaco's own, with readable colors. */
+const monacoTheme = (t: Theme) => (t === "light" ? "cfc-light" : "cfc-dark");
 
 export function layoutEditorSoon() {
   const editor = get(editorInstance);
@@ -104,18 +75,74 @@ export function layoutEditorSoon() {
   });
 }
 
-/** Ensure there is an editor instance; lazily create if missing. */
-async function ensureEditor(): Promise<void> {
-  if (get(editorInstance)) return;
+/* --------------------------- Search highlighting --------------------------- */
 
-  await loadMonacoAndWorkers();
-  applyMonacoThemeFromAppTheme();
+type SearchQuery = { term: string; matchCase: boolean };
 
-  const ed = monaco!.editor.create(elements.editorContainer, {
+/** What is highlighted in the previewed file; `null` when no file is shown. */
+let highlightQuery: SearchQuery | null = null;
+/** The decorations of the highlighting – the only bookkeeping of them. */
+let highlights: MonacoTypes.editor.IEditorDecorationsCollection | null = null;
+
+function renderSearchHighlights(editor: Editor): void {
+  const model = editor.getModel();
+  const query = highlightQuery;
+  const decorations: MonacoTypes.editor.IModelDeltaDecoration[] =
+    model && query && query.term.trim() !== ""
+      ? model
+          .findMatches(query.term, true, false, query.matchCase, null, false)
+          .map((match) => ({
+            range: match.range,
+            options: {
+              inlineClassName: "search-highlight",
+              hoverMessage: { value: translate("preview.searchMatch") },
+            },
+          }))
+      : [];
+
+  highlights ??= editor.createDecorationsCollection();
+  highlights.set(decorations);
+}
+
+function setSearchHighlight(editor: Editor, query: SearchQuery | null): void {
+  highlightQuery = query;
+  renderSearchHighlights(editor);
+}
+
+/**
+ * Keeps the highlighting of a previewed file in line with the content search
+ * of the app state. Only a change of the search is acted on, so the term the
+ * host passes along with a preview stays until the search itself changes.
+ */
+function followContentSearch(editor: Editor): void {
+  let seen: SearchQuery | null = null;
+  appState.subscribe((s) => {
+    const next: SearchQuery = {
+      term: s.content_search_query,
+      matchCase: s.config.case_sensitive_search,
+    };
+    const changed =
+      seen !== null &&
+      (seen.term !== next.term || seen.matchCase !== next.matchCase);
+    seen = next;
+    if (changed && highlightQuery) setSearchHighlight(editor, next);
+  });
+}
+
+/* ------------------------------ Editor instance ---------------------------- */
+
+async function createEditor(): Promise<Editor> {
+  const ns = await loadMonaco();
+  monaco = ns;
+
+  const editor = ns.editor.create(elements.editorContainer, {
     value: "// Select a directory to begin.",
     language: "plaintext",
-    theme: get(theme) === "light" ? "vs" : "vs-dark",
+    theme: monacoTheme(get(theme)),
     readOnly: true,
+    // Tab leaves an editor that cannot be typed in (no keyboard trap); in the
+    // editable output it indents, and Ctrl+M (Mac: Ctrl+Shift+M) switches.
+    tabFocusMode: true,
     automaticLayout: true,
     wordWrap: "on",
     stickyScroll: { enabled: true },
@@ -126,20 +153,34 @@ async function ensureEditor(): Promise<void> {
     formatOnPaste: true,
     smoothScrolling: true,
   });
-  editorInstance.set(ed);
+  editorInstance.set(editor);
 
   // Live switch Monaco when app theme toggles.
-  if (!themeUnsub) {
-    themeUnsub = theme.subscribe((t) => {
-      try {
-        monaco!.editor.setTheme(t === "light" ? "vs" : "vs-dark");
-      } catch {
-        /* noop */
-      }
-    });
-  }
+  theme.subscribe((t) => {
+    try {
+      ns.editor.setTheme(monacoTheme(t));
+    } catch {
+      /* noop */
+    }
+  });
+  followContentSearch(editor);
 
   layoutEditorSoon();
+  return editor;
+}
+
+/**
+ * The editor, created on first use. The creation is memoized as a promise, so
+ * callers that arrive while Monaco is still loading share one editor instead
+ * of each creating their own in the same container. A failed creation is not
+ * kept: the next caller tries again.
+ */
+function ensureEditor(): Promise<Editor> {
+  editorReady ??= createEditor().catch((err: unknown) => {
+    editorReady = null;
+    throw err;
+  });
+  return editorReady;
 }
 
 /** Public init hook kept for compatibility (now just ensures the editor). */
@@ -183,62 +224,34 @@ function resolveMonacoLanguage(hint: string | null | undefined, path: string) {
   return "plaintext";
 }
 
+function setLanguage(editor: Editor, language: string): void {
+  const model = editor.getModel();
+  if (model && monaco) monaco.editor.setModelLanguage(model, language);
+}
+
 export async function showPreviewContent(
   content: string,
   language: string,
   searchTerm: string,
-  path: string
+  path: string,
 ): Promise<void> {
-  await ensureEditor();
-  const editor = get(editorInstance);
-  if (!editor) return;
-
-  if (contentChangeListener) {
-    contentChangeListener.dispose();
-    contentChangeListener = null;
-  }
+  const editor = await ensureEditor();
 
   previewedPath.set(path);
 
   editor.setValue(content);
-  const model = editor.getModel();
+  // Normalize language (enables .svelte → html highlighting)
+  setLanguage(editor, resolveMonacoLanguage(language, path));
+  setSearchHighlight(editor, {
+    term: searchTerm,
+    matchCase: getState().config.case_sensitive_search,
+  });
 
-  if (model && monaco) {
-    // Normalize language (enables .svelte → html highlighting)
-    const lang = resolveMonacoLanguage(language, path);
-    monaco.editor.setModelLanguage(model, lang);
-
-    let newDecorations: MonacoTypes.editor.IModelDeltaDecoration[] = [];
-    if (searchTerm && searchTerm.trim() !== "") {
-      const matchCase = getState().config.case_sensitive_search;
-      const matches = model.findMatches(
-        searchTerm,
-        true,
-        false,
-        matchCase,
-        null,
-        true
-      );
-      newDecorations = matches.map((match) => ({
-        range: match.range,
-        options: {
-          inlineClassName: "search-highlight",
-          hoverMessage: { value: "Search match" },
-        },
-      }));
-    }
-    const currentDecorations = get(editorDecorations);
-    const newCurrentDecorations = editor.deltaDecorations(
-      currentDecorations,
-      newDecorations
-    );
-    editorDecorations.set(newCurrentDecorations);
-  }
-
-  editor.updateOptions({ readOnly: true });
+  editor.updateOptions({ readOnly: true, tabFocusMode: true });
   editor.setPosition({ lineNumber: 1, column: 1 });
   editor.revealLine(1);
 
+  shownDocument = null;
   previewMode.set("file");
   generatedTokenCount.set(null);
 
@@ -247,23 +260,25 @@ export async function showPreviewContent(
 
 export async function showGeneratedContent(
   content: string,
-  tokenCount: number
+  tokenCount: number,
+  documentId: number,
 ): Promise<void> {
-  await ensureEditor();
-  const editor = get(editorInstance);
-  if (!editor) return;
-
-  if (contentChangeListener) {
-    contentChangeListener.dispose();
-    contentChangeListener = null;
-  }
+  const editor = await ensureEditor();
 
   previewedPath.set(null);
   editor.setValue(content);
-  editorDecorations.set(editor.deltaDecorations(get(editorDecorations), []));
+  setSearchHighlight(editor, null);
+  setLanguage(editor, "plaintext");
+  editor.updateOptions({ readOnly: false, tabFocusMode: false });
+
   const model = editor.getModel();
-  if (model && monaco) monaco.editor.setModelLanguage(model, "plaintext");
-  editor.updateOptions({ readOnly: false });
+  shownDocument = model
+    ? {
+        id: documentId,
+        text: content,
+        versionId: model.getAlternativeVersionId(),
+      }
+    : null;
 
   // State for UI
   previewMode.set("generated");
@@ -272,18 +287,98 @@ export async function showGeneratedContent(
   layoutEditorSoon();
 }
 
+/**
+ * What a save of the editor's content has to send to the host, or `null` if
+ * there is no editor yet.
+ *
+ * The host keeps the document it has generated, so an output that is saved as
+ * it was shown is only named (`generated`); its text does not cross the IPC
+ * boundary a second time. Only an output the user has changed is sent
+ * (`edited`). Whether it was changed is told by the version of the editor's
+ * text: Monaco's alternative version id changes with every edit and returns
+ * to its earlier value when the edits are undone, so an output that was
+ * edited and restored with undo counts as unchanged.
+ */
+export function outputToSave(): SaveFilePayload | null {
+  const editor = get(editorInstance);
+  if (!editor) return null;
+
+  const unchanged = unchangedDocument();
+  if (unchanged) return { kind: "generated", documentId: unchanged.id };
+  return { kind: "edited", content: editor.getValue() };
+}
+
+/**
+ * The save of a generated document that the host has not answered yet: the id
+ * it was named by and the text the editor showed when it was sent.
+ */
+let pendingSave: { id: number; text: string } | null = null;
+
+/**
+ * Saves what the editor shows (see {@link outputToSave}).
+ *
+ * A save names the document the editor shows *now*, and the host may have
+ * given that document up a moment ago: a later generation has finished and
+ * replaced it, or a file preview has taken its place, and the event that says
+ * so is still on its way to the UI. The host then answers
+ * `document_unavailable` instead of saving. The user pressed Save on an output
+ * they were looking at, so the text of that output is remembered here until
+ * the save is answered (a reference, not a copy), and
+ * {@link retrySaveOfUnavailableDocument} sends it once as an edited text.
+ * In the normal path the text does not cross the IPC boundary a second time.
+ */
+export function saveOutput(): void {
+  const output = outputToSave();
+  if (!output) return;
+  const shown = output.kind === "generated" ? unchangedDocument() : null;
+  pendingSave = shown ? { id: shown.id, text: shown.text } : null;
+  post("saveFile", output);
+}
+
+/**
+ * The host does not hold the document `documentId` a save has named. If that
+ * is the save sent last, it is repeated with the text the editor showed when
+ * it was sent; returns whether it was. The repeated save carries its text, so
+ * it cannot be answered this way again: there is one retry.
+ */
+export function retrySaveOfUnavailableDocument(documentId: number): boolean {
+  const pending = pendingSave;
+  pendingSave = null;
+  if (!pending || pending.id !== documentId) return false;
+  post("saveFile", { kind: "edited", content: pending.text });
+  return true;
+}
+
+/** A save has been answered for good: its text is not needed any more. */
+export function saveSettled(): void {
+  pendingSave = null;
+}
+
+/**
+ * The text of the generated output exactly as the host produced it, or `null`
+ * if the editor shows something else or the user has changed it (by the same
+ * rule as {@link outputToSave}).
+ *
+ * This is what a copy of the whole output puts on the clipboard, so that it is
+ * the text a save writes, line ends included. Once the output has been edited,
+ * the editor's value is the one text there is, for copying and for saving.
+ */
+export function unchangedOutput(): string | null {
+  return unchangedDocument()?.text ?? null;
+}
+
 export function clearPreview() {
   post("clearPreviewState");
   previewedPath.set(null);
+  shownDocument = null;
 
   const editor = get(editorInstance);
   if (!editor) return;
 
   editor.setValue("// Preview cleared.");
-  editorDecorations.set(editor.deltaDecorations(get(editorDecorations), []));
-  editor.updateOptions({ readOnly: true });
-  const model = editor.getModel();
-  if (model && monaco) monaco.editor.setModelLanguage(model, "plaintext");
+  setSearchHighlight(editor, null);
+  editor.updateOptions({ readOnly: true, tabFocusMode: true });
+  setLanguage(editor, "plaintext");
 
   previewMode.set("idle");
   generatedTokenCount.set(null);

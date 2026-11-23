@@ -11,8 +11,7 @@ export type MsgParams = Record<string, unknown>;
 
 /** A message can be a raw string or a formatter function. */
 export type MessageValue<P extends MsgParams = MsgParams> =
-  | string
-  | ((params: P) => string);
+  string | ((params: P) => string);
 
 /** Dictionary of translation messages for a single locale. */
 export type Messages = Record<string, MessageValue>;
@@ -72,7 +71,7 @@ function interpolate(template: string, params?: MsgParams): string {
 export function translate(
   key: string,
   params?: MsgParams,
-  locale?: string
+  locale?: string,
 ): string {
   const loc = locale ?? getLocale();
   const dict = registry[loc] ?? registry["en"];
@@ -92,7 +91,7 @@ export const locale: Readable<Locale> = {
 /** Svelte-friendly translator store */
 export const t: Readable<(key: string, params?: MsgParams) => string> = derived(
   localeStore,
-  ($loc) => (key: string, params?: MsgParams) => translate(key, params, $loc)
+  ($loc) => (key: string, params?: MsgParams) => translate(key, params, $loc),
 );
 
 /* ----------------------------------------------------------------------------
@@ -195,11 +194,90 @@ register("en", {
   "toast.paste_empty": "Clipboard is empty",
   "toast.cut_ok": "Cut to clipboard",
   "toast.cut_failed": "Cut failed",
+  "toast.pasted_editor": "Pasted into editor",
+  "toast.paste_unsupported": "Paste not supported here",
+  "clipboard.copiedInput": "✓ Copied text from input field.",
+  "clipboard.copiedEditorAll": "✓ Copied entire editor content.",
+  "clipboard.copiedEditorSelection": "✓ Copied selected text from editor.",
+  "clipboard.copyFailed": "✗ Failed to copy to clipboard.",
+  "clipboard.pasted": "✓ Content pasted.",
+  "clipboard.pasteFailed": "✗ Paste failed or clipboard empty.",
+  "clipboard.pasteCancelled": "Status: Paste cancelled.",
+  "clipboard.pasteEmpty": "Status: Clipboard is empty.",
+  "clipboard.pasteUnsupported": "✗ Paste not supported here.",
+  "clipboard.cutOk": "✓ Text cut to clipboard.",
+  "clipboard.cutFailed": "✗ Cut failed.",
+  "clipboard.pastePrompt":
+    "Could not access clipboard. Please paste your text here:",
   "status.ready": "Status: Ready.",
   "status.save_cancelled": "Status: Save cancelled.",
   "status.saved_to": "Status: Saved to {path}",
   "error.save_failed": "Error: Failed to save file.",
   "error.render_failed": "Error: Failed to render state.",
+
+  // ===== Keys used by components / IPC handlers =====
+  "action.rescan": "Re-Scan",
+  "sidebar.scanning": "Scanning...",
+  "filetree.cancel": "Cancel",
+  "filetree.emptyDir": "No files found in this directory.",
+  "filetree.noMatch": "No files found matching filters.",
+  "filetree.stats.visible": "Visible",
+  "aria.scanProgress": "Scan progress",
+  "aria.generatingPreview": "Generating preview",
+  "status.indexing": "Indexing...",
+  "toast.fileSaved": "File saved",
+  "toast.saveCancelled": "Save cancelled",
+  "toast.saveFailed": "Failed to save file",
+  "toast.outputUnavailable":
+    "The generated output is no longer available. Generate it again.",
+  "toast.editorLoadFailed":
+    "The editor could not be loaded, so the content cannot be shown. Try again.",
+  "scan.cancelTitle": "Cancel the scan",
+  "toast.outputLargeTitle": "Large output",
+  "toast.outputLarge":
+    "About {size} are being generated (more than {limit}). Showing the output will take a moment.",
+  "toast.outputTooLargeTitle": "Output too large",
+  "toast.outputTooLarge":
+    "The selection would produce about {size}; the limit is {limit}. Select fewer files.",
+  "toast.ignoreRefusedTitle": "Not ignored",
+  "toast.ignoreRefusedWhitespace":
+    "No ignore pattern can name \u201c{name}\u201d: the name ends with a whitespace character that a pattern drops. Nothing was added. Rename the file, or ignore its folder.",
+  "toast.ignoreRefusedNotUnicode":
+    "No ignore pattern can name \u201c{name}\u201d: the name is not valid Unicode. Nothing was added. Rename the entry, or ignore its folder.",
+  "toast.renderFailed": "An error occurred",
+  "toast.errorTitle": "Error",
+  "preview.copied": "Copied!",
+  "preview.copyFailed": "Failed",
+  "preview.searchMatch": "Search match",
+  "scan.starting": "Starting scan...",
+  "scan.filesScanned": "Files scanned: {count}",
+  "scan.largeFilesSkipped": "Large files skipped: {count}",
+
+  // ===== Names of controls and regions (screen readers, tooltips) =====
+  "app.title": "CFC – Context File Concatenator",
+  "aria.projectFiles": "Project files",
+  "aria.expandDirectory": "Expand {name}",
+  "aria.collapseDirectory": "Collapse {name}",
+  "aria.toggleDirectorySelection": "Toggle directory selection",
+  "aria.toggleFileSelection": "Toggle file selection",
+  "aria.ignoreDirectory": "Add directory to ignore patterns",
+  "aria.ignoreFile": "Add file to ignore patterns",
+  "aria.removePattern": "Remove pattern {pattern}",
+  "aria.notifications": "Notifications",
+  "aria.dismissNotification": "Dismiss notification",
+  "filetree.ignoreDirectoryTitle":
+    "Add this directory to ignore patterns ({key})",
+  "filetree.ignoreFileTitle": "Add this file to ignore patterns ({key})",
+  // Forward delete. On a Mac the key labelled "delete" is Backspace.
+  "key.delete": "Delete",
+  "key.deleteMac": "fn+⌫",
+  "sidebar.rescanRecommended": "Re-scan recommended after removing patterns",
+  "sidebar.addCommonPattern": 'Click to add "{pattern}" to ignore patterns',
+  "sidebar.patternActive":
+    "This pattern was active and matched one or more files/directories.",
+  "theme.switchToDark": "Switch to dark mode",
+  "theme.switchToLight": "Switch to light mode",
+  "locale.current": "Language: English",
 });
 
 register("de", {
@@ -298,9 +376,92 @@ register("de", {
   "toast.paste_empty": "Zwischenablage ist leer",
   "toast.cut_ok": "Inhalt ausgeschnitten",
   "toast.cut_failed": "Ausschneiden fehlgeschlagen",
+  "toast.pasted_editor": "In den Editor eingefügt",
+  "toast.paste_unsupported": "Einfügen ist hier nicht möglich",
+  "clipboard.copiedInput": "✓ Text aus dem Eingabefeld kopiert.",
+  "clipboard.copiedEditorAll": "✓ Gesamten Editorinhalt kopiert.",
+  "clipboard.copiedEditorSelection":
+    "✓ Markierten Text aus dem Editor kopiert.",
+  "clipboard.copyFailed": "✗ Kopieren in die Zwischenablage fehlgeschlagen.",
+  "clipboard.pasted": "✓ Inhalt eingefügt.",
+  "clipboard.pasteFailed":
+    "✗ Einfügen fehlgeschlagen oder Zwischenablage leer.",
+  "clipboard.pasteCancelled": "Status: Einfügen abgebrochen.",
+  "clipboard.pasteEmpty": "Status: Zwischenablage ist leer.",
+  "clipboard.pasteUnsupported": "✗ Einfügen ist hier nicht möglich.",
+  "clipboard.cutOk": "✓ Text in die Zwischenablage ausgeschnitten.",
+  "clipboard.cutFailed": "✗ Ausschneiden fehlgeschlagen.",
+  "clipboard.pastePrompt":
+    "Kein Zugriff auf die Zwischenablage. Bitte den Text hier einfügen:",
   "status.ready": "Status: Bereit.",
   "status.save_cancelled": "Status: Speichern abgebrochen.",
   "status.saved_to": "Status: Gespeichert unter {path}",
   "error.save_failed": "Fehler: Datei konnte nicht gespeichert werden.",
   "error.render_failed": "Fehler: Rendering des Zustands fehlgeschlagen.",
+
+  // ===== Keys used by components / IPC handlers =====
+  "action.rescan": "Neu scannen",
+  "sidebar.scanning": "Scanne...",
+  "filetree.cancel": "Abbrechen",
+  "filetree.emptyDir": "Keine Dateien in diesem Verzeichnis gefunden.",
+  "filetree.noMatch": "Keine Dateien für die Filter gefunden.",
+  "filetree.stats.visible": "Sichtbar",
+  "aria.scanProgress": "Scan-Fortschritt",
+  "aria.generatingPreview": "Vorschau wird erzeugt",
+  "status.indexing": "Indexiere...",
+  "toast.fileSaved": "Datei gespeichert",
+  "toast.saveCancelled": "Speichern abgebrochen",
+  "toast.saveFailed": "Datei konnte nicht gespeichert werden",
+  "toast.outputUnavailable":
+    "Die erzeugte Ausgabe ist nicht mehr verfügbar. Bitte erneut erzeugen.",
+  "toast.editorLoadFailed":
+    "Der Editor konnte nicht geladen werden, der Inhalt kann nicht angezeigt werden. Bitte erneut versuchen.",
+  "scan.cancelTitle": "Scan abbrechen",
+  "toast.outputLargeTitle": "Große Ausgabe",
+  "toast.outputLarge":
+    "Es werden etwa {size} erzeugt (mehr als {limit}). Die Anzeige der Ausgabe dauert einen Moment.",
+  "toast.outputTooLargeTitle": "Ausgabe zu groß",
+  "toast.outputTooLarge":
+    "Die Auswahl ergäbe etwa {size}; die Grenze liegt bei {limit}. Wähle weniger Dateien aus.",
+  "toast.ignoreRefusedTitle": "Nicht ignoriert",
+  "toast.ignoreRefusedWhitespace":
+    "Kein Ignore-Muster kann \u201e{name}\u201c benennen: Der Name endet mit einem Leerraumzeichen, das ein Muster verwirft. Es wurde nichts hinzugefügt. Benenne die Datei um oder ignoriere ihren Ordner.",
+  "toast.ignoreRefusedNotUnicode":
+    "Kein Ignore-Muster kann \u201e{name}\u201c benennen: Der Name ist kein gültiges Unicode. Es wurde nichts hinzugefügt. Benenne den Eintrag um oder ignoriere seinen Ordner.",
+  "toast.renderFailed": "Ein Fehler ist aufgetreten",
+  "toast.errorTitle": "Fehler",
+  "preview.copied": "Kopiert!",
+  "preview.copyFailed": "Fehlgeschlagen",
+  "preview.searchMatch": "Suchtreffer",
+  "scan.starting": "Scan wird gestartet...",
+  "scan.filesScanned": "Gescannte Dateien: {count}",
+  "scan.largeFilesSkipped": "Große Dateien übersprungen: {count}",
+
+  // ===== Names of controls and regions (screen readers, tooltips) =====
+  "app.title": "CFC – Context File Concatenator",
+  "aria.projectFiles": "Projektdateien",
+  "aria.expandDirectory": "{name} aufklappen",
+  "aria.collapseDirectory": "{name} einklappen",
+  "aria.toggleDirectorySelection": "Verzeichnisauswahl umschalten",
+  "aria.toggleFileSelection": "Dateiauswahl umschalten",
+  "aria.ignoreDirectory": "Verzeichnis zu den Ignore-Mustern hinzufügen",
+  "aria.ignoreFile": "Datei zu den Ignore-Mustern hinzufügen",
+  "aria.removePattern": "Muster {pattern} entfernen",
+  "aria.notifications": "Benachrichtigungen",
+  "aria.dismissNotification": "Benachrichtigung schließen",
+  "filetree.ignoreDirectoryTitle":
+    "Dieses Verzeichnis zu den Ignore-Mustern hinzufügen ({key})",
+  "filetree.ignoreFileTitle":
+    "Diese Datei zu den Ignore-Mustern hinzufügen ({key})",
+  "key.delete": "Entf",
+  "key.deleteMac": "fn+⌫",
+  "sidebar.rescanRecommended":
+    "Nach dem Entfernen von Mustern wird ein erneuter Scan empfohlen",
+  "sidebar.addCommonPattern":
+    'Klicken, um "{pattern}" zu den Ignore-Mustern hinzuzufügen',
+  "sidebar.patternActive":
+    "Dieses Muster war aktiv und traf auf mindestens eine Datei oder ein Verzeichnis zu.",
+  "theme.switchToDark": "Zum dunklen Design wechseln",
+  "theme.switchToLight": "Zum hellen Design wechseln",
+  "locale.current": "Sprache: Deutsch",
 });

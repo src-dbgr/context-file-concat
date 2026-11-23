@@ -1,6 +1,13 @@
 /* @vitest-environment jsdom */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// The generated output as the host sent it, while the editor shows it unchanged.
+const { unchangedOutput } = vi.hoisted(() => ({
+  unchangedOutput: vi.fn<() => string | null>(() => null),
+}));
+vi.mock("$lib/modules/editor", () => ({ unchangedOutput }));
+
 import { handleCopy, handlePaste, handleCut } from "$lib/modules/clipboard";
 import { editorInstance } from "$lib/stores/app";
 import type { FocusContext } from "$lib/types";
@@ -11,17 +18,19 @@ type ExecuteEditsFn = (src: string, edits: Edit[]) => void;
 
 type FakeSelection = {
   isEmpty: () => boolean;
+  equalsRange?: (range: unknown) => boolean;
 };
 type FakeModel = {
   getValue: () => string;
   getValueInRange: (_sel: FakeSelection) => string;
+  getFullModelRange?: () => unknown;
 };
 type FakeEditor = {
   getModel: () => FakeModel;
   getSelection: () => FakeSelection;
   executeEdits: (
     src: string,
-    edits: Array<{ range: FakeSelection; text: string }>
+    edits: Array<{ range: FakeSelection; text: string }>,
   ) => void;
 };
 
@@ -46,17 +55,23 @@ function ctxEditor(): FocusContext {
 function setupEditor({
   content,
   selectionText,
+  selectsEverything = false,
 }: {
   content: string;
   selectionText: string | null;
+  /** The selection reaches from the start of the text to its end. */
+  selectsEverything?: boolean;
 }) {
+  const fullRange = { full: true };
   const model: FakeModel = {
     getValue: () => content,
     getValueInRange: () => selectionText ?? "",
+    getFullModelRange: () => fullRange,
   };
 
   const selection: FakeSelection = {
     isEmpty: () => selectionText === null,
+    equalsRange: (range) => selectsEverything && range === fullRange,
   };
 
   // Strictly typed spy for later call inspection
@@ -100,6 +115,69 @@ describe("clipboard.* – editor-focused paths", () => {
     vi.useFakeTimers();
     document.body.innerHTML = "";
     makeStatusAndCopyBtn();
+    unchangedOutput.mockReset();
+    unchangedOutput.mockReturnValue(null);
+  });
+
+  describe("copy of a generated output", () => {
+    // The host's text has the line ends of its files; the editor's value has
+    // one kind of line end throughout.
+    const HOST = "a.txt\r\nline\r\nb.txt\nline\n";
+    const EDITOR = "a.txt\nline\nb.txt\nline\n";
+
+    it("copies the text of the host while the output is unchanged", async () => {
+      const clip = mockClipboard({ writeOk: true });
+      unchangedOutput.mockReturnValue(HOST);
+      setupEditor({ content: EDITOR, selectionText: null });
+
+      await handleCopy(ctxEditor());
+
+      expect(clip.writeText).toHaveBeenCalledWith(HOST);
+    });
+
+    it("does so as well when everything is selected", async () => {
+      const clip = mockClipboard({ writeOk: true });
+      unchangedOutput.mockReturnValue(HOST);
+      setupEditor({
+        content: EDITOR,
+        selectionText: EDITOR,
+        selectsEverything: true,
+      });
+
+      await handleCopy(ctxEditor());
+
+      expect(clip.writeText).toHaveBeenCalledWith(HOST);
+    });
+
+    it("copies a part of the output from the editor", async () => {
+      const clip = mockClipboard({ writeOk: true });
+      unchangedOutput.mockReturnValue(HOST);
+      setupEditor({ content: EDITOR, selectionText: "line" });
+
+      await handleCopy(ctxEditor());
+
+      expect(clip.writeText).toHaveBeenCalledWith("line");
+    });
+
+    it("copies the editor's text once the output has been edited", async () => {
+      const clip = mockClipboard({ writeOk: true });
+      unchangedOutput.mockReturnValue(null);
+      setupEditor({ content: EDITOR + "note", selectionText: null });
+
+      await handleCopy(ctxEditor());
+
+      expect(clip.writeText).toHaveBeenCalledWith(EDITOR + "note");
+    });
+
+    it("copies an empty output as nothing, not as the editor's text", async () => {
+      const clip = mockClipboard({ writeOk: true });
+      unchangedOutput.mockReturnValue("");
+      setupEditor({ content: "stale", selectionText: null });
+
+      await handleCopy(ctxEditor());
+
+      expect(clip.writeText).not.toHaveBeenCalled();
+    });
   });
 
   it("handleCopy copies selected range when editor has selection; otherwise full model", async () => {

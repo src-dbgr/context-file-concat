@@ -52,7 +52,7 @@ if (hasDOM) {
   if (typeof HTMLElement !== "undefined" && !HTMLElement.prototype.scrollTo) {
     HTMLElement.prototype.scrollTo = function (
       x?: number | ScrollToOptions,
-      _y?: number
+      _y?: number,
     ): void {
       if (
         typeof x === "object" &&

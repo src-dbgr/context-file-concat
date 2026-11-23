@@ -9,8 +9,8 @@ CFC (Context File Concatenator) is a desktop application designed to intelligent
 ## Key Features
 
 - **High-Performance Scanning**: Engineered for speed, CFC handles large repositories with ease.
-  - **Proactive Scanning**: An initial, shallow scan provides immediate UI feedback, while a full scan continues indexing in the background.
-  - **Lazy Loading**: Directory contents are loaded on-demand as you expand them, eliminating long initial wait times.
+  - **Proactive Scanning**: An initial, shallow scan provides immediate UI feedback, while a full scan continues indexing in the background and fills the tree as it goes.
+  - **Lazy Loading**: Directory contents are loaded on-demand as you expand them, also while the full scan is still running, eliminating long initial wait times.
   - **UI Virtualization**: The file tree uses virtual scrolling to ensure the UI remains smooth and responsive, even with tens of thousands of files.
 - **Directory Selection**: Easily select a project directory using a native file dialog or by dragging and dropping it into the application.
 - **Interactive File Tree**: View your project structure in a familiar tree view. Select or deselect individual files or entire directories.
@@ -24,8 +24,9 @@ CFC (Context File Concatenator) is a desktop application designed to intelligent
   - Click the ignore button next to any file or folder in the tree to ignore it instantly.
 - **Syntax Highlighting**: Preview individual files or the final concatenated output with syntax highlighting in a built-in Monaco editor.
 - **Configuration Management**:
-  - Import and export your settings (including ignore patterns) as a JSON file to share configurations across projects or teams.
+  - Import and export your settings (including ignore patterns) as a JSON file to share configurations across projects or teams. An exported file holds settings only: no directory of your machine and no window geometry.
   - Window size, position, and other settings are automatically saved between sessions.
+  - Set the environment variable `CFC_CONFIG_DIR` to use a different directory for `config.json` (and `window.json`, the window geometry) instead of the platform default (useful for separate profiles; the test suite only ever writes config files in temporary directories).
 - **Customizable Output**:
   - Choose to include an ASCII directory tree at the start of the output file.
   - Use relative or absolute file paths in the output headers.
@@ -119,6 +120,13 @@ CFC is built on a modern hybrid architecture, combining a high-performance **Rus
 
 The design emphasizes key principles like **Separation of Concerns**, **Unidirectional Data Flow**, and **Performance by Design**. Heavy I/O operations are handled asynchronously in Rust to ensure a non-blocking UI, while the frontend uses virtualization to render tens of thousands of files with ease.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/architecture-dark.svg">
+  <img src="./docs/assets/architecture-light.svg" width="880" alt="Architecture of CFC: the Svelte UI in the system WebView sends typed commands over IPC to the Rust host. Command dispatch updates the central app state and starts background tasks for scanning, search and output generation; the tasks call the core (scanner, ignore rules, search, output, token count), which reads the project folder, and write their results into the app state. The host answers with full state snapshots that the UI renders. Settings are kept in config.json.">
+</picture>
+
+The UI never asks the host a question and waits for the answer: it sends a command, and the host replies with a complete snapshot of its state, which the UI renders. Commands update the app state directly or start a background task that calls the core and writes its results back. Solid arrows are commands, calls and data, the dashed arrow is the snapshot on its way to the UI.
+
 For a deep dive into the system's structure, data flows, IPC contracts, and development patterns, please see our comprehensive **[Developer Documentation](./docs/README.md)**.
 
 ---
@@ -127,7 +135,7 @@ For a deep dive into the system's structure, data flows, IPC contracts, and deve
 
 - **Unit Tests**: The `core` logic is tested with unit tests to ensure the correctness of individual components.
 - **Integration Tests**: Key application workflows are covered by integration tests that validate the interaction between the `app` and `core` layers without requiring a live UI.
-- **Continuous Integration (CI)**: A GitHub Actions workflow automatically runs `cargo fmt` (formatter), `cargo clippy` (linter), and `cargo test` on every push and pull request to maintain code quality and prevent regressions.
+- **Continuous Integration (CI)**: GitHub Actions run on every push and pull request to `main`. The Rust job (`cargo fmt`, `cargo clippy --all-targets`, `cargo test`) runs on Linux, macOS and Windows; the UI job runs Prettier, ESLint, the type check, the unit and IPC contract tests, the build, the bundle budgets and the Playwright end-to-end tests in Chromium and WebKit; one release build embeds the fresh bundle, and a `cargo check` with the minimum supported Rust version (1.88) keeps `rust-version` honest. A separate workflow checks the dependencies against the RustSec and npm advisory databases (`cargo audit`, `npm run audit:deps`).
 
 ---
 
@@ -144,24 +152,26 @@ To build and run the application locally, you need [Node.js/npm](https://nodejs.
     ```
 
 2.  **Build the Frontend Bundle:**
-    This command uses `esbuild` to bundle all JavaScript modules into a single file.
+    This command uses Vite to bundle the UI into `src/ui/dist`, which release builds embed into the binary.
 
     ```bash
     npm run build
     ```
 
-    For development, `npm run watch` will automatically rebuild on file changes.
+    For development, `npm run dev` starts the Vite dev server together with a debug build of the app, which loads the UI from it (hot reload).
 
 3.  **Run the Rust Application:**
-    Navigate back to the project root and use Cargo to build and run the app.
+    Navigate back to the project root and use Cargo to build and run the app. A release build serves the embedded bundle; a debug build (`cargo run`) expects the Vite dev server instead.
 
     ```bash
     cd ../..
-    cargo run
+    cargo run --release
     ```
 
-4.  **Run Tests:** To run the full suite of unit and integration tests, use:
+4.  **Run Tests:** To run the Rust unit and integration tests, use:
 
     ```bash
     cargo test
     ```
+
+    The UI tests live in `src/ui` (`npm test`, `npm run test:contracts`, `npm run test:e2e`). The end-to-end tests run in Chromium and WebKit; install both once with `npx playwright install chromium webkit`, or run a single engine with `npm run test:e2e -- --project=chromium`. The suite starts its own preview server on port 4173; set `E2E_PORT` to use another port, e.g. when two checkouts run the suite at the same time.

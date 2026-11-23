@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="952" viewBox="0 0 1600 952" role="img" aria-labelledby="t d">
+<title id="t">CFC architecture</title>
+<desc id="d">The Svelte UI in the system WebView sends typed commands over IPC to the Rust host. Command dispatch updates the central app state and starts background tasks for scanning, search and output generation; the tasks call the core (scanner, ignore rules, search, output, token count), which reads the project folder, and write their results into the app state. The host answers with full state snapshots that the UI renders. Settings are kept in config.json.</desc>
+<style>
+text{font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;}
+.t{font-size:30px;font-weight:600;fill:#E6EDF3;}
+.s{font-size:22px;fill:#9DA7B3;}
+.l{font-size:21px;fill:#E6EDF3;}
+.la{font-size:21px;font-weight:600;fill:#3CC8D4;}
+.r{font-size:19px;font-weight:600;letter-spacing:1.6px;fill:#9DA7B3;}
+.m{font-family:ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;font-size:19px;fill:#9DA7B3;}
+.b{fill:#161B22;stroke:#4A5461;stroke-width:2;}
+.bs{fill:#0E2A30;stroke:#3CC8D4;stroke-width:3;}
+.bd{fill:#0D1117;stroke:#4A5461;stroke-width:2;}
+.rail{fill:#39424E;}
+.k{stroke:#B4BECA;stroke-width:2.5;fill:none;}
+.ka{stroke:#3CC8D4;stroke-width:2.5;fill:none;stroke-dasharray:10 7;}
+.h{fill:#B4BECA;}
+.ha{fill:#3CC8D4;}
+</style>
+<rect width="1600" height="952" fill="#0D1117"/>
+<g id="rail">
+<rect class="rail" x="48" y="56" width="4" height="120" rx="2"/>
+<text class="r" x="68" y="78">WEBVIEW</text>
+<text class="m" x="68" y="106">src/ui</text>
+<text class="r" x="68" y="253">IPC</text>
+<rect class="rail" x="48" y="316" width="4" height="580" rx="2"/>
+<text class="r" x="68" y="338">RUST HOST</text>
+<text class="m" x="68" y="366">src/app</text>
+<text class="m" x="68" y="798">src/core</text>
+<text class="r" x="1220" y="296">ON DISK</text>
+</g>
+<g id="boxes">
+<rect id="ui" class="b" x="220" y="56" width="840" height="120" rx="10"/>
+<text class="t" data-in="ui" x="248" y="109">Svelte UI</text>
+<text class="s" data-in="ui" x="248" y="146">Runs in the system WebView and renders the latest snapshot</text>
+<rect id="disp" class="b" x="220" y="316" width="390" height="120" rx="10"/>
+<text class="t" data-in="disp" x="248" y="369">Command dispatch</text>
+<text class="s" data-in="disp" x="248" y="406">Parses and runs typed commands</text>
+<rect id="state" class="bs" x="670" y="316" width="390" height="120" rx="10"/>
+<text class="t" data-in="state" x="698" y="369">App state</text>
+<text class="s" data-in="state" x="698" y="406">The single source of truth</text>
+<rect id="tasks" class="b" x="220" y="546" width="840" height="120" rx="10"/>
+<text class="t" data-in="tasks" x="248" y="599">Background tasks</text>
+<text class="s" data-in="tasks" x="248" y="636">Scan, search and output generation run off the UI thread</text>
+<rect id="core" class="b" x="220" y="776" width="840" height="120" rx="10"/>
+<text class="t" data-in="core" x="248" y="829">Core</text>
+<text class="s" data-in="core" x="248" y="866">Scanner · Ignore rules · Search · Output · Token count</text>
+<rect id="cfg" class="bd" x="1220" y="316" width="332" height="120" rx="10"/>
+<text class="t" data-in="cfg" x="1248" y="369">Settings</text>
+<text class="s" data-in="cfg" x="1248" y="406">config.json</text>
+<rect id="proj" class="bd" x="1220" y="776" width="332" height="120" rx="10"/>
+<text class="t" data-in="proj" x="1248" y="829">Project folder</text>
+<text class="s" data-in="proj" x="1248" y="866">Scanned and read</text>
+</g>
+<g id="legend">
+<path class="k" d="M1281 96H1220"/>
+<polygon class="h" points="1296,96 1280,103 1280,89"/>
+<text class="l" x="1316" y="103">Command, call or data</text>
+<path class="ka" d="M1281 138H1220"/>
+<polygon class="ha" points="1296,138 1280,145 1280,131"/>
+<text class="l" x="1316" y="145">State snapshot</text>
+</g>
+<g id="arrows">
+<path id="a-cmd" class="k" data-seg="415 176 415 316" d="M415 176L415 301"/>
+<polygon class="h" points="415,316 408,300 422,300"/>
+<text class="l" data-for="a-cmd" x="435" y="253" text-anchor="start">commands</text>
+<path id="a-snap" class="ka" data-seg="865 316 865 176" d="M865 191L865 316"/>
+<polygon class="ha" points="865,176 872,192 858,192"/>
+<text class="la" data-for="a-snap" x="885" y="253" text-anchor="start">full state snapshots</text>
+<path id="a-upd" class="k" data-seg="610 376 670 376" d="M610 376L655 376"/>
+<polygon class="h" points="670,376 654,383 654,369"/>
+<path id="a-start" class="k" data-seg="415 436 415 546" d="M415 436L415 531"/>
+<polygon class="h" points="415,546 408,530 422,530"/>
+<text class="l" data-for="a-start" x="435" y="498" text-anchor="start">starts</text>
+<path id="a-res" class="k" data-seg="865 546 865 436" d="M865 546L865 451"/>
+<polygon class="h" points="865,436 872,452 858,452"/>
+<text class="l" data-for="a-res" x="885" y="498" text-anchor="start">results</text>
+<path id="a-call" class="k" data-seg="640 666 640 776" d="M640 666L640 761"/>
+<polygon class="h" points="640,776 633,760 647,760"/>
+<text class="l" data-for="a-call" x="660" y="728" text-anchor="start">calls</text>
+<path id="a-cfg" class="k" data-seg="1060 376 1220 376" d="M1075 376L1205 376"/>
+<polygon class="h" points="1220,376 1204,383 1204,369"/>
+<polygon class="h" points="1060,376 1076,369 1076,383"/>
+<text class="l" data-for="a-cfg" x="1140" y="358" text-anchor="middle">load / save</text>
+<path id="a-read" class="k" data-seg="1060 836 1220 836" d="M1060 836L1205 836"/>
+<polygon class="h" points="1220,836 1204,843 1204,829"/>
+<text class="l" data-for="a-read" x="1140" y="818" text-anchor="middle">reads</text>
+</g>
+</svg>

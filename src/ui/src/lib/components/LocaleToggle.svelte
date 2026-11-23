@@ -2,7 +2,13 @@
   // Minimal locale switcher (Svelte 5 Runes)
   // - Cycles through available locales (en ⇄ de)
   // - A11y: role="switch", keyboard Space/Enter
-  import { availableLocales, locale, setLocale, type Locale } from "$lib/i18n";
+  import {
+    availableLocales,
+    locale,
+    setLocale,
+    t,
+    type Locale,
+  } from "$lib/i18n";
 
   const locales = $derived(availableLocales());
   const current = $derived($locale);
@@ -25,9 +31,7 @@
     }
   }
 
-  const label = $derived(
-    current === "de" ? "Sprache: Deutsch" : "Language: English"
-  );
+  const label = $derived($t("locale.current"));
 </script>
 
 <button

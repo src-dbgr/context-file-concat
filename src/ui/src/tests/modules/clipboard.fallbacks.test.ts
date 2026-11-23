@@ -4,6 +4,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handleCopy, handlePaste, handleCut } from "$lib/modules/clipboard";
 import { editorInstance } from "$lib/stores/app";
 import { toast } from "$lib/stores/toast";
+import { copyFeedback } from "$lib/stores/preview";
+import { get } from "svelte/store";
 
 type FakeSelection = { isEmpty: () => boolean };
 type FakeModel = {
@@ -15,7 +17,7 @@ type FakeEditor = {
   getSelection: () => FakeSelection | null;
   executeEdits: (
     source: string,
-    edits: Array<{ range: FakeSelection; text: string }>
+    edits: Array<{ range: FakeSelection; text: string }>,
   ) => void;
 };
 
@@ -37,7 +39,7 @@ function ctx(
     activeEl: HTMLElement;
     isEditorFocused: boolean;
     isInNormalInputField: boolean;
-  }> = {}
+  }> = {},
 ) {
   return {
     activeEl: o.activeEl ?? document.body,
@@ -129,8 +131,7 @@ describe("clipboard – editor-focused paths", () => {
     expect(clip.writeText).toHaveBeenCalledWith("ALL");
   });
 
-  it("handleCopy (editor) updates copy button UI and resets after timeout", async () => {
-    const btn = ensureCopyBtn();
+  it("handleCopy (editor) flashes the copy feedback and resets after timeout", async () => {
     mockNavigatorClipboard();
 
     const sel: FakeSelection = { isEmpty: () => true };
@@ -147,13 +148,39 @@ describe("clipboard – editor-focused paths", () => {
 
     await handleCopy(ctx({ isEditorFocused: true }));
 
-    expect(btn.innerHTML.toLowerCase()).toContain("copied");
-    expect(btn.classList.contains("button-cta")).toBe(true);
+    // The button itself is rendered by PreviewPanel from this store.
+    expect(get(copyFeedback)).toBe("copied");
 
     vi.advanceTimersByTime(1100);
-    expect(btn.innerHTML.toLowerCase()).toContain("copy");
-    expect(btn.classList.contains("button-cta")).toBe(false);
-    expect(btn.classList.contains("button-cancel-action")).toBe(false);
+    expect(get(copyFeedback)).toBe("idle");
+  });
+
+  it("handleCopy (editor) flashes a failure when nothing could be copied", async () => {
+    mockNavigatorClipboard({ writeOk: false });
+    document.execCommand = vi.fn(() => false);
+    const ed: FakeEditor = {
+      getModel: () => ({ getValue: () => "ALL", getValueInRange: () => "" }),
+      getSelection: () => ({ isEmpty: () => true }),
+      executeEdits: vi.fn(),
+    };
+    setEditor(ed);
+
+    await handleCopy(ctx({ isEditorFocused: true }));
+    expect(get(copyFeedback)).toBe("failed");
+
+    vi.advanceTimersByTime(1100);
+    expect(get(copyFeedback)).toBe("idle");
+  });
+
+  it("handleCopy outside the editor leaves the copy button alone", async () => {
+    mockNavigatorClipboard();
+    const input = document.createElement("input");
+    input.value = "text";
+    document.body.appendChild(input);
+
+    await handleCopy(ctx({ activeEl: input, isInNormalInputField: true }));
+
+    expect(get(copyFeedback)).toBe("idle");
   });
 
   it("handlePaste (editor) – prompt fallback: cancel (null) → status + info toast", async () => {
@@ -237,7 +264,7 @@ describe("clipboard – other branches", () => {
   it("handleCopy with neither input nor editor → fails gracefully", async () => {
     mockNavigatorClipboard(); // not used because content is empty
     await handleCopy(
-      ctx({ isEditorFocused: false, isInNormalInputField: false })
+      ctx({ isEditorFocused: false, isInNormalInputField: false }),
     );
 
     const status = document.querySelector(".status-text") as HTMLElement;
@@ -248,7 +275,7 @@ describe("clipboard – other branches", () => {
   it("handlePaste when unsupported context → error toast + status", async () => {
     const errSpy = vi.spyOn(toast, "error").mockReturnValue(1);
     await handlePaste(
-      ctx({ isEditorFocused: false, isInNormalInputField: false })
+      ctx({ isEditorFocused: false, isInNormalInputField: false }),
     );
 
     const status = document.querySelector(".status-text") as HTMLElement;

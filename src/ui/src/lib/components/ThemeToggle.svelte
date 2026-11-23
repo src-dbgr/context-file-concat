@@ -6,10 +6,11 @@
    * - Fully accessible: role="switch", aria-checked, keyboard operable.
    */
   import { theme, toggleTheme } from "$lib/stores/theme";
+  import { t } from "$lib/i18n";
 
   const isLight = $derived($theme === "light");
   const label = $derived(
-    isLight ? "Switch to dark mode" : "Switch to light mode"
+    $t(isLight ? "theme.switchToDark" : "theme.switchToLight")
   );
 
   function onKey(e: KeyboardEvent) {

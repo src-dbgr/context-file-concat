@@ -4,53 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CFC - Context File Concatenator</title>
-    <script>
-      /* Early theme bootstrapping to avoid FOUC:
-         Set data-theme="light|dark" before CSS loads based on user preference. */
-      (function () {
-        try {
-          var key = "cfc-theme";
-          var stored = localStorage.getItem(key);
-          var t =
-            stored === "light" || stored === "dark"
-              ? stored
-              : window.matchMedia &&
-                  window.matchMedia("(prefers-color-scheme: dark)").matches
-                ? "dark"
-                : "light";
-          document.documentElement.setAttribute("data-theme", t);
-        } catch (e) {
-          // In case storage is blocked, default to dark to match existing visuals
-          document.documentElement.setAttribute("data-theme", "dark");
-        }
-      })();
-    </script>
+    <!-- Early theme bootstrapping to avoid FOUC. A file, not an inline script:
+         the content security policy of the release build allows none
+         (src/platform/csp.rs). -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
-    <div class="container" style="height: calc(100% - 30px)">
-      <aside id="sidebar-root" class="sidebar"></aside>
-
-      <main class="main-content">
-        <div class="sidebar-resize-handle-right" aria-hidden="true"></div>
-
-        <div id="header-root"></div>
-
-        <div class="content-splitter">
-          <div id="file-list-panel" class="file-list-panel">
-            <!-- Header/buttons/stats are rendered by FileTree.svelte -->
-            <div id="file-tree-container" class="file-tree-container"></div>
-          </div>
-
-          <div id="resizer" class="resizer"></div>
-
-          <div id="preview-panel" class="preview-panel"></div>
-        </div>
-
-        <footer id="footer-root" class="bottom-panel"></footer>
-      </main>
-    </div>
-
-    <div id="svelte-root"></div>
+    <!-- The layout is rendered by src/App.svelte, mounted into <body>. -->
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

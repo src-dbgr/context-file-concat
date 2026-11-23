@@ -91,4 +91,3 @@ test-results/
 blob-report/
 coverage/
 coverage-full/
-**/__snapshots__/**

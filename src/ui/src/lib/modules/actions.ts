@@ -1,12 +1,11 @@
 import { editorInstance } from "../stores/app.js";
 import type { FocusContext } from "../types.js";
 import { get } from "svelte/store";
-import * as monaco from "monaco-editor";
 
 function findWordBoundary(
   value: string,
   position: number,
-  direction: "forward" | "backward"
+  direction: "forward" | "backward",
 ): number {
   let i = position;
 
@@ -31,82 +30,117 @@ function findWordBoundary(
 
 export function moveWord(
   element: HTMLInputElement | HTMLTextAreaElement,
-  direction: "forward" | "backward"
+  direction: "forward" | "backward",
 ) {
   const newPos = findWordBoundary(
     element.value,
     element.selectionStart ?? 0,
-    direction
+    direction,
   );
   element.setSelectionRange(newPos, newPos);
 }
 
 export function selectWord(
   element: HTMLInputElement | HTMLTextAreaElement,
-  direction: "forward" | "backward"
+  direction: "forward" | "backward",
 ) {
   if (direction === "forward") {
     const newPos = findWordBoundary(
       element.value,
       element.selectionEnd ?? 0,
-      "forward"
+      "forward",
     );
     element.setSelectionRange(element.selectionStart, newPos);
   } else {
     const newPos = findWordBoundary(
       element.value,
       element.selectionStart ?? 0,
-      "backward"
+      "backward",
     );
     element.setSelectionRange(newPos, element.selectionEnd);
   }
 }
 
-export function deleteWordBackward(
-  element: HTMLInputElement | HTMLTextAreaElement
-) {
-  const start = element.selectionStart ?? 0;
-  const end = element.selectionEnd ?? 0;
+type TextField = HTMLInputElement | HTMLTextAreaElement;
 
-  if (start !== end) {
-    element.value = element.value.slice(0, start) + element.value.slice(end);
-    element.setSelectionRange(start, start);
-  } else {
-    const newPos = findWordBoundary(element.value, start, "backward");
-    element.value = element.value.slice(0, newPos) + element.value.slice(start);
-    element.setSelectionRange(newPos, newPos);
+/** The kinds of deletion the keyboard commands perform (InputEvent.inputType). */
+type DeleteInputType =
+  "deleteContentBackward" | "deleteWordBackward" | "deleteSoftLineBackward";
+
+/**
+ * Replaces the text of a field the way an edit by the user does: the caret is
+ * placed and an `input` event is dispatched. Setting `value` from script fires
+ * no event, so without it nothing that listens to the field (Svelte bindings,
+ * the filter debounce, the undo history) would learn about the change.
+ *
+ * Nothing is dispatched if the text stays the same, as for a native edit.
+ */
+function applyDeletion(
+  element: TextField,
+  value: string,
+  caret: number,
+  inputType: DeleteInputType,
+): void {
+  const changed = element.value !== value;
+  if (changed) element.value = value;
+  element.setSelectionRange(caret, caret);
+  if (changed) {
+    element.dispatchEvent(
+      new InputEvent("input", { bubbles: true, inputType }),
+    );
   }
 }
 
-export function deleteWordLeft(el: HTMLInputElement | HTMLTextAreaElement) {
+/** Removes the selection, if there is one. Returns whether it did. */
+function deleteSelection(element: TextField): boolean {
+  const start = element.selectionStart ?? 0;
+  const end = element.selectionEnd ?? 0;
+  if (start === end) return false;
+  const min = Math.min(start, end);
+  const max = Math.max(start, end);
+  applyDeletion(
+    element,
+    element.value.slice(0, min) + element.value.slice(max),
+    min,
+    "deleteContentBackward",
+  );
+  return true;
+}
+
+export function deleteWordBackward(element: TextField) {
+  if (deleteSelection(element)) return;
+
+  const start = element.selectionStart ?? 0;
+  const newPos = findWordBoundary(element.value, start, "backward");
+  applyDeletion(
+    element,
+    element.value.slice(0, newPos) + element.value.slice(start),
+    newPos,
+    "deleteWordBackward",
+  );
+}
+
+export function deleteWordLeft(el: TextField) {
+  if (deleteSelection(el)) return;
+
+  // Caret only: delete the word to the left (skipping whitespace first).
   const start = el.selectionStart ?? 0;
-  const end = el.selectionEnd ?? 0;
   const value = el.value;
-
-  // Selektion vorhanden → einfach entfernen
-  if (start !== end) {
-    const min = Math.min(start, end);
-    const max = Math.max(start, end);
-    el.value = value.slice(0, min) + value.slice(max);
-    el.selectionStart = el.selectionEnd = min;
-    return;
-  }
-
-  // Nur Cursor: Wort links löschen (Whitespaces zuerst überspringen)
   let i = start;
   while (i > 0 && /\s/.test(value[i - 1])) i--;
   while (i > 0 && /[\p{L}\p{N}_]/u.test(value[i - 1])) i--;
 
-  el.value = value.slice(0, i) + value.slice(start);
-  el.selectionStart = el.selectionEnd = i;
+  applyDeletion(
+    el,
+    value.slice(0, i) + value.slice(start),
+    i,
+    "deleteWordBackward",
+  );
 }
 
-export function deleteLineBackward(
-  element: HTMLInputElement | HTMLTextAreaElement
-) {
+export function deleteLineBackward(element: TextField) {
   const end = element.selectionEnd ?? 0;
-  element.value = element.value.slice(end);
-  element.setSelectionRange(0, 0);
+  applyDeletion(element, element.value.slice(end), 0, "deleteSoftLineBackward");
 }
 
 export function selectAll(context: FocusContext) {
@@ -123,14 +157,14 @@ export function selectAll(context: FocusContext) {
     if (!editor) return;
     const model = editor.getModel();
     if (model) {
-      editor.setSelection(
-        new monaco.Selection(
-          1,
-          1,
-          model.getLineCount(),
-          model.getLineMaxColumn(model.getLineCount())
-        )
-      );
+      const lastLine = model.getLineCount();
+      // A plain range: no Monaco import needed on the initial path.
+      editor.setSelection({
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: lastLine,
+        endColumn: model.getLineMaxColumn(lastLine),
+      });
     }
   }
 }

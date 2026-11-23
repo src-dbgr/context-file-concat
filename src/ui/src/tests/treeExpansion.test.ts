@@ -1,98 +1,220 @@
-import { describe, it, expect, beforeEach } from "vitest";
+/* @vitest-environment jsdom */
+
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+vi.mock("$lib/services/backend", () => ({
+  post: vi.fn(),
+}));
+import { post } from "$lib/services/backend";
+
+import * as treeExpansion from "$lib/modules/treeExpansion";
 import {
-  clearExpansionMemory,
-  recordDirExpanded,
-  recordBulkExpanded,
-  applyExpansionMemory,
+  collapseDirectory,
+  expandDirectory,
+  needsLazyLoad,
+  setAllExpanded,
+  toggleDirectory,
+  type ExpandableNode,
 } from "$lib/modules/treeExpansion";
-import type { TreeNode } from "$lib/types";
+import { appState } from "$lib/stores/app";
 
-function d(
-  path: string,
-  { expanded = false, children = [] as TreeNode[] } = {}
-): TreeNode {
+function dir(overrides: Partial<ExpandableNode> = {}): ExpandableNode {
   return {
-    path,
-    name: path.split(/[\\/]/).pop() || path,
-    is_directory: true,
-    is_expanded: expanded,
-    is_binary: false,
-    is_match: false,
-    is_previewed: false,
-    selection_state: "none",
-    children,
-    size: 0,
-  };
-}
-
-function f(path: string): TreeNode {
-  return {
-    path,
-    name: path.split(/[\\/]/).pop() || path,
-    is_directory: false,
+    path: "/repo/src",
     is_expanded: false,
-    is_binary: false,
-    is_match: false,
-    is_previewed: false,
-    selection_state: "none",
-    children: [],
-    size: 123,
+    children_loaded: true,
+    ...overrides,
   };
 }
 
-describe("treeExpansion memory", () => {
+function setScanning(is_scanning: boolean) {
+  appState.update((s) => ({ ...s, is_scanning }));
+}
+
+describe("treeExpansion – expansion intents go to the backend", () => {
   beforeEach(() => {
-    clearExpansionMemory();
+    vi.clearAllMocks();
+    setScanning(false);
   });
 
-  it("applies remembered single directory state", () => {
-    const root = d("/root", { expanded: false, children: [d("/root/a")] });
-    recordDirExpanded("/root", true);
-
-    const applied = applyExpansionMemory([root])[0];
-    expect(applied.is_expanded).toBe(true);
-    expect(applied.children.length).toBe(1);
+  it("keeps no expansion state of its own", () => {
+    // The backend's is_expanded is the single source of truth; there must be
+    // nothing here that could override a snapshot.
+    expect(Object.keys(treeExpansion).sort()).toEqual([
+      "collapseDirectory",
+      "expandDirectory",
+      "needsLazyLoad",
+      "setAllExpanded",
+      "toggleDirectory",
+    ]);
   });
 
-  it("bulk marks all directories expanded", () => {
-    const tree: TreeNode[] = [
-      d("/r", {
-        expanded: false,
-        children: [d("/r/sub", { expanded: false }), f("/r/file.txt")],
-      }),
-    ];
-    recordBulkExpanded(tree, true);
-    const applied = applyExpansionMemory(tree);
-
-    const r = applied[0];
-    expect(r.is_expanded).toBe(true);
-    expect(r.children[0].is_expanded).toBe(true); // /r/sub
-
-    // file nodes unaffected
-    const file = r.children.find((c: TreeNode) => !c.is_directory)!;
-    expect(file.is_expanded).toBe(false);
-  });
-
-  it("clearExpansionMemory resets overrides", () => {
-    const node = d("/x", { expanded: false });
-    recordDirExpanded("/x", true);
-    clearExpansionMemory();
-
-    const applied = applyExpansionMemory([node])[0];
-    expect(applied.is_expanded).toBe(false);
-  });
-
-  it("applyExpansionMemory returns clones (no mutation of input)", () => {
-    const input = d("/clone", {
-      expanded: false,
-      children: [d("/clone/sub")],
+  describe("needsLazyLoad", () => {
+    it("is true only for a collapsed, unloaded directory", () => {
+      expect(needsLazyLoad(dir({ children_loaded: false }))).toBe(true);
+      expect(needsLazyLoad(dir({ children_loaded: true }))).toBe(false);
+      expect(
+        needsLazyLoad(dir({ children_loaded: false, is_expanded: true })),
+      ).toBe(false);
     });
-    recordDirExpanded("/clone", true);
 
-    const [out] = applyExpansionMemory([input]);
-    expect(out).not.toBe(input);
-    expect(out.children[0]).not.toBe(input.children[0]);
-    expect(input.is_expanded).toBe(false);
-    expect(out.is_expanded).toBe(true);
+    it("does not depend on whether a scan is running", () => {
+      const unloaded = dir({ children_loaded: false });
+      expect(needsLazyLoad(unloaded)).toBe(true);
+      setScanning(true);
+      expect(needsLazyLoad(unloaded)).toBe(true);
+    });
+  });
+
+  describe("toggleDirectory", () => {
+    it("asks for the opposite of the rendered state", () => {
+      toggleDirectory(dir({ is_expanded: false }));
+      toggleDirectory(dir({ is_expanded: true }));
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+      ]);
+    });
+
+    it("is idempotent while the snapshot is pending (double click)", () => {
+      // Both events see the same, not yet re-rendered node.
+      const rendered = dir({ is_expanded: false });
+      toggleDirectory(rendered);
+      toggleDirectory(rendered);
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+      ]);
+    });
+
+    it("loads an unloaded directory instead (the backend expands it)", () => {
+      toggleDirectory(dir({ children_loaded: false }));
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["loadDirectoryLevel", "/repo/src"],
+      ]);
+    });
+
+    it("collapses an expanded directory whose children are not loaded", () => {
+      // Expanded during a scan that was cancelled: it must not be loaded
+      // (and thereby kept open) by the gesture that is meant to close it.
+      toggleDirectory(dir({ children_loaded: false, is_expanded: true }));
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+      ]);
+    });
+
+    it("loads an unloaded directory while a scan is running too (the tree can be explored during the scan)", () => {
+      setScanning(true);
+      toggleDirectory(dir({ children_loaded: false }));
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["loadDirectoryLevel", "/repo/src"],
+      ]);
+    });
+
+    it("does not load a directory the scan has completed meanwhile", () => {
+      setScanning(true);
+      toggleDirectory(dir({ children_loaded: true }));
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+      ]);
+    });
+  });
+
+  describe("expandDirectory / collapseDirectory", () => {
+    it("expands a collapsed directory", () => {
+      expandDirectory(dir({ is_expanded: false }));
+      expect(post).toHaveBeenCalledExactlyOnceWith("setExpansion", {
+        path: "/repo/src",
+        expanded: true,
+      });
+    });
+
+    it("never collapses on a repeated expand (ArrowRight key repeat)", () => {
+      // The repeated key event still sees the collapsed node.
+      const rendered = dir({ is_expanded: false });
+      expandDirectory(rendered);
+      expandDirectory(rendered);
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+        ["setExpansion", { path: "/repo/src", expanded: true }],
+      ]);
+    });
+
+    it("never expands on a repeated collapse (ArrowLeft key repeat)", () => {
+      const rendered = dir({ is_expanded: true });
+      collapseDirectory(rendered);
+      collapseDirectory(rendered);
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+      ]);
+    });
+
+    it("does not collapse a directory that is already expanded", () => {
+      expandDirectory(dir({ is_expanded: true }));
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("does not load a directory that is expanded but not loaded", () => {
+      expandDirectory(dir({ is_expanded: true, children_loaded: false }));
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("loads an unloaded directory when expanding it", () => {
+      expandDirectory(dir({ children_loaded: false }));
+      expect(post).toHaveBeenCalledExactlyOnceWith(
+        "loadDirectoryLevel",
+        "/repo/src",
+      );
+    });
+
+    it("collapses an expanded directory, loaded or not", () => {
+      collapseDirectory(dir({ is_expanded: true }));
+      collapseDirectory(dir({ is_expanded: true, children_loaded: false }));
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+        ["setExpansion", { path: "/repo/src", expanded: false }],
+      ]);
+    });
+
+    it("does not expand a directory that is already collapsed", () => {
+      collapseDirectory(dir({ is_expanded: false }));
+      expect(post).not.toHaveBeenCalled();
+    });
+  });
+
+  it("never sends the non-idempotent toggle command", () => {
+    for (const is_expanded of [true, false]) {
+      for (const children_loaded of [true, false]) {
+        for (const scanning of [true, false]) {
+          setScanning(scanning);
+          const node = dir({ is_expanded, children_loaded });
+          toggleDirectory(node);
+          expandDirectory(node);
+          collapseDirectory(node);
+        }
+      }
+    }
+    const sent = vi.mocked(post).mock.calls.map(([command]) => command);
+    expect(new Set(sent)).toEqual(
+      new Set(["setExpansion", "loadDirectoryLevel"]),
+    );
+  });
+
+  it("setAllExpanded sends one bulk command", () => {
+    setAllExpanded(true);
+    setAllExpanded(false);
+    expect(vi.mocked(post).mock.calls).toEqual([
+      ["expandCollapseAll", true],
+      ["expandCollapseAll", false],
+    ]);
   });
 });

@@ -27,7 +27,7 @@ function formatNumber(num: number): string {
 export function generateStatsString(
   content: string,
   additionalInfo = "",
-  tokenCount?: number
+  tokenCount?: number,
 ): string {
   const lines = content.split("\n").length;
   const words = countWords(content);
@@ -49,7 +49,7 @@ export function generateStatsString(
 
 export function splitPathForDisplay(
   fullPath: string,
-  currentDir: string | null
+  currentDir: string | null,
 ): { pathPart: string; filename: string } {
   if (!fullPath) return { pathPart: "", filename: "Unknown File" };
   let relativePath = fullPath;
@@ -67,4 +67,10 @@ export function splitPathForDisplay(
   const filename = parts[parts.length - 1];
   const pathPart = parts.slice(0, -1).join("/") + "/";
   return { pathPart, filename };
+}
+
+/** Cuts `text` to at most `max` characters; a cut is marked with an ellipsis. */
+export function truncate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
 }

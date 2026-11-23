@@ -45,7 +45,7 @@ afterEach(() => {
 function replaceCommandsWithSingle(
   matcher: (e: KeyboardEvent) => boolean,
   executor: TestCommand,
-  worksInEditor: boolean
+  worksInEditor: boolean,
 ) {
   commands.length = 0;
   commands.push({
@@ -66,7 +66,7 @@ describe("keyboard.ts – global handler integration", () => {
       (_e, _ctx) => {
         called = true;
       },
-      true
+      true,
     );
 
     const ev = new KeyboardEvent("keydown", { key: "K", cancelable: true });
@@ -84,7 +84,7 @@ describe("keyboard.ts – global handler integration", () => {
       () => {
         called = true;
       },
-      false // not allowed in editor
+      false, // not allowed in editor
     );
 
     const ev = new KeyboardEvent("keydown", { key: "X", cancelable: true });
@@ -104,6 +104,87 @@ describe("keyboard.ts – global handler integration", () => {
     const ev = new KeyboardEvent("keydown", { key: "F2", cancelable: true });
     const allowed = document.dispatchEvent(ev);
     expect(allowed).toBe(false); // blocked by safety guard
+  });
+
+  it("leaves Tab alone wherever the focus is, so it can move on", () => {
+    commands.length = 0;
+    const button = document.createElement("button");
+    document.body.appendChild(button);
+    button.focus();
+
+    for (const shiftKey of [false, true]) {
+      const tab = new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey,
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(button.dispatchEvent(tab)).toBe(true);
+    }
+    button.blur();
+    const tab = new KeyboardEvent("keydown", {
+      key: "Tab",
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(document.body.dispatchEvent(tab)).toBe(true);
+    button.remove();
+  });
+
+  it("leaves Enter to the summary of a details element, which opens it", () => {
+    commands.length = 0;
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    details.appendChild(summary);
+    document.body.appendChild(details);
+    summary.focus();
+
+    const enter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(summary.dispatchEvent(enter)).toBe(true);
+    details.remove();
+  });
+
+  it("leaves Enter to a focused button, which acts on it itself", () => {
+    commands.length = 0;
+    const button = document.createElement("button");
+    document.body.appendChild(button);
+    button.focus();
+
+    const enter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(button.dispatchEvent(enter)).toBe(true);
+
+    // Keys the button does nothing with are still blocked.
+    const f2 = new KeyboardEvent("keydown", {
+      key: "F2",
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(button.dispatchEvent(f2)).toBe(false);
+    button.remove();
+  });
+
+  it("still blocks Enter where nothing acts on it", () => {
+    commands.length = 0;
+    const div = document.createElement("div");
+    div.tabIndex = 0;
+    document.body.appendChild(div);
+    div.focus();
+
+    const enter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(div.dispatchEvent(enter)).toBe(false);
+    div.remove();
   });
 
   it("allows printable characters in inputs to pass through when no command matches", () => {

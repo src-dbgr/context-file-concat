@@ -1,82 +1,57 @@
 <script lang="ts">
-  import {
-    appState,
-    editorInstance,
-    editorDecorations,
-    previewedPath,
-  } from "$lib/stores/app";
-  import type * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+  /**
+   * The one root of the UI: the page layout with every panel in its place.
+   * The element ids and classes are the ones the global stylesheet and the
+   * resizers work with.
+   */
+  import { verticalResizer, sidebarResizer } from "$lib/actions/resizer";
+  import Sidebar from "$lib/components/Sidebar.svelte";
+  import Header from "$lib/components/Header.svelte";
+  import FileTree from "$lib/components/FileTree.svelte";
+  import PreviewPanel from "$lib/components/PreviewPanel.svelte";
+  import Footer from "$lib/components/Footer.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
   import ToastHost from "$lib/components/ToastHost.svelte";
-
-  // Non reactive store – avoids Self-trigger
-  let lastDecorationIds: string[] = [];
-  let lastModel: monaco.editor.ITextModel | null = null;
-
-  function clearDecorations(
-    editor: monaco.editor.IStandaloneCodeEditor | null
-  ) {
-    if (!editor) return;
-    if (lastDecorationIds.length) {
-      try {
-        // removes existing deco in current editor
-        editor.deltaDecorations(lastDecorationIds, []);
-      } catch {
-        // in case IDs do not match to the model (quick change) - ignore
-      }
-      lastDecorationIds = [];
-      // only publish - no read - in order to avoid effekt re-trigger
-      editorDecorations.set([]);
-    }
-  }
-
-  // keep monaco highlights in sync - runes-only, no self-trigger
-  $effect(() => {
-    const editor = $editorInstance;
-    const hasPath = !!$previewedPath;
-    const model = editor?.getModel();
-
-    const searchTerm = $appState.content_search_query;
-    const matchCase = $appState.config.case_sensitive_search;
-
-    // no editor/model/preview -> clean up everything
-    if (!editor || !model || !hasPath) {
-      clearDecorations(editor ?? null);
-      lastModel = null;
-      return;
-    }
-
-    // new model (different file) -> remove old decos securely
-    if (model !== lastModel) {
-      clearDecorations(editor);
-      lastModel = model;
-    }
-
-    // calcuate new decos
-    let newDecorations: monaco.editor.IModelDeltaDecoration[] = [];
-    if (searchTerm && searchTerm.trim() !== "") {
-      const matches = model.findMatches(
-        searchTerm,
-        true,
-        false,
-        matchCase,
-        null,
-        true
-      );
-      newDecorations = matches.map((m) => ({
-        range: m.range,
-        options: { inlineClassName: "search-highlight" },
-      }));
-    }
-
-    // apply deltas - important: no read of $editorDecorations here
-    const newIds = editor.deltaDecorations(lastDecorationIds, newDecorations);
-    lastDecorationIds = newIds;
-
-    // make available for different observer (without feeding the effect)
-    editorDecorations.set(newIds);
-  });
+  import { t } from "$lib/i18n";
 </script>
+
+<!-- The heading of the page. The window shows the title; here it is for
+     screen readers only and takes no room in the layout. -->
+<header class="visually-hidden">
+  <h1>{$t("app.title")}</h1>
+</header>
+
+<div class="container" style="height: calc(100% - 30px)">
+  <aside id="sidebar-root" class="sidebar" use:sidebarResizer>
+    <Sidebar />
+  </aside>
+
+  <main class="main-content">
+    <div class="sidebar-resize-handle-right" aria-hidden="true"></div>
+
+    <div id="header-root">
+      <Header />
+    </div>
+
+    <div class="content-splitter">
+      <div id="file-list-panel" class="file-list-panel">
+        <div id="file-tree-container" class="file-tree-container">
+          <FileTree />
+        </div>
+      </div>
+
+      <div id="resizer" class="resizer" use:verticalResizer></div>
+
+      <div id="preview-panel" class="preview-panel">
+        <PreviewPanel />
+      </div>
+    </div>
+
+    <footer id="footer-root" class="bottom-panel">
+      <Footer />
+    </footer>
+  </main>
+</div>
 
 <StatusBar />
 <ToastHost />

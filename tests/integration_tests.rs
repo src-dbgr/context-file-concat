@@ -3,16 +3,22 @@
 //! These tests use an async-aware MPSC channel from `tokio::sync` to avoid
 //! deadlocks between the test thread and the application's async tasks.
 
-use context_file_concat::app::{self, events::UserEvent, proxy::EventProxy, state::AppState};
-use context_file_concat::config::AppConfig;
+use context_file_concat::app::{
+    self, events::UserEvent, proxy::EventProxy, shared_state::SharedState, state::AppState,
+};
+use context_file_concat::config::{AppConfig, ConfigStore};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 /// Contains the test infrastructure.
+///
+/// Deliberately a small harness of its own instead of the one the unit tests share
+/// (`src/app/test_support.rs`, compiled for unit tests only): an integration test is
+/// another crate, and building its harness from the public API is part of what it
+/// shows.
 mod helpers {
     use super::*;
     use std::fs;
@@ -34,7 +40,7 @@ mod helpers {
 
     /// `TestHarness` sets up a complete, isolated environment for each test case.
     pub struct TestHarness {
-        pub state: Arc<Mutex<AppState>>,
+        pub state: SharedState,
         pub proxy: TestEventProxy,
         pub event_rx: mpsc::UnboundedReceiver<UserEvent>,
         pub root_path: PathBuf,
@@ -43,18 +49,21 @@ mod helpers {
 
     impl TestHarness {
         /// Creates a new test harness with a clean configuration.
+        ///
+        /// The state has a configuration of its own and a detached store: it is not
+        /// bound to a config file, so the tests neither read nor write the developer's
+        /// real configuration (see `test_state_of_the_tests_is_not_bound_to_a_config_file`).
         pub fn new() -> Self {
             let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
             let root_path = temp_dir.path().to_path_buf();
             let (event_tx, event_rx) = mpsc::unbounded_channel();
 
             let config = Self::create_clean_test_config(root_path.clone());
-            let mut state = AppState::default();
-            state.config = config;
+            let state = AppState::new(config, ConfigStore::detached());
             // current_path is set by start_scan_on_path, so we leave it empty here.
 
             Self {
-                state: Arc::new(Mutex::new(state)),
+                state: SharedState::new(state),
                 proxy: TestEventProxy { sender: event_tx },
                 event_rx,
                 root_path,
@@ -98,7 +107,7 @@ mod helpers {
                     Ok(Some(UserEvent::StateUpdate(ui_state))) => {
                         // The shallow scan is done when we get a state update
                         // where scanning is still true, but the file list is not empty.
-                        if ui_state.is_scanning && !ui_state.tree.is_empty() {
+                        if ui_state.is_scanning && ui_state.rows_total > 0 {
                             return;
                         }
                     }
@@ -125,6 +134,35 @@ mod helpers {
     }
 }
 
+/// No test may ever read or write the developer's real configuration: the state the
+/// tests work with has a detached store (`ConfigStore::detached`), which is bound to no
+/// config file, so "saving" its configuration succeeds and writes nothing.
+#[test]
+fn test_state_of_the_tests_is_not_bound_to_a_config_file() {
+    let harness = helpers::TestHarness::new();
+    let state = harness.state.lock();
+
+    state
+        .config_snapshot()
+        .save()
+        .expect("saving a detached snapshot is a no-op");
+}
+
+/// The location of the real configuration file can be redirected with an environment
+/// variable; the application resolves it in exactly one place.
+#[test]
+fn test_default_config_path_honours_the_environment_override() {
+    use context_file_concat::config::settings::{self, CONFIG_DIR_ENV};
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cfc-integration-config");
+    // This is the only test of this binary that reads or writes the variable.
+    std::env::set_var(CONFIG_DIR_ENV, &dir);
+    let path = settings::default_config_path();
+    std::env::remove_var(CONFIG_DIR_ENV);
+
+    assert_eq!(path, Some(dir.join("config.json")));
+}
+
 #[tokio::test]
 async fn test_proactive_scan_loads_shallow_then_deep() {
     // --- ARRANGE ---
@@ -145,9 +183,9 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
 
     // --- ASSERT (Phase 1: Shallow Scan) ---
     {
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(
-            state.is_scanning,
+            state.is_scanning(),
             "Scanning should still be active in the background"
         );
         assert!(
@@ -156,7 +194,7 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
         );
 
         let visible_paths: HashSet<_> = state
-            .full_file_list
+            .full_file_list()
             .iter()
             .map(|item| {
                 item.path
@@ -188,15 +226,15 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
 
     // --- ASSERT (Phase 2: Deep Scan) ---
     {
-        let state = harness.state.lock().unwrap();
-        assert!(!state.is_scanning, "Scanning should be finished");
+        let state = harness.state.lock();
+        assert!(!state.is_scanning(), "Scanning should be finished");
         assert!(
             state.is_fully_scanned,
             "is_fully_scanned should be true after deep scan"
         );
 
         let all_paths: HashSet<_> = state
-            .full_file_list
+            .full_file_list()
             .iter()
             .map(|item| {
                 item.path
@@ -221,7 +259,7 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
 }
 
 #[tokio::test]
-async fn test_expand_all_fully_after_scan() {
+async fn test_expand_all_after_scan() {
     // --- ARRANGE ---
     let mut harness = helpers::TestHarness::new();
     harness.setup_basic_project();
@@ -236,13 +274,13 @@ async fn test_expand_all_fully_after_scan() {
     harness.wait_for_full_scan_completion().await;
 
     // --- ACT ---
-    // Now that the scan is complete, call the simplified command
-    app::commands::expand_all_fully(harness.proxy.clone(), harness.state.clone());
+    // Now that the scan is complete, expand everything it has found
+    app::commands::expand_collapse_all(true, harness.proxy.clone(), harness.state.clone());
 
     // The command is synchronous, so we can check the state immediately.
 
     // --- ASSERT ---
-    let state = harness.state.lock().unwrap();
+    let state = harness.state.lock();
     assert!(state.is_fully_scanned);
 
     // All directories ("src" and "docs") should be in the expanded set

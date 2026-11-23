@@ -6,7 +6,9 @@
  */
 
 import { appState, getState } from "$lib/stores/app";
+import { scanProgress } from "$lib/stores/scanProgress";
 import { toast } from "$lib/stores/toast";
+import { formatFileSize, truncate } from "$lib/utils";
 import { t as tStore } from "$lib/i18n";
 import { get } from "svelte/store";
 
@@ -16,19 +18,21 @@ import {
   ShowPreviewArgsSchema,
   ShowGeneratedArgsSchema,
   StatusMessageSchema,
-  FileSaveStatusArgsSchema,
+  SaveResultSchema,
+  OutputSizeNoticeSchema,
+  IgnorePathRefusalSchema,
   DragStateSchema,
+  type SaveResult,
+  type OutputSizeNotice,
+  type IgnorePathRefusal,
 } from "$lib/ipc/schema";
-
-import {
-  applyExpansionMemory,
-  clearExpansionMemory,
-} from "$lib/modules/treeExpansion";
 
 import {
   showPreviewContent as showPreviewContentImpl,
   showGeneratedContent as showGeneratedContentImpl,
   clearPreview,
+  retrySaveOfUnavailableDocument,
+  saveSettled,
 } from "$lib/modules/editor";
 
 import type { AppState } from "$lib/types";
@@ -45,14 +49,43 @@ declare global {
       content: string,
       language: string,
       searchTerm: string | null | undefined,
-      path: string
+      path: string,
     ) => void;
-    showGeneratedContent: (content: string, tokenCount: number) => void;
+    showGeneratedContent: (
+      content: string,
+      tokenCount: number,
+      documentId: number,
+    ) => void;
+    outputSizeNotice: (notice: OutputSizeNotice) => void;
+    ignorePathRefused: (refusal: IgnorePathRefusal) => void;
     showError: (msg: string) => void;
     showStatus: (msg: string) => void;
-    fileSaveStatus: (success: boolean, path: string) => void;
+    saveResult: (result: SaveResult) => void;
     setDragState: (isDragging: boolean) => void;
     __APP_READY?: boolean;
+  }
+}
+
+/** How long an error reported by the host stays on screen. */
+const HOST_ERROR_TOAST_MS = 10_000;
+/** Upper bound for the host text shown in a toast. */
+const HOST_ERROR_MAX_CHARS = 300;
+
+/**
+ * The editor could not show what the host sent: Monaco is loaded on first use,
+ * and that load (or the creation of the editor) can fail. Without a word the
+ * click on a file or on Generate would simply do nothing.
+ */
+async function showInEditor(show: () => Promise<void>): Promise<void> {
+  try {
+    await show();
+  } catch (err) {
+    console.error("[editor] Failed to show content:", err);
+    const tr = get(tStore);
+    toast.error(tr("toast.editorLoadFailed"), {
+      title: tr("toast.errorTitle"),
+      duration: HOST_ERROR_TOAST_MS,
+    });
   }
 }
 
@@ -66,14 +99,14 @@ export function installWindowIPCHandlers(): void {
     return;
   }
 
-  let lastPath: string | null = null;
-
   window.render = (incoming: AppState) => {
+    // The whole snapshot is validated, rows included, in every build: it
+    // holds a window of rows, so the cost does not grow with the project.
     const parsed = UiStateSchema.safeParse(incoming);
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid render() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -81,8 +114,6 @@ export function installWindowIPCHandlers(): void {
 
     try {
       const prev = getState();
-      const nextPath = input?.current_path ?? null;
-      const safeTree = Array.isArray(input?.tree) ? input.tree : [];
 
       if (input?.status_message) {
         input.status_message = input.status_message.startsWith("Status:")
@@ -92,17 +123,15 @@ export function installWindowIPCHandlers(): void {
         input.status_message = "Status: Ready.";
       }
 
-      if (lastPath !== nextPath) clearExpansionMemory();
+      // The snapshot is taken as is. In particular the backend's `is_expanded`
+      // is authoritative: it decides which rows the tree has.
+      appState.set(input);
 
-      const patched: AppState = {
-        ...input,
-        tree: applyExpansionMemory(safeTree),
-      };
-      appState.set(patched);
+      // The progress shown belongs to one scan: forget it when none is
+      // running and when a new one starts.
+      if (!input.is_scanning || !prev.is_scanning) scanProgress.reset();
 
-      if (prev.current_path && !patched.current_path) clearPreview();
-
-      lastPath = nextPath;
+      if (prev.current_path && !input.current_path) clearPreview();
     } catch (err) {
       console.error("render() failed:", err);
       appState.update((s) => {
@@ -124,51 +153,22 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid updateScanProgress() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
-    const { files_scanned, current_scanning_path, large_files_skipped } =
-      parsed.data;
-
-    const tr = get(tStore);
-
-    const scanTextEl = document.querySelector(".scan-text");
-    if (scanTextEl)
-      (scanTextEl as HTMLElement).textContent = tr("filetree.scanning");
-
-    const filesCountEl = document.getElementById("scan-files-count");
-    if (filesCountEl)
-      (filesCountEl as HTMLElement).textContent =
-        `${files_scanned} files processed`;
-
-    const currentPathEl = document.getElementById("scan-current-path");
-    if (currentPathEl)
-      (currentPathEl as HTMLElement).textContent =
-        current_scanning_path || "Processing...";
-
-    const skippedEl = document.getElementById("scan-skipped-count");
-    if (skippedEl) {
-      (skippedEl as HTMLElement).textContent =
-        large_files_skipped > 0
-          ? `${large_files_skipped} large files skipped`
-          : "";
-      (skippedEl as HTMLElement).style.display =
-        large_files_skipped > 0 ? "inline" : "none";
-    }
-
-    const fillEl = document.getElementById("scan-progress-fill");
-    if (fillEl && files_scanned > 0) {
-      (fillEl as HTMLElement).style.width =
-        `${Math.min(90, (files_scanned / 1000) * 100)}%`;
-    }
+    scanProgress.report({
+      files_scanned: parsed.data.files_scanned,
+      large_files_skipped: parsed.data.large_files_skipped,
+      current_scanning_path: parsed.data.current_scanning_path,
+    });
   };
 
   window.showPreviewContent = (
     content: string,
     language: string,
     searchTerm: string | null | undefined,
-    path: string
+    path: string,
   ) => {
     const parsed = ShowPreviewArgsSchema.safeParse([
       content,
@@ -179,25 +179,83 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid showPreviewContent() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
     const [c, l, s, p] = parsed.data;
-    showPreviewContentImpl(c, l, s ?? "", p);
+    void showInEditor(() => showPreviewContentImpl(c, l, s ?? "", p));
   };
 
-  window.showGeneratedContent = (content: string, tokenCount: number) => {
-    const parsed = ShowGeneratedArgsSchema.safeParse([content, tokenCount]);
+  window.showGeneratedContent = (
+    content: string,
+    tokenCount: number,
+    documentId: number,
+  ) => {
+    const parsed = ShowGeneratedArgsSchema.safeParse([
+      content,
+      tokenCount,
+      documentId,
+    ]);
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid showGeneratedContent() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
-    const [c, t] = parsed.data;
-    showGeneratedContentImpl(c, t);
+    const [c, t, id] = parsed.data;
+    void showInEditor(() => showGeneratedContentImpl(c, t, id));
+  };
+
+  window.outputSizeNotice = (notice: OutputSizeNotice) => {
+    const parsed = OutputSizeNoticeSchema.safeParse(notice);
+    if (!parsed.success) {
+      console.warn(
+        "[IPC] Ignored invalid outputSizeNotice() payload:",
+        parsed.error.flatten(),
+      );
+      return;
+    }
+    const tr = get(tStore);
+    const sizes = {
+      size: formatFileSize(parsed.data.estimated_bytes),
+      limit: formatFileSize(parsed.data.limit_bytes),
+    };
+    if (parsed.data.status === "too_large") {
+      // Nothing was generated; the reason has to stay readable for a while.
+      toast.error(tr("toast.outputTooLarge", sizes), {
+        title: tr("toast.outputTooLargeTitle"),
+        duration: HOST_ERROR_TOAST_MS,
+      });
+    } else {
+      toast.warning(tr("toast.outputLarge", sizes), {
+        title: tr("toast.outputLargeTitle"),
+      });
+    }
+  };
+
+  window.ignorePathRefused = (refusal: IgnorePathRefusal) => {
+    const parsed = IgnorePathRefusalSchema.safeParse(refusal);
+    if (!parsed.success) {
+      console.warn(
+        "[IPC] Ignored invalid ignorePathRefused() payload:",
+        parsed.error.flatten(),
+      );
+      return;
+    }
+    // The button was pressed and nothing was hidden: the reason has to stay
+    // readable for a while.
+    const tr = get(tStore);
+    const name = truncate(parsed.data.name, HOST_ERROR_MAX_CHARS);
+    const text =
+      parsed.data.reason === "not_unicode"
+        ? tr("toast.ignoreRefusedNotUnicode", { name })
+        : tr("toast.ignoreRefusedWhitespace", { name });
+    toast.warning(text, {
+      title: tr("toast.ignoreRefusedTitle"),
+      duration: HOST_ERROR_TOAST_MS,
+    });
   };
 
   window.showError = (msg: string) => {
@@ -205,7 +263,7 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid showError() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -213,8 +271,14 @@ export function installWindowIPCHandlers(): void {
       s.status_message = `Error: ${parsed.data}`;
       return s;
     });
+    // The toast carries the message itself: the status line is overwritten
+    // by the next state snapshot.
     const tr = get(tStore);
-    toast.error(tr("toast.renderFailed"));
+    const text = parsed.data.trim();
+    toast.error(
+      text ? truncate(text, HOST_ERROR_MAX_CHARS) : tr("toast.renderFailed"),
+      { title: tr("toast.errorTitle"), duration: HOST_ERROR_TOAST_MS },
+    );
   };
 
   window.showStatus = (msg: string) => {
@@ -222,7 +286,7 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid showStatus() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }
@@ -232,36 +296,60 @@ export function installWindowIPCHandlers(): void {
     });
   };
 
-  window.fileSaveStatus = (success: boolean, path: string) => {
-    const parsed = FileSaveStatusArgsSchema.safeParse([success, path]);
+  window.saveResult = (result: SaveResult) => {
+    const parsed = SaveResultSchema.safeParse(result);
     if (!parsed.success) {
       console.warn(
-        "[IPC] Ignored invalid fileSaveStatus() payload:",
-        parsed.error.flatten()
+        "[IPC] Ignored invalid saveResult() payload:",
+        parsed.error.flatten(),
       );
       return;
     }
-    const [ok, p] = parsed.data;
+    const outcome = parsed.data;
     const tr = get(tStore);
+    const setStatus = (message: string) =>
+      appState.update((s: AppState) => {
+        s.status_message = message;
+        return s;
+      });
 
-    const msg =
-      p === "cancelled"
-        ? "Status: Save cancelled."
-        : ok
-          ? `Status: Saved to ${p}`
-          : "Error: Failed to save file.";
+    if (outcome.status === "document_unavailable") {
+      // The save lost a race against the host giving the document up; it is
+      // repeated once with the text that was shown, and answered again.
+      if (retrySaveOfUnavailableDocument(outcome.document_id)) return;
+      setStatus("Error: Failed to save file.");
+      toast.error(tr("toast.outputUnavailable"), {
+        title: tr("toast.saveFailed"),
+        duration: HOST_ERROR_TOAST_MS,
+      });
+      return;
+    }
+    saveSettled();
 
-    appState.update((s: AppState) => {
-      s.status_message = msg;
-      return s;
-    });
-
-    if (p === "cancelled") {
-      toast.info(tr("toast.saveCancelled"));
-    } else if (ok) {
-      toast.success(tr("toast.fileSaved"));
-    } else {
-      toast.error(tr("toast.saveFailed"));
+    switch (outcome.status) {
+      case "saved":
+        setStatus(`Status: Saved to ${outcome.path}`);
+        toast.success(tr("toast.fileSaved"));
+        break;
+      case "cancelled":
+        setStatus("Status: Save cancelled.");
+        toast.info(tr("toast.saveCancelled"));
+        break;
+      case "failed": {
+        setStatus("Error: Failed to save file.");
+        // The reason is the host's (the message of the operating system);
+        // the toast says what failed and shows the reason below it.
+        const reason = outcome.error.trim();
+        if (reason) {
+          toast.error(truncate(reason, HOST_ERROR_MAX_CHARS), {
+            title: tr("toast.saveFailed"),
+            duration: HOST_ERROR_TOAST_MS,
+          });
+        } else {
+          toast.error(tr("toast.saveFailed"));
+        }
+        break;
+      }
     }
   };
 
@@ -270,7 +358,7 @@ export function installWindowIPCHandlers(): void {
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid setDragState() payload:",
-        parsed.error.flatten()
+        parsed.error.flatten(),
       );
       return;
     }

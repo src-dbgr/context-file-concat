@@ -1,5 +1,6 @@
 import { commands as allCommands } from "./commands.js";
 import type { FocusContext } from "../types.js";
+import { activatesNatively } from "./nativeActivation.js";
 
 function getFocusContext(): FocusContext {
   const activeEl = document.activeElement as HTMLElement | null;
@@ -53,6 +54,19 @@ function globalKeydownHandler(e: KeyboardEvent) {
     }
   }
 
+  // Not unhandled: Tab moves the focus, which the web view does itself.
+  // Blocking it would leave every control but the text fields out of reach
+  // of the keyboard.
+  if (e.key === "Tab") {
+    return;
+  }
+
+  // Not unhandled: the focused control acts on the key itself (Enter on a
+  // button). Blocking it would keep the control from being activated.
+  if (activatesNatively(context.activeEl, e.key)) {
+    return;
+  }
+
   if (
     !e.metaKey &&
     !e.ctrlKey &&
@@ -61,7 +75,7 @@ function globalKeydownHandler(e: KeyboardEvent) {
     e.key !== "Shift"
   ) {
     console.warn(
-      `Blocked unhandled key: "${e.key}" to prevent potential crash.`
+      `Blocked unhandled key: "${e.key}" to prevent potential crash.`,
     );
     e.preventDefault();
   }

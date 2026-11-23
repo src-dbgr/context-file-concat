@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { editorInstance } from "$lib/stores/app";
   import { post } from "$lib/services/backend";
+  import { saveOutput } from "$lib/modules/editor";
   import { canGenerate, canSave, isGenerating } from "$lib/stores/uiStores";
   import LogoMark from "$lib/components/LogoMark.svelte";
   import { t } from "$lib/i18n";
@@ -30,8 +30,7 @@
   }
 
   function onSaveClick() {
-    const editor = $editorInstance;
-    if (editor) post("saveFile", editor.getValue());
+    saveOutput();
   }
 </script>
 
@@ -118,7 +117,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    color: var(--color-accent);
+    color: var(--color-accent-text);
     font-weight: 600;
   }
   #generate-btn.is-generating .cancel-content {

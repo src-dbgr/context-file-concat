@@ -2,16 +2,9 @@ import "../style.css";
 
 import { mount } from "svelte";
 import { post } from "$lib/services/backend";
-import { appState, getState } from "$lib/stores/app";
 import { setupEventListeners } from "$lib/modules/eventListeners";
 import { setupGlobalKeyboardListeners } from "$lib/modules/keyboard";
-import { verticalResizer, sidebarResizer } from "$lib/actions/resizer";
 import App from "./App.svelte";
-import Header from "$lib/components/Header.svelte";
-import Sidebar from "$lib/components/Sidebar.svelte";
-import PreviewPanel from "$lib/components/PreviewPanel.svelte";
-import FileTree from "$lib/components/FileTree.svelte";
-import Footer from "$lib/components/Footer.svelte";
 import {
   isBudgetMode,
   markScriptStart,
@@ -19,7 +12,7 @@ import {
   markInitStart,
   markReadyAndMeasureOnce,
 } from "$lib/dev/budget";
-import { ensureE2EShim, installE2EBridgeIfAllowed } from "$lib/dev/e2eShim";
+import { installE2EBridge } from "$lib/dev/e2eBridge";
 import { installWindowIPCHandlers } from "$lib/ipc/handlers";
 
 /* ----------------------------- Budget switches ----------------------------- */
@@ -31,13 +24,14 @@ if (budgetMode) {
   scheduleEarlyReadyFallback();
 }
 
-/* ------------------------- Deterministic E2E fallback ---------------------- */
+/* ------------------------------ E2E test hook ------------------------------ */
 
-ensureE2EShim(
-  (s) => appState.set(s),
-  () => getState()
-);
-void installE2EBridgeIfAllowed();
+// `window.__e2e` exists in dev and e2e builds only. `__CFC_TEST_HOOKS__` is a
+// build-time constant (vite.config.ts): in a production build this call is
+// dead code and the bridge module, which has no side effects, is dropped from
+// the bundle with it. Installed before anything else of the app runs, so the
+// tests have it even where there is no host to talk to.
+if (__CFC_TEST_HOOKS__) installE2EBridge();
 
 /* ----------------------------- Install IPC API ----------------------------- */
 
@@ -45,12 +39,7 @@ installWindowIPCHandlers();
 
 /* ------------------------------- Mount UI ---------------------------------- */
 
-mount(App, { target: document.getElementById("svelte-root")! });
-mount(Header, { target: document.getElementById("header-root")! });
-mount(Sidebar, { target: document.getElementById("sidebar-root")! });
-mount(FileTree, { target: document.getElementById("file-tree-container")! });
-mount(PreviewPanel, { target: document.getElementById("preview-panel")! });
-mount(Footer, { target: document.getElementById("footer-root")! });
+mount(App, { target: document.body });
 
 function initialize() {
   if (budgetMode) {
@@ -59,18 +48,8 @@ function initialize() {
 
   console.log("App initializing with Svelte 5 & TypeScript...");
 
-  const resizerEl = document.getElementById("resizer") as HTMLElement | null;
-  const sidebarEl = document.querySelector(".sidebar") as HTMLElement | null;
-  const resizerAction = resizerEl ? verticalResizer(resizerEl) : undefined;
-  const sidebarAction = sidebarEl ? sidebarResizer(sidebarEl) : undefined;
-
   setupEventListeners();
   setupGlobalKeyboardListeners();
-
-  window.addEventListener("beforeunload", () => {
-    resizerAction?.destroy?.();
-    sidebarAction?.destroy?.();
-  });
 
   post("initialize");
 

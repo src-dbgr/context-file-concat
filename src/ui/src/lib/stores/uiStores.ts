@@ -11,16 +11,16 @@ export const isScanning = derived(appState, (s) => s.is_scanning);
 export const isGenerating = derived(appState, (s) => s.is_generating);
 export const isBusy = derived(
   [isScanning, isGenerating],
-  ([scan, gen]) => scan || gen
+  ([scan, gen]) => scan || gen,
 );
 
 export const hasSelection = derived(
   appState,
-  (s) => (s.selected_files_count ?? 0) > 0
+  (s) => (s.selected_files_count ?? 0) > 0,
 );
 export const canGenerate = derived(
   [isScanning, hasSelection],
-  ([scan, sel]) => !scan && sel
+  ([scan, sel]) => !scan && sel,
 );
 export const canSave = derived(previewMode, (m) => m === "generated");
 
@@ -28,5 +28,5 @@ export const canSave = derived(previewMode, (m) => m === "generated");
 export const isFullyScanned = derived(appState, (s) => s.is_fully_scanned);
 export const patternsNeedRescan = derived(
   appState,
-  (s) => s.patterns_need_rescan
+  (s) => s.patterns_need_rescan,
 );

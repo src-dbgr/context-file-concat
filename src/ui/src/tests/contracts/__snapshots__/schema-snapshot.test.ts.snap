@@ -1,0 +1,1110 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapshot 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "selectDirectory",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "rescanDirectory",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "loadDirectoryLevel",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "generatePreview",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "clearDirectory",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "cancelScan",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "initialize",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "loadFilePreview",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "toggleSelection",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "toggleDirectorySelection",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "setExpansion",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "expanded": {
+              "type": "boolean",
+            },
+            "path": {
+              "minLength": 1,
+              "type": "string",
+            },
+          },
+          "required": [
+            "path",
+            "expanded",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "expandCollapseAll",
+          "type": "string",
+        },
+        "payload": {
+          "type": "boolean",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "setViewport",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer",
+            },
+            "start": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "start",
+            "count",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "locateRow",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "request": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer",
+            },
+            "target": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "path",
+                      "type": "string",
+                    },
+                    "path": {
+                      "minLength": 1,
+                      "type": "string",
+                    },
+                  },
+                  "required": [
+                    "kind",
+                    "path",
+                  ],
+                  "type": "object",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "parent_of",
+                      "type": "string",
+                    },
+                    "path": {
+                      "minLength": 1,
+                      "type": "string",
+                    },
+                  },
+                  "required": [
+                    "kind",
+                    "path",
+                  ],
+                  "type": "object",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "from": {
+                      "maximum": 9007199254740991,
+                      "minimum": 0,
+                      "type": "integer",
+                    },
+                    "kind": {
+                      "const": "typeahead",
+                      "type": "string",
+                    },
+                    "prefix": {
+                      "minLength": 1,
+                      "type": "string",
+                    },
+                  },
+                  "required": [
+                    "kind",
+                    "prefix",
+                    "from",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+          },
+          "required": [
+            "request",
+            "target",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "selectAll",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "deselectAll",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "cancelGeneration",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "clearPreviewState",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "saveFile",
+          "type": "string",
+        },
+        "payload": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "documentId": {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer",
+                },
+                "kind": {
+                  "const": "generated",
+                  "type": "string",
+                },
+              },
+              "required": [
+                "kind",
+                "documentId",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string",
+                },
+                "kind": {
+                  "const": "edited",
+                  "type": "string",
+                },
+              },
+              "required": [
+                "kind",
+                "content",
+              ],
+              "type": "object",
+            },
+          ],
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "pickOutputDirectory",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "exportConfig",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "importConfig",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "updateFilters",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "contentSearchQuery": {
+              "default": "",
+              "type": "string",
+            },
+            "extensionFilter": {
+              "default": "",
+              "type": "string",
+            },
+            "searchQuery": {
+              "default": "",
+              "type": "string",
+            },
+          },
+          "required": [
+            "searchQuery",
+            "extensionFilter",
+            "contentSearchQuery",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "addIgnorePattern",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "pattern": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "pattern",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "removeIgnorePattern",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "pattern": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "pattern",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "clearIgnorePatterns",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "addIgnorePath",
+          "type": "string",
+        },
+        "payload": {
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "setConfigOption",
+          "type": "string",
+        },
+        "payload": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "case_sensitive_search",
+                  "type": "string",
+                },
+                "value": {
+                  "type": "boolean",
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "remove_empty_directories",
+                  "type": "string",
+                },
+                "value": {
+                  "type": "boolean",
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "include_tree_by_default",
+                  "type": "string",
+                },
+                "value": {
+                  "type": "boolean",
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "use_relative_paths",
+                  "type": "string",
+                },
+                "value": {
+                  "type": "boolean",
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "output_filename",
+                  "type": "string",
+                },
+                "value": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "output_directory",
+                  "type": "string",
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "null",
+                  ],
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+          ],
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+  ],
+}
+`;
+
+exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "case_sensitive_search": {
+      "type": "boolean",
+    },
+    "ignore_patterns": {
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+    "include_tree_by_default": {
+      "type": "boolean",
+    },
+    "output_directory": {
+      "type": [
+        "string",
+        "null",
+      ],
+    },
+    "output_filename": {
+      "type": "string",
+    },
+    "remove_empty_directories": {
+      "type": "boolean",
+    },
+    "use_relative_paths": {
+      "type": "boolean",
+    },
+  },
+  "required": [
+    "ignore_patterns",
+    "case_sensitive_search",
+    "remove_empty_directories",
+    "include_tree_by_default",
+    "use_relative_paths",
+    "output_directory",
+    "output_filename",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": {},
+  "properties": {
+    "active_ignore_patterns": {
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+    "config": {
+      "additionalProperties": false,
+      "properties": {
+        "case_sensitive_search": {
+          "type": "boolean",
+        },
+        "ignore_patterns": {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "include_tree_by_default": {
+          "type": "boolean",
+        },
+        "output_directory": {
+          "type": [
+            "string",
+            "null",
+          ],
+        },
+        "output_filename": {
+          "type": "string",
+        },
+        "remove_empty_directories": {
+          "type": "boolean",
+        },
+        "use_relative_paths": {
+          "type": "boolean",
+        },
+      },
+      "required": [
+        "ignore_patterns",
+        "case_sensitive_search",
+        "remove_empty_directories",
+        "include_tree_by_default",
+        "use_relative_paths",
+        "output_directory",
+        "output_filename",
+      ],
+      "type": "object",
+    },
+    "content_search_query": {
+      "type": "string",
+    },
+    "current_config_filename": {
+      "type": [
+        "string",
+        "null",
+      ],
+    },
+    "current_path": {
+      "type": "string",
+    },
+    "extension_filter": {
+      "type": "string",
+    },
+    "is_fully_scanned": {
+      "type": "boolean",
+    },
+    "is_generating": {
+      "type": "boolean",
+    },
+    "is_scanning": {
+      "type": "boolean",
+    },
+    "last_processed_seq": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "last_processed_session": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "located": {
+      "anyOf": [
+        {
+          "additionalProperties": {},
+          "properties": {
+            "request": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer",
+            },
+            "row": {
+              "anyOf": [
+                {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+          },
+          "required": [
+            "request",
+            "row",
+          ],
+          "type": "object",
+        },
+        {
+          "type": "null",
+        },
+      ],
+    },
+    "patterns_need_rescan": {
+      "type": "boolean",
+    },
+    "rows": {
+      "items": {
+        "additionalProperties": {},
+        "properties": {
+          "children_loaded": {
+            "type": "boolean",
+          },
+          "depth": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer",
+          },
+          "has_children": {
+            "type": "boolean",
+          },
+          "is_binary": {
+            "type": "boolean",
+          },
+          "is_directory": {
+            "type": "boolean",
+          },
+          "is_expanded": {
+            "type": "boolean",
+          },
+          "is_match": {
+            "type": "boolean",
+          },
+          "is_previewed": {
+            "type": "boolean",
+          },
+          "name": {
+            "type": "string",
+          },
+          "path": {
+            "type": "string",
+          },
+          "selection_state": {
+            "enum": [
+              "none",
+              "partial",
+              "full",
+            ],
+            "type": "string",
+          },
+          "size": {
+            "type": "number",
+          },
+        },
+        "required": [
+          "path",
+          "name",
+          "depth",
+          "is_directory",
+          "is_expanded",
+          "is_binary",
+          "is_match",
+          "is_previewed",
+          "selection_state",
+          "size",
+          "has_children",
+          "children_loaded",
+        ],
+        "type": "object",
+      },
+      "maxItems": 600,
+      "type": "array",
+    },
+    "rows_revision": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "rows_start": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "rows_total": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "scan_progress": {
+      "additionalProperties": {},
+      "properties": {
+        "current_scanning_path": {
+          "type": "string",
+        },
+        "files_scanned": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer",
+        },
+        "large_files_skipped": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer",
+        },
+      },
+      "required": [
+        "files_scanned",
+        "large_files_skipped",
+        "current_scanning_path",
+      ],
+      "type": "object",
+    },
+    "search_query": {
+      "type": "string",
+    },
+    "selected_files_count": {
+      "type": "number",
+    },
+    "status_message": {
+      "type": "string",
+    },
+    "total_files_found": {
+      "type": "number",
+    },
+    "tree_dirs_count": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "tree_files_count": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "visible_files_count": {
+      "type": "number",
+    },
+  },
+  "required": [
+    "config",
+    "current_path",
+    "rows",
+    "rows_start",
+    "rows_total",
+    "rows_revision",
+    "located",
+    "total_files_found",
+    "visible_files_count",
+    "tree_files_count",
+    "tree_dirs_count",
+    "selected_files_count",
+    "is_scanning",
+    "is_generating",
+    "is_fully_scanned",
+    "status_message",
+    "search_query",
+    "extension_filter",
+    "content_search_query",
+    "scan_progress",
+    "active_ignore_patterns",
+    "patterns_need_rescan",
+    "last_processed_session",
+    "last_processed_seq",
+  ],
+  "type": "object",
+}
+`;

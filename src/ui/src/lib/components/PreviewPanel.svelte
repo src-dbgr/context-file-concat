@@ -1,6 +1,10 @@
 <script lang="ts">
   import { appState, editorInstance, previewedPath } from "$lib/stores/app";
-  import { previewMode, generatedTokenCount } from "$lib/stores/preview";
+  import {
+    previewMode,
+    generatedTokenCount,
+    copyFeedback,
+  } from "$lib/stores/preview";
   import { splitPathForDisplay, generateStatsString } from "$lib/utils";
   import { handleCopy } from "$lib/modules/clipboard";
   import { clearPreview } from "$lib/modules/editor";
@@ -13,6 +17,25 @@
   let contentVersion = $state(0);
   let modelDispose: { dispose: () => void } | null = null;
 
+  /**
+   * The statistics read the whole text, which takes a moment for a large
+   * output (about half a second for 50 MB). Edits are therefore followed with
+   * a short delay instead of per keystroke; new content is counted at once.
+   */
+  const STATS_DELAY_MS = 200;
+  let statsTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function cancelPendingStats() {
+    if (statsTimer) clearTimeout(statsTimer);
+    statsTimer = null;
+  }
+
+  function refreshStats() {
+    cancelPendingStats();
+    // trigger reactive recomputation
+    contentVersion = contentVersion + 1;
+  }
+
   onMount(() => {
     // Re-subscribe whenever the editor instance changes
     const unsub = editorInstance.subscribe((editor) => {
@@ -21,14 +44,20 @@
         modelDispose = null;
       }
       if (editor && editor.getModel()) {
-        modelDispose = editor.getModel()!.onDidChangeContent(() => {
-          // trigger reactive recomputation
-          contentVersion = contentVersion + 1;
+        modelDispose = editor.getModel()!.onDidChangeContent((change) => {
+          // `isFlush`: the whole text was replaced (a preview, an output).
+          if (change.isFlush) {
+            refreshStats();
+          } else {
+            cancelPendingStats();
+            statsTimer = setTimeout(refreshStats, STATS_DELAY_MS);
+          }
         });
       }
     });
     return () => {
       unsub();
+      cancelPendingStats();
       if (modelDispose) {
         modelDispose.dispose();
         modelDispose = null;
@@ -96,12 +125,12 @@
 </script>
 
 <!--
-  This component renders INTO the existing #preview-panel element.
+  This component renders INTO the #preview-panel element of App.svelte.
   We add subtle, accessible feedback while generation is in progress.
 -->
 <div class="preview-fragment" style="display: contents">
   <div class="panel-header">
-    <h3 id="preview-title">
+    <h2 id="preview-title">
       {#if $previewMode === "generated"}
         <div class="preview-path-container">
           <span class="preview-filename">
@@ -129,32 +158,38 @@
         </div>
         <span class="preview-stats">{$t("preview.selectAFile")}</span>
       {/if}
-    </h3>
+    </h2>
 
     <div class="preview-header-buttons">
       <button
         id="copy-btn"
-        aria-label="Copy"
+        class:button-cta={$copyFeedback === "copied"}
+        class:button-cancel-action={$copyFeedback === "failed"}
         style:display={$previewMode !== "idle" ? "inline-block" : "none"}
         onclick={onCopyClick}
         disabled={$previewMode === "idle"}
       >
-        <svg
-          class="icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
-        {$t("preview.copy")}
+        {#if $copyFeedback === "copied"}
+          {$t("preview.copied")}
+        {:else if $copyFeedback === "failed"}
+          {$t("preview.copyFailed")}
+        {:else}
+          <svg
+            class="icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+          {$t("preview.copy")}
+        {/if}
       </button>
 
       <button
         id="clear-preview-btn"
-        aria-label="Clear"
         style:display={$previewMode !== "idle" ? "inline-block" : "none"}
         onclick={clearPreview}
         disabled={$previewMode === "idle"}

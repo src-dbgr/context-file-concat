@@ -1,7 +1,9 @@
 [package]
 name = "context-file-concat"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
+# MSRV of the dependency tree (time 0.3.47+ requires 1.88); verified by the CI job "msrv".
+rust-version = "1.88"
 description = "Context File Concatenator - Intelligently select, filter, and combine project files for LLM context"
 authors = ["src dbgr"]
 license = "MIT"
@@ -12,8 +14,8 @@ categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 # Web-View Architecture
-wry = "0.37"
-tao = "0.26"
+wry = "0.57"
+tao = "0.37"
 
 # Core Logic & Utilities
 tokio = { version = "1.0", features = ["full"] }
@@ -25,16 +27,10 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 rfd = "0.15"
-dirs = "6.0"
 directories = "6.0"
 rayon = "1.10"
-tree_magic_mini = "3.2"
-camino = "1.1"
-regex = "1.1"
 thiserror = "2.0"
-tempfile = "3.20"
-tiktoken-rs = "0.7"
-async-trait = "0.1"
+tiktoken-rs = "0.12"
 rust-embed = { version = "8", features = ["compression", "include-exclude"] }
 mime_guess = "2.0"
 open = "5.3"
@@ -44,28 +40,40 @@ insta = { version = "1.43", features = ["redactions", "filters"] }
 proptest = "1.7"
 tempfile = "3.20"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-test = "0.2"
-serial_test = "3.2"
 libc = "0.2"
 
-# macOS-only: thin, scoped integration helpers (no objc macros in our code)
+# macOS-only: native menu (src/platform/macos). Same objc2 generation as tao/wry.
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.26"
-objc = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSEvent",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
 
 # For better Performance in Release-Build
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# Panics unwind, in release as in debug: the application isolates a panicking command
+# or background task (catch_unwind in app/dispatch.rs, Tokio's task boundary, the
+# guards in app/tasks.rs, poison recovery in app/shared_state.rs) and keeps running.
+# With "abort" all of that would be dead code and any panic would end the application.
+panic = "unwind"
 strip = true  # Remove debug symbols for smaller binaries
 
 # BUNDLE INFORMATION
 [package.metadata.bundle]
 name = "Context File Concatenator"
 identifier = "io.devsam.contextfileconcat"
-version = "0.3.1"
+version = "0.4.0"
 short_description = "Context File Concatenator for LLMs"
 long_description = "A desktop application to intelligently select, filter, and combine project files into a single text file optimized for Large Language Models."
 icon = ["assets/icons/icon.icns"]  # macOS

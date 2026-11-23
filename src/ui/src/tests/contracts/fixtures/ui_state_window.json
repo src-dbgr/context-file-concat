@@ -1,0 +1,159 @@
+{
+  "config": {
+    "ignore_patterns": [
+      "target"
+    ],
+    "case_sensitive_search": false,
+    "remove_empty_directories": false,
+    "include_tree_by_default": true,
+    "use_relative_paths": true,
+    "output_directory": null,
+    "output_filename": "output.txt"
+  },
+  "current_path": "/project",
+  "rows": [
+    {
+      "name": "empty",
+      "path": "/project/empty",
+      "depth": 0,
+      "is_directory": true,
+      "is_binary": false,
+      "size": 0,
+      "has_children": false,
+      "selection_state": "none",
+      "is_expanded": false,
+      "is_match": false,
+      "is_previewed": false,
+      "children_loaded": true
+    },
+    {
+      "name": "src",
+      "path": "/project/src",
+      "depth": 0,
+      "is_directory": true,
+      "is_binary": false,
+      "size": 0,
+      "has_children": true,
+      "selection_state": "partial",
+      "is_expanded": true,
+      "is_match": false,
+      "is_previewed": false,
+      "children_loaded": true
+    },
+    {
+      "name": "core",
+      "path": "/project/src/core",
+      "depth": 1,
+      "is_directory": true,
+      "is_binary": false,
+      "size": 0,
+      "has_children": true,
+      "selection_state": "full",
+      "is_expanded": false,
+      "is_match": false,
+      "is_previewed": false,
+      "children_loaded": true
+    },
+    {
+      "name": "lib.rs",
+      "path": "/project/src/lib.rs",
+      "depth": 1,
+      "is_directory": false,
+      "is_binary": false,
+      "size": 512,
+      "has_children": false,
+      "selection_state": "none",
+      "is_expanded": false,
+      "is_match": false,
+      "is_previewed": false,
+      "children_loaded": true
+    },
+    {
+      "name": "main.rs",
+      "path": "/project/src/main.rs",
+      "depth": 1,
+      "is_directory": false,
+      "is_binary": false,
+      "size": 1024,
+      "has_children": false,
+      "selection_state": "full",
+      "is_expanded": false,
+      "is_match": true,
+      "is_previewed": true,
+      "children_loaded": true
+    },
+    {
+      "name": "vendor",
+      "path": "/project/vendor",
+      "depth": 0,
+      "is_directory": true,
+      "is_binary": false,
+      "size": 0,
+      "has_children": false,
+      "selection_state": "none",
+      "is_expanded": false,
+      "is_match": false,
+      "is_previewed": false,
+      "children_loaded": false
+    },
+    {
+      "name": "README.md",
+      "path": "/project/README.md",
+      "depth": 0,
+      "is_directory": false,
+      "is_binary": false,
+      "size": 256,
+      "has_children": false,
+      "selection_state": "none",
+      "is_expanded": false,
+      "is_match": false,
+      "is_previewed": false,
+      "children_loaded": true
+    },
+    {
+      "name": "logo.png",
+      "path": "/project/logo.png",
+      "depth": 0,
+      "is_directory": false,
+      "is_binary": true,
+      "size": 65536,
+      "has_children": false,
+      "selection_state": "none",
+      "is_expanded": false,
+      "is_match": false,
+      "is_previewed": false,
+      "children_loaded": true
+    }
+  ],
+  "rows_start": 1,
+  "rows_total": 9,
+  "rows_revision": 1,
+  "located": {
+    "request": 7,
+    "row": 5
+  },
+  "total_files_found": 12,
+  "visible_files_count": 12,
+  "tree_files_count": 7,
+  "tree_dirs_count": 5,
+  "selected_files_count": 3,
+  "is_scanning": false,
+  "is_generating": false,
+  "is_fully_scanned": false,
+  "status_message": "Indexing complete. Found 12 visible items.",
+  "search_query": "main",
+  "extension_filter": "",
+  "content_search_query": "",
+  "current_config_filename": "project.cfc.json",
+  "scan_progress": {
+    "files_scanned": 12,
+    "large_files_skipped": 1,
+    "current_scanning_path": "Indexing complete. Found 12 visible items."
+  },
+  "active_ignore_patterns": [
+    "target"
+  ],
+  "patterns_need_rescan": false,
+  "last_processed_session": 0,
+  "last_processed_seq": 41
+}

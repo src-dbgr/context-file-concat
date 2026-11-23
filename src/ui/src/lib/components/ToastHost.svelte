@@ -5,6 +5,7 @@
    * - Only imports `toasts` from the store (fixes svelte-check errors)
    */
   import { toasts, toast } from "$lib/stores/toast";
+  import { t as tr } from "$lib/i18n";
 
   type Variant = "info" | "success" | "warning" | "error" | "default";
   type Item = {
@@ -56,7 +57,7 @@
 </script>
 
 <!-- Landmark region for notifications -->
-<aside class="toast-host" role="region" aria-label="Notifications">
+<aside class="toast-host" role="region" aria-label={$tr("aria.notifications")}>
   <ol
     class="toast-list"
     role="list"
@@ -64,13 +65,10 @@
     aria-relevant="additions text"
   >
     {#each items as t (t.id)}
-      <li
-        class="toast {t.variant}"
-        role="status"
-        aria-atomic="true"
-        data-id={t.id}
-      >
-        <div class="content">
+      <!-- The item stays a listitem (a list may only own listitems); the
+           status role sits on its content. -->
+      <li class="toast {t.variant}" data-id={t.id}>
+        <div class="content" role="status" aria-atomic="true">
           <span class="icon" aria-hidden="true">
             {#if typeof pickIconKind(t.variant ?? "default", t.icon) === "string"}
               {#if pickIconKind(t.variant ?? "default", t.icon) === "check"}
@@ -212,7 +210,7 @@
           <button
             type="button"
             class="close"
-            aria-label="Dismiss notification"
+            aria-label={$tr("aria.dismissNotification")}
             onclick={() => dismissToast(t.id)}
           >
             <svg viewBox="0 0 12 12" fill="currentColor">

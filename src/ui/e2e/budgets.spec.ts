@@ -1,50 +1,18 @@
 import { test, expect, Page } from "@playwright/test";
+import {
+  makeHugeTree,
+  setTree,
+  waitForBridge,
+  type AppState,
+} from "./support/tree";
 
 /**
  * Budget E2E:
  * - No artificial sleeps. Only wait for deterministic conditions.
  * - Relies on main.ts performance marks when `?budget=1` is set.
+ * - The 25k tree is served by the stand-in host of the E2E bridge, which sends
+ *   the window of rows the UI asks for, as the real host does.
  */
-
-type TreeNode = {
-  path: string;
-  name: string;
-  is_directory: boolean;
-  is_expanded: boolean;
-  is_binary: boolean;
-  is_match: boolean;
-  is_previewed: boolean;
-  selection_state: "none" | "full" | "partial";
-  size: number;
-  children: TreeNode[];
-};
-
-type AppConfig = {
-  ignore_patterns: string[];
-  case_sensitive_search: boolean;
-  include_tree_by_default: boolean;
-  use_relative_paths: boolean;
-  remove_empty_directories: boolean;
-  output_directory: string;
-  output_filename: string;
-};
-
-type AppState = {
-  is_scanning: boolean;
-  is_generating: boolean;
-  is_fully_scanned: boolean;
-  patterns_need_rescan: boolean;
-  tree: TreeNode[];
-  current_path: string | null;
-  current_config_filename: string | null;
-  status_message: string;
-  selected_files_count: number;
-  search_query: string;
-  extension_filter: string;
-  content_search_query: string;
-  active_ignore_patterns: string[];
-  config: AppConfig;
-};
 
 function shouldInstallBridge(page: Page) {
   return page.addInitScript(() => {
@@ -63,6 +31,8 @@ function baseState(): AppState {
     current_config_filename: null,
     status_message: "Status: Ready.",
     selected_files_count: 0,
+    tree_files_count: 0,
+    tree_dirs_count: 0,
     search_query: "",
     extension_filter: "",
     content_search_query: "",
@@ -77,39 +47,6 @@ function baseState(): AppState {
       output_filename: "output.txt",
     },
   };
-}
-
-function makeHugeTree(filesCount: number): TreeNode[] {
-  const children: TreeNode[] = [];
-  for (let i = 0; i < filesCount; i++) {
-    const name = `file-${i}.txt`;
-    children.push({
-      path: `/repo/src/${name}`,
-      name,
-      is_directory: false,
-      is_expanded: false,
-      is_binary: false,
-      is_match: true,
-      is_previewed: false,
-      selection_state: "none",
-      size: 123,
-      children: [],
-    });
-  }
-  return [
-    {
-      path: "/repo/src",
-      name: "src",
-      is_directory: true,
-      is_expanded: true,
-      is_binary: false,
-      is_match: true,
-      is_previewed: false,
-      selection_state: "none",
-      size: 0,
-      children,
-    },
-  ];
 }
 
 test.describe("[@budget] CI budgets", () => {
@@ -130,8 +67,7 @@ test.describe("[@budget] CI budgets", () => {
 
     const measured = await page.evaluate(() => {
       const m = performance.getEntriesByName("app-init")[0] as
-        | PerformanceMeasure
-        | undefined;
+        PerformanceMeasure | undefined;
       return m ? m.duration : -1;
     });
 
@@ -144,24 +80,15 @@ test.describe("[@budget] CI budgets", () => {
   }) => {
     await page.goto("/?e2e=1");
 
-    await page.waitForFunction(() => {
-      const w = window as unknown as {
-        __e2e?: { store?: { setAppState?: (s: unknown) => void } };
-      };
-      return typeof w.__e2e?.store?.setAppState === "function";
-    });
+    await waitForBridge(page);
 
     const huge = baseState();
     huge.tree = makeHugeTree(25_000);
+    huge.tree_files_count = 25_000;
+    huge.tree_dirs_count = 1;
 
     const startedAt = Date.now();
-    await page.evaluate((next) => {
-      (
-        window as unknown as {
-          __e2e: { store: { setAppState: (s: AppState) => void } };
-        }
-      ).__e2e.store.setAppState(next);
-    }, huge);
+    await setTree(page, huge);
 
     const rows = page.locator(".virtual-scroll-item");
     await expect(rows.first()).toBeAttached();

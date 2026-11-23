@@ -1,0 +1,5 @@
+# Configuration of `cargo audit` (CI workflow "Supply chain"; run it locally with `cargo audit`).
+#
+# Every ignored advisory needs a reason and the condition under which the entry goes away.
+[advisories]
+ignore = []

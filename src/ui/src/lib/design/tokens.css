@@ -3,6 +3,21 @@
  * Single Source of Truth for spacing, radii, shadows, typography, z-layers, and semantic colors.
  * Theme mapping is attribute-driven via [data-theme="light" | "dark"] on :root.
  * Default theme is provided by themes/dark.css.
+ *
+ * Contrast (WCAG 2.1 AA) is a property of the tokens, not of single elements:
+ * - `--color-text`, `--color-muted` and the `--color-*-text` tokens have at
+ *   least 4.5:1 on `--color-bg`, `--surface-1` and `--surface-2`, and on the
+ *   tinted surfaces they stand on (the previewed row, the active chip).
+ * - `--color-on-solid` has at least 4.5:1 on the `--color-*-solid` tokens,
+ *   `--color-on-info` on `--color-info`.
+ * - `--color-control-border` and `--focus-ring-color` (`--color-focus`: the
+ *   edge of a form control, the focus) have at least 3:1 on `--color-bg`,
+ *   `--surface-1` and `--surface-2`; `--color-accent` (the state of a
+ *   control) on `--color-bg` and `--surface-1`.
+ * The plain `--color-success|warning|error|info` tokens are for fills, borders
+ * and icons; text in one of these hues takes the `-text` token, a filled
+ * button the `-solid` one. src/tests/design/tokens.contrast.test.ts checks
+ * these ratios on the palettes, e2e/a11y.spec.ts every screen in both themes.
  */
 
 /* ---------- Core scales (theme-agnostic) ---------- */
@@ -69,10 +84,9 @@
     var(--surface-2) 85%,
     var(--color-bg) 15%
   );
-  --focus-ring-color: var(--color-accent);
+  --focus-ring-color: var(--color-focus);
   --focus-ring-width: 2px;
-  --focus-ring-shadow: 0 0 0 var(--focus-ring-width)
-    color-mix(in srgb, var(--color-accent) 25%, transparent);
+  --focus-ring-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring-color);
 
   /* Alpha helpers */
   --alpha-accent-10: color-mix(in srgb, var(--color-accent) 10%, transparent);
@@ -98,6 +112,18 @@
   --palette-light-error: #e54b4b;
 
   --palette-light-on-accent: #ffffff;
+
+  /* Text in a hue, fills under `on-solid` text, borders of form controls */
+  --palette-light-accent-text: #1f5aa6;
+  --palette-light-success-text: #166534;
+  --palette-light-warning-text: #7a5200;
+  --palette-light-error-text: #b42323;
+  --palette-light-success-solid: #15803d;
+  --palette-light-error-solid: #d23c3c;
+  --palette-light-on-solid: #ffffff;
+  --palette-light-on-info: #1f2328;
+  --palette-light-control-border: #7f8a9a;
+  --palette-light-focus: #3a7fd5;
 }
 
 /* Dark palette */
@@ -116,6 +142,18 @@
   --palette-dark-error: #e54b4b;
 
   --palette-dark-on-accent: #ffffff;
+
+  /* Text in a hue, fills under `on-solid` text, borders of form controls */
+  --palette-dark-accent-text: #82b4f2;
+  --palette-dark-success-text: #86dc8a;
+  --palette-dark-warning-text: #ffc107;
+  --palette-dark-error-text: #ff8a80;
+  --palette-dark-success-solid: #2f8537;
+  --palette-dark-error-solid: #d23c3c;
+  --palette-dark-on-solid: #ffffff;
+  --palette-dark-on-info: #1e1f22;
+  --palette-dark-control-border: #868b97;
+  --palette-dark-focus: #6ea8ee;
 }
 
 /* ---------- Semantic color mapping (Light) ---------- */
@@ -134,4 +172,15 @@
   --color-error: var(--palette-light-error);
 
   --color-on-accent: var(--palette-light-on-accent);
+
+  --color-accent-text: var(--palette-light-accent-text);
+  --color-success-text: var(--palette-light-success-text);
+  --color-warning-text: var(--palette-light-warning-text);
+  --color-error-text: var(--palette-light-error-text);
+  --color-success-solid: var(--palette-light-success-solid);
+  --color-error-solid: var(--palette-light-error-solid);
+  --color-on-solid: var(--palette-light-on-solid);
+  --color-on-info: var(--palette-light-on-info);
+  --color-control-border: var(--palette-light-control-border);
+  --color-focus: var(--palette-light-focus);
 }

@@ -3,6 +3,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { get } from "svelte/store";
 import { appState } from "$lib/stores/app";
+import { scanProgress } from "$lib/stores/scanProgress";
 
 /**
  * Hoisted mocks (evaluated before Imports)
@@ -10,25 +11,23 @@ import { appState } from "$lib/stores/app";
 
 // toast: we check calls for success/info/error
 const { toast } = vi.hoisted(() => ({
-  toast: { success: vi.fn(), info: vi.fn(), error: vi.fn() },
+  toast: {
+    success: vi.fn(),
+    info: vi.fn(),
+    warning: vi.fn(),
+    error: vi.fn(),
+  },
 }));
 vi.mock("$lib/stores/toast", () => ({ toast }));
 
-// treeExpansion: applyExpansionMemory shall return identically; clearExpansionMemory only Spy
-const { clearExpansionMemory, applyExpansionMemory } = vi.hoisted(() => ({
-  clearExpansionMemory: vi.fn(),
-  applyExpansionMemory: vi.fn((x: unknown[]) => x),
-}));
-vi.mock("$lib/modules/treeExpansion", () => ({
-  clearExpansionMemory,
-  applyExpansionMemory,
-}));
-
-// i18n: t(key) => key
+// i18n: t(key) => key, with the parameters appended where there are any
 vi.mock("$lib/i18n", () => {
+  type Params = Record<string, string | number>;
   const t = {
-    subscribe(run: (val: (key: string) => string) => void) {
-      run((k: string) => k);
+    subscribe(run: (val: (key: string, params?: Params) => string) => void) {
+      run((k: string, params?: Params) =>
+        params ? `${k} ${JSON.stringify(params)}` : k,
+      );
       return () => {};
     },
   };
@@ -42,6 +41,8 @@ vi.mock("$lib/modules/editor", () => ({
   showPreviewContent: vi.fn(),
   showGeneratedContent: vi.fn(),
   clearPreview: vi.fn(),
+  retrySaveOfUnavailableDocument: vi.fn(() => false),
+  saveSettled: vi.fn(),
 }));
 
 /**
@@ -56,7 +57,9 @@ vi.mock("$lib/ipc/schema", () => {
     ShowPreviewArgsSchema: { safeParse: passthrough },
     ShowGeneratedArgsSchema: { safeParse: passthrough },
     StatusMessageSchema: { safeParse: passthrough },
-    FileSaveStatusArgsSchema: { safeParse: passthrough },
+    SaveResultSchema: { safeParse: passthrough },
+    OutputSizeNoticeSchema: { safeParse: passthrough },
+    IgnorePathRefusalSchema: { safeParse: passthrough },
     DragStateSchema: { safeParse: passthrough },
   };
 });
@@ -67,6 +70,8 @@ import {
   showPreviewContent as showPreviewContentImpl,
   showGeneratedContent as showGeneratedContentImpl,
   clearPreview as clearPreviewImpl,
+  retrySaveOfUnavailableDocument,
+  saveSettled,
 } from "$lib/modules/editor";
 
 declare global {
@@ -77,7 +82,7 @@ declare global {
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
-  opts?: { id?: string; className?: string }
+  opts?: { id?: string; className?: string },
 ): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (opts?.id) node.id = opts.id;
@@ -100,20 +105,24 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
       "code",
       "javascript",
       "",
-      "/path/file.ts"
+      "/path/file.ts",
     );
   });
 
   it("showGeneratedContent validates and forwards to editor", () => {
-    window.showGeneratedContent("output", 42);
-    expect(showGeneratedContentImpl).toHaveBeenCalledWith("output", 42);
+    window.showGeneratedContent("output", 42, 7);
+    expect(showGeneratedContentImpl).toHaveBeenCalledWith("output", 42, 7);
   });
 
   it("showError updates status and emits toast.error", () => {
     window.showError("Boom");
     const state = get(appState);
     expect(state.status_message).toMatch(/^Error: /);
-    expect(toast.error).toHaveBeenCalledWith("toast.renderFailed");
+    // The toast carries the text of the host, under a localized title.
+    expect(toast.error).toHaveBeenCalledWith("Boom", {
+      title: "toast.errorTitle",
+      duration: 10_000,
+    });
   });
 
   it("showStatus updates status", () => {
@@ -122,18 +131,148 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     expect(state.status_message).toBe("Status: Working");
   });
 
-  it("fileSaveStatus handles cancelled, success, and failure", () => {
-    window.fileSaveStatus(true, "cancelled");
-    expect(get(appState).status_message).toBe("Status: Save cancelled.");
-    expect(toast.info).toHaveBeenCalledWith("toast.saveCancelled");
+  it("a failed load of the editor is reported, not swallowed", async () => {
+    vi.mocked(showPreviewContentImpl).mockRejectedValueOnce(
+      new Error("Failed to fetch dynamically imported module"),
+    );
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    window.fileSaveStatus(true, "/tmp/out.txt");
+    window.showPreviewContent("code", "javascript", "", "/path/file.ts");
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalled());
+
+    expect(toast.error).toHaveBeenCalledWith("toast.editorLoadFailed", {
+      title: "toast.errorTitle",
+      duration: 10_000,
+    });
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+
+    vi.mocked(showGeneratedContentImpl).mockRejectedValueOnce(new Error("x"));
+    const silent = vi.spyOn(console, "error").mockImplementation(() => {});
+    window.showGeneratedContent("output", 42, 7);
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalledTimes(2));
+    silent.mockRestore();
+  });
+
+  it("saveResult: a document the host gave up is saved again from the UI, silently", () => {
+    vi.mocked(retrySaveOfUnavailableDocument).mockReturnValueOnce(true);
+
+    window.saveResult({ status: "document_unavailable", document_id: 7 });
+
+    expect(retrySaveOfUnavailableDocument).toHaveBeenCalledWith(7);
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(saveSettled).not.toHaveBeenCalled();
+  });
+
+  it("saveResult: a document nobody has any more is a failed save", () => {
+    window.saveResult({ status: "document_unavailable", document_id: 7 });
+
+    expect(get(appState).status_message).toBe("Error: Failed to save file.");
+    expect(toast.error).toHaveBeenCalledWith("toast.outputUnavailable", {
+      title: "toast.saveFailed",
+      duration: 10_000,
+    });
+  });
+
+  it("saveResult: a saved file is reported with its path", () => {
+    window.saveResult({ status: "saved", path: "/tmp/out.txt" });
     expect(get(appState).status_message).toBe("Status: Saved to /tmp/out.txt");
     expect(toast.success).toHaveBeenCalledWith("toast.fileSaved");
+    expect(toast.info).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
 
-    window.fileSaveStatus(false, "/tmp/out.txt");
+  it("saveResult: a cancelled save is neither a success nor an error", () => {
+    window.saveResult({ status: "cancelled" });
+    expect(get(appState).status_message).toBe("Status: Save cancelled.");
+    expect(toast.info).toHaveBeenCalledWith("toast.saveCancelled");
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("saveResult: a failed save shows the reason of the host", () => {
+    window.saveResult({
+      status: "failed",
+      error: "Permission denied (os error 13)",
+    });
     expect(get(appState).status_message).toBe("Error: Failed to save file.");
+    // The reason is the text, under a localized title; it is never a path.
+    expect(toast.error).toHaveBeenCalledWith(
+      "Permission denied (os error 13)",
+      { title: "toast.saveFailed", duration: 10_000 },
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("saveResult: a file that is named 'cancelled' is a saved file", () => {
+    window.saveResult({ status: "saved", path: "cancelled" });
+    expect(get(appState).status_message).toBe("Status: Saved to cancelled");
+    expect(toast.success).toHaveBeenCalledWith("toast.fileSaved");
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it("saveResult: a failure without a reason still says what failed", () => {
+    window.saveResult({ status: "failed", error: "  " });
     expect(toast.error).toHaveBeenCalledWith("toast.saveFailed");
+  });
+
+  it("saveResult: a long reason is cut", () => {
+    window.saveResult({ status: "failed", error: "x".repeat(1000) });
+    const [text] = toast.error.mock.calls[0] as [string];
+    expect(text.length).toBeLessThanOrEqual(300);
+  });
+
+  it("outputSizeNotice: a large output is announced with a warning", () => {
+    window.outputSizeNotice({
+      status: "large",
+      estimated_bytes: 31 * 1024 * 1024,
+      limit_bytes: 20 * 1024 * 1024,
+    });
+    expect(toast.warning).toHaveBeenCalledWith(
+      'toast.outputLarge {"size":"31 MB","limit":"20 MB"}',
+      { title: "toast.outputLargeTitle" },
+    );
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("outputSizeNotice: a refused output is an error that stays readable", () => {
+    window.outputSizeNotice({
+      status: "too_large",
+      estimated_bytes: 314572800,
+      limit_bytes: 209715200,
+    });
+    expect(toast.error).toHaveBeenCalledWith(
+      'toast.outputTooLarge {"size":"300 MB","limit":"200 MB"}',
+      { title: "toast.outputTooLargeTitle", duration: 10_000 },
+    );
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it("ignorePathRefused: says why the button added nothing, and for long enough", () => {
+    window.ignorePathRefused({
+      reason: "trailing_whitespace",
+      name: "notes\u00a0",
+    });
+    expect(toast.warning).toHaveBeenLastCalledWith(
+      'toast.ignoreRefusedWhitespace {"name":"notes\u00a0"}',
+      { title: "toast.ignoreRefusedTitle", duration: 10_000 },
+    );
+
+    window.ignorePathRefused({ reason: "not_unicode", name: "bad\ufffd.txt" });
+    expect(toast.warning).toHaveBeenLastCalledWith(
+      'toast.ignoreRefusedNotUnicode {"name":"bad\ufffd.txt"}',
+      { title: "toast.ignoreRefusedTitle", duration: 10_000 },
+    );
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("ignorePathRefused: a long name is cut", () => {
+    window.ignorePathRefused({
+      reason: "not_unicode",
+      name: "x".repeat(1000),
+    });
+    const [text] = toast.warning.mock.calls[0] as [string];
+    expect(text.length).toBeLessThan(400);
   });
 
   it("setDragState toggles css class on the file tree container", () => {
@@ -147,13 +286,7 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     expect(container.classList.contains("drag-over")).toBe(false);
   });
 
-  it("updateScanProgress writes progress text and width when scanning", () => {
-    el("div", { className: "scan-text" });
-    el("div", { id: "scan-files-count" });
-    el("div", { id: "scan-current-path" });
-    el("div", { id: "scan-skipped-count" });
-    el("div", { id: "scan-progress-fill" });
-
+  it("updateScanProgress reports to the scanProgress store when scanning", () => {
     appState.update((s) => {
       s.is_scanning = true;
       return s;
@@ -165,46 +298,67 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
       large_files_skipped: 1,
     });
 
-    const scanText = document.querySelector(".scan-text") as HTMLElement;
-    const files = document.getElementById("scan-files-count") as HTMLElement;
-    const current = document.getElementById("scan-current-path") as HTMLElement;
-    const skipped = document.getElementById(
-      "scan-skipped-count"
-    ) as HTMLElement;
-    const fill = document.getElementById("scan-progress-fill") as HTMLElement;
-
-    expect(scanText.textContent).toBe("filetree.scanning");
-    expect(files.textContent).toContain("files processed");
-    expect(current.textContent).toBe("/some/path");
-    expect(skipped.textContent).toContain("large files skipped");
-    expect(fill.style.width).toMatch(/%$/);
+    expect(get(scanProgress)).toEqual({
+      files_scanned: 10,
+      current_scanning_path: "/some/path",
+      large_files_skipped: 1,
+    });
   });
 
-  it("render applies expansion memory and clears it on path change", () => {
+  it("render takes the backend's rows and expansion state as they are", () => {
     const base = get(appState);
+    const dir = (path: string, depth: number, is_expanded: boolean) => ({
+      path,
+      name: path,
+      depth,
+      is_directory: true,
+      is_expanded,
+      is_binary: false,
+      is_match: false,
+      is_previewed: false,
+      selection_state: "none",
+      size: 0,
+      has_children: true,
+      children_loaded: true,
+    });
+    const snapshot = (
+      rows: unknown[],
+      rows_start = 0,
+      rows_total = rows.length,
+    ) =>
+      ({
+        ...base,
+        current_path: "/a",
+        rows,
+        rows_start,
+        rows_total,
+        status_message: "Ready.",
+      }) as Parameters<typeof window.render>[0];
 
-    const p1 = {
-      ...base,
-      current_path: "/a",
-      tree: Array.isArray(base.tree) ? base.tree : [],
-      status_message: "Ready.",
-    } as Parameters<typeof window.render>[0];
+    // Expanded by the backend: the children are rows of the snapshot.
+    const expanded = [dir("/a/src", 0, true), dir("/a/src/core", 1, false)];
+    window.render(snapshot(expanded));
+    expect(get(appState).rows).toBe(expanded);
+    expect(get(appState).rows[0].is_expanded).toBe(true);
 
-    window.render(p1);
-    expect(applyExpansionMemory).toHaveBeenCalled();
+    // Collapsed by a later snapshot: nothing in the UI keeps it open.
+    window.render(snapshot([dir("/a/src", 0, false)]));
+    const collapsed = get(appState).rows;
+    expect(collapsed).toHaveLength(1);
+    expect(collapsed[0].is_expanded).toBe(false);
 
-    const p2 = {
-      ...base,
-      current_path: "/b",
-      tree: Array.isArray(base.tree) ? base.tree : [],
-      status_message: "Ready.",
-    } as Parameters<typeof window.render>[0];
+    // ...and nothing keeps it closed either (e.g. search auto-expansion).
+    window.render(snapshot(expanded));
+    expect(get(appState).rows[0].is_expanded).toBe(true);
+    expect(get(appState).rows).toHaveLength(2);
 
-    window.render(p2);
-    expect(clearExpansionMemory).toHaveBeenCalled();
+    // A window in the middle of a long list replaces what was held before.
+    window.render(snapshot(expanded, 500, 2000));
+    expect(get(appState)).toMatchObject({ rows_start: 500, rows_total: 2000 });
+    expect(get(appState).rows).toBe(expanded);
   });
 
-  it("render clears preview when current_path becomes null", () => {
+  it("render clears preview when the directory is closed", () => {
     appState.update((s) => {
       s.current_path = "/was/set";
       return s;
@@ -213,8 +367,10 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     const base = get(appState);
     const p = {
       ...base,
-      current_path: null,
-      tree: Array.isArray(base.tree) ? base.tree : [],
+      current_path: "",
+      rows: [],
+      rows_start: 0,
+      rows_total: 0,
       status_message: "Ready.",
     } as Parameters<typeof window.render>[0];
 

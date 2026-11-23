@@ -1,9 +1,17 @@
 import { test, expect, Page } from "@playwright/test";
+import {
+  makeHugeTree,
+  setTree,
+  waitForBridge,
+  type AppState,
+} from "./support/tree";
 
 /**
  * Benchmarks (dev-only):
  * - Keine künstlichen Waits. Es wird nur auf deterministische Bedingungen gewartet.
- * - Nutzt window.__e2e.store.setAppState (siehe e2eBridge / e2eShim).
+ * - Nutzt window.__e2e.host.setTree (siehe e2eBridge; nur im e2e-Build vorhanden):
+ *   die Bridge hält die Zeilen und liefert wie der Host nur das Fenster, das
+ *   die UI anfragt (setViewport).
  * - Misst mit Performance Marks/Measures im Browser.
  *
  * Thresholds via ENV:
@@ -11,46 +19,6 @@ import { test, expect, Page } from "@playwright/test";
  *   BMARK_FILTER_MS   (default 600)
  *   BMARK_SCROLL_MS   (default 300)
  */
-
-type TreeNode = {
-  path: string;
-  name: string;
-  is_directory: boolean;
-  is_expanded: boolean;
-  is_binary: boolean;
-  is_match: boolean;
-  is_previewed: boolean;
-  selection_state: "none" | "full" | "partial";
-  size: number;
-  children: TreeNode[];
-};
-
-type AppConfig = {
-  ignore_patterns: string[];
-  case_sensitive_search: boolean;
-  include_tree_by_default: boolean;
-  use_relative_paths: boolean;
-  remove_empty_directories: boolean;
-  output_directory: string;
-  output_filename: string;
-};
-
-type AppState = {
-  is_scanning: boolean;
-  is_generating: boolean;
-  is_fully_scanned: boolean;
-  patterns_need_rescan: boolean;
-  tree: TreeNode[];
-  current_path: string | null;
-  current_config_filename: string | null;
-  status_message: string;
-  selected_files_count: number;
-  search_query: string;
-  extension_filter: string;
-  content_search_query: string;
-  active_ignore_patterns: string[];
-  config: AppConfig;
-};
 
 function shouldInstallBridge(page: Page) {
   return page.addInitScript(() => {
@@ -69,6 +37,8 @@ function baseState(): AppState {
     current_config_filename: null,
     status_message: "Status: Ready.",
     selected_files_count: 0,
+    tree_files_count: 0,
+    tree_dirs_count: 0,
     search_query: "",
     extension_filter: "",
     content_search_query: "",
@@ -83,39 +53,6 @@ function baseState(): AppState {
       output_filename: "output.txt",
     },
   };
-}
-
-function makeHugeTree(filesCount: number): TreeNode[] {
-  const children: TreeNode[] = [];
-  for (let i = 0; i < filesCount; i++) {
-    const name = `file-${i}.txt`;
-    children.push({
-      path: `/repo/src/${name}`,
-      name,
-      is_directory: false,
-      is_expanded: false,
-      is_binary: false,
-      is_match: true,
-      is_previewed: false,
-      selection_state: "none",
-      size: 123,
-      children: [],
-    });
-  }
-  return [
-    {
-      path: "/repo/src",
-      name: "src",
-      is_directory: true,
-      is_expanded: true,
-      is_binary: false,
-      is_match: true,
-      is_previewed: false,
-      selection_state: "none",
-      size: 0,
-      children,
-    },
-  ];
 }
 
 async function waitForVirtualListReady(page: Page) {
@@ -139,25 +76,16 @@ test.describe("[@bench] 25k Benchmarks", () => {
     await page.goto("/?e2e=1");
 
     // Bridge verfügbar?
-    await page.waitForFunction(() => {
-      const w = window as unknown as {
-        __e2e?: { store?: { setAppState?: (s: unknown) => void } };
-      };
-      return typeof w.__e2e?.store?.setAppState === "function";
-    });
+    await waitForBridge(page);
 
     const huge = baseState();
     huge.tree = makeHugeTree(25_000);
+    huge.tree_files_count = 25_000;
+    huge.tree_dirs_count = 1;
 
     // Start messen + apply
-    await page.evaluate((next) => {
-      performance.mark("bm_flatten_start");
-      (
-        window as unknown as {
-          __e2e: { store: { setAppState: (s: AppState) => void } };
-        }
-      ).__e2e.store.setAppState(next);
-    }, huge);
+    await page.evaluate(() => performance.mark("bm_flatten_start"));
+    await setTree(page, huge);
 
     await waitForVirtualListReady(page);
 
@@ -165,8 +93,7 @@ test.describe("[@bench] 25k Benchmarks", () => {
       performance.mark("bm_flatten_end");
       performance.measure("bm_flatten", "bm_flatten_start", "bm_flatten_end");
       const m = performance.getEntriesByName("bm_flatten")[0] as
-        | PerformanceMeasure
-        | undefined;
+        PerformanceMeasure | undefined;
       return m ? m.duration : -1;
     });
 
@@ -180,23 +107,14 @@ test.describe("[@bench] 25k Benchmarks", () => {
     const THRESH = Number(process.env.BMARK_FILTER_MS ?? 600);
 
     await page.goto("/?e2e=1");
-    await page.waitForFunction(() => {
-      const w = window as unknown as {
-        __e2e?: { store?: { setAppState?: (s: unknown) => void } };
-      };
-      return typeof w.__e2e?.store?.setAppState === "function";
-    });
+    await waitForBridge(page);
 
     // Zuerst 25k setzen
     const huge = baseState();
     huge.tree = makeHugeTree(25_000);
-    await page.evaluate((next) => {
-      (
-        window as unknown as {
-          __e2e: { store: { setAppState: (s: AppState) => void } };
-        }
-      ).__e2e.store.setAppState(next);
-    }, huge);
+    huge.tree_files_count = 25_000;
+    huge.tree_dirs_count = 1;
+    await setTree(page, huge);
     await waitForVirtualListReady(page);
 
     // Jetzt eine gefilterte Teilmenge (~1000 Dateien: "file-24xxx")
@@ -210,20 +128,17 @@ test.describe("[@bench] 25k Benchmarks", () => {
       },
     ];
 
-    await page.evaluate((next) => {
-      performance.mark("bm_filter_start");
-      (
-        window as unknown as {
-          __e2e: { store: { setAppState: (s: AppState) => void } };
-        }
-      ).__e2e.store.setAppState(next);
-    }, filtered);
+    filtered.tree_files_count = filtered.tree[0].children.length;
+    filtered.tree_dirs_count = 1;
+
+    await page.evaluate(() => performance.mark("bm_filter_start"));
+    await setTree(page, filtered);
 
     // „bereit“, plus Sicherheits-Check: sichtbare Namen enthalten den Filter
     await waitForVirtualListReady(page);
     const allVisibleMatch = await page.evaluate(() => {
       const nodes = Array.from(
-        document.querySelectorAll(".tree .file-item .file-name")
+        document.querySelectorAll(".tree .file-item .file-name"),
       );
       return nodes.every((n) => (n.textContent || "").includes("file-24"));
     });
@@ -233,8 +148,7 @@ test.describe("[@bench] 25k Benchmarks", () => {
       performance.mark("bm_filter_end");
       performance.measure("bm_filter", "bm_filter_start", "bm_filter_end");
       const m = performance.getEntriesByName("bm_filter")[0] as
-        | PerformanceMeasure
-        | undefined;
+        PerformanceMeasure | undefined;
       return m ? m.duration : -1;
     });
 
@@ -246,22 +160,13 @@ test.describe("[@bench] 25k Benchmarks", () => {
     const THRESH = Number(process.env.BMARK_SCROLL_MS ?? 300);
 
     await page.goto("/?e2e=1");
-    await page.waitForFunction(() => {
-      const w = window as unknown as {
-        __e2e?: { store?: { setAppState?: (s: unknown) => void } };
-      };
-      return typeof w.__e2e?.store?.setAppState === "function";
-    });
+    await waitForBridge(page);
 
     const huge = baseState();
     huge.tree = makeHugeTree(25_000);
-    await page.evaluate((next) => {
-      (
-        window as unknown as {
-          __e2e: { store: { setAppState: (s: AppState) => void } };
-        }
-      ).__e2e.store.setAppState(next);
-    }, huge);
+    huge.tree_files_count = 25_000;
+    huge.tree_dirs_count = 1;
+    await setTree(page, huge);
     await waitForVirtualListReady(page);
 
     // Scroll-Jump messen: bis die letzte Datei sichtbar ist
@@ -279,7 +184,7 @@ test.describe("[@bench] 25k Benchmarks", () => {
         const tick = () => {
           tries++;
           const match = Array.from(
-            document.querySelectorAll(".tree .file-item .file-name")
+            document.querySelectorAll(".tree .file-item .file-name"),
           ).some((n) => (n.textContent || "").includes(target));
           if (match) return resolve(true);
           if (tries > 60) return resolve(false); // ~1 Sekunde Worst-Case
@@ -291,8 +196,7 @@ test.describe("[@bench] 25k Benchmarks", () => {
       performance.mark("bm_scroll_end");
       performance.measure("bm_scroll", "bm_scroll_start", "bm_scroll_end");
       const m = performance.getEntriesByName("bm_scroll")[0] as
-        | PerformanceMeasure
-        | undefined;
+        PerformanceMeasure | undefined;
       return ok && m ? m.duration : -1;
     });
 

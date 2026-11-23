@@ -20,4 +20,15 @@
   --color-error: var(--palette-dark-error);
 
   --color-on-accent: var(--palette-dark-on-accent);
+
+  --color-accent-text: var(--palette-dark-accent-text);
+  --color-success-text: var(--palette-dark-success-text);
+  --color-warning-text: var(--palette-dark-warning-text);
+  --color-error-text: var(--palette-dark-error-text);
+  --color-success-solid: var(--palette-dark-success-solid);
+  --color-error-solid: var(--palette-dark-error-solid);
+  --color-on-solid: var(--palette-dark-on-solid);
+  --color-on-info: var(--palette-dark-on-info);
+  --color-control-border: var(--palette-dark-control-border);
+  --color-focus: var(--palette-dark-focus);
 }

@@ -17,22 +17,25 @@ pub enum CoreError {
     #[error("Task join error: {0}")]
     Join(String),
 
-    /// Represents a path that was expected to be a directory but was not.
-    #[allow(dead_code)]
-    #[error("Path is not a valid directory: {0}")]
-    NotADirectory(PathBuf),
-
     /// Represents a failure to strip a path prefix.
     #[error("Failed to strip prefix from path: {0}")]
     PathStrip(String),
 
-    /// Represents an error related to ignore pattern processing.
-    #[error("Pattern error: {0}")]
-    Pattern(String),
+    /// A path that was to be a directory of the project does not name one: it
+    /// leaves the project on its way (`..`), or is anything but names below the root.
+    #[error("Not a directory of the project: {0}")]
+    OutsideProject(PathBuf),
 
     /// Represents a user-initiated cancellation of an operation.
     #[error("Operation was cancelled by the user")]
     Cancelled,
+
+    /// The output document would be larger than the caller allows (`limit` bytes).
+    #[error(
+        "The output would be larger than {} MiB. Select fewer files.",
+        .limit / (1024 * 1024)
+    )]
+    OutputTooLarge { limit: u64 },
 }
 
 // Manual From implementations because the source errors are not Clone

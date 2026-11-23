@@ -3,8 +3,8 @@
 
 import type { z } from "zod";
 import {
-  ConfigSchema,
-  TreeNodeSchema,
+  UiConfigSchema,
+  TreeRowSchema,
   UiStateSchema,
   type CommandName,
 } from "$lib/ipc/schema";
@@ -12,66 +12,73 @@ import {
 /** Valid path sample (POSIX-like) */
 export const VALID_PATH = "/repo/src/index.ts";
 
-/** Build a fully valid Config payload per ConfigSchema (backend-facing, richer than frontend's Config). */
-export function makeValidConfig(): z.input<typeof ConfigSchema> {
+/** Build a fully valid config as the host sends it (UiConfigSchema). */
+export function makeValidConfig(): z.input<typeof UiConfigSchema> {
   return {
     ignore_patterns: [],
-    tree_ignore_patterns: [], // default exists, but provide explicitly for clarity
-    last_directory: null,
-    output_directory: "",
+    output_directory: null,
     output_filename: "output.txt",
     case_sensitive_search: false,
     include_tree_by_default: false,
     use_relative_paths: false,
     remove_empty_directories: false,
-    window_size: [1280, 800],
-    window_position: [100, 100],
-    auto_load_last_directory: false,
-    max_file_size_mb: 20,
-    scan_chunk_size: 1024,
   };
 }
 
-/** Minimal TreeNode that still satisfies runtime schema. */
-export function makeValidTreeNode(path = "/repo/README.md") {
+/** Minimal row of a file that satisfies the runtime schema. */
+export function makeValidTreeRow(
+  path = "/repo/README.md",
+  overrides: Partial<z.input<typeof TreeRowSchema>> = {},
+) {
   // Let Zod derive the correct output shape; we construct an input matching its requirements.
-  const input: z.input<typeof TreeNodeSchema> = {
+  const input: z.input<typeof TreeRowSchema> = {
     path,
     name: path.split(/[\\/]/).pop() ?? path,
+    depth: 0,
     is_directory: false,
     is_expanded: false,
     is_binary: false,
     is_match: true,
     is_previewed: false,
     selection_state: "none",
-    children: [],
     size: 256,
-    // children_loaded is optional in UI schema
+    has_children: false,
+    children_loaded: true,
+    ...overrides,
   };
   // Ensure it conforms – throws if invalid
-  return TreeNodeSchema.parse(input);
+  return TreeRowSchema.parse(input);
 }
 
-/** Valid UI tree: one directory with two files. */
-export function makeValidTree() {
-  const dir = {
-    path: "/repo/src",
-    name: "src",
-    is_directory: true,
-    is_expanded: true,
-    is_binary: false,
-    is_match: true,
-    is_previewed: false,
-    selection_state: "none",
-    size: 0,
-    children: [
-      makeValidTreeNode("/repo/src/index.ts"),
-      makeValidTreeNode("/repo/src/util.ts"),
-    ],
-  } as const;
+/** Valid rows: one expanded directory and its two files. */
+export function makeValidRows() {
+  return [
+    makeValidTreeRow("/repo/src", {
+      is_directory: true,
+      is_expanded: true,
+      size: 0,
+      has_children: true,
+    }),
+    makeValidTreeRow("/repo/src/index.ts", { depth: 1 }),
+    makeValidTreeRow("/repo/src/util.ts", { depth: 1 }),
+  ];
+}
 
-  // Coerce via schema to ensure shape
-  return [TreeNodeSchema.parse(dir)];
+/**
+ * The row of a collapsed directory: its children are no rows, the flags say
+ * what the row needs to render and to request them.
+ */
+export function makeCollapsedDirRow(
+  path = "/repo/docs",
+  overrides: Partial<z.input<typeof TreeRowSchema>> = {},
+) {
+  return makeValidTreeRow(path, {
+    is_directory: true,
+    is_match: false,
+    size: 0,
+    has_children: true,
+    ...overrides,
+  });
 }
 
 /** Fully valid UiState payload per UiStateSchema. */
@@ -79,9 +86,17 @@ export function makeValidUiState(): z.input<typeof UiStateSchema> {
   return {
     config: makeValidConfig(),
     current_path: "/repo",
-    tree: makeValidTree(),
+    rows: makeValidRows(),
+    rows_start: 0,
+    rows_total: 3,
+    rows_revision: 1,
+    located: null,
+    last_processed_session: 0,
+    last_processed_seq: 0,
     total_files_found: 3,
     visible_files_count: 3,
+    tree_files_count: 2,
+    tree_dirs_count: 1,
     selected_files_count: 1,
     is_scanning: false,
     is_generating: false,
@@ -112,34 +127,45 @@ export function makeValidPayloadForCommand(name: CommandName): unknown {
     case "initialize":
     case "selectAll":
     case "deselectAll":
-    case "expandAllFully":
-    case "selectAllFully":
     case "cancelGeneration":
     case "clearPreviewState":
     case "pickOutputDirectory":
     case "exportConfig":
     case "importConfig":
+    case "clearIgnorePatterns":
       return null;
 
     case "loadDirectoryLevel":
     case "loadFilePreview":
     case "toggleSelection":
     case "toggleDirectorySelection":
-    case "toggleExpansion":
     case "addIgnorePath":
       return VALID_PATH;
+
+    case "setExpansion":
+      return { path: VALID_PATH, expanded: true };
 
     case "expandCollapseAll":
       return true;
 
+    case "setViewport":
+      return { start: 0, count: 90 };
+
+    case "locateRow":
+      return { request: 1, target: { kind: "path", path: VALID_PATH } };
+
     case "saveFile":
-      return "// content to save";
+      return { kind: "edited", content: "// content to save" };
 
     case "updateFilters":
       // Provide empty object to test default injection
       return {};
 
-    case "updateConfig":
-      return makeValidConfig();
+    case "addIgnorePattern":
+    case "removeIgnorePattern":
+      return { pattern: "*.log" };
+
+    case "setConfigOption":
+      return { option: "case_sensitive_search", value: true };
   }
 }

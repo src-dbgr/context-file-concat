@@ -1,16 +1,18 @@
 import { editorInstance } from "../stores/app.js";
 import { getUndoManagerForElement } from "./undo.js";
-import { elements } from "../dom.js";
 import type { FocusContext } from "../types.js";
 import { get } from "svelte/store";
 import { toast } from "../stores/toast.js";
+import { flashCopyFeedback } from "../stores/preview.js";
+import { unchangedOutput } from "./editor.js";
+import { translate } from "../i18n/index.js";
 
 async function readFromClipboardWithFallback(): Promise<string | null> {
   try {
     return await navigator.clipboard.readText();
   } catch {
     console.warn("Clipboard read API failed.");
-    return prompt("Could not access clipboard. Please paste your text here:");
+    return prompt(translate("clipboard.pastePrompt"));
   }
 }
 
@@ -41,7 +43,7 @@ async function copyWithFallback(content: string): Promise<boolean> {
 export async function handleCopy(context: FocusContext) {
   const { activeEl, isEditorFocused, isInNormalInputField } = context;
   let textToCopy = "";
-  let statusMessage = "✗ Failed to copy.";
+  let statusMessage = translate("clipboard.copyFailed");
   const statusEl = document.querySelector(".status-text");
 
   if (
@@ -51,10 +53,10 @@ export async function handleCopy(context: FocusContext) {
   ) {
     const selection = activeEl.value.substring(
       activeEl.selectionStart ?? 0,
-      activeEl.selectionEnd ?? 0
+      activeEl.selectionEnd ?? 0,
     );
     textToCopy = selection || activeEl.value;
-    if (textToCopy) statusMessage = `✓ Copied text from input field.`;
+    if (textToCopy) statusMessage = translate("clipboard.copiedInput");
   } else if (isEditorFocused) {
     const editor = get(editorInstance);
     if (!editor) return;
@@ -63,12 +65,23 @@ export async function handleCopy(context: FocusContext) {
     if (!model) return;
 
     const selection = editor.getSelection();
-    if (selection && !selection.isEmpty()) {
+    const hasSelection = !!selection && !selection.isEmpty();
+    // A generated output the user has not changed is copied as the host
+    // produced it (the text a save writes), not as the editor holds it:
+    // the editor gives every line the same line end.
+    const original = unchangedOutput();
+    const copiesEverything = () =>
+      !hasSelection || selection.equalsRange(model.getFullModelRange());
+
+    if (original !== null && copiesEverything()) {
+      textToCopy = original;
+      statusMessage = translate("clipboard.copiedEditorAll");
+    } else if (hasSelection) {
       textToCopy = model.getValueInRange(selection);
-      statusMessage = `✓ Copied selected text from editor.`;
+      statusMessage = translate("clipboard.copiedEditorSelection");
     } else {
       textToCopy = model.getValue();
-      statusMessage = `✓ Copied entire editor content.`;
+      statusMessage = translate("clipboard.copiedEditorAll");
     }
   }
 
@@ -77,40 +90,18 @@ export async function handleCopy(context: FocusContext) {
   if (statusEl) {
     statusEl.textContent = success
       ? statusMessage
-      : "✗ Failed to copy to clipboard.";
+      : translate("clipboard.copyFailed");
   }
 
   // Toast feedback (non-intrusive, timed)
   if (success) {
-    toast.success("Copied to clipboard");
+    toast.success(translate("toast.copied"));
   } else {
-    toast.error("Failed to copy to clipboard");
+    toast.error(translate("toast.copy_failed"));
   }
 
-  // Visual feedback on the Copy button (theme-safe)
-  if (isEditorFocused && elements.copyBtn) {
-    // Clear any inline overrides first
-    elements.copyBtn.style.backgroundColor = "";
-    elements.copyBtn.style.color = "";
-
-    if (success) {
-      elements.copyBtn.innerHTML = `... Copied!`;
-      elements.copyBtn.classList.add("button-cta");
-      elements.copyBtn.classList.remove("button-cancel-action");
-    } else {
-      elements.copyBtn.innerHTML = `... Failed`;
-      elements.copyBtn.classList.add("button-cancel-action");
-      elements.copyBtn.classList.remove("button-cta");
-    }
-
-    setTimeout(() => {
-      elements.copyBtn.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
-      elements.copyBtn.classList.remove("button-cta", "button-cancel-action");
-      // Ensure we leave styles to CSS variables (theme-safe)
-      elements.copyBtn.style.backgroundColor = "";
-      elements.copyBtn.style.color = "";
-    }, 1000);
-  }
+  // Visual feedback on the Copy button (rendered by PreviewPanel)
+  if (isEditorFocused) flashCopyFeedback(success ? "copied" : "failed");
 }
 
 export async function handlePaste(context: FocusContext) {
@@ -129,24 +120,24 @@ export async function handlePaste(context: FocusContext) {
     const text = await readFromClipboardWithFallback();
     if (text) {
       document.execCommand("insertText", false, text);
-      statusEl.textContent = `✓ Content pasted.`;
-      toast.success("Pasted content");
+      statusEl.textContent = translate("clipboard.pasted");
+      toast.success(translate("toast.pasted"));
       activeEl.dispatchEvent(new Event("input", { bubbles: true }));
     } else {
-      statusEl.textContent = `✗ Paste failed or clipboard empty.`;
-      toast.warning("Clipboard is empty");
+      statusEl.textContent = translate("clipboard.pasteFailed");
+      toast.warning(translate("toast.paste_empty"));
     }
   } else if (isEditorFocused) {
     const clipboardText = await readFromClipboardWithFallback();
 
     if (clipboardText === null) {
-      statusEl.textContent = "Status: Paste cancelled.";
-      toast.info("Paste cancelled");
+      statusEl.textContent = translate("clipboard.pasteCancelled");
+      toast.info(translate("toast.paste_cancelled"));
       return;
     }
     if (!clipboardText) {
-      statusEl.textContent = "Status: Clipboard is empty.";
-      toast.warning("Clipboard is empty");
+      statusEl.textContent = translate("clipboard.pasteEmpty");
+      toast.warning(translate("toast.paste_empty"));
       return;
     }
 
@@ -155,12 +146,12 @@ export async function handlePaste(context: FocusContext) {
     const selection = editor.getSelection();
     if (selection) {
       editor.executeEdits("paste", [{ range: selection, text: clipboardText }]);
-      statusEl.textContent = `✓ Content pasted.`;
-      toast.success("Pasted into editor");
+      statusEl.textContent = translate("clipboard.pasted");
+      toast.success(translate("toast.pasted_editor"));
     }
   } else {
-    statusEl.textContent = "✗ Paste not supported here.";
-    toast.error("Paste not supported here");
+    statusEl.textContent = translate("clipboard.pasteUnsupported");
+    toast.error(translate("toast.paste_unsupported"));
   }
 }
 
@@ -178,7 +169,7 @@ export async function handleCut(context: FocusContext) {
     getUndoManagerForElement(activeEl).recordState(true);
     const textToCopy = activeEl.value.substring(
       activeEl.selectionStart ?? 0,
-      activeEl.selectionEnd ?? 0
+      activeEl.selectionEnd ?? 0,
     );
     const copied = await copyWithFallback(textToCopy);
     if (copied) {
@@ -202,7 +193,9 @@ export async function handleCut(context: FocusContext) {
     }
   }
 
-  statusEl.textContent = success ? `✓ Text cut to clipboard.` : `✗ Cut failed.`;
-  if (success) toast.success("Cut to clipboard");
-  else toast.error("Cut failed");
+  statusEl.textContent = translate(
+    success ? "clipboard.cutOk" : "clipboard.cutFailed",
+  );
+  if (success) toast.success(translate("toast.cut_ok"));
+  else toast.error(translate("toast.cut_failed"));
 }
