@@ -16,7 +16,7 @@ use super::tasks::{
 use super::view_model::{auto_expand_for_matches, generate_ui_state, get_language_from_path};
 use crate::app::file_dialog::DialogService;
 use crate::config::{self, AppConfig}; // Import AppConfig for explicit deserialization
-use crate::core::FileHandler;
+use crate::core::{is_blank, FileHandler};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -190,7 +190,7 @@ fn apply_config<P: EventProxy>(
         proxy.send_event(UserEvent::StateUpdate(Box::new(ui_state)));
     }
 
-    if case_sensitivity_changed && !state_guard.content_search_query.is_empty() {
+    if case_sensitivity_changed && !is_blank(&state_guard.content_search_query) {
         ContentSearchFollowUp::Repeat
     } else {
         ContentSearchFollowUp::None
@@ -268,7 +268,7 @@ pub async fn update_filters<P: EventProxy>(
         } else {
             with_state_and_notify(&state, &proxy, |s| {
                 filtering::apply_filters(s);
-                if !s.search_query.is_empty() || !s.extension_filter.is_empty() {
+                if !is_blank(&s.search_query) || !is_blank(&s.extension_filter) {
                     auto_expand_for_matches(s);
                 }
             });
@@ -292,7 +292,7 @@ pub fn load_file_preview<P: EventProxy>(
                 .lock()
                 .expect("Mutex was poisoned. This should not happen.");
             state_guard.previewed_file_path = Some(path.clone());
-            search_term = if state_guard.content_search_query.is_empty() {
+            search_term = if is_blank(&state_guard.content_search_query) {
                 None
             } else {
                 Some(state_guard.content_search_query.clone())

@@ -40,5 +40,5 @@ pub struct FileItem {
 // The public vocabulary of the core, so that callers do not depend on its file layout.
 pub use file_handler::FileHandler;
 pub use scanner::{DirectoryScanner, ScanProgress, ScanRequest};
-pub use search::{ContentSearch, ContentSearchRequest, FileNameMatcher, SearchEngine};
+pub use search::{is_blank, ContentSearch, ContentSearchRequest, FileNameMatcher, SearchEngine};
 pub use tree_generator::TreeGenerator;

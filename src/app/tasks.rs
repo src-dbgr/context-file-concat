@@ -27,8 +27,8 @@ use crate::config::AppConfig;
 use crate::core::file_handler::GenerationRequest;
 use crate::core::scanner::ScanRequest;
 use crate::core::{
-    ContentSearch, ContentSearchRequest, CoreError, DirectoryScanner, FileHandler, FileItem,
-    ScanProgress, SearchEngine,
+    is_blank, ContentSearch, ContentSearchRequest, CoreError, DirectoryScanner, FileHandler,
+    FileItem, ScanProgress, SearchEngine,
 };
 use tiktoken_rs::cl100k_base;
 
@@ -697,17 +697,19 @@ fn apply_lazy_load_result<P: EventProxy>(
 /// list (files that were not known when the query was entered are searched as well)
 /// or the way the query is matched (case sensitivity).
 ///
-/// Does nothing (and sends nothing) if no content query is active.
+/// Does nothing (and sends nothing) if no content query is active, i.e. if it is
+/// [blank](is_blank).
 pub async fn refresh_content_search<P: EventProxy, S: FileSearcher>(
     proxy: &P,
     state: &Arc<Mutex<AppState>>,
     searcher: S,
 ) {
-    let has_content_query = !state
-        .lock()
-        .expect("Mutex was poisoned")
-        .content_search_query
-        .is_empty();
+    let has_content_query = !is_blank(
+        &state
+            .lock()
+            .expect("Mutex was poisoned")
+            .content_search_query,
+    );
     if has_content_query {
         search_in_files(proxy.clone(), state.clone(), searcher).await;
     }
@@ -729,7 +731,8 @@ pub async fn search_in_files<P: EventProxy, S: FileSearcher>(
         let mut state_guard = state
             .lock()
             .expect("Mutex was poisoned. This should not happen.");
-        if state_guard.content_search_query.is_empty() {
+        // A blank query is no query: nothing is searched and earlier matches are dropped.
+        if is_blank(&state_guard.content_search_query) {
             state_guard.clear_content_search();
             filtering::apply_filters(&mut state_guard);
             let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
@@ -2303,6 +2306,53 @@ mod tests {
         assert!(!request.cancel_flag.load(Ordering::SeqCst));
     }
 
+    struct UnexpectedSearch;
+    impl FileSearcher for UnexpectedSearch {
+        async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> HashSet<PathBuf> {
+            panic!("No search expected without a content query");
+        }
+    }
+
+    /// A content query of whitespace only is no query: no search runs, matches of an
+    /// earlier query are dropped and the list is shown unfiltered.
+    #[tokio::test]
+    async fn search_in_files_treats_a_whitespace_only_query_as_none() {
+        let mut harness = TestHarness::new();
+        let file = harness.root_path.join("a.txt");
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.full_file_list = vec![file_item(&file, 1)];
+            state.content_search_query = " \t ".to_string();
+            state.content_search_results = HashSet::from([PathBuf::from("/elsewhere.txt")]);
+        }
+
+        search_in_files(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            UnexpectedSearch,
+        )
+        .await;
+
+        let update = harness.last_state_update().expect("The state is sent");
+        assert_eq!(update.visible_files_count, 1);
+        assert!(harness
+            .state
+            .lock()
+            .unwrap()
+            .content_search_results
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_content_search_does_nothing_for_a_whitespace_only_query() {
+        let mut harness = TestHarness::new();
+        harness.state.lock().unwrap().content_search_query = "  ".to_string();
+
+        refresh_content_search(&harness.proxy, &harness.state, UnexpectedSearch).await;
+
+        assert!(harness.last_state_update().is_none());
+    }
+
     /// `refresh_content_search` runs the same search, so it hands over the same request.
     #[tokio::test]
     async fn refresh_content_search_passes_the_request_to_the_searcher() {
@@ -3032,12 +3082,6 @@ mod tests {
     /// additional state update).
     #[tokio::test]
     async fn deep_scan_without_content_query_does_not_search() {
-        struct UnexpectedSearch;
-        impl FileSearcher for UnexpectedSearch {
-            async fn search(&self, _: Vec<FileItem>, _: ContentSearchRequest) -> HashSet<PathBuf> {
-                panic!("No search expected without a content query");
-            }
-        }
         let mut harness = TestHarness::new();
         let token = harness.state.lock().unwrap().begin_scan();
 

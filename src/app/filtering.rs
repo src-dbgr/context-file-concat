@@ -6,7 +6,7 @@
 
 use crate::app::state::AppState;
 use crate::config::AppConfig;
-use crate::core::{FileItem, FileNameMatcher, SearchEngine};
+use crate::core::{is_blank, FileItem, FileNameMatcher, SearchEngine};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -71,11 +71,10 @@ fn get_required_ancestors(file_paths: &HashSet<PathBuf>, root_path: &Path) -> Ha
 ///
 /// # When a filter is active
 ///
-/// A filter is active as soon as its text is not empty. No text is trimmed: a query
-/// of blanks is a query for blanks. This is the rule of [`FileNameMatcher`] for the
-/// filename query and the extension filter, and the rule of the content search, which
-/// runs for every non-empty query and looks for it literally. Deciding it differently
-/// here would show an unfiltered list next to a search that did take place.
+/// A filter whose text is [blank](is_blank) (empty or whitespace only) is inactive
+/// and ignored. This one rule decides it for the filename query and the extension
+/// filter (through [`FileNameMatcher`]) and for the content query. An active text is
+/// matched as typed, without trimming.
 #[allow(clippy::too_many_arguments)] // Allowed for this function as all params are cohesive for filtering
 fn apply_filters_on_data(
     full_file_list: &[FileItem],
@@ -100,7 +99,7 @@ fn apply_filters_on_data(
     };
 
     // Step 2: Apply content search if active.
-    let has_content_filter = !content_search_query.is_empty();
+    let has_content_filter = !is_blank(content_search_query);
     if has_content_filter {
         if content_search_results.is_empty() {
             return Vec::new();
@@ -243,55 +242,59 @@ mod tests {
         state
     }
 
-    /// A filename query of blanks is not trimmed away: it looks for blanks.
+    /// A filename query of whitespace only is inactive: nothing is filtered.
     #[test]
-    fn test_whitespace_only_search_query_filters_for_whitespace() {
+    fn test_whitespace_only_search_query_is_inactive() {
         let mut state = state_with_and_without_blank();
-        state.search_query = " ".to_string();
+        state.search_query = "  ".to_string();
 
         apply_filters(&mut state);
 
+        assert_eq!(visible_paths(&state).len(), 2);
+    }
+
+    /// A query that is not blank is matched as typed: surrounding blanks belong to it.
+    #[test]
+    fn test_search_query_is_matched_with_its_surrounding_whitespace() {
+        let mut state = state_with_and_without_blank();
+        state.search_query = "main ".to_string();
+        apply_filters(&mut state);
+        assert!(visible_paths(&state).is_empty());
+
+        state.search_query = "release ".to_string();
+        apply_filters(&mut state);
         assert_eq!(
             visible_paths(&state),
             HashSet::from([PathBuf::from("/project/release notes.md")])
         );
     }
 
-    /// A query is matched as typed: surrounding blanks belong to it.
+    /// An extension filter of whitespace only is inactive: nothing is filtered.
     #[test]
-    fn test_search_query_is_matched_with_its_surrounding_whitespace() {
-        let mut state = state_with_and_without_blank();
-        state.search_query = "main ".to_string();
-
-        apply_filters(&mut state);
-
-        assert!(visible_paths(&state).is_empty());
-    }
-
-    /// An extension filter of blanks is active and names an extension no file has.
-    #[test]
-    fn test_whitespace_only_extension_filter_matches_nothing() {
+    fn test_whitespace_only_extension_filter_is_inactive() {
         let mut state = state_with_and_without_blank();
         state.extension_filter = " ".to_string();
 
         apply_filters(&mut state);
 
-        assert!(visible_paths(&state).is_empty());
+        assert_eq!(visible_paths(&state).len(), 2);
     }
 
-    /// The content search runs for a query of blanks, so its matches must be applied.
+    /// A content query of whitespace only is inactive: the list is not narrowed down,
+    /// neither to (stale) matches nor to nothing because there are no matches.
     #[test]
-    fn test_whitespace_only_content_query_applies_the_search_results() {
+    fn test_whitespace_only_content_query_is_inactive() {
         let mut state = state_with_and_without_blank();
-        state.content_search_query = " ".to_string();
+        state.content_search_query = " \t".to_string();
+
         state.content_search_results = HashSet::from([PathBuf::from("/project/main.rs")]);
-
         apply_filters(&mut state);
+        assert_eq!(visible_paths(&state).len(), 2);
 
-        assert_eq!(
-            visible_paths(&state),
-            HashSet::from([PathBuf::from("/project/main.rs")])
-        );
+        state.content_search_results.clear();
+        apply_filters(&mut state);
+        assert_eq!(visible_paths(&state).len(), 2);
+        assert_eq!(generate_ui_state(&state).tree.len(), 2);
     }
 
     #[test]

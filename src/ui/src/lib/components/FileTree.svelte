@@ -333,10 +333,14 @@
   );
 
   // --- Helpers ---------------------------------------------------------------
-  // A filter is active as soon as its text is not empty. Nothing is trimmed: the
-  // host matches the texts as typed, so a query of blanks filters for blanks.
+  // A filter text that is empty or whitespace-only is not set. Same rule as the
+  // host (`core::is_blank`), which ignores such a text entirely.
   function hasActiveFilters(s: AppState): boolean {
-    return !!(s.search_query || s.extension_filter || s.content_search_query);
+    return !!(
+      s.search_query?.trim() ||
+      s.extension_filter?.trim() ||
+      s.content_search_query?.trim()
+    );
   }
 
   // Center only the body (not the header) when showing placeholder/empty/scan states

@@ -8,6 +8,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// The single definition of a filter text that is *not set*: it is empty or consists
+/// of whitespace only.
+///
+/// This holds for the filename query, the extension filter and the content query
+/// alike. A blank text is ignored entirely: it does not filter, it does not start a
+/// content search and it does not count as an active filter. A text that is not blank
+/// is used exactly as typed, i.e. it is *not* trimmed for matching.
+pub fn is_blank(text: &str) -> bool {
+    text.trim().is_empty()
+}
+
 /// The extension filter value that stands for "files without an extension".
 const NO_EXTENSION: &str = "no extension";
 
@@ -22,8 +33,9 @@ const NO_EXTENSION: &str = "no extension";
 /// # Rules
 ///
 /// **Filename query**
-/// - An empty query is *inactive*. It is not trimmed: a query of blanks is active and
-///   looks for blanks (file names may contain them).
+/// - A [blank](is_blank) query (empty or whitespace only) is *inactive*.
+/// - An active query is used as typed: it is not trimmed, so surrounding blanks have
+///   to occur in the file name as well.
 /// - The query must be contained in the *file name* (the last path component), never in
 ///   the directories leading to it.
 /// - File names that are not valid Unicode are compared in their lossy form (invalid
@@ -31,8 +43,8 @@ const NO_EXTENSION: &str = "no extension";
 /// - Case-insensitive matching compares the Unicode lowercase forms of both sides.
 ///
 /// **Extension filter**
-/// - An empty filter is *inactive*. It is not trimmed either: a filter of blanks is
-///   active and names an extension no path has.
+/// - A [blank](is_blank) filter (empty or whitespace only) is *inactive*.
+/// - An active filter is used as typed (not trimmed).
 /// - One leading dot of the filter is ignored (`.rs` equals `rs`).
 /// - A path *with* an extension (as defined by [`Path::extension`]) matches if the
 ///   extension equals the filter, ignoring ASCII case. Only the last extension counts
@@ -90,14 +102,14 @@ impl ExtensionFilter {
 impl FileNameMatcher {
     /// Creates a matcher for the given filename query and extension filter.
     pub fn new(query: &str, extension_filter: &str, case_sensitive: bool) -> Self {
-        let name = (!query.is_empty()).then(|| {
+        let name = (!is_blank(query)).then(|| {
             if case_sensitive {
                 NameQuery::CaseSensitive(query.to_string())
             } else {
                 NameQuery::CaseInsensitive(query.to_lowercase())
             }
         });
-        let extension = (!extension_filter.is_empty()).then(|| ExtensionFilter {
+        let extension = (!is_blank(extension_filter)).then(|| ExtensionFilter {
             extension: extension_filter
                 .strip_prefix('.')
                 .unwrap_or(extension_filter)
@@ -215,7 +227,8 @@ impl SearchEngine {
 /// handed through layers as one value.
 #[derive(Debug, Clone)]
 pub struct ContentSearchRequest {
-    /// The text to look for. Used as it is, i.e. not trimmed.
+    /// The text to look for. Used as it is, i.e. not trimmed. Whether a search takes
+    /// place at all ([`is_blank`]) is up to the caller.
     pub query: String,
     /// `true` if the case of the query has to match.
     pub case_sensitive: bool,
@@ -617,6 +630,16 @@ mod tests {
         assert_eq!(result.len(), 3, "The file being read is still finished");
     }
 
+    #[test]
+    fn test_is_blank_is_true_for_empty_and_whitespace_only_texts() {
+        for blank in ["", " ", "   ", "\t", " \n\t "] {
+            assert!(is_blank(blank), "{blank:?}");
+        }
+        for set in ["a", " a", "a ", " a b "] {
+            assert!(!is_blank(set), "{set:?}");
+        }
+    }
+
     // --- FileNameMatcher -----------------------------------------------------------
 
     /// How a query/filter combination is expected to treat one path.
@@ -672,9 +695,18 @@ mod tests {
         case("ÄRGER", "", false, "ärger.txt", true, true),
         case("ÄRGER", "", true, "ärger.txt", false, false),
 
-        // The query is not trimmed.
-        case(" ", "", false, "my file.txt", true, true),
-        case(" ", "", false, "myfile.txt", false, false),
+        // A blank query is inactive: it narrows nothing down and points nothing out.
+        case(" ", "", false, "my file.txt", true, false),
+        case(" \t ", "", false, "myfile.txt", true, false),
+        // An active query is not trimmed.
+        case("y f", "", false, "my file.txt", true, true),
+        case("main ", "", false, "main.rs", false, false),
+        case(" file", "", false, "my file.txt", true, true),
+        case(" file", "", false, "file.txt", false, false),
+        // A blank extension filter is inactive as well.
+        case("", " ", false, "src/main.rs", true, false),
+        case("main", " ", false, "src/main.rs", true, true),
+        case("main", " ", false, "src/lib.rs", false, false),
 
         // Extension filter: equal to the extension, ignoring ASCII case.
         case("", "rs", false, "src/main.rs", true, true),
@@ -736,7 +768,7 @@ mod tests {
             );
             assert_eq!(
                 matcher.is_active(),
-                !case.query.is_empty() || !case.extension.is_empty(),
+                !is_blank(case.query) || !is_blank(case.extension),
                 "is_active: {context}"
             );
         }

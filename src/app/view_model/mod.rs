@@ -26,7 +26,7 @@ use crate::app::selection::SelectionState;
 use crate::app::state::AppState;
 use crate::app::tree_index::TreeCounts;
 use crate::config::AppConfig;
-use crate::core::{FileItem, FileNameMatcher};
+use crate::core::{is_blank, FileItem, FileNameMatcher};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -124,7 +124,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
 fn build_tree_snapshot(state: &AppState) -> TreeSnapshot {
     if (state.is_scanning() && state.full_file_list.is_empty())
         // If content search is active but has no results, the tree should be empty
-        || (!state.content_search_query.is_empty() && state.content_search_results.is_empty())
+        || (!is_blank(&state.content_search_query) && state.content_search_results.is_empty())
     {
         return TreeSnapshot {
             nodes: Vec::new(),

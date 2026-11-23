@@ -59,6 +59,10 @@ The single source of truth is `CommandSchemas` in `schema.ts`; names and payload
 | `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog                                                 |
 | `addIgnorePath`                 | `string` (path)                                         | Adds an ignore pattern for the path and rescans                                 |
 
+### Filter texts
+
+One rule decides whether a filter text is set, for `searchQuery`, `extensionFilter` and `contentSearchQuery` alike: a text that is empty or consists of whitespace only is **not set**. It is ignored entirely: it does not filter, it starts no content search, and the UI does not show the "no results for filter" message for it. A text that is set is matched exactly as typed; it is not trimmed. The rule lives in `core::is_blank` on the host; the UI mirrors it in `hasActiveFilters` (`FileTree.svelte`).
+
 ### Config changes
 
 `updateConfig` always stores and persists the config. What else it does depends on what changed:
