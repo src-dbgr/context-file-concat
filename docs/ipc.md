@@ -9,26 +9,27 @@ UI  ──  window.ipc.postMessage('{"command": "...", "payload": ...}')  ──
 UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  ──  Host
 ```
 
-| Concern                         | Where                                                                          |
-| ------------------------------- | ------------------------------------------------------------------------------ |
-| Sending commands                | `src/ui/src/lib/services/backend.ts` (`post`)                                  |
-| Command and state schemas (Zod) | `src/ui/src/lib/ipc/schema.ts`                                                 |
-| Receiving host calls            | `src/ui/src/lib/ipc/handlers.ts` (`installWindowIPCHandlers`)                  |
-| Frontend types                  | `src/ui/src/lib/types.ts` (derived from the schemas with `z.infer`)            |
-| Command dispatch (host)         | `src/app/mod.rs` (`COMMANDS`, `dispatch_ipc_message`) → `src/app/commands.rs`  |
-| Command ordering (host)         | `src/app/dispatch.rs` (`CommandDispatcher`)                                    |
-| Host → UI events                | `src/app/events.rs` (`UserEvent`), `src/app/mod.rs` (`handle_user_event`)      |
-| State snapshot (host)           | `src/app/view_model/` (`generate_ui_state`, `UiState`, `UiConfig`, `TreeNode`) |
-| Delivery / coalescing           | `src/app/transport.rs`                                                         |
+| Concern                         | Where                                                                         |
+| ------------------------------- | ----------------------------------------------------------------------------- |
+| Sending commands                | `src/ui/src/lib/services/backend.ts` (`post`)                                 |
+| Command and state schemas (Zod) | `src/ui/src/lib/ipc/schema.ts`                                                |
+| Receiving host calls            | `src/ui/src/lib/ipc/handlers.ts` (`installWindowIPCHandlers`)                 |
+| Frontend types                  | `src/ui/src/lib/types.ts` (derived from the schemas with `z.infer`)           |
+| Command dispatch (host)         | `src/app/mod.rs` (`COMMANDS`, `dispatch_ipc_message`) → `src/app/commands.rs` |
+| Command ordering (host)         | `src/app/dispatch.rs` (`CommandDispatcher`)                                   |
+| Host → UI events                | `src/app/events.rs` (`UserEvent`), `src/app/mod.rs` (`handle_user_event`)     |
+| State snapshot (host)           | `src/app/view_model/` (`generate_ui_state`, `UiState`, `UiConfig`, `TreeRow`) |
+| Rows of the tree, their window  | `src/app/view_model/rows.rs` (host), `src/ui/src/lib/modules/treeWindow.ts`   |
+| Delivery / coalescing           | `src/app/transport.rs`                                                        |
 
 ## Principles
 
 - **Commands are fire-and-forget.** `post()` returns `void`. The host mutates its `AppState` and answers with a state snapshot (and, where applicable, one of the other host calls).
 - **Commands take effect in the order they were posted.** The host executes them one after the other, see [Command ordering](#command-ordering).
 - **Every state update is a complete snapshot.** `window.render(uiState)` replaces the UI's `appState` store wholesale. There are no diffs and no patches; a snapshot never depends on an earlier one. This is what allows the transport to drop a pending snapshot when a newer one is already available (latest wins, see `transport.rs`).
-- **The host owns the state, the UI owns none of it.** In particular the host is the single source of truth for selection and for **expansion** (see below). The UI renders what it receives.
-- **Snapshots are pruned to what is visible.** The tree only contains the children of expanded directories; totals are sent as counters.
-- **Validation at the edge.** Outgoing commands are validated against `CommandSchemas` in DEV. Incoming calls are validated in `handlers.ts`: `render()` with the full `UiStateSchema` in DEV and tests, and with the envelope-only `UiStateEnvelopeSchema` in production (the recursive tree walk stays off the hot path). Invalid payloads are ignored with a console warning.
+- **The host owns the state, the UI owns none of it.** In particular the host is the single source of truth for selection, for **expansion** and for the **list of rows** the tree consists of (see below). The UI renders what it receives.
+- **Snapshots are bounded by what is on screen.** Of the tree a snapshot carries a window: the rows around the viewport the UI has reported (see [The rows of the tree](#the-rows-of-the-tree)). Its size does not depend on the size of the project or on how much is expanded; totals are sent as counters.
+- **Validation at the edge.** Outgoing commands are validated against `CommandSchemas` in DEV. Incoming calls are validated in `handlers.ts`: `render()` with the full `UiStateSchema`, every row included, in every build (a window of rows is small enough for that). Invalid payloads are ignored with a console warning.
 - **No untyped `any` at the boundary.**
 
 ## Commands (UI → Host)
@@ -37,7 +38,7 @@ The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on
 
 | Command                         | Payload                                                 | Effect                                                                                                                                                                                                                                              |
 | ------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `initialize`                    | `null`                                                  | Sends the current snapshot                                                                                                                                                                                                                          |
+| `initialize`                    | `null`                                                  | Sends the current snapshot, with the window of rows at the top                                                                                                                                                                                      |
 | `selectDirectory`               | `null`                                                  | Opens the directory dialog and [opens](#opening-a-path) the choice                                                                                                                                                                                  |
 | `rescanDirectory`               | `null`                                                  | Rescans the current directory, keeping selection and expansion                                                                                                                                                                                      |
 | `clearDirectory`                | `null`                                                  | Resets all directory-related state                                                                                                                                                                                                                  |
@@ -45,10 +46,12 @@ The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on
 | `loadDirectoryLevel`            | `string` (path)                                         | **Expands** the directory right away, then scans its level and marks it loaded                                                                                                                                                                      |
 | `setExpansion`                  | `{ path: string, expanded: boolean }` (no other fields) | Expands or collapses one directory. Idempotent; always answered with a snapshot                                                                                                                                                                     |
 | `expandCollapseAll`             | `boolean`                                               | Expands (`true`) or collapses (`false`) every directory the filters show                                                                                                                                                                            |
+| `setViewport`                   | `{ start: number, count: number }` (no other fields)    | Reports the rows the UI shows, overscan included; the snapshots from then on carry that [window](#the-rows-of-the-tree). Always answered with a snapshot                                                                                            |
+| `locateRow`                     | `{ request: number, target }` (no other fields)         | Asks where a row is in the list of all rows, see [Looking up a row](#looking-up-a-row); the answer is `located` of the snapshot                                                                                                                     |
 | `toggleSelection`               | `string` (path)                                         | Selects/deselects one file                                                                                                                                                                                                                          |
 | `toggleDirectorySelection`      | `string` (path)                                         | Selects/deselects all files below a directory                                                                                                                                                                                                       |
 | `selectAll` / `deselectAll`     | `null`                                                  | Selects all listed files / clears the selection                                                                                                                                                                                                     |
-| `updateFilters`                 | `{ searchQuery, extensionFilter, contentSearchQuery }`  | Applies the filters; expands the ancestors of matches (no other fields)                                                                                                                                                                             |
+| `updateFilters`                 | `{ searchQuery, extensionFilter, contentSearchQuery }`  | Applies the filters; expands the ancestors of matches, up to a [limit](#expansion-one-source-of-truth) (no other fields). Changed texts show the list from the top                                                                                  |
 | `loadFilePreview`               | `string` (path)                                         | Marks the file as previewed; `showPreviewContent` follows once it has been read                                                                                                                                                                     |
 | `clearPreviewState`             | `null`                                                  | Clears the previewed file; a preview still being read is not shown any more                                                                                                                                                                         |
 | `generatePreview`               | `null`                                                  | Concatenates the selection; answers with `showGeneratedContent`. An output filename of the form `cfc_output_<timestamp>.txt` is replaced by one with the current time; every other name is kept, also the `cfc_output.txt` of a fresh configuration |
@@ -242,7 +245,11 @@ Produced by `generate_ui_state` (`src/app/view_model/mod.rs`), validated by `UiS
 | ---------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `config`                                                   | The settings the UI displays (`UiConfig`), see below                   |
 | `current_path`                                             | Scanned root directory (`""` if none)                                  |
-| `tree`                                                     | **Pruned** tree of the filtered file list, see below                   |
+| `rows`                                                     | The rows of the tree inside the window, in order, see below            |
+| `rows_start`                                               | The position of `rows[0]` in the list of all rows                      |
+| `rows_total`                                               | The number of rows of the tree: what the scrollbar spans               |
+| `rows_revision`                                            | Changes when the list of all rows does, and only then                  |
+| `located`                                                  | The answer to the last `locateRow`, or `null`                          |
 | `total_files_found`                                        | Items (files and directories) in the unfiltered list                   |
 | `visible_files_count`                                      | Items (files and directories) in the filtered list                     |
 | `tree_files_count`                                         | Files in the complete filtered tree, including the ones not sent       |
@@ -258,45 +265,85 @@ Produced by `generate_ui_state` (`src/app/view_model/mod.rs`), validated by `UiS
 
 `config` is a view of its own (`UiConfig` in `src/app/view_model/ui_config.rs`, `UiConfigSchema`), not the persisted `AppConfig`: `ignore_patterns` (sorted), `case_sensitive_search`, `remove_empty_directories`, `include_tree_by_default`, `use_relative_paths`, `output_directory` (`string | null`) and `output_filename`. It is an allow-list: a field added to `AppConfig` is not sent unless it is added to the view, the schema and the fixture. The UI reads it and edits it with the commands in [Config changes](#config-changes).
 
-### The pruned tree
+### The rows of the tree
 
-Sending the complete tree on every update costs ~14 MB of JSON at 50,000 files, for every click. The snapshot therefore contains **only what the UI can show**:
+The tree is shown as a flat list of **rows**: every item of the filtered file list whose ancestors are all expanded, in display order (directories first, then by name, each directory followed by its content). The host owns that list (`VisibleRows` in `src/app/view_model/rows.rs`); the UI never holds it. A snapshot carries
 
-- The builder descends into a directory **only if it is expanded** (`AppState::expanded_dirs`).
-- A collapsed directory is sent with `children: []`. Everything its row needs is part of the node.
-- A directory that is expanded below a collapsed ancestor is not sent at all; its expansion is remembered by the host and shows up when the ancestor is expanded.
+- `rows_total`, the length of the list (the UI sizes its scroller with it),
+- `rows`, the rows of one **window** of the list, and `rows_start`, the position of the first of them.
 
-`TreeNode`:
+The window is where the UI looks. The UI reports its viewport with `setViewport { start, count }` (the rows it shows plus a buffer, see [Virtualization Patterns](./virtualization.md)), the host stores it and every snapshot from then on, whatever command it answers, carries the rows `start .. start + count` of the list as it is at that moment. So a snapshot stays self-contained: it never depends on rows sent earlier, and dropping one in favour of a newer one (see `transport.rs`) loses nothing.
 
-| Field                               | Meaning                                                                                                                                                              |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`, `path`                      | Display name and absolute path (the node's identity). A path that is not valid Unicode is sent lossily (U+FFFD); see below                                           |
-| `is_directory`, `is_binary`, `size` | Kind and size                                                                                                                                                        |
-| `children`                          | Child nodes, directories first, then by name. **Empty for files and for collapsed directories**                                                                      |
-| `has_children`                      | **Required.** The directory has children in the filtered list, whether or not they were sent. `false` for files and for directories that are empty or not loaded yet |
-| `is_expanded`                       | The directory is expanded. Authoritative; `children` is filled exactly for expanded directories                                                                      |
-| `children_loaded`                   | **Required.** `false` for a directory whose content has not been scanned yet (lazy loading). Always `true` for files                                                 |
-| `selection_state`                   | `"none" \| "partial" \| "full"`. For directories it is computed from **all** files below it, also the ones not sent                                                  |
-| `is_match`                          | The node matches the filename, extension or content filter                                                                                                           |
-| `is_previewed`                      | The file is shown in the preview panel                                                                                                                               |
+- Until the UI has reported a viewport the window is the first 100 rows (`Viewport::DEFAULT_ROWS`).
+- The host sends at most 600 rows (`Viewport::MAX_ROWS`), whatever `count` says. This is what bounds a snapshot.
+- A window that would start behind the end of the list (a directory was collapsed, a filter applied) is moved up so that it ends with the list. `rows_start` states where the rows really start; the UI must not assume it is what it asked for.
+- A new tree is shown from the top: loading or closing a directory, changed filter texts and `initialize` set `start` to 0 (the UI scrolls to the top on the same occasions).
+- `rows_start + rows.length <= rows_total` always holds; the schema rejects anything else.
+
+`TreeRow`:
+
+| Field                               | Meaning                                                                                                                                                |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`, `path`                      | Display name and absolute path (the row's identity). A path that is not valid Unicode is sent lossily (U+FFFD); see below                              |
+| `depth`                             | The nesting level, 0 for the items directly below the loaded directory. A row belongs to the nearest row above it that is less deep                    |
+| `is_directory`, `is_binary`, `size` | Kind and size                                                                                                                                          |
+| `has_children`                      | The directory has children in the filtered list, whether or not it is expanded. `false` for files and for directories that are empty or not loaded yet |
+| `is_expanded`                       | The directory is expanded. Authoritative; its children are rows of the list exactly while this is `true` (and all of its ancestors are expanded)       |
+| `children_loaded`                   | `false` for a directory whose content has not been scanned yet (lazy loading). Always `true` for files                                                 |
+| `selection_state`                   | `"none" \| "partial" \| "full"`. For directories it is made of **all** files below it: also below collapsed directories, also far outside the window   |
+| `is_match`                          | The item matches the filename, extension or content filter                                                                                             |
+| `is_previewed`                      | The file is shown in the preview panel                                                                                                                 |
+
+Every field is required. A row has no children: what is below a directory are the rows that follow it with a greater `depth`.
 
 Paths are written lossily (`src/app/view_model/lossy_path.rs`; also `config.output_directory` and the path of `showPreviewContent`): serde refuses a path that is not valid Unicode, and a single such file name would otherwise cost the UI the whole snapshot. For every valid path nothing changes. The row of such a file is shown, but the path the UI sends back for it is not the one the host knows, so commands for it have no effect.
 
-Because the tree is partial, the UI must not derive totals from it. `tree_files_count` and `tree_dirs_count` describe the complete filtered tree and are independent of what is expanded. (`visible_files_count` is the raw length of the filtered list and counts directories and items outside the tree as well; the file tree header uses the `tree_*` counters.)
+Because the UI holds a window, it must not derive anything about the tree from `rows`. `tree_files_count` and `tree_dirs_count` describe the complete filtered tree and are independent of what is expanded or sent. (`visible_files_count` is the raw length of the filtered list and counts directories and items outside the tree as well; the file tree header uses the `tree_*` counters.) `rows_total` counts rows, i.e. depends on what is expanded.
 
-Measured for a synthetic project of 50,000 files in 550 directories (`payload_of_a_large_project_is_proportional_to_what_is_expanded` in `src/app/view_model/pruning_tests.rs`):
+`rows_revision` identifies the list: it changes when the list is built anew (another filtered file list, a directory expanded or collapsed) and stays the same for everything else (selection, preview, scrolling, a row lookup). While it is the same, a position in the list means the same row. It is 0 while no tree is shown.
 
-| Snapshot                                       | JSON size |
-| ---------------------------------------------- | --------- |
-| Complete tree (previous behaviour, any update) | 13.9 MB   |
-| Everything collapsed (50 rows)                 | 12.6 kB   |
-| One directory chain expanded (160 rows)        | 42.5 kB   |
+#### What the host keeps for it
 
-"Expand all" still produces the complete tree; that is inherent to showing every row.
+Nothing of this is recomputed per snapshot unless it has changed (measured below):
+
+| Derived data                        | Rebuilt when                                                          | Otherwise                                     |
+| ----------------------------------- | --------------------------------------------------------------------- | --------------------------------------------- |
+| Hierarchy (`TreeIndex`)             | the filtered file list or the root path changes                       | reused                                        |
+| List of rows (`VisibleRows`)        | the hierarchy changes, or a directory is expanded or collapsed        | reused: selection, preview, scrolling, lookup |
+| Selected files below each directory | the hierarchy changes, or the selection changes wholesale (see below) | follows single changes                        |
+| The rows of the window (`TreeRow`s) | every snapshot (at most 600 rows)                                     |                                               |
+
+The selection counts follow the journal of `SelectedFiles` (`src/app/selection.rs`): selecting or deselecting one file adjusts the directories above it. Changes of more than 1024 files at once ("select all", a click on a large directory) and "deselect all" are counted again, in one pass over the tree; these commands walk their files anyway.
+
+#### Measured
+
+A synthetic project, everything expanded (the worst case), release build, `cargo test --release snapshot_of_a_huge -- --nocapture` (`src/app/view_model/windowing_tests.rs`, which also asserts the size and a generous time budget). Before: the snapshot held every row, nested, for every update. Now: a window of 200 rows.
+
+| Files (directories) | Before: JSON | Before: build + serialize | Now: JSON | Click on a checkbox | Scroll (`setViewport`) | Expand/collapse one directory |
+| ------------------- | ------------ | ------------------------- | --------- | ------------------- | ---------------------- | ----------------------------- |
+| 25,000 (1,300)      | 6.6 MB       | 1.9 ms + 4.6 ms           | 55 kB     | 26 µs + 39 µs       | 26 µs + 39 µs          | 0.13 ms + 39 µs               |
+| 100,000 (5,050)     | 26.3 MB      | 7.6 ms + 17.3 ms          | 55 kB     | 28 µs + 40 µs       | 28 µs + 38 µs          | 0.44 ms + 39 µs               |
+| 500,000 (25,050)    | 131 MB       | 48 ms + 88 ms             | 55 kB     | 24 µs + 35 µs       | 29 µs + 35 µs          | 2.3 ms + 36 µs                |
+
+(Build + serialize on the host; parsing, validating and flattening megabytes of JSON in the WebView came on top and is gone as well.) The largest window the host sends, 600 rows, is 163 kB. What still grows with the project is the work after the list itself has changed: the first snapshot for a new filtered list builds the hierarchy, the rows and the counts (6 ms / 22 ms / 113 ms), and expanding or collapsing rebuilds the list of rows (last column).
+
+### Looking up a row
+
+The UI knows the rows of its window. For everything else it asks: `locateRow { request, target }`, where `request` is a number the UI chooses and `target` is one of
+
+| `target`                              | The row that is looked for                                                                    | Used for                                  |
+| ------------------------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `{ kind: "path", path }`              | The row of the item at `path`                                                                 | Keeping the focus on its item (see below) |
+| `{ kind: "parent_of", path }`         | The row of the directory the item at `path` lies in                                           | `ArrowLeft` when the parent is not held   |
+| `{ kind: "typeahead", prefix, from }` | The first row from row `from` on, wrapping around, whose name starts with `prefix` (any case) | Typing a name in the tree                 |
+
+The host resolves the target to a path, remembers it, and **every** snapshot from then on states where that path is in its own list: `located: { request, row }`, with `row: null` if there is no such row (not listed, below a collapsed directory, nothing found). The answer is therefore true for the snapshot it arrives with, also when the list has changed in between or the snapshot that was sent first has been dropped. The UI acts on the answer to the request it is waiting for and ignores every other; `located` is `null` until the first lookup and again after a new tree is shown or the UI has started (`initialize`).
+
+A lookup does not move the window. The UI scrolls to the row (if it wants to show it), which reports the viewport, and the rows arrive with the answer to that.
 
 ### Expansion: one source of truth
 
-`AppState::expanded_dirs` on the host is the only place that knows which directories are expanded. The UI keeps **no** expansion state of its own (there used to be an "expansion memory" that overrode `is_expanded` on arrival; with a pruned tree a directory that is expanded only in the UI would have no children to show, and the memory also undid the host's search auto-expansion).
+`AppState::expanded_dirs` on the host is the only place that knows which directories are expanded. The UI keeps **no** expansion state of its own (there used to be an "expansion memory" that overrode `is_expanded` on arrival; the children of a directory are rows only while it is expanded on the host, so a directory that is expanded only in the UI would have nothing to show, and the memory also undid the host's search auto-expansion).
 
 Every way of changing the expansion is therefore a command, and the result is visible with the next snapshot:
 
@@ -311,7 +358,7 @@ Every way of changing the expansion is therefore a command, and the result is vi
 
 The mapping from gesture to command lives in `src/ui/src/lib/modules/treeExpansion.ts`. While a scan is running the host refuses lazy loads (the scan delivers the children itself), so the UI sends `setExpansion` in that case. Only expanding loads: a directory that is already expanded without loaded children (expanded during a scan that was cancelled) is collapsed with `setExpansion { expanded: false }` like any other, and is loaded when it is expanded the next time.
 
-Keys are handled in one place, the key handler of the tree in `FileTree.svelte` (roving focus): `Enter` toggles a directory or opens a file, `Space` toggles the selection, wherever the focus is inside the row. The one exception are the keys a control of the row acts on by itself (`activatesNatively` in `src/ui/src/lib/modules/nativeActivation.ts`): `Enter` and `Space` on the ignore button, `Space` on the checkbox. The tree leaves them to the control, whose click handler runs once (`addIgnorePath`, `toggleSelection` / `toggleDirectorySelection`); the global key guard (`keyboard.ts`), which blocks keys nothing handles, lets them through for the same reason. `TreeItem.svelte` handles the pointer only (a key that activates a control arrives there as its `click`).
+Keys are handled in one place, the key handler of the tree in `FileTree.svelte` (roving focus): `Enter` toggles a directory or opens a file, `Space` toggles the selection, wherever the focus is inside the row. Moving the focus (`ArrowUp`/`ArrowDown`, `PageUp`/`PageDown`, `Home`/`End`) is arithmetic on positions in the list, so it also reaches rows the UI does not hold: the tree scrolls there, the rows arrive, the row gets the focus. Where a position cannot be computed (the parent of a row, a name typed into the tree, the focused item after the list has changed around it) the UI [asks the host](#looking-up-a-row). The one exception are the keys a control of the row acts on by itself (`activatesNatively` in `src/ui/src/lib/modules/nativeActivation.ts`): `Enter` and `Space` on the ignore button, `Space` on the checkbox. The tree leaves them to the control, whose click handler runs once (`addIgnorePath`, `toggleSelection` / `toggleDirectorySelection`); the global key guard (`keyboard.ts`), which blocks keys nothing handles, lets them through for the same reason. `TreeItem.svelte` handles the pointer only (a key that activates a control arrives there as its `click`).
 
 **"Expand all" and "Collapse all" act on the directories the filters show**, i.e. the directories of the filtered list. Under an active filter, "Expand all" adds them to what is expanded and "Collapse all" removes exactly them; directories the filter hides keep their state, so what was expanded before the filter is still expanded when the filter is cleared. Without a filter both reach every listed directory.
 
@@ -321,25 +368,27 @@ Keys are handled in one place, the key handler of the tree in `FileTree.svelte` 
 
 So collapsing a directory with matches and typing on leaves it collapsed, as does everything that merely applies the same filters again; a match in a directory the user has not collapsed is still revealed. Loading another directory (which clears the filters) ends the hold as well.
 
+**The automatic expansion is limited.** One application of the filters expands the directories above matches in the order of the tree and stops after 500 of them (`AUTO_EXPAND_LIMIT` in `src/app/filtering.rs`). A filter that matches broadly (an extension most files have) would otherwise expand every directory of the project: a list nobody reads, and an expanded set that stays that large after the filter is gone. The matches further down are still listed, counted (`tree_files_count`) and highlighted; their directories stay collapsed until the user opens them (a click, "Expand all") or narrows the filter. Finding the directories is one pass over the filtered list: for 500,000 matching files in 25,000 directories it takes 6 ms, where expanding all of them took 160 ms (8 ms → 0.3 ms at 25,000 files, 32 ms → 0.8 ms at 100,000).
+
 There is no optimistic update: a row changes when the snapshot arrives. Snapshots are cheap enough for that, and it rules out the UI and the host disagreeing.
 
 **Gestures name their target state.** Because there is no optimistic update, a gesture can fire a second time before the snapshot answering the first one has been rendered: key repeat on `ArrowRight`, a double click on the chevron. The second event still sees the old row. If the UI sent "flip it", the second event would undo the first and the directory would end up collapsed again. The UI therefore always sends the state the gesture should lead to, derived from the row the user acted on, and `setExpansion` is idempotent on the host. This also holds for the gestures that read as "toggle" (chevron, name, `Enter`): the user acts on what is on screen ("open this collapsed directory"), so two activations of the same rendered row ask for the same state twice. There is no "flip it" command in the contract.
 
 ## Contract tests
 
-- **Rust → TypeScript fixture.** `src/app/view_model/contract_tests.rs` serializes a representative pruned `UiState` and compares it with `src/ui/src/tests/contracts/fixtures/ui_state_pruned.json`. `src/ui/src/tests/contracts/rust-fixture.test.ts` parses that exact file with the full `UiStateSchema` and checks that no field is unknown to the schema. A change on either side that the other does not follow fails CI. Regenerate the fixture after an intended change with
+- **Rust → TypeScript fixture.** `src/app/view_model/contract_tests.rs` serializes a representative `UiState` (every kind of row, a window that is not the whole list, an answered row lookup) and compares it with `src/ui/src/tests/contracts/fixtures/ui_state_window.json`. `src/ui/src/tests/contracts/rust-fixture.test.ts` parses that exact file with the full `UiStateSchema` and checks that no field of the state, of its config or of a row is unknown to the schema. A change on either side that the other does not follow fails CI. Regenerate the fixture after an intended change with
 
   ```sh
   UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture
   ```
 
-- **TypeScript → Rust fixture (commands).** `src/app/command_contract_tests.rs` writes the routing table `COMMANDS` with example payloads into `src/ui/src/tests/contracts/fixtures/commands.json`; payloads with a type on the host (`ConfigOption`, `IgnorePatternPayload`, `SetExpansionPayload`, `UpdateFiltersPayload`) are serialized from that type, one example per `ConfigOption`. These types reject unknown fields, and so do their schemas (`.strict()`). `rust-fixture.test.ts` checks that `CommandSchemas` has exactly the same command names, that every example passes the schema of its command unchanged, and that both sides know the same options of `setConfigOption`. `COMMANDS` is what the router resolves names with, so a command cannot be routed without being part of the contract. The fixture is regenerated with the same command as above.
+- **TypeScript → Rust fixture (commands).** `src/app/command_contract_tests.rs` writes the routing table `COMMANDS` with example payloads into `src/ui/src/tests/contracts/fixtures/commands.json`; payloads with a type on the host (`ConfigOption`, `IgnorePatternPayload`, `SetExpansionPayload`, `SetViewportPayload`, `LocateRowPayload`, `UpdateFiltersPayload`) are serialized from that type, one example per `ConfigOption` and per kind of `RowTarget`. These types reject unknown fields, and so do their schemas (`.strict()`). `rust-fixture.test.ts` checks that `CommandSchemas` has exactly the same command names, that every example passes the schema of its command unchanged, and that both sides know the same options of `setConfigOption` and the same kinds of row lookup. `COMMANDS` is what the router resolves names with, so a command cannot be routed without being part of the contract. The fixture is regenerated with the same command as above.
 - **Schema tests.** `src/ui/src/tests/contracts/` covers the command union, the state schema, property tests and JSON-schema snapshots (`npm run test:contracts`).
-- **Pruning.** `src/app/view_model/pruning_tests.rs` and the property tests in `cache_tests.rs` compare the snapshot with the original full-tree algorithm, pruned by the same rule.
+- **Rows.** `src/app/view_model/pruning_tests.rs` and the property tests in `cache_tests.rs` compare the rows with the original full-tree algorithm, pruned to the expanded part (the rows are put back into nested form for that, `reference::nest`). `windowing_tests.rs` covers the window (a property test: any viewport yields exactly that slice of the list), when the list is rebuilt, the row lookup, and the cost of a snapshot.
 
 ## Changing the contract
 
-1. **Host:** add the command to `commands.rs`, to `OrderedCommand` (or, if it waits for a native dialog, to `DialogCommand`) and to `COMMANDS` in `src/app/mod.rs`; the compiler then asks for its handler in `run_command` and for example payloads in `command_contract_tests.rs`. A field goes into `UiState` / `UiConfig` / `TreeNode`.
+1. **Host:** add the command to `commands.rs`, to `OrderedCommand` (or, if it waits for a native dialog, to `DialogCommand`) and to `COMMANDS` in `src/app/mod.rs`; the compiler then asks for its handler in `run_command` and for example payloads in `command_contract_tests.rs`. A field goes into `UiState` / `UiConfig` / `TreeRow`.
 2. **UI:** extend `CommandSchemas` / `UiStateSchema` in `schema.ts`. The types in `types.ts` are derived from the schemas. Prefer additive changes.
 3. Regenerate the fixtures (see above) and update the factories in `src/ui/src/tests/contracts/`.
 4. Keep the snapshot self-contained: never send something that is only meaningful relative to an earlier update.
@@ -349,4 +398,4 @@ There is no optimistic update: a row changes when the snapshot arrives. Snapshot
 
 The host serializes each `UserEvent` on the UI thread and evaluates the resulting `window.*` call in the WebView. An event that cannot be serialized is logged and skipped; no call is made for it. Consecutive undelivered state updates are coalesced to the latest one; the order relative to all other events is preserved (`src/app/transport.rs`).
 
-In E2E tests there is no host. `$lib/dev/e2eBridge.ts` (installed only when `$lib/dev/e2eShim.ts` allows it) exposes `window.__e2e.store.setAppState`, which sets the store directly. States seeded this way have to follow the same rules as real snapshots: children only below expanded directories, counters filled in.
+In E2E tests there is no host. `$lib/dev/e2eBridge.ts` (installed only when `$lib/dev/e2eShim.ts` allows it) exposes `window.__e2e.store.setAppState`, which sets the store directly. States seeded this way have to follow the same rules as real snapshots: `rows` is a window of a list of `rows_total` rows (all of it, for a small tree), children are rows only below expanded directories, counters filled in. For a list that is longer than a window the bridge has a stand-in for the host's windowing, `window.__e2e.host.setTree(state, rows)`: it keeps the rows and answers `setViewport` and `locateRow` with snapshots, asynchronously, like `rows.rs` does (`e2e/tree-window.spec.ts`, the 25k budgets and benchmarks).
