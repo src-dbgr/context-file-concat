@@ -10,6 +10,7 @@ pub mod file_handler;
 pub mod ignore_rules;
 pub mod scanner;
 pub mod search;
+pub mod token_counter;
 pub mod tree_generator;
 
 use serde::{Deserialize, Serialize};

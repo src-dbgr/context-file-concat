@@ -17,11 +17,16 @@ import {
   AnyCommandMessageSchema,
   CommandSchemas,
   ConfigOptionSchema,
+  OutputSizeNoticeSchema,
+  SaveFilePayloadSchema,
+  SaveResultSchema,
+  ShowGeneratedArgsSchema,
   UiConfigSchema,
   UiStateSchema,
   UiStateEnvelopeSchema,
   type CommandName,
 } from "$lib/ipc/schema";
+import type { z } from "zod";
 import type { AppState, TreeNode } from "$lib/types";
 
 const fixturePath = fileURLToPath(
@@ -210,5 +215,80 @@ describe("[IPC Contracts] commands routed by the Rust backend", () => {
       ConfigOptionSchema.options.map((o) => o.shape.option.value),
     );
     expect(hostOptions).toEqual(uiOptions);
+  });
+});
+
+describe("[IPC Contracts] saveFile as the host accepts it", () => {
+  it("covers every kind of save on both sides", () => {
+    const hostKinds = new Set(
+      commandFixture.saveFile.map(
+        (payload) => (payload as { kind: string }).kind,
+      ),
+    );
+    const uiKinds = new Set(
+      SaveFilePayloadSchema.options.map((o) => o.shape.kind.value),
+    );
+    expect(hostKinds).toEqual(uiKinds);
+  });
+});
+
+// Host → UI: `fixtures/output_events.json` is written by the host
+// (src/app/event_contract_tests.rs) from the scripts it really evaluates in
+// the WebView: for each handler of the generated output, the argument lists of
+// example calls, one per form the event can take.
+const outputEvents = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("./fixtures/output_events.json", import.meta.url)),
+    "utf8",
+  ),
+) as Record<string, unknown[][]>;
+
+/** The schema of each handler's argument list. */
+const outputEventSchemas: Record<string, z.ZodTypeAny> = {
+  showGeneratedContent: ShowGeneratedArgsSchema,
+  // These handlers take one argument, an object.
+  saveResult: SaveResultSchema,
+  outputSizeNotice: OutputSizeNoticeSchema,
+};
+const takesOneObject = new Set(["saveResult", "outputSizeNotice"]);
+
+describe("[IPC Contracts] host calls of the generated output", () => {
+  it("knows exactly the handlers the host calls", () => {
+    expect(Object.keys(outputEvents).sort()).toEqual(
+      Object.keys(outputEventSchemas).sort(),
+    );
+  });
+
+  it("accepts every example call unchanged", () => {
+    for (const [handler, calls] of Object.entries(outputEvents)) {
+      expect(calls.length, handler).toBeGreaterThan(0);
+      for (const args of calls) {
+        const label = `${handler} ${JSON.stringify(args)}`;
+        let input: unknown = args;
+        if (takesOneObject.has(handler)) {
+          expect(args, label).toHaveLength(1);
+          input = args[0];
+        }
+        const result = outputEventSchemas[handler].safeParse(input);
+        expect(result.error?.issues ?? [], label).toEqual([]);
+        // Nothing the host sends is dropped by the schema.
+        expect(result.data, label).toEqual(input);
+      }
+    }
+  });
+
+  it("covers every status of a save and of a size notice on both sides", () => {
+    const statuses = (handler: string) =>
+      new Set(
+        outputEvents[handler].map(
+          ([argument]) => (argument as { status: string }).status,
+        ),
+      );
+    expect(statuses("saveResult")).toEqual(
+      new Set(SaveResultSchema.options.map((o) => o.shape.status.value)),
+    );
+    expect(statuses("outputSizeNotice")).toEqual(
+      new Set(OutputSizeNoticeSchema.options.map((o) => o.shape.status.value)),
+    );
   });
 });

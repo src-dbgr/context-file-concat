@@ -11,15 +11,23 @@ import { scanProgress } from "$lib/stores/scanProgress";
 
 // toast: we check calls for success/info/error
 const { toast } = vi.hoisted(() => ({
-  toast: { success: vi.fn(), info: vi.fn(), error: vi.fn() },
+  toast: {
+    success: vi.fn(),
+    info: vi.fn(),
+    warning: vi.fn(),
+    error: vi.fn(),
+  },
 }));
 vi.mock("$lib/stores/toast", () => ({ toast }));
 
-// i18n: t(key) => key
+// i18n: t(key) => key, with the parameters appended where there are any
 vi.mock("$lib/i18n", () => {
+  type Params = Record<string, string | number>;
   const t = {
-    subscribe(run: (val: (key: string) => string) => void) {
-      run((k: string) => k);
+    subscribe(run: (val: (key: string, params?: Params) => string) => void) {
+      run((k: string, params?: Params) =>
+        params ? `${k} ${JSON.stringify(params)}` : k,
+      );
       return () => {};
     },
   };
@@ -47,7 +55,8 @@ vi.mock("$lib/ipc/schema", () => {
     ShowPreviewArgsSchema: { safeParse: passthrough },
     ShowGeneratedArgsSchema: { safeParse: passthrough },
     StatusMessageSchema: { safeParse: passthrough },
-    FileSaveStatusArgsSchema: { safeParse: passthrough },
+    SaveResultSchema: { safeParse: passthrough },
+    OutputSizeNoticeSchema: { safeParse: passthrough },
     DragStateSchema: { safeParse: passthrough },
   };
 });
@@ -96,8 +105,8 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
   });
 
   it("showGeneratedContent validates and forwards to editor", () => {
-    window.showGeneratedContent("output", 42);
-    expect(showGeneratedContentImpl).toHaveBeenCalledWith("output", 42);
+    window.showGeneratedContent("output", 42, 7);
+    expect(showGeneratedContentImpl).toHaveBeenCalledWith("output", 42, 7);
   });
 
   it("showError updates status and emits toast.error", () => {
@@ -117,18 +126,78 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     expect(state.status_message).toBe("Status: Working");
   });
 
-  it("fileSaveStatus handles cancelled, success, and failure", () => {
-    window.fileSaveStatus(true, "cancelled");
-    expect(get(appState).status_message).toBe("Status: Save cancelled.");
-    expect(toast.info).toHaveBeenCalledWith("toast.saveCancelled");
-
-    window.fileSaveStatus(true, "/tmp/out.txt");
+  it("saveResult: a saved file is reported with its path", () => {
+    window.saveResult({ status: "saved", path: "/tmp/out.txt" });
     expect(get(appState).status_message).toBe("Status: Saved to /tmp/out.txt");
     expect(toast.success).toHaveBeenCalledWith("toast.fileSaved");
+    expect(toast.info).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
 
-    window.fileSaveStatus(false, "/tmp/out.txt");
+  it("saveResult: a cancelled save is neither a success nor an error", () => {
+    window.saveResult({ status: "cancelled" });
+    expect(get(appState).status_message).toBe("Status: Save cancelled.");
+    expect(toast.info).toHaveBeenCalledWith("toast.saveCancelled");
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("saveResult: a failed save shows the reason of the host", () => {
+    window.saveResult({
+      status: "failed",
+      error: "Permission denied (os error 13)",
+    });
     expect(get(appState).status_message).toBe("Error: Failed to save file.");
+    // The reason is the text, under a localized title; it is never a path.
+    expect(toast.error).toHaveBeenCalledWith(
+      "Permission denied (os error 13)",
+      { title: "toast.saveFailed", duration: 10_000 },
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("saveResult: a file that is named 'cancelled' is a saved file", () => {
+    window.saveResult({ status: "saved", path: "cancelled" });
+    expect(get(appState).status_message).toBe("Status: Saved to cancelled");
+    expect(toast.success).toHaveBeenCalledWith("toast.fileSaved");
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it("saveResult: a failure without a reason still says what failed", () => {
+    window.saveResult({ status: "failed", error: "  " });
     expect(toast.error).toHaveBeenCalledWith("toast.saveFailed");
+  });
+
+  it("saveResult: a long reason is cut", () => {
+    window.saveResult({ status: "failed", error: "x".repeat(1000) });
+    const [text] = toast.error.mock.calls[0] as [string];
+    expect(text.length).toBeLessThanOrEqual(300);
+  });
+
+  it("outputSizeNotice: a large output is announced with a warning", () => {
+    window.outputSizeNotice({
+      status: "large",
+      estimated_bytes: 31 * 1024 * 1024,
+      limit_bytes: 20 * 1024 * 1024,
+    });
+    expect(toast.warning).toHaveBeenCalledWith(
+      'toast.outputLarge {"size":"31 MB","limit":"20 MB"}',
+      { title: "toast.outputLargeTitle" },
+    );
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("outputSizeNotice: a refused output is an error that stays readable", () => {
+    window.outputSizeNotice({
+      status: "too_large",
+      estimated_bytes: 314572800,
+      limit_bytes: 209715200,
+    });
+    expect(toast.error).toHaveBeenCalledWith(
+      'toast.outputTooLarge {"size":"300 MB","limit":"200 MB"}',
+      { title: "toast.outputTooLargeTitle", duration: 10_000 },
+    );
+    expect(toast.warning).not.toHaveBeenCalled();
   });
 
   it("setDragState toggles css class on the file tree container", () => {

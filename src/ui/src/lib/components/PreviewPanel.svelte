@@ -17,6 +17,25 @@
   let contentVersion = $state(0);
   let modelDispose: { dispose: () => void } | null = null;
 
+  /**
+   * The statistics read the whole text, which takes a moment for a large
+   * output (about half a second for 50 MB). Edits are therefore followed with
+   * a short delay instead of per keystroke; new content is counted at once.
+   */
+  const STATS_DELAY_MS = 200;
+  let statsTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function cancelPendingStats() {
+    if (statsTimer) clearTimeout(statsTimer);
+    statsTimer = null;
+  }
+
+  function refreshStats() {
+    cancelPendingStats();
+    // trigger reactive recomputation
+    contentVersion = contentVersion + 1;
+  }
+
   onMount(() => {
     // Re-subscribe whenever the editor instance changes
     const unsub = editorInstance.subscribe((editor) => {
@@ -25,14 +44,20 @@
         modelDispose = null;
       }
       if (editor && editor.getModel()) {
-        modelDispose = editor.getModel()!.onDidChangeContent(() => {
-          // trigger reactive recomputation
-          contentVersion = contentVersion + 1;
+        modelDispose = editor.getModel()!.onDidChangeContent((change) => {
+          // `isFlush`: the whole text was replaced (a preview, an output).
+          if (change.isFlush) {
+            refreshStats();
+          } else {
+            cancelPendingStats();
+            statsTimer = setTimeout(refreshStats, STATS_DELAY_MS);
+          }
         });
       }
     });
     return () => {
       unsub();
+      cancelPendingStats();
       if (modelDispose) {
         modelDispose.dispose();
         modelDispose = null;

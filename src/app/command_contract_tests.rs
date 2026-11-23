@@ -11,7 +11,7 @@
 //! `UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture` and adapt the UI schema.
 
 use super::commands::{
-    ConfigOption, IgnorePatternPayload, SetExpansionPayload, UpdateFiltersPayload,
+    ConfigOption, IgnorePatternPayload, SaveFilePayload, SetExpansionPayload, UpdateFiltersPayload,
 };
 use super::{Command, DialogCommand, OrderedCommand, COMMANDS};
 use serde_json::{json, Value};
@@ -53,6 +53,23 @@ fn config_option_examples() -> Vec<ConfigOption> {
     examples
 }
 
+/// One example per kind of save. The `match` does not compile once a kind is added
+/// without being listed here.
+fn save_file_examples() -> Vec<SaveFilePayload> {
+    let examples = vec![
+        SaveFilePayload::Generated { document_id: 7 },
+        SaveFilePayload::Edited {
+            content: "generated content, edited".to_string(),
+        },
+    ];
+    for example in &examples {
+        match example {
+            SaveFilePayload::Generated { .. } | SaveFilePayload::Edited { .. } => {}
+        }
+    }
+    examples
+}
+
 /// Example payloads of a command, as the UI has to send them.
 fn example_payloads(command: Command) -> Vec<Value> {
     use OrderedCommand as C;
@@ -69,7 +86,7 @@ fn example_payloads(command: Command) -> Vec<Value> {
             | DialogCommand::PickOutputDirectory
             | DialogCommand::ImportConfig
             | DialogCommand::ExportConfig => vec![Value::Null],
-            DialogCommand::SaveFile => vec![json!("generated content")],
+            DialogCommand::SaveFile => save_file_examples().into_iter().map(to_json).collect(),
         },
         Command::Ordered(command) => match command {
             C::Initialize
@@ -159,6 +176,10 @@ fn typed_example_payloads_are_accepted_by_the_host() {
     for option in config_option_examples() {
         let parsed: ConfigOption = serde_json::from_value(to_json(&option)).unwrap();
         assert_eq!(parsed, option);
+    }
+    for example in save_file_examples() {
+        let parsed: SaveFilePayload = serde_json::from_value(to_json(&example)).unwrap();
+        assert_eq!(parsed, example);
     }
     for payload in example_payloads(Command::Ordered(OrderedCommand::AddIgnorePattern)) {
         serde_json::from_value::<IgnorePatternPayload>(payload).unwrap();

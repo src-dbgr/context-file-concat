@@ -59,7 +59,14 @@
     null
   ],
   "saveFile": [
-    "generated content"
+    {
+      "documentId": 7,
+      "kind": "generated"
+    },
+    {
+      "content": "generated content, edited",
+      "kind": "edited"
+    }
   ],
   "selectAll": [
     null

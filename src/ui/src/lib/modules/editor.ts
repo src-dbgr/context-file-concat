@@ -14,6 +14,7 @@ import {
   getState,
 } from "../stores/app.js";
 import { post } from "../services/backend.js";
+import type { SaveFilePayload } from "../ipc/schema.js";
 import { get } from "svelte/store";
 import { previewMode, generatedTokenCount } from "../stores/preview.js";
 import { theme, type Theme } from "../stores/theme.js";
@@ -29,6 +30,13 @@ let monaco: MonacoNS | null = null;
 
 /** The one creation of the editor; shared by every caller that needs it. */
 let editorReady: Promise<Editor> | null = null;
+
+/**
+ * The generated document the editor shows: the id the host keeps it under and
+ * the version of the editor's text at the moment it was shown. `null` while
+ * the editor shows something else.
+ */
+let shownDocument: { id: number; versionId: number } | null = null;
 
 const monacoTheme = (t: Theme) => (t === "light" ? "vs" : "vs-dark");
 
@@ -224,6 +232,7 @@ export async function showPreviewContent(
   editor.setPosition({ lineNumber: 1, column: 1 });
   editor.revealLine(1);
 
+  shownDocument = null;
   previewMode.set("file");
   generatedTokenCount.set(null);
 
@@ -233,6 +242,7 @@ export async function showPreviewContent(
 export async function showGeneratedContent(
   content: string,
   tokenCount: number,
+  documentId: number,
 ): Promise<void> {
   const editor = await ensureEditor();
 
@@ -242,6 +252,11 @@ export async function showGeneratedContent(
   setLanguage(editor, "plaintext");
   editor.updateOptions({ readOnly: false });
 
+  const model = editor.getModel();
+  shownDocument = model
+    ? { id: documentId, versionId: model.getAlternativeVersionId() }
+    : null;
+
   // State for UI
   previewMode.set("generated");
   generatedTokenCount.set(tokenCount);
@@ -249,9 +264,37 @@ export async function showGeneratedContent(
   layoutEditorSoon();
 }
 
+/**
+ * What a save of the editor's content has to send to the host, or `null` if
+ * there is no editor yet.
+ *
+ * The host keeps the document it has generated, so an output that is saved as
+ * it was shown is only named (`generated`); its text does not cross the IPC
+ * boundary a second time. Only an output the user has changed is sent
+ * (`edited`). Whether it was changed is told by the version of the editor's
+ * text: Monaco's alternative version id changes with every edit and returns
+ * to its earlier value when the edits are undone, so an output that was
+ * edited and restored with undo counts as unchanged.
+ */
+export function outputToSave(): SaveFilePayload | null {
+  const editor = get(editorInstance);
+  if (!editor) return null;
+
+  const model = editor.getModel();
+  if (
+    shownDocument &&
+    model &&
+    model.getAlternativeVersionId() === shownDocument.versionId
+  ) {
+    return { kind: "generated", documentId: shownDocument.id };
+  }
+  return { kind: "edited", content: editor.getValue() };
+}
+
 export function clearPreview() {
   post("clearPreviewState");
   previewedPath.set(null);
+  shownDocument = null;
 
   const editor = get(editorInstance);
   if (!editor) return;

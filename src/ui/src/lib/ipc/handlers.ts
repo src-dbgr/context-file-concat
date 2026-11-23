@@ -8,7 +8,7 @@
 import { appState, getState } from "$lib/stores/app";
 import { scanProgress } from "$lib/stores/scanProgress";
 import { toast } from "$lib/stores/toast";
-import { truncate } from "$lib/utils";
+import { formatFileSize, truncate } from "$lib/utils";
 import { t as tStore } from "$lib/i18n";
 import { get } from "svelte/store";
 
@@ -19,8 +19,11 @@ import {
   ShowPreviewArgsSchema,
   ShowGeneratedArgsSchema,
   StatusMessageSchema,
-  FileSaveStatusArgsSchema,
+  SaveResultSchema,
+  OutputSizeNoticeSchema,
   DragStateSchema,
+  type SaveResult,
+  type OutputSizeNotice,
 } from "$lib/ipc/schema";
 
 import {
@@ -45,10 +48,15 @@ declare global {
       searchTerm: string | null | undefined,
       path: string,
     ) => void;
-    showGeneratedContent: (content: string, tokenCount: number) => void;
+    showGeneratedContent: (
+      content: string,
+      tokenCount: number,
+      documentId: number,
+    ) => void;
+    outputSizeNotice: (notice: OutputSizeNotice) => void;
     showError: (msg: string) => void;
     showStatus: (msg: string) => void;
-    fileSaveStatus: (success: boolean, path: string) => void;
+    saveResult: (result: SaveResult) => void;
     setDragState: (isDragging: boolean) => void;
     __APP_READY?: boolean;
   }
@@ -158,8 +166,16 @@ export function installWindowIPCHandlers(): void {
     showPreviewContentImpl(c, l, s ?? "", p);
   };
 
-  window.showGeneratedContent = (content: string, tokenCount: number) => {
-    const parsed = ShowGeneratedArgsSchema.safeParse([content, tokenCount]);
+  window.showGeneratedContent = (
+    content: string,
+    tokenCount: number,
+    documentId: number,
+  ) => {
+    const parsed = ShowGeneratedArgsSchema.safeParse([
+      content,
+      tokenCount,
+      documentId,
+    ]);
     if (!parsed.success) {
       console.warn(
         "[IPC] Ignored invalid showGeneratedContent() payload:",
@@ -167,8 +183,35 @@ export function installWindowIPCHandlers(): void {
       );
       return;
     }
-    const [c, t] = parsed.data;
-    showGeneratedContentImpl(c, t);
+    const [c, t, id] = parsed.data;
+    showGeneratedContentImpl(c, t, id);
+  };
+
+  window.outputSizeNotice = (notice: OutputSizeNotice) => {
+    const parsed = OutputSizeNoticeSchema.safeParse(notice);
+    if (!parsed.success) {
+      console.warn(
+        "[IPC] Ignored invalid outputSizeNotice() payload:",
+        parsed.error.flatten(),
+      );
+      return;
+    }
+    const tr = get(tStore);
+    const sizes = {
+      size: formatFileSize(parsed.data.estimated_bytes),
+      limit: formatFileSize(parsed.data.limit_bytes),
+    };
+    if (parsed.data.status === "too_large") {
+      // Nothing was generated; the reason has to stay readable for a while.
+      toast.error(tr("toast.outputTooLarge", sizes), {
+        title: tr("toast.outputTooLargeTitle"),
+        duration: HOST_ERROR_TOAST_MS,
+      });
+    } else {
+      toast.warning(tr("toast.outputLarge", sizes), {
+        title: tr("toast.outputLargeTitle"),
+      });
+    }
   };
 
   window.showError = (msg: string) => {
@@ -209,36 +252,47 @@ export function installWindowIPCHandlers(): void {
     });
   };
 
-  window.fileSaveStatus = (success: boolean, path: string) => {
-    const parsed = FileSaveStatusArgsSchema.safeParse([success, path]);
+  window.saveResult = (result: SaveResult) => {
+    const parsed = SaveResultSchema.safeParse(result);
     if (!parsed.success) {
       console.warn(
-        "[IPC] Ignored invalid fileSaveStatus() payload:",
+        "[IPC] Ignored invalid saveResult() payload:",
         parsed.error.flatten(),
       );
       return;
     }
-    const [ok, p] = parsed.data;
+    const outcome = parsed.data;
     const tr = get(tStore);
+    const setStatus = (message: string) =>
+      appState.update((s: AppState) => {
+        s.status_message = message;
+        return s;
+      });
 
-    const msg =
-      p === "cancelled"
-        ? "Status: Save cancelled."
-        : ok
-          ? `Status: Saved to ${p}`
-          : "Error: Failed to save file.";
-
-    appState.update((s: AppState) => {
-      s.status_message = msg;
-      return s;
-    });
-
-    if (p === "cancelled") {
-      toast.info(tr("toast.saveCancelled"));
-    } else if (ok) {
-      toast.success(tr("toast.fileSaved"));
-    } else {
-      toast.error(tr("toast.saveFailed"));
+    switch (outcome.status) {
+      case "saved":
+        setStatus(`Status: Saved to ${outcome.path}`);
+        toast.success(tr("toast.fileSaved"));
+        break;
+      case "cancelled":
+        setStatus("Status: Save cancelled.");
+        toast.info(tr("toast.saveCancelled"));
+        break;
+      case "failed": {
+        setStatus("Error: Failed to save file.");
+        // The reason is the host's (the message of the operating system);
+        // the toast says what failed and shows the reason below it.
+        const reason = outcome.error.trim();
+        if (reason) {
+          toast.error(truncate(reason, HOST_ERROR_MAX_CHARS), {
+            title: tr("toast.saveFailed"),
+            duration: HOST_ERROR_TOAST_MS,
+          });
+        } else {
+          toast.error(tr("toast.saveFailed"));
+        }
+        break;
+      }
     }
   };
 

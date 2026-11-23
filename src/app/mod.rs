@@ -7,6 +7,8 @@
 mod command_contract_tests;
 pub mod commands;
 pub mod dispatch;
+#[cfg(test)]
+mod event_contract_tests;
 pub mod events;
 pub mod file_dialog;
 pub mod filtering;
@@ -304,17 +306,14 @@ fn script_for(event: &UserEvent) -> serde_json::Result<String> {
             json(&path.to_string_lossy())?,
         ),
         UserEvent::ShowGeneratedContent {
-            content,
+            document,
             token_count,
-        } => format!(
-            "window.showGeneratedContent({}, {});",
-            json(content)?,
-            token_count
-        ),
-        UserEvent::ShowError(msg) => format!("window.showError({});", json(msg)?),
-        UserEvent::SaveComplete(success, path) => {
-            format!("window.fileSaveStatus({}, {});", success, json(path)?)
+        } => generated_content_script(document.text(), *token_count, document.id())?,
+        UserEvent::OutputSize(notice) => {
+            format!("window.outputSizeNotice({});", json(notice)?)
         }
+        UserEvent::ShowError(msg) => format!("window.showError({});", json(msg)?),
+        UserEvent::SaveResult(result) => format!("window.saveResult({});", json(result)?),
         UserEvent::ConfigExported(success) => format!(
             "window.showStatus('{}');",
             if *success {
@@ -332,13 +331,36 @@ fn script_for(event: &UserEvent) -> serde_json::Result<String> {
     })
 }
 
+/// The call that shows a generated document.
+///
+/// A document can weigh many megabytes, so the script is written into one buffer of
+/// about its final size: the text is escaped straight into it and exists once more,
+/// not three times (as a JSON string, as the formatted script and while that grows).
+fn generated_content_script(
+    text: &str,
+    token_count: usize,
+    document_id: u64,
+) -> serde_json::Result<String> {
+    use std::io::Write;
+
+    // Room for the escapes of a typical text: a line end takes two bytes instead of one.
+    let mut script = Vec::with_capacity(text.len() + text.len() / 8 + 96);
+    script.extend_from_slice(b"window.showGeneratedContent(");
+    serde_json::to_writer(&mut script, text)?;
+    // Writing into a `Vec` cannot fail.
+    let _ = write!(script, ", {token_count}, {document_id});");
+    // JSON is UTF-8, and so is everything else that was written.
+    String::from_utf8(script).map_err(serde::ser::Error::custom)
+}
+
 fn event_name(event: &UserEvent) -> &'static str {
     match event {
         UserEvent::StateUpdate(_) => "StateUpdate",
         UserEvent::ShowFilePreview { .. } => "ShowFilePreview",
         UserEvent::ShowGeneratedContent { .. } => "ShowGeneratedContent",
         UserEvent::ShowError(_) => "ShowError",
-        UserEvent::SaveComplete(..) => "SaveComplete",
+        UserEvent::OutputSize(_) => "OutputSize",
+        UserEvent::SaveResult(_) => "SaveResult",
         UserEvent::ConfigExported(_) => "ConfigExported",
         UserEvent::ScanProgress(_) => "ScanProgress",
         UserEvent::DragStateChanged(_) => "DragStateChanged",
@@ -348,7 +370,8 @@ fn event_name(event: &UserEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::state::{AppState, StatusNotice};
+    use crate::app::events::{OutputSizeNotice, SaveResult};
+    use crate::app::state::{AppState, GeneratedDocument, StatusNotice};
     use crate::config::AppConfig;
     use std::path::Path;
     use std::sync::mpsc as std_mpsc;
@@ -656,7 +679,10 @@ mod tests {
     async fn only_one_dialog_is_open_at_a_time() {
         let mut harness = Harness::new().await;
 
-        harness.send("saveFile", serde_json::json!("content"));
+        harness.send(
+            "saveFile",
+            serde_json::json!({ "kind": "edited", "content": "content" }),
+        );
         harness.send("importConfig", serde_json::Value::Null);
         harness
             .dialog_opened
@@ -673,7 +699,10 @@ mod tests {
         // Cancelling the save dialog is answered, then the import dialog opens.
         harness.close_dialog.send(()).unwrap();
         let events = harness.events(1).await;
-        assert!(matches!(events[0], UserEvent::SaveComplete(false, _)));
+        assert!(matches!(
+            events[0],
+            UserEvent::SaveResult(SaveResult::Cancelled)
+        ));
         harness
             .dialog_opened
             .recv_timeout(Duration::from_secs(5))
@@ -1254,14 +1283,17 @@ mod tests {
                 "setConfigOption",
                 serde_json::json!({ "option": "output_filename", "value": name }),
             );
-            send("saveFile", serde_json::json!("content"));
+            send(
+                "saveFile",
+                serde_json::json!({ "kind": "edited", "content": "content" }),
+            );
 
             loop {
                 let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
                     .await
                     .expect("the save dialog did not run")
                     .expect("the event channel was closed");
-                if matches!(event, UserEvent::SaveComplete(false, _)) {
+                if matches!(event, UserEvent::SaveResult(SaveResult::Cancelled)) {
                     break;
                 }
             }
@@ -1312,18 +1344,44 @@ mod tests {
         );
         assert_eq!(
             script(UserEvent::ShowGeneratedContent {
-                content: "x".to_string(),
+                document: GeneratedDocument::for_test(7, "x \"y\"\n"),
                 token_count: 3,
             }),
-            r#"window.showGeneratedContent("x", 3);"#
+            r#"window.showGeneratedContent("x \"y\"\n", 3, 7);"#
+        );
+        assert_eq!(
+            script(UserEvent::OutputSize(OutputSizeNotice::Large {
+                estimated_bytes: 30,
+                limit_bytes: 20,
+            })),
+            r#"window.outputSizeNotice({"status":"large","estimated_bytes":30,"limit_bytes":20});"#
+        );
+        assert_eq!(
+            script(UserEvent::OutputSize(OutputSizeNotice::TooLarge {
+                estimated_bytes: 300,
+                limit_bytes: 200,
+            })),
+            r#"window.outputSizeNotice({"status":"too_large","estimated_bytes":300,"limit_bytes":200});"#
         );
         assert_eq!(
             script(UserEvent::ShowError("it's \"broken\"".to_string())),
             r#"window.showError("it's \"broken\"");"#
         );
         assert_eq!(
-            script(UserEvent::SaveComplete(true, "/out/a.txt".to_string())),
-            r#"window.fileSaveStatus(true, "/out/a.txt");"#
+            script(UserEvent::SaveResult(SaveResult::Saved {
+                path: "/out/a.txt".to_string()
+            })),
+            r#"window.saveResult({"status":"saved","path":"/out/a.txt"});"#
+        );
+        assert_eq!(
+            script(UserEvent::SaveResult(SaveResult::Cancelled)),
+            r#"window.saveResult({"status":"cancelled"});"#
+        );
+        assert_eq!(
+            script(UserEvent::SaveResult(SaveResult::Failed {
+                error: "disk \"full\"".to_string()
+            })),
+            r#"window.saveResult({"status":"failed","error":"disk \"full\""});"#
         );
         assert_eq!(
             script(UserEvent::ConfigExported(false)),

@@ -30,11 +30,10 @@ use crate::config::{AppConfig, ConfigSnapshot};
 use crate::core::file_handler::GenerationRequest;
 use crate::core::scanner::ScanRequest;
 use crate::core::{
-    is_blank, ContentSearch, ContentSearchRequest, CoreError, DirectoryScanner, FileHandler,
-    FileItem, ScanProgress, SearchEngine,
+    is_blank, token_counter, ContentSearch, ContentSearchRequest, CoreError, DirectoryScanner,
+    FileHandler, FileItem, ScanProgress, SearchEngine,
 };
 use crate::utils::language::language_of;
-use tiktoken_rs::cl100k_base;
 
 //================================================================================================//
 //|                                     SERVICE TRAITS                                           |//
@@ -67,7 +66,9 @@ pub trait Scanner: Send + Sync {
 
 /// A trait abstracting the token counting functionality.
 pub trait Tokenizer: Send + Sync {
-    fn count_tokens(&self, text: &str) -> impl Future<Output = usize> + Send;
+    /// Counts the tokens of `text`, which is shared with the caller, not copied.
+    /// `None` if the count was cancelled; its result is not needed any more then.
+    fn count_tokens(&self, text: Arc<String>) -> impl Future<Output = Option<usize>> + Send;
 }
 
 /// The outcome of a content search: the matching paths, or why the search failed.
@@ -96,6 +97,10 @@ pub struct RealContentGenerator {
     pub cancel_flag: Arc<AtomicBool>,
     /// Files larger than this many bytes are not inlined into the output.
     pub max_file_size: u64,
+    /// A document larger than this many bytes is not built ([`MAX_OUTPUT_SIZE`]).
+    pub max_output_size: u64,
+    /// What the document is expected to weigh ([`GenerationPlan::estimated_size`]).
+    pub expected_output_size: u64,
 }
 impl ContentGenerator for RealContentGenerator {
     async fn generate(
@@ -116,6 +121,8 @@ impl ContentGenerator for RealContentGenerator {
                 tree_ignore_patterns,
                 use_relative_paths,
                 max_file_size: self.max_file_size,
+                max_output_size: self.max_output_size,
+                expected_output_size: self.expected_output_size,
             },
             self.cancel_flag.clone(),
             // Nobody follows the progress of a generation (yet).
@@ -145,17 +152,22 @@ impl Scanner for RealScanner {
     }
 }
 
-pub struct RealTokenizer;
+/// Counts tokens on the blocking thread pool (see [`token_counter`]).
+pub struct RealTokenizer {
+    /// Raised when the generation the count belongs to is cancelled or superseded.
+    /// Aborting the task does not reach the blocking thread; this flag does.
+    pub cancel_flag: Arc<AtomicBool>,
+}
 impl Tokenizer for RealTokenizer {
-    async fn count_tokens(&self, text: &str) -> usize {
-        let text_clone = text.to_string();
-        tokio::task::spawn_blocking(move || {
-            cl100k_base()
-                .map(|bpe| bpe.encode_with_special_tokens(&text_clone).len())
-                .unwrap_or(0)
-        })
-        .await
-        .unwrap_or(0)
+    async fn count_tokens(&self, text: Arc<String>) -> Option<usize> {
+        let cancel_flag = self.cancel_flag.clone();
+        tokio::task::spawn_blocking(move || token_counter::count_tokens(&text, &cancel_flag))
+            .await
+            .unwrap_or_else(|e| {
+                // The document is worth showing without its count.
+                tracing::error!("Counting the tokens failed: {e}");
+                Some(0)
+            })
     }
 }
 
@@ -178,17 +190,102 @@ impl FileSearcher for RealFileSearcher {
 //|                                   TASK IMPLEMENTATIONS                                       |//
 //================================================================================================//
 
+/// An output of more than this many bytes (estimated) is still generated, but the
+/// user is told that it is large (`OutputSizeNotice::Large`): 20 MiB.
+///
+/// Up to here a generation is a matter of well under a second. Beyond it the time
+/// becomes noticeable, and most of it is spent where it cannot be cancelled: the
+/// editor needs about 25 ms per megabyte to take a document over, on the UI thread
+/// (measured in Chromium and WebKit; 20 MiB: 0.5 s, 50 MiB: 1.2 s).
+pub const LARGE_OUTPUT_SIZE: u64 = 20 * 1024 * 1024;
+
+/// An output of more than this many bytes is not generated
+/// (`OutputSizeNotice::TooLarge`): 200 MiB.
+///
+/// The document is handed to the WebView as one string and shown by the editor as a
+/// whole. At 200 MiB that blocks the UI thread for about 5 s, and it is within a
+/// factor of 2.5 of what a string can hold in the WebView of Windows at all (V8:
+/// 512 MiB of characters). A document of this size is also far beyond what it is
+/// made for: 200 MiB of source code are roughly 50 million tokens.
+///
+/// The limit is enforced twice: the command refuses a selection whose estimated
+/// output exceeds it, without reading a file, and the generation gives up if the
+/// document grows beyond it all the same (the files have grown since the scan).
+pub const MAX_OUTPUT_SIZE: u64 = 200 * 1024 * 1024;
+
+/// The directory tree of a planned generation.
+pub struct PlannedTree {
+    /// The entries the tree is drawn from: the unfiltered file list.
+    pub items: Vec<FileItem>,
+    /// Directories without files are left out ("remove empty directories", for a
+    /// list that is known to be complete).
+    pub prune_empty_directories: bool,
+    pub ignore_patterns: HashSet<String>,
+}
+
+/// Everything a generation works with, taken from the state at one moment.
+///
+/// The command that starts a generation makes the plan under the state lock it holds
+/// anyway, so what is generated is the selection as it was when the user asked for
+/// it, and the size the command judges is the size of exactly that. Of the file list
+/// only what is needed leaves the lock: the paths of the selected files are copied,
+/// their sizes are added up where they are, and the list itself is copied once, and
+/// only if the document gets a tree (the configuration is not copied at all).
+pub struct GenerationPlan {
+    /// The selected files in the order of the tree.
+    pub selected_files: Vec<PathBuf>,
+    pub root: PathBuf,
+    /// `None` if the document gets no directory tree.
+    pub tree: Option<PlannedTree>,
+    pub use_relative_paths: bool,
+    /// What the document will weigh, in bytes, told from the sizes of the scan
+    /// (`FileHandler::estimate_output_size`).
+    pub estimated_size: u64,
+}
+
+impl GenerationPlan {
+    /// The plan of a generation of what is selected in `state` right now.
+    pub fn of(state: &AppState) -> Self {
+        let config = &state.config;
+        let items = &state.full_file_list;
+        let include_tree = config.include_tree_by_default;
+
+        let estimated_size = FileHandler::estimate_output_size(
+            items
+                .iter()
+                .filter(|item| state.selected_files.contains(&item.path)),
+            include_tree.then_some(items.as_slice()),
+            config.max_file_size_bytes(),
+        );
+
+        Self {
+            selected_files: selected_files_in_tree_order(items, &state.selected_files),
+            root: PathBuf::from(&state.current_path),
+            tree: include_tree.then(|| PlannedTree {
+                items: items.clone(),
+                prune_empty_directories: config.remove_empty_directories && state.is_fully_scanned,
+                ignore_patterns: config.tree_ignore_patterns.clone(),
+            }),
+            use_relative_paths: config.use_relative_paths,
+            estimated_size,
+        }
+    }
+}
+
 /// The main asynchronous task for generating the concatenated file content.
 ///
-/// `token` identifies this generation run. The outcome is only published while the
-/// token is still current, so a cancelled or superseded task can neither show outdated
-/// content nor reset the generating state of the generation that replaced it.
+/// `plan` says what is generated (see [`GenerationPlan`]); the task does not read the
+/// selection from the state again. `token` identifies this generation run. The outcome
+/// is only published while the token is still current, so a cancelled or superseded
+/// task can neither show outdated content nor reset the generating state of the
+/// generation that replaced it.
 pub async fn generation_task<P, G, T>(
     proxy: P,
     state: SharedState,
     content_generator: G,
     tokenizer: T,
     token: GenerationToken,
+    plan: GenerationPlan,
 ) where
     P: EventProxy,
     G: ContentGenerator + 'static,
@@ -200,44 +297,46 @@ pub async fn generation_task<P, G, T>(
         token: &token,
     };
 
-    let (selected, root, config, files_for_tree, is_fully_scanned) = {
-        let state_guard = state.lock();
-        (
-            selected_files_in_tree_order(&state_guard.full_file_list, &state_guard.selected_files),
-            PathBuf::from(&state_guard.current_path),
-            state_guard.config.clone(),
-            state_guard.full_file_list.clone(),
-            state_guard.is_fully_scanned,
-        )
-    };
+    let GenerationPlan {
+        selected_files,
+        root,
+        tree,
+        use_relative_paths,
+        estimated_size: _,
+    } = plan;
 
-    let items_for_tree = if config.remove_empty_directories && is_fully_scanned {
-        tracing::debug!("Pruning empty directories from the generated tree.");
-        SearchEngine::remove_empty_directories(
-            files_for_tree.clone(),
-            &files_for_tree,
-            &HashSet::new(),
-        )
-        .0
-    } else {
-        files_for_tree
+    let include_tree = tree.is_some();
+    let (items_for_tree, tree_ignore_patterns) = match tree {
+        Some(mut tree) => {
+            if tree.prune_empty_directories {
+                tracing::debug!("Pruning empty directories from the generated tree.");
+                SearchEngine::retain_directories_with_files(&mut tree.items);
+            }
+            (tree.items, tree.ignore_patterns)
+        }
+        None => (Vec::new(), HashSet::new()),
     };
 
     let result = content_generator
         .generate(
-            &selected,
+            &selected_files,
             &root,
-            config.include_tree_by_default,
+            include_tree,
             items_for_tree,
-            config.tree_ignore_patterns,
-            config.use_relative_paths,
+            tree_ignore_patterns,
+            use_relative_paths,
         )
         .await;
 
     let outcome = match result {
         Ok(content) => {
-            let token_count = tokenizer.count_tokens(&content).await;
-            Ok((content, token_count))
+            // From here on the document is shared: with the token count, with the
+            // event that shows it and with the state that keeps it for saving.
+            let document = Arc::new(content);
+            match tokenizer.count_tokens(document.clone()).await {
+                Some(token_count) => Ok((document, token_count)),
+                None => Err(CoreError::Cancelled),
+            }
         }
         Err(e) => Err(e),
     };
@@ -249,29 +348,36 @@ pub async fn generation_task<P, G, T>(
 ///
 /// The outcome of a generation that is no longer the current one (superseded or
 /// cancelled) is only logged; whoever replaced or cancelled it informs the UI.
+///
+/// A document that is published is kept by the state under the id of its generation
+/// (`AppState::complete_generation`), so that a save can write it without the UI
+/// sending it back.
 fn publish_generation_outcome<P: EventProxy>(
-    outcome: Result<(String, usize), CoreError>,
+    outcome: Result<(Arc<String>, usize), CoreError>,
     proxy: &P,
     state: &SharedState,
     token: &GenerationToken,
 ) {
     let mut state_guard = state.lock();
-    if !state_guard.finish_generation(token) {
-        tracing::debug!("Discarding the outcome of an outdated generation.");
-        return;
-    }
-
     match outcome {
-        Ok((content, token_count)) => {
+        Ok((text, token_count)) => {
+            let Some(document) = state_guard.complete_generation(token, text) else {
+                tracing::debug!("Discarding the outcome of an outdated generation.");
+                return;
+            };
             proxy.send_event(UserEvent::ShowGeneratedContent {
-                content,
+                document,
                 token_count,
             });
         }
-        // A cancelled generation never gets here: cancelling is what raises the cancel
-        // flag, and it releases the generating state first, so the outcome of the
-        // cancelled run (`CoreError::Cancelled`) has already been discarded above.
+        // A cancelled generation never gets past the check: cancelling is what raises
+        // the cancel flag, and it releases the generating state first, so the outcome
+        // of the cancelled run (`CoreError::Cancelled`) is discarded here.
         Err(e) => {
+            if !state_guard.finish_generation(token) {
+                tracing::debug!("Discarding the outcome of an outdated generation.");
+                return;
+            }
             tracing::error!("Generation failed: {}", e);
             proxy.send_event(UserEvent::ShowError(e.to_string()));
         }
@@ -960,12 +1066,16 @@ async fn file_preview_task<P, R>(
         return;
     }
     match outcome {
-        Ok(content) => proxy.send_event(UserEvent::ShowFilePreview {
-            content,
-            language: language_of(&path).to_string(),
-            search_term,
-            path,
-        }),
+        Ok(content) => {
+            // The file takes the place of the generated output in the editor.
+            state_guard.discard_generated_document();
+            proxy.send_event(UserEvent::ShowFilePreview {
+                content,
+                language: language_of(&path).to_string(),
+                search_term,
+                path,
+            });
+        }
         Err(message) => proxy.send_event(UserEvent::ShowError(message)),
     }
 }
@@ -1159,6 +1269,12 @@ mod tests {
             std::iter::from_fn(|| self.event_rx.try_recv().ok()).collect()
         }
 
+        /// The plan of a generation of what is selected right now, as the command
+        /// that starts a generation makes it.
+        fn plan(&self) -> GenerationPlan {
+            GenerationPlan::of(&self.state.lock())
+        }
+
         /// The most recent state update among the events sent so far (see
         /// [`Self::drain_events`]); all pending events are consumed.
         fn last_state_update(&mut self) -> Option<UiState> {
@@ -1284,8 +1400,8 @@ mod tests {
     }
 
     impl Tokenizer for MockTokenizer {
-        async fn count_tokens(&self, _: &str) -> usize {
-            self.token_count
+        async fn count_tokens(&self, _: Arc<String>) -> Option<usize> {
+            Some(self.token_count)
         }
     }
 
@@ -1443,6 +1559,7 @@ mod tests {
             generator,
             tokenizer,
             token,
+            harness.plan(),
         )
         .await;
 
@@ -1452,12 +1569,17 @@ mod tests {
 
         assert!(matches!(events[0], UserEvent::ShowGeneratedContent { .. }));
         if let UserEvent::ShowGeneratedContent {
-            content,
+            document,
             token_count,
         } = &events[0]
         {
-            assert_eq!(content, "Generated Content");
+            assert_eq!(document.text(), "Generated Content");
             assert_eq!(*token_count, 2);
+            // The host keeps what it has shown, under the id it has shown it with.
+            assert_eq!(
+                harness.state.lock().generated_document(document.id()),
+                Some(document.clone())
+            );
         }
 
         // The state update is the second of the two events captured above.
@@ -1489,6 +1611,7 @@ mod tests {
             generator,
             MockTokenizer { token_count: 0 },
             token.clone(),
+            harness.plan(),
         ));
         has_started_receiver
             .await
@@ -1519,6 +1642,7 @@ mod tests {
             generator,
             MockTokenizer { token_count: 0 },
             token,
+            harness.plan(),
         )
         .await;
 
@@ -1558,6 +1682,7 @@ mod tests {
             PanickingContentGenerator,
             MockTokenizer { token_count: 0 },
             token.clone(),
+            harness.plan(),
         ));
         let join_error = task_handle.await.expect_err("The task must panic");
         assert!(join_error.is_panic());
@@ -1884,6 +2009,7 @@ mod tests {
             generator,
             tokenizer,
             token,
+            harness.plan(),
         )
         .await;
 
@@ -2617,16 +2743,317 @@ mod tests {
             generator,
             tokenizer,
             token,
+            harness.plan(),
         )
         .await;
 
         // Assert
-        // This test is implicitly asserting that the `remove_empty_directories` logic in `generation_task`
-        // is called and doesn't panic. A more advanced mock could capture the `items_for_tree` argument
-        // and assert its contents, but for coverage, simply executing the path is sufficient.
         let events = harness.drain_events();
         assert!(matches!(events[0], UserEvent::ShowGeneratedContent { .. }));
         assert!(matches!(events[1], UserEvent::StateUpdate(_)));
+    }
+
+    /// Records what a generation hands to its generator.
+    #[derive(Clone, Default)]
+    struct RecordingGenerator {
+        calls: Arc<Mutex<Vec<RecordedGeneration>>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct RecordedGeneration {
+        selected_files: Vec<PathBuf>,
+        include_tree: bool,
+        tree_paths: Vec<PathBuf>,
+        tree_ignore_patterns: HashSet<String>,
+        use_relative_paths: bool,
+    }
+
+    impl RecordingGenerator {
+        fn only_call(&self) -> RecordedGeneration {
+            let calls = self.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "{calls:?}");
+            calls[0].clone()
+        }
+    }
+
+    impl ContentGenerator for RecordingGenerator {
+        async fn generate(
+            &self,
+            selected_files: &[PathBuf],
+            _: &Path,
+            include_tree: bool,
+            items_for_tree: Vec<FileItem>,
+            tree_ignore_patterns: HashSet<String>,
+            use_relative_paths: bool,
+        ) -> Result<String, CoreError> {
+            self.calls.lock().unwrap().push(RecordedGeneration {
+                selected_files: selected_files.to_vec(),
+                include_tree,
+                tree_paths: items_for_tree.into_iter().map(|item| item.path).collect(),
+                tree_ignore_patterns,
+                use_relative_paths,
+            });
+            Ok("recorded".to_string())
+        }
+    }
+
+    /// A project of two files, one of them below `src`, and an empty directory.
+    fn load_small_project(harness: &TestHarness) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let src = harness.root_path.join("src");
+        let main = src.join("main.rs");
+        let empty = harness.root_path.join("empty");
+        let readme = harness.root_path.join("README.md");
+        let mut state = harness.state.lock();
+        state.full_file_list = vec![
+            dir_item(&src, 1),
+            FileItem {
+                size: 100,
+                ..file_item(&main, 2)
+            },
+            dir_item(&empty, 1),
+            FileItem {
+                size: 1000,
+                ..file_item(&readme, 1)
+            },
+        ];
+        (src, main, empty, readme)
+    }
+
+    async fn run_recorded_generation(harness: &TestHarness) -> RecordedGeneration {
+        let generator = RecordingGenerator::default();
+        let token = harness.state.lock().begin_generation();
+        generation_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            generator.clone(),
+            MockTokenizer { token_count: 0 },
+            token,
+            harness.plan(),
+        )
+        .await;
+        generator.only_call()
+    }
+
+    #[tokio::test]
+    async fn generation_hands_the_generator_the_tree_without_empty_directories() {
+        let harness = TestHarness::new();
+        let (src, main, empty, readme) = load_small_project(&harness);
+        {
+            let mut state = harness.state.lock();
+            state.is_fully_scanned = true;
+            state.config.remove_empty_directories = true;
+            state.config.include_tree_by_default = true;
+            state.config.tree_ignore_patterns = HashSet::from(["*.lock".to_string()]);
+            state.config.use_relative_paths = false;
+            state.selected_files = HashSet::from([readme.clone(), main.clone()]);
+        }
+
+        let recorded = run_recorded_generation(&harness).await;
+
+        assert_eq!(
+            recorded,
+            RecordedGeneration {
+                // The order of the tree, whatever the order of the selection.
+                selected_files: vec![readme.clone(), main.clone()],
+                include_tree: true,
+                // The list as it is, without the directory that holds no file.
+                tree_paths: vec![src.clone(), main.clone(), readme.clone()],
+                tree_ignore_patterns: HashSet::from(["*.lock".to_string()]),
+                use_relative_paths: false,
+            }
+        );
+
+        // Empty directories stay where the option is off, and where the list is not
+        // known to be complete (a directory that was not loaded yet looks empty).
+        for (remove_empty_directories, is_fully_scanned) in [(false, true), (true, false)] {
+            {
+                let mut state = harness.state.lock();
+                state.config.remove_empty_directories = remove_empty_directories;
+                state.is_fully_scanned = is_fully_scanned;
+            }
+            let recorded = run_recorded_generation(&harness).await;
+            assert_eq!(
+                recorded.tree_paths,
+                vec![src.clone(), main.clone(), empty.clone(), readme.clone()]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_without_a_tree_does_not_copy_the_file_list() {
+        let harness = TestHarness::new();
+        let (_, main, _, _) = load_small_project(&harness);
+        {
+            let mut state = harness.state.lock();
+            state.config.include_tree_by_default = false;
+            state.selected_files.insert(main.clone());
+        }
+
+        assert!(harness.plan().tree.is_none());
+        let recorded = run_recorded_generation(&harness).await;
+        assert!(!recorded.include_tree);
+        assert_eq!(recorded.tree_paths, Vec::<PathBuf>::new());
+        assert_eq!(recorded.selected_files, vec![main]);
+    }
+
+    /// The plan is the selection of the moment it was made: what is selected or
+    /// deselected while the generation runs belongs to the next one.
+    #[tokio::test]
+    async fn generation_works_with_the_selection_of_its_plan() {
+        let harness = TestHarness::new();
+        let (_, main, _, readme) = load_small_project(&harness);
+        harness.state.lock().selected_files.insert(main.clone());
+        let plan = harness.plan();
+        {
+            let mut state = harness.state.lock();
+            state.selected_files.clear();
+            state.selected_files.insert(readme);
+        }
+
+        let generator = RecordingGenerator::default();
+        let token = harness.state.lock().begin_generation();
+        generation_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            generator.clone(),
+            MockTokenizer { token_count: 0 },
+            token,
+            plan,
+        )
+        .await;
+
+        assert_eq!(generator.only_call().selected_files, vec![main]);
+    }
+
+    #[tokio::test]
+    async fn plan_estimates_the_output_from_the_sizes_of_the_scan() {
+        let harness = TestHarness::new();
+        let (_, main, _, readme) = load_small_project(&harness);
+        let estimate = |harness: &TestHarness| harness.plan().estimated_size;
+        harness.state.lock().config.include_tree_by_default = false;
+
+        let nothing = estimate(&harness);
+        harness.state.lock().selected_files.insert(main);
+        let one_file = estimate(&harness);
+        harness.state.lock().selected_files.insert(readme.clone());
+        let two_files = estimate(&harness);
+
+        // 100 and 1000 bytes of content, plus the path and the frame of each block.
+        assert!((100..400).contains(&(one_file - nothing)), "{one_file}");
+        assert!(
+            (1000..1300).contains(&(two_files - one_file)),
+            "{two_files}"
+        );
+
+        // The tree adds to it; a file above the size limit is not embedded.
+        harness.state.lock().config.include_tree_by_default = true;
+        assert!(estimate(&harness) > two_files);
+        {
+            let mut state = harness.state.lock();
+            state.config.include_tree_by_default = false;
+            state.full_file_list[3].size = 3 * 1024 * 1024;
+            state.config.max_file_size_mb = 1;
+        }
+        assert!(estimate(&harness) < two_files);
+
+        // A selected path that is not listed (any more) is not part of the output.
+        let before = estimate(&harness);
+        harness
+            .state
+            .lock()
+            .selected_files
+            .insert(PathBuf::from("/elsewhere/gone.txt"));
+        assert_eq!(estimate(&harness), before);
+    }
+
+    /// A tokenizer whose count is cancelled, as the real one reports it when the
+    /// cancellation flag of its generation is raised.
+    struct CancelledTokenizer;
+
+    impl Tokenizer for CancelledTokenizer {
+        async fn count_tokens(&self, _: Arc<String>) -> Option<usize> {
+            None
+        }
+    }
+
+    /// Cancelling during the token count: the generation is over for the state when
+    /// the count gives up, and neither the document nor an error is shown.
+    #[tokio::test]
+    async fn generation_cancelled_during_the_token_count_shows_nothing() {
+        let mut harness = TestHarness::new();
+        let generator = MockContentGenerator::new();
+        generator.set_result(Ok("document".to_string()));
+        let token = harness.state.lock().begin_generation();
+        harness.state.lock().cancel_current_generation();
+
+        generation_task(
+            harness.proxy.clone(),
+            harness.state.clone(),
+            generator,
+            CancelledTokenizer,
+            token,
+            harness.plan(),
+        )
+        .await;
+
+        harness.assert_no_events("A cancelled generation publishes nothing");
+        assert!(!harness.state.lock().is_generating());
+    }
+
+    #[tokio::test]
+    async fn real_tokenizer_counts_shared_text_and_stops_when_cancelled() {
+        let text = Arc::new("hello world\n".repeat(1000));
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let tokenizer = RealTokenizer {
+            cancel_flag: cancel_flag.clone(),
+        };
+
+        // "hello", " world" and the line end, a thousand times.
+        assert_eq!(tokenizer.count_tokens(text.clone()).await, Some(3000));
+        // The text was borrowed for the count, not kept.
+        assert_eq!(Arc::strong_count(&text), 1);
+
+        cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(tokenizer.count_tokens(text).await, None);
+    }
+
+    /// The generated output the host keeps is the one the editor shows. A file
+    /// preview takes its place there, so the host gives its copy up; a preview that
+    /// fails leaves the editor, and so the document, as it is.
+    #[tokio::test]
+    async fn file_preview_takes_the_place_of_the_generated_document() {
+        let mut harness = TestHarness::new();
+        let file = harness.root_path.join("a.txt");
+        let generate = |harness: &TestHarness| {
+            let mut state = harness.state.lock();
+            let token = state.begin_generation();
+            state
+                .complete_generation(&token, Arc::new("output".to_string()))
+                .unwrap()
+                .id()
+        };
+
+        let id = generate(&harness);
+        launch_file_preview(
+            file.clone(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            |_| Err(CoreError::Cancelled),
+        )
+        .await
+        .unwrap();
+        assert!(harness.state.lock().generated_document(id).is_some());
+
+        launch_file_preview(file, harness.proxy.clone(), harness.state.clone(), |_| {
+            Ok("file content".to_string())
+        })
+        .await
+        .unwrap();
+        assert!(harness.state.lock().generated_document(id).is_none());
+        assert!(harness
+            .drain_events()
+            .iter()
+            .any(|event| matches!(event, UserEvent::ShowFilePreview { .. })));
     }
 
     /// Test for the lazy load happy path, using the proper entry point.
@@ -2800,6 +3227,8 @@ mod tests {
             inner: RealContentGenerator {
                 cancel_flag: token.cancel_flag(),
                 max_file_size: MAX_FILE_SIZE,
+                max_output_size: MAX_OUTPUT_SIZE,
+                expected_output_size: 0,
             },
             outcome: outcome.clone(),
         };
@@ -2826,6 +3255,7 @@ mod tests {
             generator,
             MockTokenizer { token_count: 0 },
             token,
+            harness.plan(),
         ));
         harness.state.lock().cancel_current_generation();
         task_handle.await.unwrap();
@@ -2849,6 +3279,8 @@ mod tests {
         let generator = RealContentGenerator {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             max_file_size: 5,
+            max_output_size: MAX_OUTPUT_SIZE,
+            expected_output_size: 0,
         };
 
         let content = generator
@@ -3285,6 +3717,7 @@ mod tests {
             generator,
             MockTokenizer { token_count: 1 },
             old_token.clone(),
+            harness.plan(),
         ));
         has_started.await.expect("Mock did not signal start");
 
@@ -3320,6 +3753,7 @@ mod tests {
             generator,
             MockTokenizer { token_count: 0 },
             old_token,
+            harness.plan(),
         ));
         has_started.await.expect("Mock did not signal start");
 

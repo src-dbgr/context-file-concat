@@ -7,6 +7,9 @@
 //!   the blocking work off the async runtime and honouring cancellation. What to
 //!   generate is described by a [`GenerationRequest`]; a [`GenerationObserver`] can
 //!   follow the progress.
+//!
+//! How large a document will be can be told beforehand, without IO, from the sizes
+//! the scan has recorded: [`FileHandler::estimate_output_size`].
 
 #[cfg(test)]
 use super::MAX_FILE_SIZE;
@@ -22,6 +25,17 @@ use std::sync::Arc;
 /// Placeholder emitted instead of the content of binary / undecodable files.
 const BINARY_CONTENT_MARKER: &str = "[BINARY OR NON-UTF8 FILE - CONTENT SKIPPED]";
 
+/// What precedes the directory tree.
+const TREE_SECTION_START: &str = "# DIRECTORY TREE\n=====================\n";
+/// What follows the directory tree.
+const TREE_SECTION_END: &str = "=====================\n\n";
+/// What follows the display path of a file block, up to its body.
+const FILE_BLOCK_START: &str = "\n===FILE-START===\n";
+/// What follows the body of a file block.
+const FILE_BLOCK_END: &str = "---FILE-END-----\n\n";
+/// Room for the metadata header of a document (the date and the number of files).
+const HEADER_SIZE_ESTIMATE: u64 = 72;
+
 /// Builds the concatenated output document.
 ///
 /// This type is concerned with formatting only; it performs no IO.
@@ -30,33 +44,59 @@ struct OutputDocument {
 }
 
 impl OutputDocument {
-    /// Starts a document with the metadata header.
-    fn new(generated_at: impl std::fmt::Display, total_files: usize) -> Self {
-        Self {
-            buffer: format!(
-                "# CFC Output - Generated: {generated_at}\n# Total files: {total_files}\n\n"
-            ),
-        }
+    /// Starts a document with the metadata header. `capacity` is the size the
+    /// finished document is expected to have, in bytes: the buffer is allocated once
+    /// instead of growing (and being copied) while the files are appended.
+    fn new(generated_at: impl std::fmt::Display, total_files: usize, capacity: usize) -> Self {
+        use std::fmt::Write;
+
+        let mut buffer = String::new();
+        // A hint only: without the memory for it the document grows as it goes.
+        let _ = buffer.try_reserve_exact(capacity);
+        // Writing into a `String` cannot fail.
+        let _ = write!(
+            buffer,
+            "# CFC Output - Generated: {generated_at}\n# Total files: {total_files}\n\n"
+        );
+        Self { buffer }
+    }
+
+    /// The size of the document so far, in bytes.
+    fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// By how many bytes [`Self::push_tree`] makes the document grow.
+    fn tree_section_len(tree: &str) -> usize {
+        TREE_SECTION_START.len() + tree.len() + TREE_SECTION_END.len()
+    }
+
+    /// By how many bytes [`Self::push_file`] makes the document grow.
+    fn file_block_len(display_path: &str, body: &str) -> usize {
+        display_path.len()
+            + FILE_BLOCK_START.len()
+            + body.len()
+            + usize::from(!body.ends_with('\n'))
+            + FILE_BLOCK_END.len()
     }
 
     /// Appends the directory tree section.
     fn push_tree(&mut self, tree: &str) {
-        self.buffer.push_str("# DIRECTORY TREE\n");
-        self.buffer.push_str("=====================\n");
+        self.buffer.push_str(TREE_SECTION_START);
         self.buffer.push_str(tree);
-        self.buffer.push_str("=====================\n\n");
+        self.buffer.push_str(TREE_SECTION_END);
     }
 
     /// Appends one file block consisting of its display path and body.
     fn push_file(&mut self, display_path: &str, body: &str) {
         self.buffer.push_str(display_path);
-        self.buffer.push_str("\n===FILE-START===\n");
+        self.buffer.push_str(FILE_BLOCK_START);
         self.buffer.push_str(body);
         // Ensure the content block ends with a newline for consistent formatting.
         if !body.ends_with('\n') {
             self.buffer.push('\n');
         }
-        self.buffer.push_str("---FILE-END-----\n\n");
+        self.buffer.push_str(FILE_BLOCK_END);
     }
 
     fn finish(self) -> String {
@@ -295,6 +335,14 @@ pub struct GenerationRequest<'a> {
     /// Files larger than this many bytes are represented by a marker instead of
     /// their content.
     pub max_file_size: u64,
+    /// The most the document may weigh, in bytes. A generation that would exceed it
+    /// ends with [`CoreError::OutputTooLarge`] instead of building the document.
+    /// `u64::MAX`: no limit.
+    pub max_output_size: u64,
+    /// What the document is expected to weigh, in bytes (see
+    /// [`FileHandler::estimate_output_size`]). Only a hint for allocating the
+    /// document once; 0 if unknown.
+    pub expected_output_size: u64,
 }
 
 /// Follows the progress of a generation. All notifications default to doing nothing,
@@ -324,6 +372,8 @@ impl FileHandler {
     /// files. File IO runs on the blocking thread pool, not on the async runtime.
     ///
     /// Files that cannot be read get an inline marker instead of aborting the generation.
+    /// A document never grows beyond `max_output_size`: the generation ends with
+    /// [`CoreError::OutputTooLarge`] before the part is appended that would exceed it.
     pub async fn generate_concatenated_content_simple(
         request: GenerationRequest<'_>,
         cancel_flag: Arc<AtomicBool>,
@@ -337,18 +387,34 @@ impl FileHandler {
             tree_ignore_patterns,
             use_relative_paths,
             max_file_size,
+            max_output_size,
+            expected_output_size,
         } = request;
+        // Whether a document of `size` bytes that grows by `more` exceeds the limit.
+        let fits = |size: usize, more: usize| {
+            u64::try_from(size.saturating_add(more)).is_ok_and(|size| size <= max_output_size)
+        };
+        let too_large = || CoreError::OutputTooLarge {
+            limit: max_output_size,
+        };
 
         let mut document = OutputDocument::new(
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
             selected_files.len(),
+            // Never more than the document may weigh, whatever the estimate says.
+            usize::try_from(expected_output_size.min(max_output_size)).unwrap_or(0),
         );
 
         if include_tree {
             let tree =
                 TreeGenerator::generate_tree(&items_for_tree, root_path, &tree_ignore_patterns);
+            if !fits(document.len(), OutputDocument::tree_section_len(&tree)) {
+                return Err(too_large());
+            }
             document.push_tree(&tree);
         }
+        // The list has served its purpose; the files that follow can use the memory.
+        drop(items_for_tree);
 
         for file_path in selected_files {
             // Check for cancellation at the start of each file processing step.
@@ -366,10 +432,72 @@ impl FileHandler {
             };
 
             let display_path = display_path(file_path, root_path, use_relative_paths)?;
+            let block_len = OutputDocument::file_block_len(&display_path, &body);
+            if !fits(document.len(), block_len) {
+                return Err(too_large());
+            }
             document.push_file(&display_path, &body);
             observer.file_appended(file_path);
         }
         Ok(document.finish())
+    }
+
+    /// What the output document for `selected` will weigh, in bytes, told from the
+    /// sizes the scan has recorded. No file is opened.
+    ///
+    /// `selected` are the entries whose content is embedded (directories among them
+    /// are skipped, as by the generation), `tree_items` the entries of the directory
+    /// tree if the document gets one. The result is an estimate, not a promise: a file
+    /// may have changed since it was listed, a file in a legacy encoding grows when it
+    /// is decoded, and the tree is counted as if nothing of it were ignored. For files
+    /// that are still what the scan saw it is a few bytes per file off, on the high
+    /// side.
+    pub fn estimate_output_size<'a>(
+        selected: impl IntoIterator<Item = &'a FileItem>,
+        tree_items: Option<&[FileItem]>,
+        max_file_size: u64,
+    ) -> u64 {
+        let len = |text: &str| text.len() as u64;
+
+        let blocks = selected
+            .into_iter()
+            .filter(|item| !item.is_directory)
+            .map(|item| {
+                let body = if item.size > max_file_size {
+                    // "[FILE TOO LARGE: <size> bytes - CONTENT SKIPPED]"
+                    64
+                } else if item.is_binary {
+                    len(BINARY_CONTENT_MARKER)
+                } else {
+                    item.size
+                };
+                // The path as it is shown (at most the whole path), the frame of the
+                // block, and the line end a body without one gets.
+                (item.path.as_os_str().len() as u64)
+                    .saturating_add(len(FILE_BLOCK_START) + len(FILE_BLOCK_END) + 1)
+                    .saturating_add(body)
+            })
+            .fold(0, u64::saturating_add);
+
+        // A line of the tree: per level of depth an indentation ("│   ", 6 bytes at
+        // most), then the connector (10 bytes), the icon (5 bytes), the name and the
+        // line end.
+        let tree = tree_items.map_or(0, |items| {
+            items
+                .iter()
+                .map(|item| {
+                    let name = item.path.file_name().map_or(0, |name| name.len() as u64);
+                    (item.depth as u64).saturating_mul(6) + 16 + name
+                })
+                .fold(
+                    len(TREE_SECTION_START) + len(TREE_SECTION_END),
+                    u64::saturating_add,
+                )
+        });
+
+        HEADER_SIZE_ESTIMATE
+            .saturating_add(tree)
+            .saturating_add(blocks)
     }
 
     /// Retrieves a truncated preview of a text file's content.
@@ -486,6 +614,27 @@ mod tests {
             tree_ignore_patterns,
             use_relative_paths,
             max_file_size: MAX_FILE_SIZE,
+            max_output_size: u64::MAX,
+            expected_output_size: 0,
+        }
+    }
+
+    /// A request without a tree whose document may weigh `max_output_size` bytes.
+    fn request_with_limit<'a>(
+        selected_files: &'a [PathBuf],
+        root_path: &'a Path,
+        max_output_size: u64,
+    ) -> GenerationRequest<'a> {
+        GenerationRequest {
+            max_output_size,
+            ..request(
+                selected_files,
+                root_path,
+                false,
+                vec![],
+                HashSet::new(),
+                true,
+            )
         }
     }
 
@@ -827,7 +976,7 @@ mod tests {
 
     #[test]
     fn output_document_formats_blocks_without_io() {
-        let mut document = OutputDocument::new("NOW", 2);
+        let mut document = OutputDocument::new("NOW", 2, 0);
         document.push_tree("tree\n");
         document.push_file("a.txt", "no newline");
         document.push_file("b.txt", "");
@@ -1164,6 +1313,225 @@ mod tests {
         assert_eq!(
             file_block_body(&content, "large.txt"),
             "[FILE TOO LARGE: 6 bytes - CONTENT SKIPPED]\n"
+        );
+    }
+
+    /// The capacity is a hint for the allocation and nothing else.
+    #[test]
+    fn expected_size_of_a_document_does_not_change_its_text() {
+        let build = |capacity| {
+            let mut document = OutputDocument::new("NOW", 1, capacity);
+            document.push_file("a.txt", "text");
+            document.finish()
+        };
+        assert_eq!(build(0), build(4096));
+        // An absurd expectation is not an error either.
+        assert_eq!(build(0), build(usize::MAX));
+    }
+
+    #[test]
+    fn document_grows_by_the_lengths_it_announces() {
+        let mut document = OutputDocument::new("NOW", 3, 0);
+        let mut expected = document.len();
+
+        expected += OutputDocument::tree_section_len("tree\n");
+        document.push_tree("tree\n");
+        assert_eq!(document.len(), expected);
+
+        for (path, body) in [("a.txt", "no line end"), ("b.txt", "line end\n"), ("c", "")] {
+            expected += OutputDocument::file_block_len(path, body);
+            document.push_file(path, body);
+            assert_eq!(document.len(), expected, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_stops_before_the_document_exceeds_its_size_limit() {
+        let (_dir, root) = setup_test_environment();
+        let first = root.join("first.txt");
+        let second = root.join("second.txt");
+        fs::write(&first, "a".repeat(600)).unwrap();
+        fs::write(&second, "b".repeat(600)).unwrap();
+        let selected_files = vec![first.clone(), second];
+        async fn generate_within(
+            selected_files: &[PathBuf],
+            root: &Path,
+            max_output_size: u64,
+            observer: &impl GenerationObserver,
+        ) -> Result<String, CoreError> {
+            FileHandler::generate_concatenated_content_simple(
+                request_with_limit(selected_files, root, max_output_size),
+                Arc::new(AtomicBool::new(false)),
+                observer,
+            )
+            .await
+        }
+        let files = selected_files.as_slice();
+
+        // Without a limit: this is how large the document is.
+        let unlimited = generate_within(files, &root, u64::MAX, &()).await.unwrap();
+        let size = unlimited.len() as u64;
+        assert!((1200..1400).contains(&size), "{size}");
+
+        // A limit of exactly its size is met, a byte less is not.
+        assert_eq!(
+            generate_within(files, &root, size, &())
+                .await
+                .unwrap()
+                .len() as u64,
+            size
+        );
+        let result = generate_within(files, &root, size - 1, &()).await;
+        assert!(
+            matches!(result, Err(CoreError::OutputTooLarge { limit }) if limit == size - 1),
+            "{result:?}"
+        );
+
+        // The limit is checked as the document grows: the first file still fitted,
+        // and the generation ended before the second one was appended.
+        let observer = CancelAfterFirstFile {
+            // The flag of another generation: this one is not cancelled.
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            appended: Default::default(),
+        };
+        let result = generate_within(files, &root, 1000, &observer).await;
+        assert!(matches!(result, Err(CoreError::OutputTooLarge { .. })));
+        assert_eq!(*observer.appended.lock().unwrap(), vec![first]);
+    }
+
+    /// The expected size is a hint: it neither lifts the limit nor reserves beyond it.
+    #[tokio::test]
+    async fn expected_size_does_not_change_what_is_generated() {
+        let (_dir, root) = setup_test_environment();
+        let selected_files = vec![root.join("README.md")];
+        let generate_expecting = |expected_output_size| {
+            let mut request = request_with_limit(&selected_files, &root, 4096);
+            request.expected_output_size = expected_output_size;
+            async move {
+                FileHandler::generate_concatenated_content_simple(
+                    request,
+                    Arc::new(AtomicBool::new(false)),
+                    &(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let body_of = |document: String| file_block_body(&document, "README.md").to_string();
+
+        let plain = body_of(generate_expecting(0).await);
+        assert_eq!(plain, "This is the main readme.\n");
+        assert_eq!(body_of(generate_expecting(100).await), plain);
+        assert_eq!(body_of(generate_expecting(u64::MAX).await), plain);
+    }
+
+    #[tokio::test]
+    async fn a_tree_alone_can_exceed_the_size_limit() {
+        let (_dir, root) = setup_test_environment();
+        let items = create_file_items(&root, &["src", "src/main.rs", "README.md"]);
+        let mut request = request(&[], &root, true, items, HashSet::new(), true);
+        request.max_output_size = 80;
+
+        let result = FileHandler::generate_concatenated_content_simple(
+            request,
+            Arc::new(AtomicBool::new(false)),
+            &(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(CoreError::OutputTooLarge { limit: 80 })
+        ));
+    }
+
+    #[test]
+    fn output_too_large_names_the_limit_in_mebibytes() {
+        let error = CoreError::OutputTooLarge {
+            limit: 200 * 1024 * 1024,
+        };
+        assert_eq!(
+            error.to_string(),
+            "The output would be larger than 200 MiB. Select fewer files."
+        );
+    }
+
+    #[tokio::test]
+    async fn estimated_size_is_close_to_the_generated_document_and_not_below_it() {
+        let (_dir, root) = setup_test_environment();
+        fs::write(root.join("src/big.rs"), "let x = 1;\n".repeat(4000)).unwrap();
+        let listed = [
+            "src",
+            "src/main.rs",
+            "src/big.rs",
+            "src/module",
+            "src/module/component.rs",
+            "assets",
+            "assets/logo.png",
+            "README.md",
+            "docs",
+        ];
+        // The items carry the sizes of their files, as a scan records them.
+        let items = create_file_items(&root, &listed);
+        let selected: Vec<&FileItem> = items.iter().filter(|item| !item.is_directory).collect();
+        let selected_files: Vec<PathBuf> = selected.iter().map(|item| item.path.clone()).collect();
+
+        for include_tree in [false, true] {
+            let estimate = FileHandler::estimate_output_size(
+                selected.iter().copied(),
+                include_tree.then_some(items.as_slice()),
+                MAX_FILE_SIZE,
+            );
+            let document = generate(
+                &selected_files,
+                &root,
+                include_tree,
+                items.clone(),
+                HashSet::new(),
+                true,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+            let actual = document.len() as u64;
+
+            assert!(estimate >= actual, "{estimate} < {actual}");
+            assert!(
+                estimate - actual < 100 * listed.len() as u64 + 100,
+                "tree: {include_tree}, estimate {estimate}, actual {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn estimated_size_counts_a_marker_for_content_that_is_not_embedded() {
+        let item = |name: &str, size: u64, is_binary: bool, is_directory: bool| FileItem {
+            path: PathBuf::from("/p").join(name),
+            size,
+            is_binary,
+            is_directory,
+            ..Default::default()
+        };
+        let estimate =
+            |items: &[FileItem]| FileHandler::estimate_output_size(items.iter(), None, 1000);
+        let nothing = estimate(&[]);
+
+        let text = estimate(&[item("a", 900, false, false)]) - nothing;
+        let too_large = estimate(&[item("a", 5_000_000, false, false)]) - nothing;
+        let binary = estimate(&[item("a", 900, true, false)]) - nothing;
+        let directory = estimate(&[item("a", 0, false, true)]) - nothing;
+
+        assert!((900..1000).contains(&text), "{text}");
+        assert!(too_large < 150, "{too_large}");
+        assert!(binary < 150, "{binary}");
+        assert_eq!(directory, 0);
+        // Sizes that cannot be added up do not wrap around.
+        let huge = [
+            item("a", u64::MAX, false, false),
+            item("b", 900, false, false),
+        ];
+        assert_eq!(
+            FileHandler::estimate_output_size(huge.iter(), None, u64::MAX),
+            u64::MAX
         );
     }
 
