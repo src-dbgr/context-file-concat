@@ -54,7 +54,6 @@ describe("IPC contracts – outgoing commands (positive)", () => {
       ["loadFilePreview", "/repo/README.md"],
       ["toggleSelection", "/repo/src/main.rs"],
       ["toggleDirectorySelection", "/repo/src"],
-      ["toggleExpansion", "/repo/src"],
       ["addIgnorePath", "/repo/dist"],
       ["saveFile", "Hello world"], // content to save
     ] as const;

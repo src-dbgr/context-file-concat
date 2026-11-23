@@ -333,6 +333,8 @@
   );
 
   // --- Helpers ---------------------------------------------------------------
+  // A filter text that is empty or whitespace-only is not set. Same rule as the
+  // host (`core::is_blank`), which ignores such a text entirely.
   function hasActiveFilters(s: AppState): boolean {
     return !!(
       s.search_query?.trim() ||
@@ -614,7 +616,7 @@
           {/each}
         </div>
       </div>
-    {:else if $appState.search_query?.trim() || $appState.extension_filter?.trim() || $appState.content_search_query?.trim()}
+    {:else if hasActiveFilters($appState)}
       <div class="message-display" role="status" aria-live="polite">
         <div class="message-icon">
           <svg

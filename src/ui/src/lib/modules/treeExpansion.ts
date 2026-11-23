@@ -8,7 +8,7 @@
 // carries the result (`is_expanded` plus the now visible children).
 //
 // Every gesture is sent as the state it should lead to (`setExpansion`), never
-// as "flip it" (`toggleExpansion`). A gesture can fire again before the snapshot
+// as "flip it". A gesture can fire again before the snapshot
 // that answers it has been rendered (key repeat, double click); the repeated
 // event still sees the old node. Naming the target makes the repetition
 // harmless, whereas a second toggle would undo the first.

@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// The persisted settings of the application.
+///
+/// Fields that are not part of this struct are ignored when a configuration is read
+/// (deliberately no `deny_unknown_fields`), so files written by an older version keep
+/// loading after a setting has been retired, e.g. the former `scan_chunk_size`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
     pub ignore_patterns: HashSet<String>,
@@ -22,7 +27,6 @@ pub struct AppConfig {
     /// Size limit for files in MiB: larger files are not listed by the scan, not read
     /// by the content search and not inlined into the generated output.
     pub max_file_size_mb: u64,
-    pub scan_chunk_size: usize,
 }
 
 impl AppConfig {
@@ -99,7 +103,6 @@ impl Default for AppConfig {
             window_position: (100.0, 100.0),
             auto_load_last_directory: false,
             max_file_size_mb: 20,
-            scan_chunk_size: 100,
         }
     }
 }

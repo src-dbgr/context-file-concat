@@ -6,7 +6,7 @@
 
 use crate::app::state::AppState;
 use crate::config::AppConfig;
-use crate::core::{FileItem, SearchEngine, SearchFilter};
+use crate::core::{is_blank, FileItem, FileNameMatcher, SearchEngine};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -34,8 +34,11 @@ pub fn apply_filters(state: &mut AppState) {
         &state.full_file_list,
         &PathBuf::from(&state.current_path),
         &state.config,
-        &state.search_query,
-        &state.extension_filter,
+        &FileNameMatcher::new(
+            &state.search_query,
+            &state.extension_filter,
+            state.config.case_sensitive_search,
+        ),
         &state.content_search_query,
         &state.content_search_results,
         &dirs_to_preserve,
@@ -65,13 +68,19 @@ fn get_required_ancestors(file_paths: &HashSet<PathBuf>, root_path: &Path) -> Ha
 }
 
 /// A "pure" function that applies filters sequentially to a list of `FileItem`s.
+///
+/// # When a filter is active
+///
+/// A filter whose text is [blank](is_blank) (empty or whitespace only) is inactive
+/// and ignored. This one rule decides it for the filename query and the extension
+/// filter (through [`FileNameMatcher`]) and for the content query. An active text is
+/// matched as typed, without trimming.
 #[allow(clippy::too_many_arguments)] // Allowed for this function as all params are cohesive for filtering
 fn apply_filters_on_data(
     full_file_list: &[FileItem],
     root_path: &Path,
     config: &AppConfig,
-    search_query: &str,
-    extension_filter: &str,
+    name_matcher: &FileNameMatcher,
     content_search_query: &str,
     content_search_results: &HashSet<PathBuf>,
     dirs_to_preserve: &HashSet<PathBuf>,
@@ -90,7 +99,7 @@ fn apply_filters_on_data(
     };
 
     // Step 2: Apply content search if active.
-    let has_content_filter = !content_search_query.trim().is_empty();
+    let has_content_filter = !is_blank(content_search_query);
     if has_content_filter {
         if content_search_results.is_empty() {
             return Vec::new();
@@ -102,19 +111,10 @@ fn apply_filters_on_data(
     }
 
     // Step 3: Apply filename/extension search if active.
-    let has_filename_filter = !search_query.trim().is_empty();
-    let has_extension_filter = !extension_filter.trim().is_empty();
-
-    if has_filename_filter || has_extension_filter {
-        let filter = SearchFilter {
-            query: search_query.to_string(),
-            extension: extension_filter.to_string(),
-            case_sensitive: config.case_sensitive_search,
-        };
-
+    if name_matcher.is_active() {
         let matching_files: HashSet<_> = working_list
             .iter()
-            .filter(|item| !item.is_directory && SearchEngine::matches_filter(item, &filter))
+            .filter(|item| !item.is_directory && name_matcher.matches_all(&item.path))
             .map(|item| item.path.clone())
             .collect();
 
@@ -220,6 +220,90 @@ mod tests {
         apply_filters(&mut state);
 
         assert_eq!(state.filtered_file_list().len(), 0);
+    }
+
+    fn visible_paths(state: &AppState) -> HashSet<PathBuf> {
+        state
+            .filtered_file_list()
+            .iter()
+            .map(|item| item.path.clone())
+            .collect()
+    }
+
+    /// A state with one file whose name contains a blank and one whose name does not.
+    fn state_with_and_without_blank() -> AppState {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            create_test_file_item("/project/release notes.md", false),
+            create_test_file_item("/project/main.rs", false),
+        ];
+        state
+    }
+
+    /// A filename query of whitespace only is inactive: nothing is filtered.
+    #[test]
+    fn test_whitespace_only_search_query_is_inactive() {
+        let mut state = state_with_and_without_blank();
+        state.search_query = "  ".to_string();
+
+        apply_filters(&mut state);
+
+        assert_eq!(visible_paths(&state).len(), 2);
+    }
+
+    /// A query that is not blank is matched as typed: surrounding blanks belong to it.
+    #[test]
+    fn test_search_query_is_matched_with_its_surrounding_whitespace() {
+        let mut state = state_with_and_without_blank();
+        state.search_query = "main ".to_string();
+        apply_filters(&mut state);
+        assert!(visible_paths(&state).is_empty());
+
+        state.search_query = "release ".to_string();
+        apply_filters(&mut state);
+        assert_eq!(
+            visible_paths(&state),
+            HashSet::from([PathBuf::from("/project/release notes.md")])
+        );
+    }
+
+    /// An extension filter of whitespace only is inactive: nothing is filtered.
+    #[test]
+    fn test_whitespace_only_extension_filter_is_inactive() {
+        let mut state = state_with_and_without_blank();
+        state.extension_filter = " ".to_string();
+
+        apply_filters(&mut state);
+
+        assert_eq!(visible_paths(&state).len(), 2);
+    }
+
+    /// A content query of whitespace only is inactive: the list is not narrowed down,
+    /// neither to (stale) matches nor to nothing because there are no matches.
+    #[test]
+    fn test_whitespace_only_content_query_is_inactive() {
+        let mut state = state_with_and_without_blank();
+        state.content_search_query = " \t".to_string();
+
+        state.content_search_results = HashSet::from([PathBuf::from("/project/main.rs")]);
+        apply_filters(&mut state);
+        assert_eq!(visible_paths(&state).len(), 2);
+
+        state.content_search_results.clear();
+        apply_filters(&mut state);
+        assert_eq!(visible_paths(&state).len(), 2);
+        assert_eq!(generate_ui_state(&state).tree.len(), 2);
+    }
+
+    #[test]
+    fn test_empty_filters_keep_the_full_list() {
+        let mut state = state_with_and_without_blank();
+
+        apply_filters(&mut state);
+
+        assert_eq!(visible_paths(&state).len(), 2);
     }
 
     #[test]

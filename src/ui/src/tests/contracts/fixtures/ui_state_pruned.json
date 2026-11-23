@@ -20,8 +20,7 @@
       50.0
     ],
     "auto_load_last_directory": true,
-    "max_file_size_mb": 20,
-    "scan_chunk_size": 100
+    "max_file_size_mb": 20
   },
   "current_path": "/project",
   "tree": [

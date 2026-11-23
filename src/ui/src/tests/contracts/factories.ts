@@ -28,7 +28,6 @@ export function makeValidConfig(): z.input<typeof ConfigSchema> {
     window_position: [100, 100],
     auto_load_last_directory: false,
     max_file_size_mb: 20,
-    scan_chunk_size: 1024,
   };
 }
 
@@ -154,7 +153,6 @@ export function makeValidPayloadForCommand(name: CommandName): unknown {
     case "loadFilePreview":
     case "toggleSelection":
     case "toggleDirectorySelection":
-    case "toggleExpansion":
     case "addIgnorePath":
       return VALID_PATH;
 

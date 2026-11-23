@@ -182,24 +182,6 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
       "additionalProperties": false,
       "properties": {
         "command": {
-          "const": "toggleExpansion",
-          "type": "string",
-        },
-        "payload": {
-          "minLength": 1,
-          "type": "string",
-        },
-      },
-      "required": [
-        "command",
-        "payload",
-      ],
-      "type": "object",
-    },
-    {
-      "additionalProperties": false,
-      "properties": {
-        "command": {
           "const": "setExpansion",
           "type": "string",
         },
@@ -426,9 +408,6 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
             "remove_empty_directories": {
               "type": "boolean",
             },
-            "scan_chunk_size": {
-              "type": "number",
-            },
             "tree_ignore_patterns": {
               "default": [],
               "items": {
@@ -480,7 +459,6 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
             "window_position",
             "auto_load_last_directory",
             "max_file_size_mb",
-            "scan_chunk_size",
           ],
           "type": "object",
         },
@@ -591,9 +569,6 @@ exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
     "remove_empty_directories": {
       "type": "boolean",
     },
-    "scan_chunk_size": {
-      "type": "number",
-    },
     "tree_ignore_patterns": {
       "default": [],
       "items": {
@@ -645,7 +620,6 @@ exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
     "window_position",
     "auto_load_last_directory",
     "max_file_size_mb",
-    "scan_chunk_size",
   ],
   "type": "object",
 }
@@ -767,9 +741,6 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
         "remove_empty_directories": {
           "type": "boolean",
         },
-        "scan_chunk_size": {
-          "type": "number",
-        },
         "tree_ignore_patterns": {
           "default": [],
           "items": {
@@ -821,7 +792,6 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
         "window_position",
         "auto_load_last_directory",
         "max_file_size_mb",
-        "scan_chunk_size",
       ],
       "type": "object",
     },

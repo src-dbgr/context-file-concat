@@ -11,10 +11,10 @@
 
 ## Two levels of "only what is visible"
 
-| Level        | Where                                         | Bounds                                               |
-| ------------ | --------------------------------------------- | ---------------------------------------------------- |
-| Pruning      | Host, `src/app/view_model/tree_builder.rs`    | JSON size, parsing, validation, the flatten step     |
-| Windowing    | UI, `src/ui/src/lib/components/FileTree.svelte` | DOM rows                                           |
+| Level     | Where                                           | Bounds                                           |
+| --------- | ----------------------------------------------- | ------------------------------------------------ |
+| Pruning   | Host, `src/app/view_model/tree_builder.rs`      | JSON size, parsing, validation, the flatten step |
+| Windowing | UI, `src/ui/src/lib/components/FileTree.svelte` | DOM rows                                         |
 
 ### 1. Pruned snapshot (host)
 
@@ -45,7 +45,7 @@ The flatten step is a `$derived` of `$appState.tree`. Because the tree is pruned
 
 ## Expansion
 
-The host is the single source of truth for expansion; the UI stores none. Expanding or collapsing posts a command (`toggleExpansion`, `loadDirectoryLevel` for directories that are not loaded yet, `expandCollapseAll`) and the next snapshot contains the new rows. See [IPC Contracts](./ipc.md#expansion-one-source-of-truth).
+The host is the single source of truth for expansion; the UI stores none. Expanding or collapsing posts a command (`setExpansion`, `loadDirectoryLevel` for directories that are not loaded yet, `expandCollapseAll`) and the next snapshot contains the new rows. See [IPC Contracts](./ipc.md#expansion-one-source-of-truth).
 
 Consequences for UI code:
 
