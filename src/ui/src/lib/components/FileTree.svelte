@@ -795,6 +795,11 @@
     </div>
   {/if}
 
+  <!-- The rows of a running scan stay usable; the scan stays cancellable. -->
+  {#if $appState.is_scanning && totalRows > 0}
+    <ScanProgress compact />
+  {/if}
+
   <div class="file-tree-body" class:centered={centerBody}>
     {#if $appState.is_scanning && totalRows === 0}
       <ScanProgress />

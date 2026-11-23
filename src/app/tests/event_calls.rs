@@ -85,6 +85,12 @@ fn every_event_becomes_one_call_with_its_arguments() {
         r#"window.saveResult({"status":"failed","error":"disk \"full\""});"#
     );
     assert_eq!(
+        script(UserEvent::SaveResult(SaveResult::DocumentUnavailable {
+            document_id: 7
+        })),
+        r#"window.saveResult({"status":"document_unavailable","document_id":7});"#
+    );
+    assert_eq!(
         script(UserEvent::ConfigExported(false)),
         "window.showStatus('Failed to export config.');"
     );

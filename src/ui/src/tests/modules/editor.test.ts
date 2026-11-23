@@ -217,6 +217,93 @@ describe("editor module", () => {
     });
   });
 
+  /**
+   * A save names the document the editor shows when the button is pressed.
+   * The host may have given that document up a moment before; the event that
+   * says so reaches the UI *before* the answer to the save does.
+   */
+  describe("a save that loses a race against the host", () => {
+    async function withEditor() {
+      const fake = makeFakeMonaco();
+      loadMonaco.mockResolvedValue(fake.ns);
+      const m = await freshModules();
+      const backend = await import("$lib/services/backend");
+      const post = vi.mocked(backend.post);
+      post.mockClear();
+      return { fake, m, post };
+    }
+    // Line ends as the files have them: the editor would rewrite them.
+    const shown = "a.txt\r\nline\r\nb.txt\nline\n";
+
+    it("normally names the document and sends no text", async () => {
+      const { m, post } = await withEditor();
+      await m.showGeneratedContent(shown, 3, 7);
+
+      m.saveOutput();
+
+      expect(post.mock.calls).toEqual([
+        ["saveFile", { kind: "generated", documentId: 7 }],
+      ]);
+    });
+
+    it("(a) a later generation finished on the host: saves what was shown", async () => {
+      const { m, post } = await withEditor();
+      await m.showGeneratedContent(shown, 3, 7);
+
+      m.saveOutput();
+      // The new output arrives, then the answer to the save of the old one.
+      await m.showGeneratedContent("second output", 2, 8);
+      expect(m.retrySaveOfUnavailableDocument(7)).toBe(true);
+
+      expect(post.mock.calls).toEqual([
+        ["saveFile", { kind: "generated", documentId: 7 }],
+        ["saveFile", { kind: "edited", content: shown }],
+      ]);
+    });
+
+    it("(b) a file preview took the place of the output: saves what was shown", async () => {
+      const { m, post } = await withEditor();
+      await m.showGeneratedContent(shown, 3, 7);
+
+      m.saveOutput();
+      await m.showPreviewContent("file content", "plaintext", "", "/a.txt");
+      expect(m.retrySaveOfUnavailableDocument(7)).toBe(true);
+
+      expect(post.mock.lastCall).toEqual([
+        "saveFile",
+        { kind: "edited", content: shown },
+      ]);
+    });
+
+    it("retries once, and only the save it has sent", async () => {
+      const { m, post } = await withEditor();
+      await m.showGeneratedContent(shown, 3, 7);
+      m.saveOutput();
+
+      expect(m.retrySaveOfUnavailableDocument(6)).toBe(false);
+      expect(m.retrySaveOfUnavailableDocument(7)).toBe(false);
+      expect(post).toHaveBeenCalledTimes(1);
+
+      m.saveOutput();
+      expect(m.retrySaveOfUnavailableDocument(7)).toBe(true);
+      expect(m.retrySaveOfUnavailableDocument(7)).toBe(false);
+      expect(post).toHaveBeenCalledTimes(3);
+    });
+
+    it("keeps nothing once the save is answered, or for an edited text", async () => {
+      const { fake, m, post } = await withEditor();
+      await m.showGeneratedContent(shown, 3, 7);
+      m.saveOutput();
+      m.saveSettled();
+      expect(m.retrySaveOfUnavailableDocument(7)).toBe(false);
+
+      fake.editor.type("x");
+      m.saveOutput();
+      expect(post.mock.lastCall?.[1]).toMatchObject({ kind: "edited" });
+      expect(m.retrySaveOfUnavailableDocument(7)).toBe(false);
+    });
+  });
+
   describe("creation of the editor", () => {
     it("creates one editor when two previews arrive before Monaco is loaded", async () => {
       const fake = makeFakeMonaco();

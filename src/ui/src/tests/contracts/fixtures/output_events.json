@@ -46,6 +46,12 @@
         "error": "Permission denied (os error 13)",
         "status": "failed"
       }
+    ],
+    [
+      {
+        "document_id": 7,
+        "status": "document_unavailable"
+      }
     ]
   ],
   "showGeneratedContent": [

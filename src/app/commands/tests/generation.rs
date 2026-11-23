@@ -163,37 +163,92 @@ async fn test_save_file_writes_edited_content_instead_of_the_generated_document(
     );
 }
 
-/// A document the host does not hold is a failed save, reported as such; the user
-/// is not asked for a file first.
+/// A document the host does not hold is not saved and the user is not asked for a
+/// file: the UI is told which document is missing, so that it can save the text it
+/// has shown instead.
 #[tokio::test]
 async fn test_save_file_fails_for_a_document_the_host_does_not_hold() {
     let mut harness = TestHarness::new();
     let save_path = harness.root_path.join("output.txt");
     harness.dialog.set_save_file(Some(save_path.clone()));
-    let expect_unavailable = |result: SaveResult| match result {
-        SaveResult::Failed { error } => {
-            assert!(error.contains("no longer available"), "{error}")
-        }
-        other => panic!("Expected a failed save, got {other:?}"),
+    let expect_unavailable = |result: SaveResult, id: u64| {
+        assert_eq!(result, SaveResult::DocumentUnavailable { document_id: id });
     };
 
     // Nothing was generated yet.
     save_generated(&harness, 1);
-    expect_unavailable(harness.next_save_result().await);
+    expect_unavailable(harness.next_save_result().await, 1);
 
     // The document was replaced by the one of a later generation.
     let first = generated_document(&harness, "first");
     let second = generated_document(&harness, "second");
     save_generated(&harness, first.id());
-    expect_unavailable(harness.next_save_result().await);
+    expect_unavailable(harness.next_save_result().await, first.id());
     assert!(!save_path.exists());
 
     // The preview was cleared, which empties the editor.
     clear_preview_state(harness.proxy.clone(), harness.state.clone());
     harness.last_state_update().expect("a snapshot");
     save_generated(&harness, second.id());
-    expect_unavailable(harness.next_save_result().await);
+    expect_unavailable(harness.next_save_result().await, second.id());
     assert!(!save_path.exists());
+}
+
+/// The two races a save can lose, as the host sees them: the UI names the document
+/// it shows, the host has just given it up and the event that says so is still on
+/// its way. The host answers with the missing document, and the save the UI then
+/// repeats with the text it has shown writes exactly that text.
+#[tokio::test]
+async fn test_a_save_that_lost_a_race_is_repeated_with_the_text_of_the_ui() {
+    let mut harness = TestHarness::new();
+    let save_path = harness.root_path.join("output.txt");
+    harness.dialog.set_save_file(Some(save_path.clone()));
+    let retry_as_the_ui_does = |harness: &TestHarness, text: &str| {
+        save_file(
+            harness.dialog.as_ref(),
+            typed(json!({ "kind": "edited", "content": text })),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+    };
+
+    // (a) A later generation finished; the UI still shows (and names) the first.
+    let first = generated_document(&harness, "first\r\noutput\n");
+    let _second = generated_document(&harness, "second");
+    save_generated(&harness, first.id());
+    assert_eq!(
+        harness.next_save_result().await,
+        SaveResult::DocumentUnavailable {
+            document_id: first.id()
+        }
+    );
+    retry_as_the_ui_does(&harness, first.text());
+    assert!(matches!(
+        harness.next_save_result().await,
+        SaveResult::Saved { .. }
+    ));
+    assert_eq!(
+        std_fs::read_to_string(&save_path).unwrap(),
+        "first\r\noutput\n"
+    );
+
+    // (b) A file preview took the place of the output on the host; the UI has not
+    // been shown the file yet.
+    let third = generated_document(&harness, "third");
+    harness.state.lock().discard_generated_document();
+    save_generated(&harness, third.id());
+    assert_eq!(
+        harness.next_save_result().await,
+        SaveResult::DocumentUnavailable {
+            document_id: third.id()
+        }
+    );
+    retry_as_the_ui_does(&harness, third.text());
+    assert!(matches!(
+        harness.next_save_result().await,
+        SaveResult::Saved { .. }
+    ));
+    assert_eq!(std_fs::read_to_string(&save_path).unwrap(), "third");
 }
 
 /// The output is still on screen after another directory has been opened (the UI

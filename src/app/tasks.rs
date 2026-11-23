@@ -1216,7 +1216,9 @@ fn lazy_load_scanner(config: &AppConfig, token: &LazyLoadToken) -> RealScanner {
 /// The asynchronous task for scanning a single directory level and appending the results.
 ///
 /// `token` ties the load to the file list it was started for. If that list has been
-/// replaced in the meantime (new scan, directory reset), the outcome is discarded.
+/// replaced in the meantime (new scan, directory reset), the outcome is discarded; if
+/// only the rules of the list changed, the level is loaded again
+/// ([`level_is_still_wanted`]).
 /// Otherwise the new files are also run through an active content search.
 async fn lazy_load_task<P: EventProxy, S: Scanner, F: FileSearcher>(
     request: ScanRequest,
@@ -1230,7 +1232,38 @@ async fn lazy_load_task<P: EventProxy, S: Scanner, F: FileSearcher>(
 
     if apply_lazy_load_result(scan_result, request.start_dir(), &proxy, &state, &token) {
         refresh_content_search(&proxy, &state, searcher).await;
+    } else if level_is_still_wanted(&state, &token, &request) {
+        tracing::debug!(
+            "Loading {:?} again: the load was outdated by a change of the list.",
+            request.start_dir()
+        );
+        start_lazy_load_scan(request.start_dir().to_path_buf(), proxy, state);
     }
+}
+
+/// `true` if a lazy load whose outcome was not merged has to be repeated: it was
+/// outdated (an ignore pattern was added while it ran, see
+/// [`AppState::apply_ignore_patterns`]), but the directory it was to load is still
+/// there, expanded and without its content. Left alone, the directory would stay
+/// expanded and empty until the user collapses and expands it.
+///
+/// Nothing is repeated where something else delivers the level or nobody waits for
+/// it: a scan that is running walks the directory itself, another project root is
+/// another list, and a directory the user collapsed or that is ignored now is not
+/// asked for any more. A load that failed is not outdated and is reported instead.
+fn level_is_still_wanted(
+    state: &SharedState,
+    token: &LazyLoadToken,
+    request: &ScanRequest,
+) -> bool {
+    let state = state.lock();
+    let directory = request.start_dir();
+    !state.is_current_lazy_load(token)
+        && !state.is_scanning()
+        && Path::new(&state.current_path) == request.project_root()
+        && state.expanded_dirs.contains(directory)
+        && !state.loaded_dirs.contains(directory)
+        && listed_directory(&state, directory).is_some()
 }
 
 /// Merges the outcome of a lazy load into the state, unless it has become outdated.
@@ -1482,13 +1515,15 @@ async fn run_content_search<P: EventProxy, S: FileSearcher>(
         Ok(matching_paths) => matching_paths,
         Err(reason) => {
             let state_guard = &mut *state.lock();
-            // The matches of the search before stay: "the search failed" must not
-            // look like "nothing matches".
+            // The matches of the search before stay, and without a search before
+            // the list stays unfiltered: "the search failed" must not look like
+            // "nothing matches".
             if state_guard.abandon_content_search(&token) {
                 tracing::error!("The content search for {query:?} failed: {reason}");
                 proxy.send_event(UserEvent::ShowError(format!(
                     "The content search failed: {reason}"
                 )));
+                filtering::apply_filters(state_guard);
                 send_snapshot(&proxy, state_guard);
             }
             return;

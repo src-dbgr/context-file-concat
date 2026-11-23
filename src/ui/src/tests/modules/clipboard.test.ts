@@ -114,6 +114,38 @@ describe("clipboard.* (input fields)", () => {
     expect(status.textContent || "").toMatch(/Failed/i);
   });
 
+  it("gives its feedback in the language of the UI", async () => {
+    const { setLocale } = await import("$lib/i18n");
+    const { toasts, toast } = await import("$lib/stores/toast");
+    const { get } = await import("svelte/store");
+    const status = () =>
+      (document.querySelector(".status-text") as HTMLElement).textContent;
+    setLocale("de");
+    toast.clear();
+    try {
+      mockNavigatorClipboard({ writeOk: true, readText: "" });
+      setExecCommand(vi.fn().mockReturnValue(true));
+
+      await handleCopy(ctxFor(makeInput("hello", 0, 5)));
+      expect(status()).toBe("✓ Text aus dem Eingabefeld kopiert.");
+      await handleCut(ctxFor(makeInput("CUT", 0, 3)));
+      expect(status()).toBe("✓ Text in die Zwischenablage ausgeschnitten.");
+      await handlePaste(ctxFor(makeInput("", 0)));
+      expect(status()).toBe(
+        "✗ Einfügen fehlgeschlagen oder Zwischenablage leer.",
+      );
+
+      expect(get(toasts).map((t) => t.message)).toEqual([
+        "In Zwischenablage kopiert",
+        "Inhalt ausgeschnitten",
+        "Zwischenablage ist leer",
+      ]);
+    } finally {
+      toast.clear();
+      setLocale("en");
+    }
+  });
+
   it("handlePaste inserts via execCommand and updates status", async () => {
     const el = makeInput("", 0);
     const ctx = ctxFor(el);

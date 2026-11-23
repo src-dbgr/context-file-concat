@@ -309,6 +309,52 @@ export function outputToSave(): SaveFilePayload | null {
 }
 
 /**
+ * The save of a generated document that the host has not answered yet: the id
+ * it was named by and the text the editor showed when it was sent.
+ */
+let pendingSave: { id: number; text: string } | null = null;
+
+/**
+ * Saves what the editor shows (see {@link outputToSave}).
+ *
+ * A save names the document the editor shows *now*, and the host may have
+ * given that document up a moment ago: a later generation has finished and
+ * replaced it, or a file preview has taken its place, and the event that says
+ * so is still on its way to the UI. The host then answers
+ * `document_unavailable` instead of saving. The user pressed Save on an output
+ * they were looking at, so the text of that output is remembered here until
+ * the save is answered (a reference, not a copy), and
+ * {@link retrySaveOfUnavailableDocument} sends it once as an edited text.
+ * In the normal path the text does not cross the IPC boundary a second time.
+ */
+export function saveOutput(): void {
+  const output = outputToSave();
+  if (!output) return;
+  const shown = output.kind === "generated" ? unchangedDocument() : null;
+  pendingSave = shown ? { id: shown.id, text: shown.text } : null;
+  post("saveFile", output);
+}
+
+/**
+ * The host does not hold the document `documentId` a save has named. If that
+ * is the save sent last, it is repeated with the text the editor showed when
+ * it was sent; returns whether it was. The repeated save carries its text, so
+ * it cannot be answered this way again: there is one retry.
+ */
+export function retrySaveOfUnavailableDocument(documentId: number): boolean {
+  const pending = pendingSave;
+  pendingSave = null;
+  if (!pending || pending.id !== documentId) return false;
+  post("saveFile", { kind: "edited", content: pending.text });
+  return true;
+}
+
+/** A save has been answered for good: its text is not needed any more. */
+export function saveSettled(): void {
+  pendingSave = null;
+}
+
+/**
  * The text of the generated output exactly as the host produced it, or `null`
  * if the editor shows something else or the user has changed it (by the same
  * rule as {@link outputToSave}).

@@ -41,6 +41,8 @@ vi.mock("$lib/modules/editor", () => ({
   showPreviewContent: vi.fn(),
   showGeneratedContent: vi.fn(),
   clearPreview: vi.fn(),
+  retrySaveOfUnavailableDocument: vi.fn(() => false),
+  saveSettled: vi.fn(),
 }));
 
 /**
@@ -68,6 +70,8 @@ import {
   showPreviewContent as showPreviewContentImpl,
   showGeneratedContent as showGeneratedContentImpl,
   clearPreview as clearPreviewImpl,
+  retrySaveOfUnavailableDocument,
+  saveSettled,
 } from "$lib/modules/editor";
 
 declare global {
@@ -125,6 +129,49 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     window.showStatus("Working");
     const state = get(appState);
     expect(state.status_message).toBe("Status: Working");
+  });
+
+  it("a failed load of the editor is reported, not swallowed", async () => {
+    vi.mocked(showPreviewContentImpl).mockRejectedValueOnce(
+      new Error("Failed to fetch dynamically imported module"),
+    );
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    window.showPreviewContent("code", "javascript", "", "/path/file.ts");
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalled());
+
+    expect(toast.error).toHaveBeenCalledWith("toast.editorLoadFailed", {
+      title: "toast.errorTitle",
+      duration: 10_000,
+    });
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+
+    vi.mocked(showGeneratedContentImpl).mockRejectedValueOnce(new Error("x"));
+    const silent = vi.spyOn(console, "error").mockImplementation(() => {});
+    window.showGeneratedContent("output", 42, 7);
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalledTimes(2));
+    silent.mockRestore();
+  });
+
+  it("saveResult: a document the host gave up is saved again from the UI, silently", () => {
+    vi.mocked(retrySaveOfUnavailableDocument).mockReturnValueOnce(true);
+
+    window.saveResult({ status: "document_unavailable", document_id: 7 });
+
+    expect(retrySaveOfUnavailableDocument).toHaveBeenCalledWith(7);
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(saveSettled).not.toHaveBeenCalled();
+  });
+
+  it("saveResult: a document nobody has any more is a failed save", () => {
+    window.saveResult({ status: "document_unavailable", document_id: 7 });
+
+    expect(get(appState).status_message).toBe("Error: Failed to save file.");
+    expect(toast.error).toHaveBeenCalledWith("toast.outputUnavailable", {
+      title: "toast.saveFailed",
+      duration: 10_000,
+    });
   });
 
   it("saveResult: a saved file is reported with its path", () => {

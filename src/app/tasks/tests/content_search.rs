@@ -727,6 +727,51 @@ async fn a_failed_content_search_is_reported_and_keeps_the_previous_matches() {
     );
 }
 
+/// The first search for a query fails: there are no earlier matches to keep, and
+/// the list stays as it is without the content filter. "The search failed" is not
+/// "nothing matches"; the error is shown.
+#[tokio::test]
+async fn a_failed_first_content_search_keeps_the_unfiltered_list() {
+    let mut harness = TestHarness::new();
+    let (a, b) = (
+        harness.root_path.join("a.txt"),
+        harness.root_path.join("b.txt"),
+    );
+    {
+        let mut state = harness.state.lock();
+        state.set_full_file_list(vec![file_item(&a, 1), file_item(&b, 1)]);
+        state.content_search_query = "needle".to_string();
+    }
+
+    search_in_files(
+        harness.proxy.clone(),
+        harness.state.clone(),
+        FailingSearcher,
+    )
+    .await;
+
+    let events = harness.drain_events();
+    match &events[..] {
+        [UserEvent::ShowError(message), UserEvent::StateUpdate(ui_state)] => {
+            assert!(message.contains("content search failed"), "{message}");
+            assert_eq!(ui_state.visible_files_count, 2, "not an empty list");
+        }
+        other => panic!("Expected an error and a state update, got {other:?}"),
+    }
+    // Also when the filters are applied again (another filter text, a lazy load).
+    {
+        let mut state = harness.state.lock();
+        filtering::apply_filters(&mut state);
+        assert_eq!(state.filtered_file_list().len(), 2);
+    }
+
+    // A later search that delivers filters as usual.
+    let next = MockFileSearcher::default();
+    next.set_results(HashSet::from([a.clone()]));
+    search_in_files(harness.proxy.clone(), harness.state.clone(), next).await;
+    assert_eq!(harness.state.lock().filtered_file_list().len(), 1);
+}
+
 /// The failure of a search that has been superseded is nobody's business.
 #[tokio::test]
 async fn a_failed_content_search_that_was_superseded_stays_silent() {

@@ -194,12 +194,20 @@ export const StatusMessageSchema = z.string();
 /**
  * How a save ended (`SaveResult` in `src/app/events.rs`). A failed save names
  * its reason, a cancelled one is a case of its own, and only a successful one
- * has a path.
+ * has a path. `document_unavailable`: the host does not hold the generated
+ * document the save named (any more); nothing was saved, and the UI saves the
+ * text it has shown instead (see `saveOutput` in `modules/editor.ts`).
  */
 export const SaveResultSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("saved"), path: z.string() }).strict(),
   z.object({ status: z.literal("cancelled") }).strict(),
   z.object({ status: z.literal("failed"), error: z.string() }).strict(),
+  z
+    .object({
+      status: z.literal("document_unavailable"),
+      document_id: z.number().int().nonnegative(),
+    })
+    .strict(),
 ]);
 export type SaveResult = z.infer<typeof SaveResultSchema>;
 
