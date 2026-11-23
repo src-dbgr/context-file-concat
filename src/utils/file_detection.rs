@@ -350,7 +350,9 @@ mod tests {
         let size = 64 * 1024 * 1024;
 
         let grow = |path: &Path| {
-            let file = fs::OpenOptions::new().append(true).open(path).unwrap();
+            // Opened for writing: Windows does not let a file opened for appending
+            // only be resized.
+            let file = fs::OpenOptions::new().write(true).open(path).unwrap();
             file.set_len(size).unwrap();
         };
 

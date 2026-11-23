@@ -20,10 +20,15 @@ env:
 # Pinning policy: GitHub's own actions (actions/*) by major version, third-party actions
 # by commit SHA with the released version as a comment.
 
+# Linux runs on a pinned Ubuntu release, not ubuntu-latest: the Playwright version in
+# src/ui/package-lock.json installs browsers only on the releases it knows, and the
+# GTK/WebKitGTK packages of .github/actions/linux-deps are those of that release.
+# Move the pin (here and in release.yml) together with a Playwright upgrade.
+
 jobs:
   ui:
     name: UI (lint, unit, contracts, build, budgets, E2E)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: src/ui
@@ -80,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
       # Snapshots and fixtures are compared byte for byte; keep LF on Windows.
       - name: Disable CRLF conversion
@@ -108,7 +113,7 @@ jobs:
   # with exactly that toolchain.
   msrv:
     name: MSRV (Rust 1.88)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/linux-deps
@@ -125,7 +130,7 @@ jobs:
   release-build:
     name: Release build (Linux, embeds the UI bundle)
     needs: ui
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/linux-deps

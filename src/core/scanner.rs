@@ -1226,6 +1226,10 @@ mod tests {
 
     /// Tests that the scanner continues gracefully if it fails to get metadata for a single entry.
     /// This is simulated by deleting a file *during* the scan, a realistic race condition.
+    ///
+    /// Not on Windows: there the walker hands out the metadata it read together with
+    /// the directory listing, so what happens to the file afterwards is not seen.
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn test_scanner_skips_entry_on_metadata_error() {
         setup_test_logging();
@@ -1353,6 +1357,10 @@ mod tests {
     /// Tests how the scanner handles a file being replaced by a directory mid-scan.
     /// This is a plausible race condition. The scanner should correctly identify the
     /// item as a directory at the time of processing.
+    ///
+    /// Not on Windows: there the walker hands out the metadata it read together with
+    /// the directory listing, so what happens to the file afterwards is not seen.
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn test_scanner_handles_file_being_replaced_by_directory() {
         setup_test_logging();
@@ -1603,9 +1611,11 @@ mod tests {
         ] {
             let request = ScanRequest::directory_level("/project", spelling).unwrap();
             assert_eq!(request, plain, "{spelling}");
+            // As text, not as a path (which would look past `.` and separators):
+            // the root as given, and the names joined the way the platform does.
             assert_eq!(
                 request.start_dir().as_os_str(),
-                "/project/src/core",
+                Path::new("/project").join("src").join("core").as_os_str(),
                 "{spelling}"
             );
         }
