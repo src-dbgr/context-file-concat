@@ -46,6 +46,9 @@
   // Pointer only. Keys are handled once, by the tree (FileTree's key handler
   // with the roving focus): a key pressed on a focused arrow or name bubbles
   // up to it and acts on the row. A key handler here would act a second time.
+  // The checkbox and the ignore button are activated by the browser (Space,
+  // and Enter on the button), which arrives here as their click; the tree
+  // leaves those keys alone.
 </script>
 
 {#if node.is_directory}

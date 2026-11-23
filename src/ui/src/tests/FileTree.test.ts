@@ -651,6 +651,82 @@ describe("FileTree", () => {
       const part = (container: HTMLElement, path: string, selector: string) =>
         row(container, path).querySelector(selector)!;
 
+      /**
+       * Press a key on a control that acts on it by itself. The tree leaves
+       * the key alone (nothing posted, default not prevented); the browser
+       * then activates the control, which is the click sent here.
+       */
+      async function activate(el: Element, key: string) {
+        if (!(el instanceof HTMLElement)) throw new Error("not focusable");
+        el.focus();
+        const notPrevented = await fireEvent.keyDown(el, { key });
+        expect(notPrevented).toBe(true);
+        expect(vi.mocked(post).mock.calls).toEqual([]);
+        await fireEvent.click(el);
+      }
+
+      for (const key of ["Enter", " "]) {
+        it(`${JSON.stringify(key)} on the ignore button of a directory ignores it, once`, async () => {
+          const { container } = await mountFocusedOn(tree());
+          await activate(part(container, "/repo/src", ".ignore-btn"), key);
+          expect(vi.mocked(post).mock.calls).toEqual([
+            ["addIgnorePath", "/repo/src"],
+          ]);
+        });
+
+        it(`${JSON.stringify(key)} on the ignore button of a file ignores it, once`, async () => {
+          const { container } = await mountFocusedOn(tree());
+          await activate(part(container, "/repo/z.txt", ".ignore-btn"), key);
+          expect(vi.mocked(post).mock.calls).toEqual([
+            ["addIgnorePath", "/repo/z.txt"],
+          ]);
+        });
+      }
+
+      it("Space on the checkbox of a directory toggles its selection once", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await activate(
+          part(container, "/repo/src", 'input[type="checkbox"]'),
+          " ",
+        );
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["toggleDirectorySelection", "/repo/src"],
+        ]);
+      });
+
+      it("Space on the checkbox of a file toggles its selection once", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await activate(
+          part(container, "/repo/z.txt", 'input[type="checkbox"]'),
+          " ",
+        );
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["toggleSelection", "/repo/z.txt"],
+        ]);
+      });
+
+      it("Enter on a checkbox still acts on the row", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await pressOn(
+          part(container, "/repo/z.txt", 'input[type="checkbox"]'),
+          "Enter",
+        );
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["loadFilePreview", "/repo/z.txt"],
+        ]);
+      });
+
+      it("the other keys of the tree still work on a control", async () => {
+        const { container } = await mountFocusedOn(tree());
+        await pressOn(
+          part(container, "/repo/src", ".ignore-btn"),
+          "ArrowRight",
+        );
+        expect(vi.mocked(post).mock.calls).toEqual([
+          ["setExpansion", { path: "/repo/src", expanded: true }],
+        ]);
+      });
+
       it("Space on a focused directory name selects it and does not expand it", async () => {
         const { container } = await mountFocusedOn(tree());
         await pressOn(part(container, "/repo/src", ".file-name"), " ");

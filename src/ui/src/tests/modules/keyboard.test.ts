@@ -106,6 +106,45 @@ describe("keyboard.ts – global handler integration", () => {
     expect(allowed).toBe(false); // blocked by safety guard
   });
 
+  it("leaves Enter to a focused button, which acts on it itself", () => {
+    commands.length = 0;
+    const button = document.createElement("button");
+    document.body.appendChild(button);
+    button.focus();
+
+    const enter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(button.dispatchEvent(enter)).toBe(true);
+
+    // Keys the button does nothing with are still blocked.
+    const f2 = new KeyboardEvent("keydown", {
+      key: "F2",
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(button.dispatchEvent(f2)).toBe(false);
+    button.remove();
+  });
+
+  it("still blocks Enter where nothing acts on it", () => {
+    commands.length = 0;
+    const div = document.createElement("div");
+    div.tabIndex = 0;
+    document.body.appendChild(div);
+    div.focus();
+
+    const enter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(div.dispatchEvent(enter)).toBe(false);
+    div.remove();
+  });
+
   it("allows printable characters in inputs to pass through when no command matches", () => {
     focusInput();
     commands.length = 0;
