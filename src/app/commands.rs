@@ -2393,6 +2393,83 @@ mod tests {
         assert!(!save_path.exists());
     }
 
+    /// The output is still on screen after another directory has been opened (the UI
+    /// clears the editor only when no directory is loaded any more), so it can still
+    /// be saved: by a drop or the directory dialog, by reopening the same directory,
+    /// by an import.
+    #[tokio::test]
+    async fn test_generated_output_can_be_saved_after_the_directory_was_changed() {
+        let mut harness = TestHarness::new();
+        let file = harness.create_file("a.txt", "content of a");
+        harness.set_initial_files(&["a.txt"]);
+        harness.state.lock().selected_files.insert(file);
+        let save_path = harness.root_path.join("saved.txt");
+        harness.dialog.set_save_file(Some(save_path.clone()));
+
+        generate_preview(harness.proxy.clone(), harness.state.clone());
+        let document = loop {
+            match harness.get_next_event().await {
+                Some(UserEvent::ShowGeneratedContent { document, .. }) => break document,
+                Some(_) => {}
+                None => panic!("Timed out waiting for the generated content"),
+            }
+        };
+
+        let other = harness.create_dir("other_project");
+        let same = harness.root_path.clone();
+        for directory in [other, same] {
+            open_dropped_path(
+                directory.clone(),
+                harness.proxy.clone(),
+                harness.state.clone(),
+            );
+            harness
+                .wait_for_state(|ui_state| {
+                    !ui_state.is_scanning && Path::new(&ui_state.current_path) == directory
+                })
+                .await;
+
+            save_generated(&harness, document.id());
+            loop {
+                match harness.get_next_event().await {
+                    Some(UserEvent::SaveResult(result)) => {
+                        assert!(
+                            matches!(result, SaveResult::Saved { .. }),
+                            "after opening {directory:?}: {result:?}"
+                        );
+                        break;
+                    }
+                    Some(UserEvent::StateUpdate(_) | UserEvent::ScanProgress(_)) => {}
+                    other => panic!("Expected the result of the save, got {other:?}"),
+                }
+            }
+            assert_eq!(std_fs::read_to_string(&save_path).unwrap(), document.text());
+            std_fs::remove_file(&save_path).unwrap();
+        }
+
+        // A hard reset of the directory (what an import does) keeps it as well.
+        harness.state.lock().reset_directory_state();
+        save_generated(&harness, document.id());
+        assert!(matches!(
+            harness.next_save_result().await,
+            SaveResult::Saved { .. }
+        ));
+
+        // Closing the directory makes the UI clear its editor, which it reports.
+        clear_directory(harness.proxy.clone(), harness.state.clone());
+        assert!(harness
+            .state
+            .lock()
+            .generated_document(document.id())
+            .is_some());
+        clear_preview_state(harness.proxy.clone(), harness.state.clone());
+        assert!(harness
+            .state
+            .lock()
+            .generated_document(document.id())
+            .is_none());
+    }
+
     /// What is saved is decided when the command starts: the document the UI named
     /// is written even if a newer one arrives while the dialog is open.
     #[tokio::test]

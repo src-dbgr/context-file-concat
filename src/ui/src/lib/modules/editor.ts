@@ -32,11 +32,26 @@ let monaco: MonacoNS | null = null;
 let editorReady: Promise<Editor> | null = null;
 
 /**
- * The generated document the editor shows: the id the host keeps it under and
- * the version of the editor's text at the moment it was shown. `null` while
- * the editor shows something else.
+ * The generated document the editor shows: the id the host keeps it under, the
+ * text as the host sent it and the version of the editor's text at the moment
+ * it was shown. `null` while the editor shows something else.
+ *
+ * The text is kept because the editor's own value is not it: Monaco gives a
+ * text one kind of line end, so an output of files with CRLF and LF line ends
+ * comes back from `getValue()` with all of them rewritten.
  */
-let shownDocument: { id: number; versionId: number } | null = null;
+let shownDocument: { id: number; text: string; versionId: number } | null =
+  null;
+
+/** The generated document, if the editor still shows it as it came. */
+function unchangedDocument() {
+  const model = get(editorInstance)?.getModel();
+  return shownDocument &&
+    model &&
+    model.getAlternativeVersionId() === shownDocument.versionId
+    ? shownDocument
+    : null;
+}
 
 const monacoTheme = (t: Theme) => (t === "light" ? "vs" : "vs-dark");
 
@@ -254,7 +269,11 @@ export async function showGeneratedContent(
 
   const model = editor.getModel();
   shownDocument = model
-    ? { id: documentId, versionId: model.getAlternativeVersionId() }
+    ? {
+        id: documentId,
+        text: content,
+        versionId: model.getAlternativeVersionId(),
+      }
     : null;
 
   // State for UI
@@ -280,15 +299,22 @@ export function outputToSave(): SaveFilePayload | null {
   const editor = get(editorInstance);
   if (!editor) return null;
 
-  const model = editor.getModel();
-  if (
-    shownDocument &&
-    model &&
-    model.getAlternativeVersionId() === shownDocument.versionId
-  ) {
-    return { kind: "generated", documentId: shownDocument.id };
-  }
+  const unchanged = unchangedDocument();
+  if (unchanged) return { kind: "generated", documentId: unchanged.id };
   return { kind: "edited", content: editor.getValue() };
+}
+
+/**
+ * The text of the generated output exactly as the host produced it, or `null`
+ * if the editor shows something else or the user has changed it (by the same
+ * rule as {@link outputToSave}).
+ *
+ * This is what a copy of the whole output puts on the clipboard, so that it is
+ * the text a save writes, line ends included. Once the output has been edited,
+ * the editor's value is the one text there is, for copying and for saving.
+ */
+export function unchangedOutput(): string | null {
+  return unchangedDocument()?.text ?? null;
 }
 
 export function clearPreview() {

@@ -89,6 +89,11 @@ fn count_pieces(
 /// whitespace: no word reaches across that place, and the words before it do not
 /// depend on what follows it. A piece therefore ends at the first such place after
 /// `piece_size` bytes; a text without one (a single long line) stays in one piece.
+///
+/// A line is therefore never divided, however long it is: a line of 20 MiB is one
+/// piece, counted by one thread in about a second, and not cancellable meanwhile.
+/// Cutting inside a line would need the places where the encoding ends a word there,
+/// which only the encoding itself can tell.
 fn pieces(text: &str, piece_size: usize) -> Vec<&str> {
     let mut pieces = Vec::with_capacity(text.len() / piece_size.max(1) + 1);
     let mut rest = text;

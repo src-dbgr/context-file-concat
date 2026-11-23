@@ -178,6 +178,30 @@ describe("editor module", () => {
       expect(m.outputToSave()).toEqual({ kind: "generated", documentId: 8 });
     });
 
+    it("keeps the text of the host for copying while it is unchanged", async () => {
+      const { fake, m } = await withEditor();
+      expect(m.unchangedOutput()).toBeNull();
+
+      // Line ends as the files have them; an editor rewrites them.
+      const text = "a.txt\r\nline\r\nb.txt\nline\n";
+      await m.showGeneratedContent(text, 3, 7);
+      expect(m.unchangedOutput()).toBe(text);
+
+      fake.editor.type("x");
+      expect(m.unchangedOutput()).toBeNull();
+      fake.editor.undo();
+      expect(m.unchangedOutput()).toBe(text);
+
+      await m.showGeneratedContent("second", 1, 8);
+      expect(m.unchangedOutput()).toBe("second");
+      await m.showPreviewContent("file content", "plaintext", "", "/a.txt");
+      expect(m.unchangedOutput()).toBeNull();
+
+      await m.showGeneratedContent("third", 1, 9);
+      m.clearPreview();
+      expect(m.unchangedOutput()).toBeNull();
+    });
+
     it("does not name a document the editor no longer shows", async () => {
       const { m } = await withEditor();
       await m.showGeneratedContent("generated output", 3, 7);

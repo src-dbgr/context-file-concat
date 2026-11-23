@@ -714,9 +714,10 @@ impl AppState {
             .cloned()
     }
 
-    /// Gives up the generated document. To be called when the UI stops showing it
-    /// (a file preview takes its place, the preview is cleared, the directory is
-    /// closed), so that its memory is released.
+    /// Gives up the generated document, so that its memory is released. To be called
+    /// exactly where the UI stops showing it: a file preview takes its place
+    /// (`showPreviewContent`) or the preview is cleared (`clearPreviewState`).
+    /// Anything else would leave the UI with an output it can no longer save.
     pub fn discard_generated_document(&mut self) {
         self.generated_document = None;
     }
@@ -972,9 +973,12 @@ impl AppState {
 
     /// Forgets the loaded directory and everything derived from it. The scan slot is
     /// left alone: the caller decides what becomes of the scan that is running.
+    ///
+    /// The generated document is not part of that: the UI goes on showing an output
+    /// when another directory is opened, and gives it up itself where it stops
+    /// (`clearPreviewState`, which it also sends when the directory is closed).
     fn clear_directory_data(&mut self) {
         self.cancel_current_generation();
-        self.discard_generated_document();
         self.invalidate_file_list();
 
         self.current_path = String::new();
@@ -1434,20 +1438,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_generated_document_is_given_up_with_the_directory() {
+    async fn test_generated_document_outlives_the_directory_it_was_generated_from() {
         let mut state = AppState::default();
         let token = state.begin_generation();
         let document = state
             .complete_generation(&token, Arc::new("output".to_string()))
             .unwrap();
 
+        // Another directory is opened, or the state is reset by an import: the UI
+        // still shows the output, so it has to stay available for saving.
         state.reset_directory_state();
-        assert_eq!(state.generated_document(document.id()), None);
+        assert_eq!(
+            state.generated_document(document.id()),
+            Some(document.clone())
+        );
+        let scan = state.begin_open(Path::new("/other"));
+        assert!(state.enter_opened_directory(&scan, Path::new("/other")));
+        assert_eq!(
+            state.generated_document(document.id()),
+            Some(document.clone())
+        );
 
-        let token = state.begin_generation();
-        let document = state
-            .complete_generation(&token, Arc::new("output".to_string()))
-            .unwrap();
+        // It is given up when it is told to.
         state.discard_generated_document();
         assert_eq!(state.generated_document(document.id()), None);
     }

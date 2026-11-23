@@ -238,9 +238,9 @@ Why these numbers: the output is handed to the WebView as one string and shown b
 
 The limit is enforced a second time while the document is built: should it grow beyond 200 MiB all the same (files have grown since the scan), the generation ends with `showError("The output would be larger than 200 MiB. Select fewer files.")` (`CoreError::OutputTooLarge`).
 
-The tokens of the output (`tokenCount`, the `cl100k_base` encoding) are counted on the blocking thread pool, from the document itself (it is shared, not copied), in pieces of about 1 MiB on up to four threads (`src/core/token_counter.rs`). The pieces end where the encoding splits the text in any case (behind a line end that is followed by text), so the count is the count of the whole text. Between two pieces the count looks at the cancellation flag of its generation: `cancelGeneration`, a new generation or closing the directory end it within a piece.
+The tokens of the output (`tokenCount`, the `cl100k_base` encoding) are counted on the blocking thread pool, from the document itself (it is shared, not copied), in pieces of about 1 MiB on up to four threads (`src/core/token_counter.rs`). The pieces end where the encoding splits the text in any case (behind a line end that is followed by text), so the count is the count of the whole text. Between two pieces the count looks at the cancellation flag of its generation: `cancelGeneration`, a new generation or closing the directory end it within a piece. A piece cannot end inside a line, so a line that is longer than 1 MiB (a minified bundle, a dump on one line) is one piece however long it is: it is counted on one thread and cannot be cancelled before it is done, which takes about 50 ms per megabyte (1 s for a line of 20 MiB, the most a single file holds with the default limit).
 
-**The host keeps the document.** A finished generation stores its document in the state (`AppState::complete_generation`, `GeneratedDocument` in `src/app/state.rs`) under the id of its run and sends it with that id: `showGeneratedContent(content, tokenCount, documentId)`. The document stays until the next one replaces it, also while a newer generation is running or after one was cancelled, because the UI still shows it during that time. It is given up when the UI stops showing it: a file preview is shown (`showPreviewContent`), the preview is cleared (`clearPreviewState`), the directory is closed.
+**The host keeps the document.** A finished generation stores its document in the state (`AppState::complete_generation`, `GeneratedDocument` in `src/app/state.rs`) under the id of its run and sends it with that id: `showGeneratedContent(content, tokenCount, documentId)`. The document stays until the next one replaces it, also while a newer generation is running or after one was cancelled, because the UI still shows it during that time. It is given up exactly where the UI stops showing it: when a file preview is shown (`showPreviewContent`) and when the preview is cleared (`clearPreviewState`). Opening another directory (a drop, the directory dialog, reopening the same directory, an import) does **not** give it up: the output stays in the editor then, and can still be saved. Closing the directory (`clearDirectory`) empties the editor, and the UI reports that with `clearPreviewState` like any other clearing.
 
 #### Saving
 
@@ -251,7 +251,7 @@ The UI does not send the output back to have it saved. `saveFile` says what is t
 | `{ kind: "generated", documentId }`   | The editor shows the output as it came (`outputToSave` in `modules/editor.ts`) | Its own copy, byte for byte |
 | `{ kind: "edited", content: string }` | The user has changed the text in the editor                                    | `content`                   |
 
-Whether the text was changed is told by the version of the editor's model: Monaco's alternative version id is recorded when the output is shown; it changes with every edit and returns to the recorded value when the edits are undone, so an output that was edited and restored with undo is saved as `generated` again. Copying to the clipboard is done by the UI, from the editor.
+Whether the text was changed is told by the version of the editor's model: Monaco's alternative version id is recorded when the output is shown; it changes with every edit and returns to the recorded value when the edits are undone, so an output that was edited and restored with undo is saved as `generated` again.
 
 What is saved is decided when the command starts, before the dialog opens; a generation that ends while the user chooses the file does not change it. The command is answered with exactly one `saveResult`:
 
@@ -260,6 +260,16 @@ What is saved is decided when the command starts, before the dialog opens; a gen
 | `{ status: "saved", path }`   | The file was written                                                                                                                                                                   |
 | `{ status: "cancelled" }`     | The dialog was dismissed; nothing was written                                                                                                                                          |
 | `{ status: "failed", error }` | Nothing was saved. `error` is the message of the operating system, or the host's own if it does not hold the document that was named (any more); the dialog is not opened in that case |
+
+#### Copying
+
+Copying is done by the UI (`handleCopy` in `modules/clipboard.ts`), and it follows the same rule as saving, so that the clipboard and the saved file hold the same text:
+
+- While the output is unchanged, a copy of the whole output (the Copy button, or a copy with nothing or everything selected) puts the **text the host sent** on the clipboard. The UI keeps that string next to the editor (`unchangedOutput` in `modules/editor.ts`).
+- Once the user has edited the output, the editor's text is the one text there is: it is what a copy takes and what a save sends.
+- A copy of a selected part is always taken from the editor.
+
+The distinction matters for line ends. The output keeps the line ends of its files, and Monaco gives a text one kind of line end: for an output of files with CRLF and LF line ends, the editor's value (`getValue()`) has all of them rewritten to the more frequent kind. An unedited output is therefore neither saved nor copied through the editor. The first edit makes the editor's text the output, with its uniform line ends, for the copy and the save alike.
 
 A payload that is neither of the two kinds is logged and not answered. The UI shows a toast per result (success, info, error with the reason) in its language.
 

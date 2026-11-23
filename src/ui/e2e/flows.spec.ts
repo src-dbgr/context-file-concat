@@ -510,6 +510,126 @@ test.describe("Saving the generated output", () => {
     });
   });
 
+  test("the output can still be saved after another directory was opened", async ({
+    page,
+  }) => {
+    // A snapshot as the host sends it (the seeded states leave out what the
+    // components of these tests do not read).
+    const render = (next: AppState) =>
+      page.evaluate(
+        (s) => {
+          (window as unknown as { render: (s: unknown) => void }).render(s);
+        },
+        {
+          total_files_found: 0,
+          visible_files_count: 0,
+          scan_progress: {
+            files_scanned: 0,
+            large_files_skipped: 0,
+            current_scanning_path: "",
+          },
+          ...next,
+        },
+      );
+
+    // The host reports directory A, then directory B: the output stays on
+    // screen, and a save still names it.
+    await render(withRepo());
+    await render({ ...withRepo(), current_path: "/other" });
+    await expect(page.locator("#current-path")).toContainText("/other");
+    await expect(page.locator("#preview-title")).toContainText(
+      /Preview generated/i,
+    );
+    expect(await save(page)).toEqual({
+      command: "saveFile",
+      payload: { kind: "generated", documentId: 7 },
+    });
+
+    // No directory any more: the editor is cleared, and the host is told so
+    // (that is where it gives its copy of the output up).
+    await page.evaluate(() => {
+      (window as unknown as { __posted: string[] }).__posted.length = 0;
+    });
+    await render({ ...withRepo(), current_path: "", tree: [] });
+    await expect(page.locator("#save-btn")).toBeDisabled();
+    const posted = await page.evaluate(() =>
+      (window as unknown as { __posted: string[] }).__posted.map(
+        (message) => (JSON.parse(message) as Posted).command,
+      ),
+    );
+    expect(posted).toContain("clearPreviewState");
+  });
+
+  test("an unedited output is copied with the line ends of its files", async ({
+    page,
+  }) => {
+    // What is written to the clipboard, recorded.
+    await page.evaluate(() => {
+      const w = window as unknown as { __copied: string[] };
+      w.__copied = [];
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: (text: string) => {
+            w.__copied.push(text);
+            return Promise.resolve();
+          },
+        },
+      });
+    });
+    const copy = async () => {
+      await page.evaluate(() => {
+        (window as unknown as { __copied: string[] }).__copied.length = 0;
+      });
+      await page.locator("#copy-btn").click();
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => (window as unknown as { __copied: string[] }).__copied.length,
+          ),
+        )
+        .toBe(1);
+      return page.evaluate(
+        () => (window as unknown as { __copied: string[] }).__copied[0],
+      );
+    };
+
+    // One file with CRLF line ends among files with LF.
+    const mixed =
+      "# CFC Output\n\nwin.txt\n===FILE-START===\none\r\ntwo\r\n---FILE-END-----\n\n" +
+      "unix.txt\n===FILE-START===\none\ntwo\nthree\nfour\n---FILE-END-----\n\n";
+    await page.evaluate((content) => {
+      (
+        window as unknown as {
+          showGeneratedContent: (c: string, t: number, id: number) => void;
+        }
+      ).showGeneratedContent(content, 30, 9);
+    }, mixed);
+    await expect(page.locator("#editor-container .view-lines")).toContainText(
+      "win.txt",
+    );
+
+    // Unedited: the copy is the text of the host, and the save names it.
+    expect(await copy()).toBe(mixed);
+    expect((await save(page)).payload).toEqual({
+      kind: "generated",
+      documentId: 9,
+    });
+
+    // Edited: the editor's text is the one text there is, for both.
+    await focusEditor(page);
+    await page.keyboard.type("x");
+    await expect(page.locator("#editor-container .view-lines")).toContainText(
+      "x# CFC Output",
+    );
+    const copied = await copy();
+    expect(copied.startsWith("x# CFC Output")).toBe(true);
+    expect((await save(page)).payload).toEqual({
+      kind: "edited",
+      content: copied,
+    });
+  });
+
   test("each result of a save has its own toast", async ({ page }) => {
     const toasts = page.locator(".toast-list .toast");
 
