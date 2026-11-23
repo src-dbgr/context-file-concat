@@ -96,7 +96,7 @@ The commands are idempotent (adding a pattern that is set, removing one that is 
 
 #### Config import
 
-`importConfig` takes the settings a user edits and shares from the chosen file: ignore patterns (also those of the generated tree), search and output options, the size limit. The window geometry and `last_directory` describe the installation the file was exported from; they are **not** imported, the current values stay. The import is a hard reset of the loaded directory: selection, expansion, filters and preview are cleared (answered with a snapshot), and the directory that was loaded is then [opened](#opening-a-path) again, so it is listed according to the imported settings. Without a loaded directory no scan is started. The imported settings are persisted.
+`importConfig` takes the settings a user edits and shares from the chosen file: ignore patterns (also those of the generated tree), search and output options, the size limit. The window geometry of the file is **not** imported; the current values stay. The import is a hard reset of the loaded directory: selection, expansion, filters and preview are cleared and no directory is loaded (answered with a snapshot). If the file names a `last_directory` and that directory exists, it is then [opened](#opening-a-path) like a dropped path, which also records it as `last_directory`. If the file names none, or one that does not exist, nothing is scanned: the UI stays clean, no error is shown and `last_directory` keeps its value. The imported settings are persisted.
 
 #### Persistence
 
@@ -168,7 +168,7 @@ While a scan walks the directory it reports its progress at most every 100 ms. E
 
 ### Opening a path
 
-Opening a path (a drop, the choice of the directory dialog, the reload after a config import) replaces the loaded directory. Whether the path exists is not known when the command runs, and finding out is IO that does not belong on the command lane. The command therefore only **announces** the scan: the first snapshot has `is_scanning: true`, and everything else is still the directory that was loaded before (`current_path`, tree, selection, filters). The scan task then looks at the path:
+Opening a path (a drop, the choice of the directory dialog, the `last_directory` of an imported config) replaces the loaded directory. Whether the path exists is not known when the command runs, and finding out is IO that does not belong on the command lane. The command therefore only **announces** the scan: the first snapshot has `is_scanning: true`, and everything else is still the directory that was loaded before (`current_path`, tree, selection, filters). The scan task then looks at the path:
 
 - A directory is entered: the previous directory is reset at that moment and `current_path` changes, with a snapshot (`is_scanning: true`, empty tree). Then the directory is scanned.
 - For a file (a dropped file) the same happens with the directory the file lies in.

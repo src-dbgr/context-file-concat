@@ -60,7 +60,9 @@ impl AppConfig {
     ///
     /// What describes this installation rather than a preference stays as it is: the
     /// window geometry (an imported file may come from another display, or store it
-    /// in another unit) and the directory that was opened last.
+    /// in another unit) and the directory that was opened last. (Whether the directory
+    /// named by the imported file is opened is up to the caller; opening it is what
+    /// makes it the last directory.)
     pub fn adopt_user_settings(&mut self, imported: AppConfig) {
         *self = AppConfig {
             window_size: self.window_size,

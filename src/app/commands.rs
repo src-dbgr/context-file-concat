@@ -714,17 +714,18 @@ pub fn pick_output_directory<P: EventProxy, D: DialogService + ?Sized>(
     }
 }
 
-/// Imports the settings of a configuration file.
+/// Imports a configuration file.
 ///
-/// Only what a user edits and shares is taken from the file (ignore patterns, search
-/// and output options, the size limit, see [`AppConfig::adopt_user_settings`]). The
-/// window geometry and the last directory describe this installation and stay as they
-/// are: an imported file neither moves the window nor opens somebody else's project.
+/// The settings a user edits and shares are taken from the file (ignore patterns,
+/// search and output options, the size limit, see [`AppConfig::adopt_user_settings`]).
+/// The window geometry of the file is ignored: it describes the display of whoever
+/// exported it, possibly in another unit.
 ///
 /// The import is treated as a "hard reset" of the application's context: the current
-/// state (file lists, selections, filters, previews) is cleared and the UI is told, and
-/// then the directory that was loaded is opened again from a clean slate, so that it
-/// is listed according to the imported settings.
+/// state (file lists, selections, filters, previews) is cleared and the UI is told.
+/// If the file names a `last_directory` and that directory exists, it is then opened
+/// like any other path (see [`start_scan_on_path`]), which also records it as the last
+/// directory of this installation. Otherwise nothing is scanned and the UI stays clean.
 pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
     proxy: P,
@@ -742,12 +743,11 @@ pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
             return;
         }
     };
+    // Looked at before the state is locked; this command runs on the blocking lane.
+    let directory_to_open = imported.last_directory.clone().filter(|dir| dir.exists());
 
     // The reset, the new settings and the start of the scan happen under one lock.
     let mut state_guard = state.lock();
-    let loaded_directory =
-        Some(PathBuf::from(&state_guard.current_path)).filter(|dir| !dir.as_os_str().is_empty());
-
     state_guard.reset_directory_state();
     state_guard.config.adopt_user_settings(imported);
     state_guard.current_config_filename =
@@ -756,7 +756,7 @@ pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
 
     // The UI is wiped clean before the scan (if any) announces itself.
     send_state(&proxy, &state_guard);
-    if let Some(directory) = loaded_directory {
+    if let Some(directory) = directory_to_open {
         tasks::open_path(&mut state_guard, directory, proxy, state.clone());
     }
 }
@@ -1243,22 +1243,42 @@ mod tests {
         );
     }
 
-    /// The import is a hard reset: selection and filters are gone, and the directory
-    /// that was loaded is listed again according to the imported settings.
+    const KEPT_GEOMETRY: ((f64, f64), (f64, f64)) = ((1000.0, 700.0), (7.0, 8.0));
+
+    /// Gives the state a geometry of its own, to tell it from the imported one.
+    fn set_kept_geometry(harness: &TestHarness) {
+        let mut state = harness.state.lock();
+        state.config.window_size = KEPT_GEOMETRY.0;
+        state.config.window_position = KEPT_GEOMETRY.1;
+        state.config.geometry_units = GeometryUnits::Logical;
+    }
+
+    #[track_caller]
+    fn assert_geometry_is_kept(config: &AppConfig) {
+        assert_eq!((config.window_size, config.window_position), KEPT_GEOMETRY);
+        assert_eq!(config.geometry_units, GeometryUnits::Logical);
+    }
+
+    /// The import is a hard reset: selection and filters of the loaded directory are
+    /// gone, and the directory the imported file names is opened, listed according to
+    /// the imported settings, and recorded as the last directory.
     #[tokio::test]
-    async fn test_import_config_resets_and_reloads_the_loaded_directory() {
-        let mut harness = TestHarness::new();
+    async fn test_import_config_resets_and_opens_the_imported_last_directory() {
+        let (mut harness, store) = TestHarness::with_config_file();
         let kept = harness.create_file("kept.txt", "");
-        harness.create_file("debug.log", "");
-        harness.set_initial_files(&["kept.txt", "debug.log"]);
+        harness.set_initial_files(&["kept.txt"]);
         {
             let mut state = harness.state.lock();
             state.selected_files.insert(kept.clone());
             state.search_query = "kept".to_string();
         }
-        let somebody_elses_project = harness.create_dir("elsewhere");
+        set_kept_geometry(&harness);
+        let project_to_open = harness.create_dir("new_project_dir");
+        harness.create_file("new_project_dir/file.rs", "");
+        harness.create_file("new_project_dir/debug.log", "");
+        let imported = foreign_config(Some(project_to_open.clone()));
 
-        import_file(&harness, &foreign_config(Some(somebody_elses_project)));
+        import_file(&harness, &imported);
 
         // First the clean slate, then the scan.
         match harness.get_next_event().await.unwrap() {
@@ -1266,6 +1286,7 @@ mod tests {
                 assert!(!clean.is_scanning);
                 assert_eq!(clean.current_path, "");
                 assert_eq!(clean.selected_files_count, 0);
+                assert!(clean.tree.is_empty());
                 assert!(clean.config.case_sensitive_search);
                 assert_eq!(
                     clean.current_config_filename.as_deref(),
@@ -1275,85 +1296,82 @@ mod tests {
             other => panic!("Expected the clean state first, got {other:?}"),
         }
         let final_state = harness.wait_for_scan_completion().await.unwrap();
-        assert_eq!(
-            final_state.current_path,
-            harness.root_path.to_string_lossy()
-        );
+        assert_eq!(final_state.current_path, project_to_open.to_string_lossy());
         assert!(final_state.is_fully_scanned);
 
-        let state = harness.state.lock();
-        assert!(state.selected_files.is_empty() && state.search_query.is_empty());
-        let listed: Vec<_> = state
-            .full_file_list
-            .iter()
-            .filter_map(|item| item.path.file_name()?.to_str())
-            .collect();
-        assert!(listed.contains(&"kept.txt"));
-        assert!(
-            !listed.contains(&"debug.log"),
-            "the imported ignore pattern applies to the reloaded directory"
-        );
+        let expected = AppConfig {
+            window_size: KEPT_GEOMETRY.0,
+            window_position: KEPT_GEOMETRY.1,
+            geometry_units: GeometryUnits::Logical,
+            ..imported
+        };
+        {
+            let state = harness.state.lock();
+            assert!(state.selected_files.is_empty() && state.search_query.is_empty());
+            let listed: Vec<_> = state
+                .full_file_list
+                .iter()
+                .filter_map(|item| item.path.file_name()?.to_str())
+                .collect();
+            assert_eq!(
+                listed,
+                ["file.rs"],
+                "the imported ignore pattern applies to the opened directory"
+            );
+            assert_eq!(state.config, expected);
+            assert_geometry_is_kept(&state.config);
+        }
+        let saved = config_on_disk(&store, |saved| {
+            saved.last_directory.as_ref() == Some(&project_to_open)
+        })
+        .await;
+        assert_eq!(saved, expected);
     }
 
-    /// The imported file carries the geometry and the last directory of the
-    /// installation it was exported from. Neither is taken over, and what is taken
-    /// over is persisted.
+    /// The imported file names no directory: the state is clean and nothing is
+    /// scanned, whatever was loaded before. The geometry of the file is ignored.
     #[tokio::test]
-    async fn test_import_config_takes_user_settings_only_and_persists_them() {
+    async fn test_import_config_without_a_last_directory_leaves_a_clean_state() {
         let (mut harness, store) = TestHarness::with_config_file();
-        let last_directory = Some(harness.root_path.join("opened_last"));
-        {
-            let mut state = harness.state.lock();
-            state.current_path = String::new();
-            state.config.window_size = (1000.0, 700.0);
-            state.config.window_position = (7.0, 8.0);
-            state.config.geometry_units = GeometryUnits::Logical;
-            state.config.last_directory = last_directory.clone();
-        }
-        let imported = foreign_config(Some(harness.create_dir("elsewhere")));
+        harness.create_file("kept.txt", "");
+        harness.set_initial_files(&["kept.txt"]);
+        set_kept_geometry(&harness);
+        let last_directory = Some(harness.root_path.clone());
+        harness.state.lock().config.last_directory = last_directory.clone();
+        let imported = foreign_config(None);
 
         import_file(&harness, &imported);
 
+        match harness.get_next_event().await {
+            Some(UserEvent::StateUpdate(clean)) => {
+                assert!(!clean.is_scanning);
+                assert_eq!(clean.current_path, "");
+                assert!(clean.tree.is_empty());
+            }
+            other => panic!("Expected the clean state, got {other:?}"),
+        }
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No scan should start without a directory")
+            .await;
+
         let expected = AppConfig {
-            window_size: (1000.0, 700.0),
-            window_position: (7.0, 8.0),
+            window_size: KEPT_GEOMETRY.0,
+            window_position: KEPT_GEOMETRY.1,
             geometry_units: GeometryUnits::Logical,
             last_directory,
             ..imported
         };
-        assert_eq!(harness.state.lock().config, expected);
+        {
+            let state = harness.state.lock();
+            assert_eq!(state.current_path, "");
+            assert!(state.full_file_list.is_empty() && !state.is_scanning());
+            assert_eq!(state.config, expected);
+            assert_geometry_is_kept(&state.config);
+        }
         assert_eq!(
             config_on_disk(&store, |saved| saved.output_filename == "imported.txt").await,
             expected
         );
-        assert!(harness.last_state_update().is_some());
-    }
-
-    /// Importing settings does not open a directory: not the one named by the imported
-    /// file, and not the one this installation opened last.
-    #[tokio::test]
-    async fn test_import_config_without_a_loaded_directory_starts_no_scan() {
-        let mut harness = TestHarness::new();
-        let opened_last = harness.create_dir("opened_last");
-        {
-            let mut state = harness.state.lock();
-            state.current_path = String::new();
-            state.config.last_directory = Some(opened_last.clone());
-        }
-
-        import_file(
-            &harness,
-            &foreign_config(Some(harness.create_dir("elsewhere"))),
-        );
-
-        let event = harness.get_next_event().await;
-        assert!(matches!(event, Some(UserEvent::StateUpdate(_))));
-        harness
-            .expect_no_event_within(QUIET_PERIOD, "No scan should start without a directory")
-            .await;
-        let state = harness.state.lock();
-        assert_eq!(state.current_path, "");
-        assert_eq!(state.config.last_directory, Some(opened_last));
     }
 
     /// Without a directory there is nothing to filter or scan, but the change is
@@ -1573,20 +1591,37 @@ mod tests {
         assert_eq!(state.config.ignore_patterns, patterns_before);
     }
 
-    /// The directory that was loaded has vanished by the time the settings are
-    /// imported: the import itself succeeds, the reload reports the missing path.
+    /// The imported file names a directory that does not exist: as without one, the
+    /// state is clean, nothing is scanned and no error is shown.
     #[tokio::test]
-    async fn test_import_config_reports_a_loaded_directory_that_is_gone() {
+    async fn test_import_config_with_a_nonexistent_last_directory_leaves_a_clean_state() {
         let mut harness = TestHarness::new();
-        let vanished = harness.root_path.join("vanished");
-        harness.state.lock().current_path = vanished.to_string_lossy().to_string();
+        harness.create_file("kept.txt", "");
+        harness.set_initial_files(&["kept.txt"]);
+        set_kept_geometry(&harness);
+        let nonexistent = harness.root_path.join("nonexistent_dir");
 
-        import_file(&harness, &foreign_config(None));
+        import_file(&harness, &foreign_config(Some(nonexistent)));
 
-        let ended = harness.wait_for_scan_completion().await.unwrap();
-        assert_eq!(ended.current_path, "");
-        assert!(ended.config.case_sensitive_search);
-        assert!(!harness.state.lock().is_scanning());
+        match harness.get_next_event().await {
+            Some(UserEvent::StateUpdate(clean)) => {
+                assert!(!clean.is_scanning);
+                assert_eq!(clean.current_path, "");
+                assert!(clean.tree.is_empty());
+                assert!(clean.config.case_sensitive_search);
+            }
+            other => panic!("Expected the clean state, got {other:?}"),
+        }
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "No scan should start for a nonexistent directory",
+            )
+            .await;
+        let state = harness.state.lock();
+        assert_eq!(state.current_path, "");
+        assert!(!state.is_scanning());
+        assert_geometry_is_kept(&state.config);
     }
 
     // =========================================================================================
