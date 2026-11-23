@@ -2,7 +2,7 @@
 
 use crate::app::selection::{DirectorySelection, SelectedFiles, SelectionCountsCache};
 use crate::app::tracked::Tracked;
-use crate::app::tree_index::{TreeIndex, TreeIndexCache};
+use crate::app::tree_index::{IndexedList, TreeIndex, TreeIndexCache};
 use crate::app::view_model::TreeViewState;
 use crate::config::{AppConfig, ConfigSnapshot, ConfigStore};
 use crate::core::{is_blank, FileItem, FileNameMatcher, ScanProgress};
@@ -364,6 +364,21 @@ pub enum AfterAbandonedScan {
     Reopen { path: PathBuf, token: ScanToken },
 }
 
+/// What the state has no use for any more and what takes time to drop: a file list or
+/// the hierarchy of one (an allocation or two per item, tens of milliseconds for a
+/// large project). Whoever is handed one holds the lock on the state; it is to be
+/// dropped after the lock has been released.
+#[must_use = "drop it after the lock on the state has been released"]
+#[derive(Default)]
+pub(crate) struct Discarded(Vec<Box<dyn Send>>);
+
+impl Discarded {
+    /// Adds `value` to what is dropped with this.
+    pub(crate) fn add(&mut self, value: impl Send + 'static) {
+        self.0.push(Box::new(value));
+    }
+}
+
 /// Holds the complete, mutable state of the application.
 ///
 /// It is shared between threads (the event loop, the command lanes and background
@@ -378,7 +393,9 @@ pub struct AppState {
     pub full_file_list: Vec<FileItem>,
     /// The list of files and directories visible in the UI after applying filters.
     /// Private so that every change goes through [`AppState::set_filtered_file_list`].
-    filtered_file_list: Vec<FileItem>,
+    /// Shared, so that data derived from it can be built without holding the lock on
+    /// the state ([`AppState::shared_filtered_file_list`]); never changed in place.
+    filtered_file_list: Arc<Vec<FileItem>>,
     /// The set of absolute paths to files that are currently selected by the user.
     pub selected_files: SelectedFiles,
     /// The set of absolute paths to directories that are expanded in the UI tree.
@@ -482,7 +499,7 @@ impl AppState {
             config,
             current_path: String::new(),
             full_file_list: Vec::new(),
-            filtered_file_list: Vec::new(),
+            filtered_file_list: Arc::default(),
             selected_files: SelectedFiles::default(),
             expanded_dirs: Tracked::default(),
             collapsed_under_filter: HashSet::new(),
@@ -1019,17 +1036,32 @@ impl AppState {
     /// Does nothing and returns `false` for a stale token. The filtered list is not
     /// touched; the caller applies the filters when it publishes the change.
     pub fn merge_scanned_items(&mut self, token: &ScanToken, items: Vec<FileItem>) -> bool {
-        if !self.is_current_scan(token) {
+        let Some(mut new_items) = self.confirm_scanned_items(token, items) else {
             return false;
+        };
+        self.full_file_list.append(&mut new_items);
+        true
+    }
+
+    /// Tells which of `items`, listed by the walk of the scan identified by `token`,
+    /// are not in the file list yet, and returns those; the others (their level was
+    /// published ahead of the walk) are confirmed as seen by the walk. The file list
+    /// itself is not changed: this is the first half of
+    /// [`AppState::merge_scanned_items`], for a caller that adds the items later
+    /// ([`AppState::extend_file_lists`]).
+    ///
+    /// Returns `None` for a stale token.
+    pub(crate) fn confirm_scanned_items(
+        &mut self,
+        token: &ScanToken,
+        mut items: Vec<FileItem>,
+    ) -> Option<Vec<FileItem>> {
+        if !self.is_current_scan(token) {
+            return None;
         }
         let ahead_of_walk = self.ahead_of_walk.get_or_insert_with(AheadOfWalk::default);
-        self.full_file_list.reserve(items.len());
-        for item in items {
-            if !ahead_of_walk.confirm(&item.path) {
-                self.full_file_list.push(item);
-            }
-        }
-        true
+        items.retain(|item| !ahead_of_walk.confirm(&item.path));
+        Some(items)
     }
 
     /// Declares the file list complete on behalf of the scan identified by `token`,
@@ -1159,8 +1191,59 @@ impl AppState {
     /// This is the only way to change the list, which guarantees that data derived from
     /// it is never used with a different list than it was built from.
     pub fn set_filtered_file_list(&mut self, items: Vec<FileItem>) {
-        self.filtered_file_list = items;
+        self.filtered_file_list = Arc::new(items);
         self.filtered_revision += 1;
+    }
+
+    /// The filtered file list in a form that can be read after the lock on the state
+    /// has been released. It is the list of [`AppState::filtered_revision`] as it is
+    /// now; the state gets another one when the list changes.
+    pub(crate) fn shared_filtered_file_list(&self) -> Arc<Vec<FileItem>> {
+        Arc::clone(&self.filtered_file_list)
+    }
+
+    /// Adds `new_items` to the file list and makes `filtered` the filtered list, in
+    /// one step. `filtered` comes with its hierarchy, so the next state update does
+    /// not have to build it.
+    ///
+    /// This is for a caller that has prepared `filtered` without holding the lock,
+    /// and that has made sure, now that it holds it, that `filtered` is what the
+    /// filters make of the file list with `new_items`.
+    pub(crate) fn extend_file_lists(
+        &mut self,
+        mut new_items: Vec<FileItem>,
+        filtered: IndexedList,
+    ) -> Discarded {
+        self.full_file_list.append(&mut new_items);
+        let (items, root_path, index) = filtered.into_parts();
+        let replaced_list = std::mem::replace(&mut self.filtered_file_list, items);
+        self.filtered_revision += 1;
+        let replaced_tree = self
+            .tree_index_cache
+            .install(self.filtered_revision, root_path, index);
+        let mut discarded = Discarded::default();
+        discarded.add((replaced_list, replaced_tree));
+        discarded
+    }
+
+    /// Takes over the hierarchy of `list`, which was built without holding the lock
+    /// from the filtered list as it was at `revision`, so that the next state update
+    /// does not have to build it. Only if the filtered list is still that one:
+    /// otherwise `list` is outdated and not used, and whoever needs the hierarchy of
+    /// the current list builds it ([`AppState::file_tree`]).
+    pub(crate) fn adopt_file_tree(&mut self, revision: u64, list: IndexedList) -> Discarded {
+        let (items, root_path, index) = list.into_parts();
+        let is_current = self.filtered_revision == revision
+            && Arc::ptr_eq(&self.filtered_file_list, &items)
+            && root_path == Path::new(&self.current_path);
+        let unused_tree = if is_current {
+            self.tree_index_cache.install(revision, root_path, index)
+        } else {
+            Some(index)
+        };
+        let mut discarded = Discarded::default();
+        discarded.add((items, unused_tree));
+        discarded
     }
 
     /// The hierarchy of the filtered file list below the current path.
@@ -1174,6 +1257,24 @@ impl AppState {
             Path::new(&self.current_path),
             &self.filtered_file_list,
         )
+    }
+
+    /// What it takes to build the hierarchy of the filtered file list without
+    /// holding the lock on the state: the list, its revision and the root path.
+    /// `None` if the state has the hierarchy. The result goes to
+    /// [`AppState::adopt_file_tree`].
+    pub(crate) fn file_tree_to_build(&self) -> Option<(Arc<Vec<FileItem>>, u64, PathBuf)> {
+        let root_path = PathBuf::from(&self.current_path);
+        (!self
+            .tree_index_cache
+            .holds(self.filtered_revision, &root_path))
+        .then(|| {
+            (
+                Arc::clone(&self.filtered_file_list),
+                self.filtered_revision,
+                root_path,
+            )
+        })
     }
 
     /// Identifies the current content of the filtered file list.
@@ -1500,6 +1601,92 @@ mod tests {
             vec![scanned_dir("/p/a"), scanned_file("/p/f.txt")],
         );
         (state, token)
+    }
+
+    /// The first half of a merge: the walk's items that are not listed yet are
+    /// handed back, the others are confirmed, and the list is left alone.
+    #[test]
+    fn test_confirming_scanned_items_tells_the_new_ones_without_listing_them() {
+        let (mut state, token) = state_after_shallow_phase();
+
+        let new_items = state
+            .confirm_scanned_items(
+                &token,
+                vec![scanned_dir("/p/a"), scanned_file("/p/a/x.txt")],
+            )
+            .unwrap();
+        assert_eq!(new_items.len(), 1);
+        assert_eq!(new_items[0].path, Path::new("/p/a/x.txt"));
+        assert_eq!(listed_paths(&state), ["/p/a", "/p/f.txt"]);
+
+        // `/p/a` is confirmed by this, `/p/f.txt` is not: the end of the walk
+        // removes it.
+        assert!(state.complete_scanned_file_list(&token, HashSet::new()));
+        assert_eq!(listed_paths(&state), ["/p/a"]);
+
+        let (mut state, token) = state_after_shallow_phase();
+        state.cancel_current_scan();
+        assert!(state
+            .confirm_scanned_items(&token, vec![scanned_file("/p/late.txt")])
+            .is_none());
+    }
+
+    /// A hierarchy that was built without the lock is taken over for the list it
+    /// was built from, and for no other.
+    #[test]
+    fn test_a_hierarchy_built_outside_the_lock_is_adopted_only_for_its_list() {
+        let (mut state, _token) = state_after_shallow_phase();
+        state.set_filtered_file_list(state.full_file_list.clone());
+
+        // The list is still the one: adopted, nothing is built.
+        let (list, revision, root_path) = state.file_tree_to_build().unwrap();
+        let built = IndexedList::build(list, root_path);
+        drop(state.adopt_file_tree(revision, built));
+        assert!(state.file_tree_to_build().is_none());
+        assert_eq!(state.file_tree().roots().len(), 2);
+        assert_eq!(state.file_tree_build_count(), 0);
+
+        // The list was replaced meanwhile (by an equal one, even): not adopted.
+        state.set_filtered_file_list(state.full_file_list.clone());
+        let (list, revision, root_path) = state.file_tree_to_build().unwrap();
+        let built = IndexedList::build(list, root_path);
+        state.set_filtered_file_list(vec![scanned_file("/p/f.txt")]);
+        drop(state.adopt_file_tree(revision, built));
+        assert!(state.file_tree_to_build().is_some());
+        assert_eq!(state.file_tree().roots().len(), 1);
+        assert_eq!(state.file_tree_build_count(), 1);
+
+        // Another directory was entered meanwhile: not adopted.
+        let (list, revision, root_path) = {
+            state.set_filtered_file_list(state.full_file_list.clone());
+            state.file_tree_to_build().unwrap()
+        };
+        let built = IndexedList::build(list, root_path);
+        state.current_path = "/p/a".to_string();
+        drop(state.adopt_file_tree(revision, built));
+        assert!(state.file_tree_to_build().is_some());
+    }
+
+    /// Extending both lists at once installs the hierarchy that comes with the new
+    /// filtered list under its new revision.
+    #[test]
+    fn test_extending_the_lists_installs_the_hierarchy_of_the_new_filtered_list() {
+        let (mut state, _token) = state_after_shallow_phase();
+        state.set_filtered_file_list(state.full_file_list.clone());
+        let revision = state.filtered_revision();
+
+        let new_items = vec![scanned_file("/p/a/x.txt")];
+        let mut filtered = state.filtered_file_list().to_vec();
+        filtered.extend_from_slice(&new_items);
+        let filtered = IndexedList::build(Arc::new(filtered), PathBuf::from("/p"));
+        drop(state.extend_file_lists(new_items, filtered));
+
+        assert_eq!(listed_paths(&state), ["/p/a", "/p/f.txt", "/p/a/x.txt"]);
+        assert_eq!(state.filtered_file_list().len(), 3);
+        assert_ne!(state.filtered_revision(), revision);
+        assert!(state.file_tree_to_build().is_none());
+        assert_eq!(state.file_tree().children(0), [2]);
+        assert_eq!(state.file_tree_build_count(), 0);
     }
 
     #[test]

@@ -26,6 +26,7 @@ use super::state::{
     AfterAbandonedScan, AppState, GenerationToken, LazyLoadToken, PreviewToken, ScanToken,
     StatusNotice,
 };
+use super::tree_index::IndexedList;
 use super::view_model::generate_ui_state;
 use crate::config::{AppConfig, ConfigSnapshot};
 
@@ -613,16 +614,20 @@ const PUBLISH_PAUSE_FACTOR: u32 = 9;
 /// Publishes the items a running scan delivers into the state, at a bounded cost.
 ///
 /// The scanner delivers small batches, hundreds per second on a fast disk. Publishing
-/// means: merging them into the file list, applying the filters to the whole list and
+/// means: merging them into the file list, bringing the filtered list up to date and
 /// sending a state update, for which the tree index is built anew. All of that grows
-/// with the size of the list, and it happens under the lock on the state. The batches
-/// are therefore collected here and published together
+/// with the size of the list. The batches are therefore collected here and published
+/// together
 ///
 /// * at most every [`MIN_PUBLISH_INTERVAL`] (more often would not be seen), and
 /// * only after [`PUBLISH_PAUSE_FACTOR`] times the duration of the previous
 ///   publication has passed. The larger the list gets, the less often it is
-///   published, and the share of publishing in the time of the scan (and in the time
-///   the state is locked) stays below 1 / (1 + factor) however large the project is.
+///   published, and the share of publishing in the time of the scan stays below
+///   1 / (1 + factor) however large the project is.
+///
+/// The pace bounds the work. That commands do not have to wait for it is a matter of
+/// its own: the part that grows with the list holds no lock on the state, see
+/// [`add_scanned_items`].
 struct BatchPublisher {
     pending: Vec<FileItem>,
     due: tokio::time::Instant,
@@ -667,7 +672,12 @@ impl BatchPublisher {
         let Some(cost) = publish_scanned_items(state, proxy, token, items) else {
             return false;
         };
-        self.due = tokio::time::Instant::now() + pause_after_publication(cost);
+        tracing::debug!(
+            "Published scanned items in {:?}, the state locked for at most {:?}.",
+            cost.total,
+            cost.locked
+        );
+        self.due = tokio::time::Instant::now() + pause_after_publication(cost.total);
         true
     }
 }
@@ -677,24 +687,86 @@ fn pause_after_publication(cost: Duration) -> Duration {
     MIN_PUBLISH_INTERVAL.max(cost.saturating_mul(PUBLISH_PAUSE_FACTOR))
 }
 
+/// What a publication of scanned items took.
+#[derive(Debug, Clone, Copy)]
+struct PublicationCost {
+    /// From beginning to end. This is what the pace of publishing follows.
+    total: Duration,
+    /// The longer of the two moments in which the state was locked: what commands
+    /// and the progress of the walk had to wait for at most.
+    locked: Duration,
+}
+
 /// Merges `items`, delivered by the walk of the scan identified by `token`, into the
-/// file list and tells the UI. Returns how long that took (while the state was
-/// locked), or `None` without touching anything if the scan is no longer the current
-/// one.
+/// file list and tells the UI. Returns what that took, or `None` without touching
+/// anything if the scan is no longer the current one.
 fn publish_scanned_items<P: EventProxy>(
     state: &SharedState,
     proxy: &P,
     token: &ScanToken,
     items: Vec<FileItem>,
-) -> Option<Duration> {
-    let mut s = state.lock();
+) -> Option<PublicationCost> {
+    add_scanned_items(state, token, items, |s| {
+        proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(s))));
+    })
+}
+
+/// Merges `items`, delivered by the walk of the scan identified by `token`, into the
+/// file list and applies the filters. `added` is called with the state as it is then,
+/// before anything else can change it: a state update made there shows exactly the
+/// state with the items. Returns what all of this took, or `None` without touching
+/// anything (and without calling `added`) if the scan is no longer the current one.
+///
+/// The state is locked twice, briefly: to take what is needed out of it and to put
+/// the result in. The work in between (the filtered list and its hierarchy, which
+/// grow with the project) holds no lock, see [`filtering::StagedScanItems`].
+fn add_scanned_items(
+    state: &SharedState,
+    token: &ScanToken,
+    items: Vec<FileItem>,
+    added: impl FnOnce(&AppState),
+) -> Option<PublicationCost> {
     let started = std::time::Instant::now();
-    if !s.merge_scanned_items(token, items) {
-        return None;
-    }
-    filtering::apply_filters(&mut s);
-    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&s))));
-    Some(started.elapsed())
+    let (staged, staging) = {
+        let mut s = state.lock();
+        let locked = std::time::Instant::now();
+        (
+            filtering::stage_scanned_items(&mut s, token, items)?,
+            locked.elapsed(),
+        )
+    };
+
+    let prepared = staged.prepare();
+
+    let (is_current, committing, discarded) = {
+        let mut s = state.lock();
+        let locked = std::time::Instant::now();
+        let (is_current, discarded) = filtering::commit_scanned_items(&mut s, token, prepared);
+        if is_current {
+            added(&s);
+        }
+        (is_current, locked.elapsed(), discarded)
+    };
+    // Lists and hierarchies that have been replaced: not while the state is locked.
+    drop(discarded);
+
+    is_current.then(|| PublicationCost {
+        total: started.elapsed(),
+        locked: staging.max(committing),
+    })
+}
+
+/// Builds the hierarchy of the filtered file list, if the state does not have it,
+/// without holding the lock meanwhile, so that the state update that follows finds
+/// it. If the list changes while it is being built, the result is dropped
+/// ([`AppState::adopt_file_tree`]).
+fn build_file_tree_ahead(state: &SharedState) {
+    let Some((list, revision, root_path)) = state.lock().file_tree_to_build() else {
+        return;
+    };
+    let built = IndexedList::build(list, root_path);
+    let discarded = state.lock().adopt_file_tree(revision, built);
+    drop(discarded);
 }
 
 /// What the scan identified by `token` does with the progress its scanner reports
@@ -760,6 +832,11 @@ fn apply_shallow_scan_result<P: EventProxy>(
 /// that have not been published yet, with them the file list is complete. The scan is
 /// not finished by this, see [`complete_scan`]; nothing is sent to the UI.
 ///
+/// Like a publication, this does not hold the lock on the state for the work that
+/// grows with the list where it can be avoided: the items are added as every batch
+/// is, and the hierarchy of the complete list is built before [`complete_scan`]
+/// needs it for its state update.
+///
 /// Returns `false` without touching the state if the scan is no longer the current one.
 fn apply_deep_scan_result(
     state: &SharedState,
@@ -767,13 +844,15 @@ fn apply_deep_scan_result(
     remaining_items: Vec<FileItem>,
     patterns: HashSet<String>,
 ) -> bool {
-    let mut s = state.lock();
-    if !s.merge_scanned_items(token, remaining_items)
-        || !s.complete_scanned_file_list(token, patterns)
-    {
+    // The remaining items go the way of every batch. They get no state update of
+    // their own: whatever ends this scan from here on sends one.
+    if add_scanned_items(state, token, remaining_items, |_| {}).is_none() {
         return false;
     }
-    filtering::apply_filters(&mut s);
+    if !filtering::complete_scanned_file_list(&mut state.lock(), token, patterns) {
+        return false;
+    }
+    build_file_tree_ahead(state);
     true
 }
 
@@ -5280,6 +5359,91 @@ mod tests {
         assert_eq!(state.loaded_dirs, HashSet::from([root]));
     }
 
+    /// The state is not locked while the items of a publication are prepared, and
+    /// the state update that ends the publication is made of the state as it is
+    /// then, changes of the meantime included.
+    #[tokio::test]
+    async fn a_publication_shows_the_state_as_it_is_when_the_items_are_in() {
+        let mut harness = TestHarness::new();
+        let src = harness.root_path.join("src");
+        let (task, token, feed) = spawn_streaming_scan(&mut harness, vec![dir_item(&src, 1)]).await;
+
+        let staged = filtering::stage_scanned_items(
+            &mut harness.state.lock(),
+            &token,
+            vec![file_item(&src.join("a.rs"), 2)],
+        )
+        .unwrap();
+        let prepared = staged.prepare();
+        // What a command does meanwhile: the user selects a file and expands `src`.
+        {
+            let mut state = harness.state.lock();
+            state.selected_files.insert(src.join("a.rs"));
+            state.expand_directories([src.clone()]);
+        }
+        let ui_state = {
+            let mut state = harness.state.lock();
+            let (is_current, discarded) =
+                filtering::commit_scanned_items(&mut state, &token, prepared);
+            drop(discarded);
+            assert!(is_current);
+            generate_ui_state(&state)
+        };
+
+        assert_eq!(ui_state.visible_files_count, 2);
+        assert_eq!(ui_state.selected_files_count, 1);
+        let src_row = ui_state.row_named("src").unwrap();
+        assert!(src_row.is_expanded);
+        assert_eq!(ui_state.children_of(src_row).len(), 1);
+
+        drop(feed);
+        task.await.unwrap();
+    }
+
+    /// The end of the walk leaves the hierarchy of the complete list behind, so the
+    /// state update that reports the scan as finished does not build it with the
+    /// state locked: with a filter (the list is filtered once more) and without.
+    #[tokio::test]
+    async fn the_end_of_the_walk_prepares_the_hierarchy_for_the_last_state_update() {
+        for query in ["", "a"] {
+            let mut harness = TestHarness::new();
+            let src = harness.root_path.join("src");
+            let token = {
+                let mut state = harness.state.lock();
+                state.search_query = query.to_string();
+                let token = state.begin_scan();
+                state.begin_scan_walk(&token);
+                token
+            };
+            assert!(apply_shallow_scan_result(
+                &harness.state,
+                &harness.proxy,
+                &token,
+                &harness.root_path.clone(),
+                vec![dir_item(&src, 1)],
+                HashSet::new(),
+            ));
+
+            assert!(apply_deep_scan_result(
+                &harness.state,
+                &token,
+                vec![dir_item(&src, 1), file_item(&src.join("a.rs"), 2)],
+                HashSet::new(),
+            ));
+            let built = harness.state.lock().file_tree_build_count();
+            complete_scan(&harness.state, &harness.proxy, &token);
+
+            let ui_state = harness.last_state_update().unwrap();
+            assert!(ui_state.is_fully_scanned && !ui_state.is_scanning);
+            assert_eq!(ui_state.visible_files_count, 2, "query {query:?}");
+            assert_eq!(
+                harness.state.lock().file_tree_build_count(),
+                built,
+                "query {query:?}"
+            );
+        }
+    }
+
     /// The pause between two publications grows with what a publication costs, so
     /// publishing takes a bounded share of the time however large the list is.
     #[test]
@@ -5368,6 +5532,150 @@ mod tests {
             })
             .await;
             run(&format!("[{round}] incremental"), &root, real).await;
+        }
+    }
+
+    /// The items a walk lists for a project of about `count` entries: packages of
+    /// modules of 25 files each, a directory before its content.
+    fn synthetic_walk(count: usize) -> Vec<FileItem> {
+        const FILES_PER_MODULE: usize = 25;
+        const MODULES_PER_PACKAGE: usize = 100;
+        let root = Path::new("/root");
+        let mut items = Vec::with_capacity(count + count / FILES_PER_MODULE + 64);
+        let mut package = 0;
+        while items.len() < count {
+            let package_path = root.join(format!("package_{package:04}"));
+            items.push(dir_item(&package_path, 1));
+            for module in 0..MODULES_PER_PACKAGE {
+                if items.len() >= count {
+                    break;
+                }
+                let module_path = package_path.join(format!("module_{module:03}"));
+                items.push(dir_item(&module_path, 2));
+                for file in 0..FILES_PER_MODULE {
+                    items.push(file_item(
+                        &module_path.join(format!("source_file_{file:02}.rs")),
+                        3,
+                    ));
+                }
+            }
+            package += 1;
+        }
+        items
+    }
+
+    /// Measurement, not a test: `cargo test --release --lib perf_lock_hold --
+    /// --ignored --nocapture`. How long the state is locked for one publication of
+    /// scanned items, next to the plain way (merge, filter and state update under
+    /// one lock, which is what a publication used to be).
+    #[test]
+    #[ignore = "a benchmark, run on request"]
+    fn perf_lock_hold_of_a_publication() {
+        /// A scan of a project of which `listed` entries have been published.
+        fn scanning_state(
+            listed: usize,
+            later: usize,
+            worked_in: bool,
+        ) -> (AppState, ScanToken, Vec<FileItem>) {
+            let mut walk = synthetic_walk(listed + later);
+            let first_level: Vec<FileItem> = walk
+                .iter()
+                .filter(|item| item.depth == 1)
+                .cloned()
+                .collect();
+            let mut state = AppState::default();
+            state.current_path = "/root".to_string();
+            if worked_in {
+                let (dirs, files): (Vec<_>, Vec<_>) =
+                    walk.iter().partition(|item| item.is_directory);
+                state.expand_directories(dirs.into_iter().map(|dir| dir.path.clone()));
+                state
+                    .selected_files
+                    .extend(files.into_iter().map(|file| file.path.clone()).collect());
+            }
+            let later = walk.split_off(listed);
+            let token = state.begin_scan();
+            state.begin_scan_walk(&token);
+            state.replace_with_shallow_file_list(Path::new("/root"), first_level);
+            assert!(state.merge_scanned_items(&token, walk));
+            filtering::apply_filters(&mut state);
+            generate_ui_state(&state);
+            (state, token, later)
+        }
+
+        fn millis(durations: &[Duration]) -> String {
+            let all: Vec<String> = durations
+                .iter()
+                .map(|duration| format!("{:.1}", duration.as_secs_f64() * 1000.0))
+                .collect();
+            format!("{} ms", all.join(" / "))
+        }
+
+        const ROUNDS: usize = 4;
+        for listed in [200_000usize, 1_000_000] {
+            for batch in [4_096usize, listed / 10] {
+                // As after a re-scan of a project the user has worked in: every
+                // directory expanded, every file selected. This is the worst case
+                // for what is left under the lock (the rows, the selection counts).
+                for worked_in in [false, true] {
+                    let (tx, mut rx) = mpsc::unbounded_channel();
+                    let proxy = TestEventProxy { sender: tx };
+
+                    let (state, token, later) = scanning_state(listed, ROUNDS * batch, worked_in);
+                    let state = SharedState::new(state);
+                    let (mut total, mut locked) = (Vec::new(), Vec::new());
+                    for items in later.chunks(batch) {
+                        let cost = publish_scanned_items(&state, &proxy, &token, items.to_vec())
+                            .expect("the scan is the current one");
+                        total.push(cost.total);
+                        locked.push(cost.locked);
+                        while rx.try_recv().is_ok() {}
+                    }
+                    let completing = std::time::Instant::now();
+                    assert!(filtering::complete_scanned_file_list(
+                        &mut state.lock(),
+                        &token,
+                        HashSet::new()
+                    ));
+                    drop(generate_ui_state(&state.lock()));
+                    let completing = completing.elapsed();
+
+                    let (mut state, token, later) =
+                        scanning_state(listed, ROUNDS * batch, worked_in);
+                    let mut plain = Vec::new();
+                    for items in later.chunks(batch) {
+                        let items = items.to_vec();
+                        let started = std::time::Instant::now();
+                        assert!(state.merge_scanned_items(&token, items));
+                        filtering::apply_filters(&mut state);
+                        let ui_state = generate_ui_state(&state);
+                        plain.push(started.elapsed());
+                        drop(ui_state);
+                    }
+                    let started = std::time::Instant::now();
+                    assert!(state.complete_scanned_file_list(&token, HashSet::new()));
+                    filtering::apply_filters(&mut state);
+                    drop(generate_ui_state(&state));
+                    let plain_completing = started.elapsed();
+
+                    println!(
+                        "{listed} listed{}, batches of {batch}",
+                        if worked_in {
+                            ", all expanded and selected"
+                        } else {
+                            ""
+                        }
+                    );
+                    println!("  locked, plain way:   {}", millis(&plain));
+                    println!("  locked, in steps:    {}", millis(&locked));
+                    println!("  publication, total:  {}", millis(&total));
+                    println!(
+                        "  completion, locked:  {} (plain way: {})",
+                        millis(&[completing]),
+                        millis(&[plain_completing])
+                    );
+                }
+            }
         }
     }
 }

@@ -8,12 +8,14 @@
 //! This cleanly separates the logic of state mutation from the logic of state
 //! presentation (`view_model`), which only reads the state.
 
-use crate::app::state::AppState;
+use crate::app::state::{AppState, Discarded, ScanToken};
+use crate::app::tree_index::IndexedList;
 use crate::config::AppConfig;
 use crate::core::{is_blank, FileItem, FileNameMatcher, SearchEngine};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Applies all current filters to the full file list to generate the visible list.
 pub fn apply_filters(state: &mut AppState) {
@@ -40,6 +42,237 @@ pub fn apply_filters(state: &mut AppState) {
         state.is_fully_scanned,
     );
     state.set_filtered_file_list(filtered);
+}
+
+/// `true` if the filters, as they are set, let every item of the file list through:
+/// the filtered list is then the file list, item by item.
+///
+/// This restates what [`apply_filters_on_data`] does when none of its steps is
+/// active, for the callers that want to know it without running the filters.
+fn lets_everything_through(state: &AppState) -> bool {
+    !(state.config.remove_empty_directories && state.is_fully_scanned)
+        && state.content_filter_matches().is_none()
+        && !state.file_name_matcher().is_active()
+}
+
+/// `true` if the filtered list is known to be the file list, item by item: the
+/// filters let everything through and have been applied to the list as it is.
+fn mirrors_file_list(state: &AppState) -> bool {
+    lets_everything_through(state) && state.filtered_file_list().len() == state.full_file_list.len()
+}
+
+/// Items of a scan's walk on their way into the state, between the two short
+/// moments in which the state is locked for them.
+///
+/// Publishing items means work on the whole list (the filtered list, its hierarchy),
+/// which grows with the project, and every command waits while the state is locked.
+/// The work is therefore done in three steps, of which only the first and the last
+/// hold the lock, and only for what is in proportion to the new items:
+///
+/// 1. [`stage_scanned_items`] (locked) takes what the work needs out of the state.
+/// 2. [`StagedScanItems::prepare`] (not locked) does the work.
+/// 3. [`commit_scanned_items`] (locked) puts the result into the state, if the state
+///    is still the one the result was prepared for.
+///
+/// Between 1 and 3 the state is consistent and anything may happen to it: until 3
+/// the items are simply not there yet.
+pub(crate) struct StagedScanItems(Staged);
+
+enum Staged {
+    /// Every item is in the list already.
+    Nothing,
+    /// The filters let everything through: `new_items` are to be appended to the
+    /// file list and to the filtered list, which is `base` at this moment.
+    Append {
+        base: Arc<Vec<FileItem>>,
+        base_revision: u64,
+        /// The length of the file list `base` mirrors.
+        listed: usize,
+        root_path: PathBuf,
+        new_items: Vec<FileItem>,
+    },
+    /// The items have been merged and the filters applied, which takes the file
+    /// list and therefore the lock; the hierarchy of the result is still to be built.
+    Filtered {
+        list: Arc<Vec<FileItem>>,
+        revision: u64,
+        root_path: PathBuf,
+    },
+}
+
+/// The outcome of [`StagedScanItems::prepare`].
+pub(crate) struct PreparedScanItems(Prepared);
+
+enum Prepared {
+    Nothing,
+    Append {
+        base_revision: u64,
+        listed: usize,
+        new_items: Vec<FileItem>,
+        filtered: IndexedList,
+    },
+    Filtered {
+        revision: u64,
+        list: IndexedList,
+    },
+}
+
+/// Step 1 of publishing `items`, which the walk of the scan identified by `token`
+/// has listed (see [`StagedScanItems`]). Call it with the state locked.
+///
+/// Without an active filter nothing is changed yet but the record of what the walk
+/// has seen. With one, the items are merged and the filters applied here: that needs
+/// the whole file list, which only exists inside the state.
+///
+/// Returns `None` without touching anything for a stale token.
+pub(crate) fn stage_scanned_items(
+    state: &mut AppState,
+    token: &ScanToken,
+    items: Vec<FileItem>,
+) -> Option<StagedScanItems> {
+    if items.is_empty() {
+        return state
+            .is_current_scan(token)
+            .then_some(StagedScanItems(Staged::Nothing));
+    }
+    let root_path = PathBuf::from(&state.current_path);
+    if mirrors_file_list(state) {
+        let new_items = state.confirm_scanned_items(token, items)?;
+        if new_items.is_empty() {
+            return Some(StagedScanItems(Staged::Nothing));
+        }
+        return Some(StagedScanItems(Staged::Append {
+            base: state.shared_filtered_file_list(),
+            base_revision: state.filtered_revision(),
+            listed: state.full_file_list.len(),
+            root_path,
+            new_items,
+        }));
+    }
+
+    if !state.merge_scanned_items(token, items) {
+        return None;
+    }
+    apply_filters(state);
+    Some(StagedScanItems(Staged::Filtered {
+        list: state.shared_filtered_file_list(),
+        revision: state.filtered_revision(),
+        root_path,
+    }))
+}
+
+impl StagedScanItems {
+    /// Step 2: builds the filtered list with the new items (where step 1 has not)
+    /// and its hierarchy. This is the expensive part; call it without the lock.
+    pub(crate) fn prepare(self) -> PreparedScanItems {
+        PreparedScanItems(match self.0 {
+            Staged::Nothing => Prepared::Nothing,
+            Staged::Append {
+                base,
+                base_revision,
+                listed,
+                root_path,
+                new_items,
+            } => {
+                let mut filtered = Vec::with_capacity(base.len() + new_items.len());
+                filtered.extend_from_slice(&base);
+                filtered.extend_from_slice(&new_items);
+                // The state may give up the list meanwhile; not holding on to it
+                // lets it go there and then.
+                drop(base);
+                Prepared::Append {
+                    base_revision,
+                    listed,
+                    new_items,
+                    filtered: IndexedList::build(Arc::new(filtered), root_path),
+                }
+            }
+            Staged::Filtered {
+                list,
+                revision,
+                root_path,
+            } => Prepared::Filtered {
+                revision,
+                list: IndexedList::build(list, root_path),
+            },
+        })
+    }
+}
+
+/// Step 3 of publishing scanned items: puts what was prepared into the state. Call
+/// it with the state locked; afterwards the state holds the items, filtered, and a
+/// state update can be sent.
+///
+/// What was prepared is only used if the state it was prepared for is still there
+/// (the same filtered list, the same file list, the same filters). If not, it is
+/// dropped and the items take the plain way: merged and filtered here, the hierarchy
+/// built by whoever asks for it next. The result is the same either way.
+///
+/// Returns `false` without touching anything for a stale token: a scan that was
+/// cancelled or superseded since step 1 publishes nothing. What the returned
+/// [`Discarded`] holds is to be dropped after the lock has been released.
+pub(crate) fn commit_scanned_items(
+    state: &mut AppState,
+    token: &ScanToken,
+    prepared: PreparedScanItems,
+) -> (bool, Discarded) {
+    let mut discarded = Discarded::default();
+    if !state.is_current_scan(token) {
+        discarded.add(prepared);
+        return (false, discarded);
+    }
+    match prepared.0 {
+        Prepared::Nothing => {}
+        Prepared::Append {
+            base_revision,
+            listed,
+            new_items,
+            filtered,
+        } => {
+            let is_current = state.filtered_revision() == base_revision
+                && state.full_file_list.len() == listed
+                && filtered.root_path() == Path::new(&state.current_path)
+                && lets_everything_through(state);
+            if is_current {
+                discarded = state.extend_file_lists(new_items, filtered);
+            } else {
+                discarded.add(filtered);
+                // Some of the items may have been listed meanwhile.
+                state.merge_scanned_items(token, new_items);
+                apply_filters(state);
+            }
+        }
+        Prepared::Filtered { revision, list } => {
+            discarded = state.adopt_file_tree(revision, list);
+        }
+    }
+    (true, discarded)
+}
+
+/// Declares the file list complete on behalf of the scan identified by `token`
+/// ([`AppState::complete_scanned_file_list`]) and applies the filters to it.
+///
+/// Returns `false` without touching anything for a stale token.
+pub(crate) fn complete_scanned_file_list(
+    state: &mut AppState,
+    token: &ScanToken,
+    active_patterns: HashSet<String>,
+) -> bool {
+    let mirrored = mirrors_file_list(state);
+    let listed = state.full_file_list.len();
+    if !state.complete_scanned_file_list(token, active_patterns) {
+        return false;
+    }
+    // Completing a list adds nothing to it. If it has removed nothing either and the
+    // filters still let everything through (being complete is what the removal of
+    // empty directories waits for), the filtered list is still the file list, and so
+    // are the hierarchy and the rows made from it.
+    let still_mirrored =
+        mirrored && state.full_file_list.len() == listed && lets_everything_through(state);
+    if !still_mirrored {
+        apply_filters(state);
+    }
+    true
 }
 
 /// Applies the filters after the filter texts have changed, and reveals what the
@@ -574,5 +807,485 @@ mod tests {
             visible_paths.contains(&file_path),
             "Regular file should still be visible"
         );
+    }
+
+    //========================================================================================//
+    //|                     SCANNED ITEMS: STAGED, PREPARED, COMMITTED                       |//
+    //========================================================================================//
+
+    use crate::app::state::ScanToken;
+    use crate::app::view_model::rows::all_rows;
+
+    /// A scan of `/project` whose first level (`src`, `docs`) has been published.
+    fn state_with_a_walking_scan() -> (AppState, ScanToken) {
+        let mut state = AppState::default();
+        state.config = AppConfig {
+            remove_empty_directories: false,
+            ..create_test_config()
+        };
+        state.current_path = "/project".to_string();
+        let token = state.begin_scan();
+        state.begin_scan_walk(&token);
+        state.replace_with_shallow_file_list(
+            Path::new("/project"),
+            vec![
+                create_test_file_item("/project/src", true),
+                create_test_file_item("/project/docs", true),
+            ],
+        );
+        apply_filters(&mut state);
+        state.expand_directories([PathBuf::from("/project/src")]);
+        (state, token)
+    }
+
+    /// What the walk lists first: the first level again, and the content of `src`.
+    fn first_batch() -> Vec<FileItem> {
+        vec![
+            create_test_file_item("/project/src", true),
+            create_test_file_item("/project/src/main.rs", false),
+            create_test_file_item("/project/src/notes.txt", false),
+            create_test_file_item("/project/docs", true),
+        ]
+    }
+
+    fn paths_of(items: &[FileItem]) -> Vec<&str> {
+        items
+            .iter()
+            .map(|item| item.path.to_str().unwrap())
+            .collect()
+    }
+
+    /// The three steps in a row, as a publication without anything in between.
+    fn add_in_steps(state: &mut AppState, token: &ScanToken, items: Vec<FileItem>) -> bool {
+        let Some(staged) = stage_scanned_items(state, token, items) else {
+            return false;
+        };
+        commit_scanned_items(state, token, staged.prepare()).0
+    }
+
+    /// The way without steps, which defines the result: merged, then filtered.
+    fn add_plainly(state: &mut AppState, token: &ScanToken, items: Vec<FileItem>) -> bool {
+        let merged = state.merge_scanned_items(token, items);
+        if merged {
+            apply_filters(state);
+        }
+        merged
+    }
+
+    /// Asserts that `state` is what the plain way makes of the same file list: the
+    /// filtered list is the filters applied to the file list, and the tree shows it.
+    #[track_caller]
+    fn assert_filtered_list_is_current(state: &mut AppState) {
+        let filtered: Vec<FileItem> = state.filtered_file_list().to_vec();
+        let rows = all_rows(state);
+        let counts = state.file_tree().counts();
+
+        apply_filters(state);
+
+        assert_eq!(paths_of(state.filtered_file_list()), paths_of(&filtered));
+        assert_eq!(all_rows(state), rows);
+        assert_eq!(state.file_tree().counts(), counts);
+    }
+
+    #[test]
+    fn scanned_items_are_added_with_a_hierarchy_that_was_built_outside_the_lock() {
+        let (mut state, token) = state_with_a_walking_scan();
+        generate_ui_state(&state);
+        let built = state.file_tree_build_count();
+
+        let staged = stage_scanned_items(&mut state, &token, first_batch()).unwrap();
+        // Until the last step the lists are as they were.
+        assert_eq!(state.full_file_list.len(), 2);
+        assert_eq!(state.filtered_file_list().len(), 2);
+        let prepared = staged.prepare();
+        let revision = state.filtered_revision();
+        let (is_current, discarded) = commit_scanned_items(&mut state, &token, prepared);
+        drop(discarded);
+
+        assert!(is_current);
+        assert_eq!(
+            paths_of(&state.full_file_list),
+            [
+                "/project/src",
+                "/project/docs",
+                "/project/src/main.rs",
+                "/project/src/notes.txt"
+            ]
+        );
+        assert_eq!(
+            paths_of(state.filtered_file_list()),
+            paths_of(&state.full_file_list)
+        );
+        assert_ne!(state.filtered_revision(), revision);
+
+        let ui_state = generate_ui_state(&state);
+        let src = ui_state.row_named("src").unwrap();
+        assert_eq!(ui_state.children_of(src).len(), 2);
+        assert_eq!(ui_state.visible_files_count, 4);
+        assert_eq!(
+            state.file_tree_build_count(),
+            built,
+            "The state update must find the hierarchy that came with the list"
+        );
+        assert_filtered_list_is_current(&mut state);
+    }
+
+    #[test]
+    fn items_that_are_all_listed_already_change_nothing() {
+        let (mut state, token) = state_with_a_walking_scan();
+        let revision = state.filtered_revision();
+
+        assert!(add_in_steps(
+            &mut state,
+            &token,
+            vec![create_test_file_item("/project/src", true)]
+        ));
+        assert!(add_in_steps(&mut state, &token, Vec::new()));
+
+        assert_eq!(state.full_file_list.len(), 2);
+        assert_eq!(state.filtered_revision(), revision);
+    }
+
+    #[test]
+    fn a_stale_scan_can_neither_stage_nor_commit_items() {
+        // Stale before the first step.
+        let (mut state, token) = state_with_a_walking_scan();
+        state.cancel_current_scan();
+        assert!(stage_scanned_items(&mut state, &token, first_batch()).is_none());
+        assert!(stage_scanned_items(&mut state, &token, Vec::new()).is_none());
+        assert_eq!(state.full_file_list.len(), 2);
+
+        // Cancelled, or superseded by another scan, between the first and the last
+        // step: with and without an active filter.
+        for query in ["", "main"] {
+            for supersede in [false, true] {
+                let (mut state, token) = state_with_a_walking_scan();
+                state.search_query = query.to_string();
+                apply_filters(&mut state);
+                let staged = stage_scanned_items(&mut state, &token, first_batch()).unwrap();
+                let prepared = staged.prepare();
+                let listed = paths_of(&state.full_file_list)
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>();
+
+                if supersede {
+                    let _ = state.begin_scan();
+                } else {
+                    state.cancel_current_scan();
+                }
+                let revision = state.filtered_revision();
+                let built = state.file_tree_build_count();
+                let (is_current, discarded) = commit_scanned_items(&mut state, &token, prepared);
+                drop(discarded);
+
+                assert!(!is_current, "query {query:?}, superseded: {supersede}");
+                assert_eq!(paths_of(&state.full_file_list), listed);
+                assert_eq!(state.filtered_revision(), revision);
+                state.file_tree();
+                assert_eq!(
+                    state.file_tree_build_count(),
+                    built + 1,
+                    "Nothing of a stale scan may be installed"
+                );
+                assert_filtered_list_is_current(&mut state);
+            }
+        }
+    }
+
+    /// The prepared list belongs to the filtered list it was made from. If that one
+    /// has been replaced meanwhile, the prepared one is dropped; the items are
+    /// listed all the same.
+    #[test]
+    fn prepared_items_are_not_installed_over_a_filtered_list_that_has_changed() {
+        type Change = fn(&mut AppState);
+        let changes: [(&str, Change); 4] = [
+            ("the filters were applied again", |state| {
+                apply_filters(state)
+            }),
+            ("a filter was set", |state| {
+                state.set_filter_texts("main".to_string(), String::new(), String::new());
+                apply_filter_texts(state);
+            }),
+            ("a level was loaded that the walk lists as well", |state| {
+                let lazy_load = state.begin_lazy_load();
+                assert!(state.merge_directory_level(
+                    &lazy_load,
+                    Path::new("/project/src"),
+                    vec![
+                        create_test_file_item("/project/src/main.rs", false),
+                        create_test_file_item("/project/src/only_listed_lazily.rs", false),
+                    ],
+                    HashSet::new(),
+                ));
+                apply_filters(state);
+            }),
+            ("items were removed by an ignore pattern", |state| {
+                state.config.ignore_patterns.insert("docs".to_string());
+                state.apply_ignore_patterns();
+                apply_filters(state);
+            }),
+        ];
+        for (what, change) in changes {
+            let (mut state, token) = state_with_a_walking_scan();
+            let staged = stage_scanned_items(&mut state, &token, first_batch()).unwrap();
+            let prepared = staged.prepare();
+
+            change(&mut state);
+            let built = state.file_tree_build_count();
+            let (is_current, discarded) = commit_scanned_items(&mut state, &token, prepared);
+            drop(discarded);
+
+            assert!(is_current, "{what}");
+            let mut listed = paths_of(&state.full_file_list);
+            listed.sort_unstable();
+            let unique = listed.iter().collect::<HashSet<_>>().len();
+            assert_eq!(unique, listed.len(), "{what}: nothing is listed twice");
+            for path in ["/project/src/main.rs", "/project/src/notes.txt"] {
+                assert!(listed.contains(&path), "{what}: {path} is listed");
+            }
+            state.file_tree();
+            assert_eq!(
+                state.file_tree_build_count(),
+                built + 1,
+                "{what}: the prepared hierarchy must not have been installed"
+            );
+            assert_filtered_list_is_current(&mut state);
+        }
+    }
+
+    /// A file list that changed without the filtered list following it (which no
+    /// command does) is not what the prepared list was made for either.
+    #[test]
+    fn prepared_items_are_not_installed_next_to_a_file_list_that_has_changed() {
+        let (mut state, token) = state_with_a_walking_scan();
+        let staged = stage_scanned_items(&mut state, &token, first_batch()).unwrap();
+        let prepared = staged.prepare();
+
+        state
+            .full_file_list
+            .push(create_test_file_item("/project/added.txt", false));
+        let (is_current, discarded) = commit_scanned_items(&mut state, &token, prepared);
+        drop(discarded);
+
+        assert!(is_current);
+        assert_eq!(state.full_file_list.len(), 5);
+        assert_filtered_list_is_current(&mut state);
+    }
+
+    /// With an active filter the list is filtered in the first step; what is prepared
+    /// is its hierarchy, and that is only taken over for the list it was built from.
+    #[test]
+    fn with_a_filter_the_hierarchy_is_taken_over_only_for_the_list_it_was_built_from() {
+        for changed_meanwhile in [false, true] {
+            let (mut state, token) = state_with_a_walking_scan();
+            state.search_query = "main".to_string();
+            apply_filters(&mut state);
+
+            let staged = stage_scanned_items(&mut state, &token, first_batch()).unwrap();
+            // Merged and filtered at once: the state is consistent between the steps.
+            assert_eq!(state.full_file_list.len(), 4);
+            assert_eq!(
+                paths_of(state.filtered_file_list()),
+                ["/project/src", "/project/src/main.rs"]
+            );
+            let prepared = staged.prepare();
+            if changed_meanwhile {
+                state.search_query = "notes".to_string();
+                apply_filters(&mut state);
+            }
+            let built = state.file_tree_build_count();
+            let (is_current, discarded) = commit_scanned_items(&mut state, &token, prepared);
+            drop(discarded);
+
+            assert!(is_current);
+            state.file_tree();
+            assert_eq!(
+                state.file_tree_build_count() - built,
+                usize::from(changed_meanwhile),
+                "changed meanwhile: {changed_meanwhile}"
+            );
+            assert_filtered_list_is_current(&mut state);
+        }
+    }
+
+    /// Whatever the filters are and however the walk is cut into batches: the steps
+    /// end with the state the plain way ends with.
+    #[test]
+    fn adding_items_in_steps_ends_like_merging_and_filtering_them() {
+        let walk: Vec<FileItem> = [
+            ("/project/src", true),
+            ("/project/src/main.rs", false),
+            ("/project/src/core", true),
+            ("/project/src/core/mod.rs", false),
+            ("/project/src/core/notes.txt", false),
+            ("/project/src/empty", true),
+            ("/project/docs", true),
+            ("/project/docs/guide.md", false),
+            ("/project/readme.md", false),
+        ]
+        .into_iter()
+        .map(|(path, is_dir)| create_test_file_item(path, is_dir))
+        .collect();
+        let filters: [fn(&mut AppState); 4] = [
+            |_| {},
+            |state| state.search_query = "mod".to_string(),
+            |state| state.extension_filter = "md".to_string(),
+            |state| state.config.remove_empty_directories = true,
+        ];
+
+        for (filter_index, filter) in filters.into_iter().enumerate() {
+            for batch_size in [1, 2, 4, walk.len()] {
+                let (mut stepped, stepped_token) = state_with_a_walking_scan();
+                let (mut plain, plain_token) = state_with_a_walking_scan();
+                for state in [&mut stepped, &mut plain] {
+                    filter(state);
+                    apply_filter_texts(state);
+                    state.expand_directories([PathBuf::from("/project/src/core")]);
+                }
+
+                for batch in walk.chunks(batch_size) {
+                    assert!(add_in_steps(&mut stepped, &stepped_token, batch.to_vec()));
+                    assert!(add_plainly(&mut plain, &plain_token, batch.to_vec()));
+                    generate_ui_state(&stepped);
+                }
+                assert!(complete_scanned_file_list(
+                    &mut stepped,
+                    &stepped_token,
+                    HashSet::new()
+                ));
+                assert!(plain.complete_scanned_file_list(&plain_token, HashSet::new()));
+                apply_filters(&mut plain);
+
+                let context = format!("filter {filter_index}, batches of {batch_size}");
+                assert_eq!(
+                    paths_of(&stepped.full_file_list),
+                    paths_of(&plain.full_file_list),
+                    "{context}"
+                );
+                assert_eq!(
+                    paths_of(stepped.filtered_file_list()),
+                    paths_of(plain.filtered_file_list()),
+                    "{context}"
+                );
+                assert_eq!(all_rows(&stepped), all_rows(&plain), "{context}");
+                assert_eq!(
+                    stepped.file_tree().counts(),
+                    plain.file_tree().counts(),
+                    "{context}"
+                );
+                assert_filtered_list_is_current(&mut stepped);
+            }
+        }
+    }
+
+    /// The rule the steps rely on to leave the filters out: nothing active, nothing
+    /// removed.
+    #[test]
+    fn without_an_active_filter_the_filtered_list_is_the_file_list() {
+        let (mut state, token) = state_with_a_walking_scan();
+        assert!(add_plainly(&mut state, &token, first_batch()));
+        assert!(lets_everything_through(&state));
+        assert!(mirrors_file_list(&state));
+        assert_eq!(
+            paths_of(state.filtered_file_list()),
+            paths_of(&state.full_file_list)
+        );
+
+        // A content query whose first search is still running filters nothing yet.
+        state.content_search_query = "fn".to_string();
+        let _search = state.begin_content_search();
+        assert!(lets_everything_through(&state));
+
+        let active: [fn(&mut AppState); 4] = [
+            |state| state.search_query = "main".to_string(),
+            |state| state.extension_filter = "rs".to_string(),
+            |state| {
+                state.content_search_query = "fn".to_string();
+                let search = state.begin_content_search();
+                state.finish_content_search(&search, HashSet::new());
+            },
+            |state| {
+                state.config.remove_empty_directories = true;
+                state.is_fully_scanned = true;
+            },
+        ];
+        for (index, activate) in active.into_iter().enumerate() {
+            let (mut state, _token) = state_with_a_walking_scan();
+            activate(&mut state);
+            assert!(!lets_everything_through(&state), "filter {index}");
+        }
+
+        // The removal of empty directories waits for the complete list.
+        let (mut state, _token) = state_with_a_walking_scan();
+        state.config.remove_empty_directories = true;
+        assert!(lets_everything_through(&state));
+    }
+
+    /// Completing a list that the filters let through as it is leaves the filtered
+    /// list (and with it the hierarchy and the rows) alone; anything else is
+    /// filtered again.
+    #[test]
+    fn completing_the_list_filters_it_again_only_if_something_can_have_changed() {
+        // Nothing removed, no filter: kept.
+        let (mut state, token) = state_with_a_walking_scan();
+        assert!(add_in_steps(&mut state, &token, first_batch()));
+        let revision = state.filtered_revision();
+        assert!(complete_scanned_file_list(
+            &mut state,
+            &token,
+            HashSet::new()
+        ));
+        assert!(state.is_fully_scanned);
+        assert_eq!(state.filtered_revision(), revision);
+        assert_filtered_list_is_current(&mut state);
+
+        // An item of the first level that the walk did not find is removed.
+        let (mut state, token) = state_with_a_walking_scan();
+        let mut batch = first_batch();
+        batch.retain(|item| item.path != Path::new("/project/docs"));
+        assert!(add_in_steps(&mut state, &token, batch));
+        assert!(complete_scanned_file_list(
+            &mut state,
+            &token,
+            HashSet::new()
+        ));
+        assert_eq!(
+            paths_of(state.filtered_file_list()),
+            [
+                "/project/src",
+                "/project/src/main.rs",
+                "/project/src/notes.txt"
+            ]
+        );
+
+        // Empty directories are removed once the list is complete.
+        let (mut state, token) = state_with_a_walking_scan();
+        state.config.remove_empty_directories = true;
+        assert!(add_in_steps(&mut state, &token, first_batch()));
+        assert_eq!(state.filtered_file_list().len(), 4);
+        assert!(complete_scanned_file_list(
+            &mut state,
+            &token,
+            HashSet::new()
+        ));
+        assert_eq!(
+            paths_of(state.filtered_file_list()),
+            [
+                "/project/src",
+                "/project/src/main.rs",
+                "/project/src/notes.txt"
+            ]
+        );
+
+        // A stale token changes nothing.
+        let (mut state, token) = state_with_a_walking_scan();
+        state.cancel_current_scan();
+        assert!(!complete_scanned_file_list(
+            &mut state,
+            &token,
+            HashSet::new()
+        ));
+        assert!(!state.is_fully_scanned);
     }
 }

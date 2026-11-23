@@ -356,6 +356,42 @@ fn display_order(items: &[FileItem], names: &[String], a: usize, b: usize) -> Or
     }
 }
 
+/// A file list together with the hierarchy that was built from it.
+///
+/// Building the hierarchy of a large list takes time, and nothing about it needs the
+/// application state: whoever has the list in a shareable form can build it without
+/// holding the lock on the state, and hand both over together. That the index belongs
+/// to exactly these items and this root is what this type stands for; there is no
+/// other way to make one than [`IndexedList::build`].
+#[derive(Debug)]
+pub(crate) struct IndexedList {
+    items: Arc<Vec<FileItem>>,
+    root_path: PathBuf,
+    index: Arc<TreeIndex>,
+}
+
+impl IndexedList {
+    /// Builds the hierarchy of `items` below `root_path`.
+    pub(crate) fn build(items: Arc<Vec<FileItem>>, root_path: PathBuf) -> Self {
+        let index = Arc::new(TreeIndex::build(&items, &root_path));
+        Self {
+            items,
+            root_path,
+            index,
+        }
+    }
+
+    /// The path the hierarchy was built below.
+    pub(crate) fn root_path(&self) -> &Path {
+        &self.root_path
+    }
+
+    /// The list, the root path and the index, for the owner of a [`TreeIndexCache`].
+    pub(crate) fn into_parts(self) -> (Arc<Vec<FileItem>>, PathBuf, Arc<TreeIndex>) {
+        (self.items, self.root_path, self.index)
+    }
+}
+
 /// Remembers the [`TreeIndex`] of the most recent filtered file list.
 ///
 /// The cache is keyed by the revision of the filtered list and the root path; asking for
@@ -407,6 +443,41 @@ impl TreeIndexCache {
             index: Arc::clone(&index),
         });
         index
+    }
+
+    /// `true` if the cache holds the index of the list of `revision` below `root_path`.
+    pub(crate) fn holds(&self, revision: u64, root_path: &Path) -> bool {
+        let slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref()
+            .is_some_and(|cached| cached.revision == revision && cached.root_path == root_path)
+    }
+
+    /// Makes `index`, which was built elsewhere from the list of `revision` below
+    /// `root_path`, the cached one. If the cache already holds the index of that
+    /// list, it keeps it.
+    ///
+    /// Returns the index that is not needed any more (the one that was replaced, or
+    /// `index` itself). Dropping the index of a large list is not free, so this is
+    /// left to the caller, who may hold a lock at this point.
+    pub(crate) fn install(
+        &self,
+        revision: u64,
+        root_path: PathBuf,
+        index: Arc<TreeIndex>,
+    ) -> Option<Arc<TreeIndex>> {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|cached| cached.revision == revision && cached.root_path == root_path)
+        {
+            return Some(index);
+        }
+        slot.replace(CachedIndex {
+            revision,
+            root_path,
+            index,
+        })
+        .map(|replaced| replaced.index)
     }
 
     /// How often an index has been built by this cache.
@@ -636,5 +707,45 @@ mod tests {
         assert!(!Arc::ptr_eq(&new_revision, &new_root));
         assert_eq!(new_root.roots(), [1]);
         assert_eq!(cache.build_count(), 3);
+    }
+
+    /// An index that was built elsewhere is cached for the list it names; the cache
+    /// hands back whichever index is not needed.
+    #[test]
+    fn cache_takes_an_index_that_was_built_elsewhere() {
+        let items = Arc::new(vec![item("/r/a", true), item("/r/a/f.rs", false)]);
+        let cache = TreeIndexCache::default();
+        assert!(!cache.holds(1, Path::new("/r")));
+
+        let (_, root_path, built) =
+            IndexedList::build(Arc::clone(&items), PathBuf::from("/r")).into_parts();
+        assert_eq!(built.roots(), [0]);
+        assert!(cache.install(1, root_path, Arc::clone(&built)).is_none());
+        assert!(cache.holds(1, Path::new("/r")));
+        assert!(!cache.holds(2, Path::new("/r")));
+        assert!(!cache.holds(1, Path::new("/r/a")));
+        assert!(Arc::ptr_eq(
+            &cache.get_or_build(1, Path::new("/r"), &items),
+            &built
+        ));
+        assert_eq!(cache.build_count(), 0);
+
+        // The index of the same list a second time: the cached one stays.
+        let (_, root_path, second) =
+            IndexedList::build(Arc::clone(&items), PathBuf::from("/r")).into_parts();
+        let unused = cache.install(1, root_path, Arc::clone(&second)).unwrap();
+        assert!(Arc::ptr_eq(&unused, &second));
+        assert!(Arc::ptr_eq(
+            &cache.get_or_build(1, Path::new("/r"), &items),
+            &built
+        ));
+
+        // The index of another list replaces it.
+        let replaced = cache
+            .install(2, PathBuf::from("/r"), Arc::clone(&second))
+            .unwrap();
+        assert!(Arc::ptr_eq(&replaced, &built));
+        assert!(cache.holds(2, Path::new("/r")));
+        assert_eq!(cache.build_count(), 0);
     }
 }
