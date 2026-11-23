@@ -1,6 +1,8 @@
 pub mod settings;
+pub mod shared;
 pub mod store;
 
+pub use shared::{ImportedConfig, SharedConfig};
 pub use store::{ConfigSnapshot, ConfigStore};
 
 use serde::{Deserialize, Serialize};
@@ -33,7 +35,17 @@ impl GeometryUnits {
 /// (deliberately no `deny_unknown_fields`), so files written by an older version keep
 /// loading after a setting has been retired, e.g. the former `scan_chunk_size` and
 /// `auto_load_last_directory`.
+///
+/// A field that a file does not name has its value of [`AppConfig::default`]
+/// (`#[serde(default)]`): a file written before a setting existed keeps loading, with
+/// all its other settings, and no list of fields has to be kept in step for that. The
+/// one exception is `geometry_units`, see there; a stored configuration is read
+/// through [`settings::load_config`], which accounts for it.
+///
+/// Which of the fields are settings to share and which describe this installation is
+/// defined by [`SharedConfig`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct AppConfig {
     pub ignore_patterns: HashSet<String>,
     pub tree_ignore_patterns: HashSet<String>,
@@ -47,6 +59,9 @@ pub struct AppConfig {
     pub window_size: (f64, f64),
     pub window_position: (f64, f64),
     /// The unit of `window_size` and `window_position`.
+    ///
+    /// Unlike every other field, a missing unit does not mean the default: a file that
+    /// does not name it was written by a version that stored physical pixels.
     #[serde(default = "GeometryUnits::of_unmarked_config")]
     pub geometry_units: GeometryUnits,
     /// Size limit for files in MiB: larger files are not listed by the scan, not read
@@ -81,22 +96,21 @@ where
 }
 
 impl AppConfig {
-    /// Takes over the settings of `imported` that a user edits and shares: patterns,
-    /// search and output options, the file size limit.
+    /// Takes over what an imported file holds: the settings a user edits and shares
+    /// (patterns, search and output options, the file size limit, see
+    /// [`SharedConfig`]), and the output directory if the file names one.
     ///
     /// What describes this installation rather than a preference stays as it is: the
     /// window geometry (an imported file may come from another display, or store it
     /// in another unit) and the directory that was opened last. (Whether the directory
     /// named by the imported file is opened is up to the caller; opening it is what
-    /// makes it the last directory.)
-    pub fn adopt_user_settings(&mut self, imported: AppConfig) {
-        *self = AppConfig {
-            window_size: self.window_size,
-            window_position: self.window_position,
-            geometry_units: self.geometry_units,
-            last_directory: self.last_directory.take(),
-            ..imported
-        };
+    /// makes it the last directory.) An output directory the file does not name stays
+    /// as well: a file exported for sharing names none.
+    pub fn adopt_user_settings(&mut self, imported: ImportedConfig) {
+        imported.settings.apply_to(self);
+        if let Some(output_directory) = imported.output_directory {
+            self.output_directory = Some(output_directory);
+        }
     }
 
     /// The file size limit ([`AppConfig::max_file_size_mb`]) in bytes, the unit the
@@ -156,7 +170,7 @@ impl Default for AppConfig {
             ignore_patterns,
             tree_ignore_patterns: HashSet::new(),
             last_directory: None,
-            output_directory: dirs::desktop_dir(),
+            output_directory: desktop_dir(),
             // A static name keeps `Default` deterministic. It stays until the user changes
             // it: a generation only renews a name of the form `cfc_output_<timestamp>.txt`
             // (see `commands::generate_preview`).
@@ -171,6 +185,13 @@ impl Default for AppConfig {
             max_file_size_mb: 20,
         }
     }
+}
+
+/// The desktop directory of the current user, where the output goes by default.
+fn desktop_dir() -> Option<PathBuf> {
+    directories::UserDirs::new()?
+        .desktop_dir()
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -228,16 +249,10 @@ mod tests {
         assert_eq!(unmarked.geometry_units, GeometryUnits::Physical);
     }
 
-    #[test]
-    fn adopting_user_settings_keeps_geometry_and_last_directory() {
-        let mut current = AppConfig {
-            window_size: (1000.0, 700.0),
-            window_position: (7.0, 8.0),
-            geometry_units: GeometryUnits::Logical,
-            last_directory: Some(PathBuf::from("/current/project")),
-            ..AppConfig::default()
-        };
-        let imported = AppConfig {
+    /// A configuration that differs from the default in everything an import can
+    /// touch, with the geometry and last directory of another installation.
+    fn foreign_config() -> AppConfig {
+        AppConfig {
             ignore_patterns: HashSet::from(["*.imported".to_string()]),
             tree_ignore_patterns: HashSet::from(["docs".to_string()]),
             output_directory: Some(PathBuf::from("/imported/out")),
@@ -251,9 +266,29 @@ mod tests {
             window_position: (-900.0, -900.0),
             geometry_units: GeometryUnits::Physical,
             last_directory: Some(PathBuf::from("/somebody/elses/project")),
-        };
+        }
+    }
 
-        current.adopt_user_settings(imported.clone());
+    fn current_config() -> AppConfig {
+        AppConfig {
+            window_size: (1000.0, 700.0),
+            window_position: (7.0, 8.0),
+            geometry_units: GeometryUnits::Logical,
+            last_directory: Some(PathBuf::from("/current/project")),
+            output_directory: Some(PathBuf::from("/current/out")),
+            ..AppConfig::default()
+        }
+    }
+
+    /// A complete configuration file, as earlier versions exported it.
+    #[test]
+    fn adopting_user_settings_keeps_geometry_and_last_directory() {
+        let mut current = current_config();
+        let imported = foreign_config();
+
+        current.adopt_user_settings(
+            serde_json::from_value(serde_json::to_value(&imported).unwrap()).unwrap(),
+        );
 
         assert_eq!(
             current,
@@ -265,5 +300,54 @@ mod tests {
                 ..imported
             }
         );
+    }
+
+    /// A file exported for sharing names no directories: the output directory of this
+    /// installation stays, too.
+    #[test]
+    fn adopting_shared_settings_keeps_the_output_directory_as_well() {
+        let mut current = current_config();
+        let exported = serde_json::to_value(SharedConfig::from(&foreign_config())).unwrap();
+
+        current.adopt_user_settings(serde_json::from_value(exported).unwrap());
+
+        assert_eq!(
+            current,
+            AppConfig {
+                window_size: (1000.0, 700.0),
+                window_position: (7.0, 8.0),
+                geometry_units: GeometryUnits::Logical,
+                last_directory: Some(PathBuf::from("/current/project")),
+                output_directory: Some(PathBuf::from("/current/out")),
+                ..foreign_config()
+            }
+        );
+    }
+
+    /// `#[serde(default)]`: a field that is missing has its default, whichever it is.
+    /// The test goes through all fields, so one added later is covered without being
+    /// named anywhere.
+    #[test]
+    fn every_missing_field_but_the_geometry_unit_has_its_default() {
+        let complete = serde_json::to_value(foreign_config()).unwrap();
+        let defaults = serde_json::to_value(AppConfig::default()).unwrap();
+
+        for field in complete.as_object().unwrap().keys() {
+            let mut partial = complete.clone();
+            partial.as_object_mut().unwrap().remove(field);
+
+            let read: AppConfig =
+                serde_json::from_value(partial).unwrap_or_else(|e| panic!("without {field}: {e}"));
+
+            // Compared as configurations: the order of a set in JSON is arbitrary.
+            let mut expected = complete.clone();
+            expected[field] = if field == "geometry_units" {
+                serde_json::json!("physical")
+            } else {
+                defaults[field].clone()
+            };
+            let expected: AppConfig = serde_json::from_value(expected).unwrap();
+            assert_eq!(read, expected, "without {field}");
+        }
     }
 }

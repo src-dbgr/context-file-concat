@@ -17,6 +17,7 @@ use wry::WebViewBuilder;
 
 // Keep platform quirks isolated.
 mod platform;
+use platform::origin::AppOrigin;
 
 // Embedded UI-Assets – only compiled in Release
 #[cfg(not(debug_assertions))]
@@ -71,7 +72,9 @@ async fn main() {
     // Create the shared application state and the coalescing transport to the UI thread
     let (proxy, ui_events) = app::transport::channel(event_loop.create_proxy());
     let state = SharedState::new(AppState::new(config, config_store.clone()));
-    let dialog_service = Arc::new(NativeDialogService {});
+    // The dialogs belong to the window (the handle has to be taken here, on the main
+    // thread), so they cannot end up behind it.
+    let dialog_service = Arc::new(NativeDialogService::parented_to(&*window));
 
     // To avoid code duplication, we define the handlers first.
     let ipc_handler_state = state.clone();
@@ -81,7 +84,20 @@ async fn main() {
     let ipc_dispatcher = app::dispatch::CommandDispatcher::new();
     // Drops go through the same dispatcher, so they are ordered with the IPC commands.
     let drop_dispatcher = ipc_dispatcher.clone();
+    // The origin the UI is loaded from, which is also the only one commands are taken
+    // from: the Vite dev server in a debug build, the embedded assets in a release one.
+    #[cfg(debug_assertions)]
+    let origin = AppOrigin::dev_server();
+    #[cfg(not(debug_assertions))]
+    let origin = AppOrigin::embedded();
+
     let ipc_handler = move |request: wry::http::Request<String>| {
+        // wry reports the URL of the document the message was posted from.
+        let source = request.uri().to_string();
+        if !origin.is_own_page(&source) {
+            tracing::warn!("Dropping an IPC message from a foreign origin: {source}");
+            return;
+        }
         app::dispatch_ipc_message(
             &ipc_dispatcher,
             request.into_body(),
@@ -124,16 +140,15 @@ async fn main() {
     let webview_builder = {
         tracing::info!("Running in DEBUG mode, loading from Vite dev server.");
         WebViewBuilder::new()
-            .with_url("http://localhost:1420")
+            .with_url(origin.start_url())
             .with_devtools(true)
     };
 
     // RELEASE: Custom-Protocol (no Port, no file://-issues)
     #[cfg(not(debug_assertions))]
     let webview_builder = {
-        use platform::navigation::{AppOrigin, NavigationDecision, OriginForm};
-        use std::borrow::Cow;
-        use wry::http::Response;
+        use platform::asset_protocol;
+        use platform::navigation::NavigationDecision;
 
         tracing::info!(
             "Running in RELEASE mode, using embedded assets via custom scheme 'cfc://'."
@@ -141,26 +156,10 @@ async fn main() {
 
         let enable_devtools = std::env::var_os("CFC_DEVTOOLS").is_some();
 
-        let origin = AppOrigin::new("cfc", "index.html", OriginForm::for_current_platform());
-        let handler = move |_webview_id: wry::WebViewId,
-                            request: wry::http::Request<Vec<u8>>|
-              -> Response<Cow<'static, [u8]>> {
-            let path = request.uri().path().to_string();
-            match web_assets::load(&path) {
-                Some((bytes, content_type)) => Response::builder()
-                    .status(200)
-                    .header("Content-Type", content_type)
-                    .body(bytes)
-                    .expect("response build ok"),
-                None => {
-                    let not_found: &'static [u8] = b"Not Found";
-                    Response::builder()
-                        .status(404)
-                        .header("Content-Type", "text/plain; charset=utf-8")
-                        .body(Cow::Borrowed(not_found))
-                        .expect("response build ok")
-                }
-            }
+        // Sent with every response: the policy is decided here, not in the markup.
+        let csp = origin.content_security_policy();
+        let handler = move |_webview_id: wry::WebViewId, request: wry::http::Request<Vec<u8>>| {
+            asset_protocol::respond(web_assets::load(request.uri().path()), &csp)
         };
 
         WebViewBuilder::new()

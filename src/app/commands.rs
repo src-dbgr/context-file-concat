@@ -406,15 +406,45 @@ async fn update_filters_with<P: EventProxy, S: tasks::FileSearcher>(
 /// The state update (highlighting in the tree) is sent right away. The content follows
 /// with `ShowFilePreview` once the file has been read in the background, unless another
 /// preview was requested or the preview was closed in the meantime.
+///
+/// Only an entry of the loaded list can be previewed (see [`is_listed`]). A request
+/// for any other path reads nothing: it is answered with an error and the unchanged
+/// state.
 pub fn load_file_preview<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
-    if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
-        tasks::start_file_preview(PathBuf::from(path_str), proxy, state);
-    } else {
+    let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) else {
         tracing::warn!(
             "Failed to deserialize path string from payload: {:?}",
             payload
         );
+        return;
+    };
+    let path = PathBuf::from(path_str);
+
+    {
+        let state_guard = state.lock();
+        if !is_listed(&state_guard, &path) {
+            tracing::warn!("Refusing to preview {path:?}: not part of the loaded list.");
+            proxy.send_event(UserEvent::ShowError(format!(
+                "Cannot preview {}: it is not part of the loaded directory.",
+                path.display()
+            )));
+            send_state(&proxy, &state_guard);
+            return;
+        }
     }
+    tasks::start_file_preview(path, proxy, state);
+}
+
+/// True if `path` is an entry of the loaded list, i.e. something the scan of the
+/// loaded directory has found.
+///
+/// This is what the UI can ask the content of. The list is the reference rather than
+/// the directory on disk: it is what the user was shown (ignore patterns and the size
+/// limit applied), and comparing against it needs no file system access, so there is
+/// nothing a `..` or a symbolic link in the requested path could get around. The path
+/// has to be the listed one; it is compared, not resolved.
+fn is_listed(state: &AppState, path: &Path) -> bool {
+    state.full_file_list.iter().any(|item| item.path == path)
 }
 
 /// Loads the children of a specific directory for lazy loading.
@@ -797,17 +827,28 @@ pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
     }
 }
 
-/// Exports the current application configuration to a JSON file.
+/// Exports the settings that are meant to be shared to a JSON file: patterns, search
+/// and output options, the size limit. Directories and the window geometry of this
+/// installation are not part of the file (see [`config::SharedConfig`]).
+///
+/// The settings are copied under the state lock; the file is written without it, so
+/// a slow disk does not hold up everything else that needs the state.
 pub fn export_config<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
     proxy: P,
     state: SharedState,
 ) {
     if let Some(path) = dialog.export_config_path() {
-        let state_guard = state.lock();
-        let result = config::settings::export_config(&state_guard.config, &path).is_ok();
+        let settings = shared_settings(&state);
+        let result = config::settings::export_config(&settings, &path).is_ok();
         proxy.send_event(UserEvent::ConfigExported(result));
     }
+}
+
+/// A copy of the shareable settings as they are right now. The state is locked for
+/// the copy only.
+fn shared_settings(state: &SharedState) -> config::SharedConfig {
+    config::SharedConfig::from(&state.lock().config)
 }
 
 #[cfg(test)]
@@ -1783,6 +1824,7 @@ mod tests {
     async fn test_load_file_preview_sends_search_term() {
         let mut harness = TestHarness::new();
         let file_path = harness.create_file("preview.txt", "content with magic_word");
+        harness.set_initial_files(&["preview.txt"]);
         let search_term = "magic_word";
         {
             let mut state = harness.state.lock();
@@ -1821,6 +1863,7 @@ mod tests {
     async fn test_clear_preview_state_discards_preview_being_loaded() {
         let mut harness = TestHarness::new();
         let file_path = harness.create_file("preview.txt", "content");
+        harness.set_initial_files(&["preview.txt"]);
 
         load_file_preview(
             json!(file_path),
@@ -2251,6 +2294,273 @@ mod tests {
 
         let saved = config_on_disk(&store, |saved| saved.last_directory.is_none()).await;
         assert_eq!(saved, harness.state.lock().config);
+    }
+
+    // --- loadFilePreview: only entries of the loaded list ---
+
+    /// Asks for a preview of `path` and returns the error it is refused with. Fails
+    /// the test if the request is not refused: an error, the unchanged state, nothing
+    /// else, and no file read.
+    async fn refused_preview(harness: &mut TestHarness, path: &Path) -> String {
+        let previewed_before = harness.state.lock().previewed_file_path.clone();
+
+        load_file_preview(json!(path), harness.proxy.clone(), harness.state.clone());
+
+        let Some(UserEvent::ShowError(message)) = harness.event_rx.try_recv().ok() else {
+            panic!("Expected the preview of {path:?} to be refused with an error");
+        };
+        let Some(UserEvent::StateUpdate(_)) = harness.event_rx.try_recv().ok() else {
+            panic!("Expected a snapshot after the refusal of {path:?}");
+        };
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "A refused preview must not show content")
+            .await;
+        assert_eq!(
+            harness.state.lock().previewed_file_path,
+            previewed_before,
+            "{path:?}"
+        );
+        message
+    }
+
+    #[tokio::test]
+    async fn test_load_file_preview_refuses_a_path_outside_the_loaded_directory() {
+        let mut harness = TestHarness::new();
+        harness.create_file("listed.txt", "listed");
+        harness.set_initial_files(&["listed.txt"]);
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().join("secret.txt");
+        std_fs::write(&outside, "top secret").unwrap();
+
+        let message = refused_preview(&mut harness, &outside).await;
+
+        assert!(message.contains("not part of the loaded directory"));
+        assert!(message.contains("secret.txt"));
+        assert!(!message.contains("top secret"));
+    }
+
+    /// Inside the directory is not enough: the file has to be one the scan listed
+    /// (it may be ignored, too large, or created since).
+    #[tokio::test]
+    async fn test_load_file_preview_refuses_an_unlisted_file_of_the_loaded_directory() {
+        let mut harness = TestHarness::new();
+        harness.create_file("listed.txt", "listed");
+        let unlisted = harness.create_file(".env", "API_KEY=secret");
+        harness.set_initial_files(&["listed.txt"]);
+
+        refused_preview(&mut harness, &unlisted).await;
+    }
+
+    /// The requested path is compared with the list, not resolved: neither `..` nor a
+    /// symbolic link leads from a listed directory to something else.
+    #[tokio::test]
+    async fn test_load_file_preview_does_not_resolve_the_requested_path() {
+        let mut harness = TestHarness::new();
+        harness.create_dir("sub");
+        let listed = harness.create_file("sub/listed.txt", "listed");
+        harness.set_initial_files(&["sub", "sub/listed.txt"]);
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().join("secret.txt");
+        std_fs::write(&outside, "top secret").unwrap();
+
+        // Out of the directory by `..`, also behind a listed path.
+        let outside_name = outside_dir.path().file_name().unwrap();
+        let by_parent = harness
+            .root_path
+            .join("sub/../..")
+            .join(outside_name)
+            .join("secret.txt");
+        refused_preview(&mut harness, &by_parent).await;
+        refused_preview(&mut harness, &listed.join("../../../etc/hosts")).await;
+        // The listed file by another spelling is not the listed path either.
+        let respelled = harness.root_path.join("sub/../sub/listed.txt");
+        refused_preview(&mut harness, &respelled).await;
+
+        // A link inside the directory that the scan has not listed.
+        #[cfg(unix)]
+        {
+            let link = harness.root_path.join("sub/link.txt");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            refused_preview(&mut harness, &link).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_file_preview_refuses_everything_when_no_directory_is_loaded() {
+        let mut harness = TestHarness::new();
+        let file = harness.create_file("file.txt", "content");
+        harness.state.lock().reset_directory_state();
+        let _ = harness.last_state_update();
+
+        refused_preview(&mut harness, &file).await;
+        refused_preview(&mut harness, Path::new("")).await;
+        refused_preview(&mut harness, Path::new("/etc/hosts")).await;
+    }
+
+    /// A refused request leaves the preview that is shown alone.
+    #[tokio::test]
+    async fn test_refused_preview_keeps_the_current_preview() {
+        let mut harness = TestHarness::new();
+        let listed = harness.create_file("listed.txt", "listed content");
+        let unlisted = harness.create_file("unlisted.txt", "unlisted content");
+        harness.set_initial_files(&["listed.txt"]);
+        load_file_preview(json!(listed), harness.proxy.clone(), harness.state.clone());
+        let _ = harness.event_rx.try_recv();
+        assert!(matches!(
+            harness.get_next_event().await,
+            Some(UserEvent::ShowFilePreview { .. })
+        ));
+
+        refused_preview(&mut harness, &unlisted).await;
+
+        assert_eq!(harness.state.lock().previewed_file_path, Some(listed));
+    }
+
+    #[test]
+    fn test_is_listed_knows_exactly_the_entries_of_the_list() {
+        let root = PathBuf::from("/project");
+        let mut state = AppState::default();
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            file_item(root.join("src"), true),
+            file_item(root.join("src/main.rs"), false),
+        ];
+
+        for (path, expected) in [
+            ("/project/src/main.rs", true),
+            ("/project/src", true),
+            ("/project", false),
+            ("/project/src/other.rs", false),
+            ("/project/src/main.rs/..", false),
+            ("/project/src/../src/main.rs", false),
+            ("/project/src/main.rs.bak", false),
+            ("src/main.rs", false),
+            ("/etc/passwd", false),
+            ("", false),
+        ] {
+            assert_eq!(is_listed(&state, Path::new(path)), expected, "{path:?}");
+        }
+    }
+
+    // --- exportConfig: shareable settings only ---
+
+    #[tokio::test]
+    async fn test_export_config_writes_the_shared_settings_only() {
+        let mut harness = TestHarness::new();
+        let save_path = harness.root_path.join("exported.json");
+        harness.dialog.set_save_file(Some(save_path.clone()));
+        {
+            let mut state = harness.state.lock();
+            state.config.ignore_patterns = HashSet::from(["*.shared".to_string()]);
+            state.config.case_sensitive_search = true;
+            state.config.output_filename = "shared.txt".to_string();
+            state.config.output_directory = Some(PathBuf::from("/home/alice/out"));
+            state.config.last_directory = Some(PathBuf::from("/home/alice/project"));
+            state.config.window_size = (1234.0, 567.0);
+        }
+
+        export_config(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        assert!(matches!(
+            harness.get_next_event().await,
+            Some(UserEvent::ConfigExported(true))
+        ));
+        let written = std_fs::read_to_string(&save_path).unwrap();
+        let exported: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            exported,
+            serde_json::to_value(config::SharedConfig::from(&harness.state.lock().config)).unwrap()
+        );
+        assert_eq!(exported["ignore_patterns"], json!(["*.shared"]));
+        for personal in [
+            "alice",
+            "last_directory",
+            "output_directory",
+            "window_size",
+            "window_position",
+            "geometry_units",
+        ] {
+            assert!(!written.contains(personal), "{personal} in {written}");
+        }
+    }
+
+    /// The export of one installation, imported into another: the settings arrive,
+    /// the directories and the geometry of the importing installation stay.
+    #[tokio::test]
+    async fn test_exported_config_can_be_imported() {
+        let mut exporter = TestHarness::new();
+        let exported_path = exporter.root_path.join("exported.json");
+        exporter.dialog.set_save_file(Some(exported_path.clone()));
+        {
+            let mut state = exporter.state.lock();
+            state.config.ignore_patterns = HashSet::from(["*.shared".to_string()]);
+            state.config.case_sensitive_search = true;
+            state.config.max_file_size_mb = 3;
+            state.config.output_directory = Some(PathBuf::from("/home/alice/out"));
+        }
+        export_config(
+            exporter.dialog.as_ref(),
+            exporter.proxy.clone(),
+            exporter.state.clone(),
+        );
+        assert!(matches!(
+            exporter.get_next_event().await,
+            Some(UserEvent::ConfigExported(true))
+        ));
+
+        let mut importer = TestHarness::new();
+        set_kept_geometry(&importer);
+        {
+            let mut state = importer.state.lock();
+            state.config.output_directory = Some(PathBuf::from("/home/bob/out"));
+            state.config.last_directory = Some(PathBuf::from("/home/bob/project"));
+        }
+        importer.dialog.set_pick_file(Some(exported_path));
+        import_config(
+            importer.dialog.as_ref(),
+            importer.proxy.clone(),
+            importer.state.clone(),
+        );
+
+        assert!(matches!(
+            importer.get_next_event().await,
+            Some(UserEvent::StateUpdate(_))
+        ));
+        importer
+            .expect_no_event_within(QUIET_PERIOD, "An export names no directory to open")
+            .await;
+        let config = importer.state.lock().config.clone();
+        assert_eq!(
+            config::SharedConfig::from(&config),
+            config::SharedConfig::from(&exporter.state.lock().config)
+        );
+        assert_eq!(
+            config.output_directory,
+            Some(PathBuf::from("/home/bob/out"))
+        );
+        assert_eq!(
+            config.last_directory,
+            Some(PathBuf::from("/home/bob/project"))
+        );
+        assert_geometry_is_kept(&config);
+    }
+
+    /// The file is written without the state lock: a state that is in use while the
+    /// export writes does not wait for the disk, and the export does not wait for it.
+    #[tokio::test]
+    async fn test_export_config_copies_the_settings_under_the_lock_only() {
+        let harness = TestHarness::new();
+        harness.state.lock().config.output_filename = "before.txt".to_string();
+
+        let settings = shared_settings(&harness.state);
+
+        // The lock is free again, and the copy does not follow later edits.
+        harness.state.lock().config.output_filename = "after.txt".to_string();
+        assert_eq!(settings.output_filename, "before.txt");
     }
 
     #[tokio::test]
@@ -2885,7 +3195,9 @@ mod tests {
     #[tokio::test]
     async fn test_load_file_preview_sends_error_on_io_failure() {
         let mut harness = TestHarness::new();
+        // Listed by the scan, deleted since.
         let non_existent_path = harness.root_path.join("non_existent_file.txt");
+        harness.set_initial_files(&["non_existent_file.txt"]);
         let payload = json!(non_existent_path);
         load_file_preview(payload, harness.proxy.clone(), harness.state.clone());
 
