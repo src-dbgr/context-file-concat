@@ -261,6 +261,40 @@ fn an_event_that_changes_nothing_leaves_a_list_alone_that_a_command_has_filtered
     );
 }
 
+/// A filtered list that a completion made with every directory loaded is not taken
+/// for one made with a set of loaded directories: "every directory" and a set are
+/// not compared, so the list is made anew, also for an event that brings nothing.
+#[test]
+fn a_list_made_with_every_directory_loaded_is_made_anew_for_a_set_of_them() {
+    let (mut state, token) = state_with_a_walking_scan();
+    state.config.remove_empty_directories = true;
+    assert!(add_in_steps(&mut state, &token, first_batch()));
+    let prepared = complete(&state, &token).prepare();
+    assert!(commit_scan_completion(&mut state, &token, prepared).done());
+    assert_eq!(
+        paths_of(state.filtered_file_list()),
+        [
+            "/project/src",
+            "/project/src/main.rs",
+            "/project/src/notes.txt"
+        ]
+    );
+
+    // The empty directory stops being loaded: it is not known to be empty.
+    assert!(state.loaded_dirs.remove(Path::new("/project/docs")));
+    let revisions = (state.file_list_revision(), state.filtered_revision());
+    let lazy_load = state.begin_lazy_load();
+    let level = vec![item("/project/src/main.rs", false)];
+    let src = Path::new("/project/src");
+    let staged = stage_directory_level(&state, &lazy_load, src, level, HashSet::new()).unwrap();
+    assert!(commit_directory_level(&mut state, &lazy_load, staged.prepare()).done());
+
+    assert_eq!(state.file_list_revision(), revisions.0);
+    assert_ne!(state.filtered_revision(), revisions.1);
+    assert!(paths_of(state.filtered_file_list()).contains(&"/project/docs"));
+    assert_filtered_list_is_current(&mut state);
+}
+
 /// "Nothing to build" is not assumed. Where the filtered list is not known to be
 /// what the filters of the event make of the file list, it is made, also for an
 /// event that brings nothing.
