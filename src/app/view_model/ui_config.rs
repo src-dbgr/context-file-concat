@@ -23,6 +23,7 @@ pub struct UiConfig {
     pub remove_empty_directories: bool,
     pub include_tree_by_default: bool,
     pub use_relative_paths: bool,
+    #[serde(serialize_with = "super::lossy_path::serialize_option")]
     pub output_directory: Option<PathBuf>,
     pub output_filename: String,
 }

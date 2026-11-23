@@ -13,7 +13,9 @@
 //! The order is only worth something if a command performs every state change it
 //! stands for before it returns (or suspends). A command that starts background work
 //! therefore registers that work in the state itself and spawns nothing but the IO;
-//! and it must not block the lane with IO of its own.
+//! and it must not block the lane with IO of its own. (No command of the ordered lane
+//! touches the file system: what needs the disk runs in a task or on the blocking
+//! thread pool.)
 //!
 //! # Lanes
 //!
@@ -29,9 +31,18 @@
 //! * **Blocking lane** ([`CommandDispatcher::dispatch_blocking`]): work that blocks a
 //!   thread for as long as the user likes, i.e. native modal dialogs. It runs on the
 //!   blocking thread pool, one job at a time and in arrival order, so that at most one
-//!   dialog is open. It is *not* ordered relative to the other lanes: commands arriving
-//!   while a dialog is open are executed immediately, and whatever the dialog command
-//!   does after the dialog closes happens after them.
+//!   dialog is open.
+//!
+//!   A blocking command **starts after the ordered commands that were dispatched
+//!   before it**: a dialog that is opened right after an edit sees the edit (the save
+//!   dialog proposes the file name that has just been entered). This is a barrier, not
+//!   a lock. The job waits until the ordered lane has *started* everything that was
+//!   queued ahead of it, i.e. until each of those commands has finished or suspended;
+//!   a suspended command (a content search) has made its own state changes by then
+//!   and is not waited for. In the other direction there is no order: commands
+//!   arriving after the blocking command, also while its dialog is open, are executed
+//!   immediately, and whatever the dialog command does after the dialog closes happens
+//!   after them.
 //!
 //! # Panics
 //!
@@ -47,10 +58,17 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::task::Poll;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 type Job = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type BlockingJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// A command of the blocking lane together with its barrier.
+struct BlockingJob {
+    /// Resolves once the ordered lane has started everything dispatched before this
+    /// job (or has shut down).
+    ordered_lane_caught_up: oneshot::Receiver<()>,
+    run: Box<dyn FnOnce() + Send + 'static>,
+}
 
 /// Executes commands in the order in which they were dispatched.
 ///
@@ -88,8 +106,23 @@ impl CommandDispatcher {
 
     /// Queues a command that blocks its thread (a native dialog) on the blocking lane.
     /// Never blocks the caller.
+    ///
+    /// The command starts once the ordered commands dispatched before this call have
+    /// been started, and once the blocking commands dispatched before it have ended.
     pub fn dispatch_blocking(&self, command: impl FnOnce() + Send + 'static) {
-        if self.blocking.send(Box::new(command)).is_err() {
+        // The barrier is a marker command: when the ordered lane gets to it, everything
+        // ahead of it has run up to its end or its first suspension. If the lane is
+        // gone, the sender is dropped, which releases the job as well.
+        let (caught_up, ordered_lane_caught_up) = oneshot::channel();
+        let _ = self.ordered.send(Box::pin(async move {
+            let _ = caught_up.send(());
+        }));
+
+        let job = BlockingJob {
+            ordered_lane_caught_up,
+            run: Box::new(command),
+        };
+        if self.blocking.send(job).is_err() {
             tracing::error!("Command dropped: the blocking lane is no longer running.");
         }
     }
@@ -143,10 +176,13 @@ async fn run_continuation_lane(mut continuations: mpsc::UnboundedReceiver<Job>) 
     }
 }
 
-/// Runs blocking commands one at a time on the blocking thread pool.
+/// Runs blocking commands one at a time on the blocking thread pool, each one after
+/// its barrier on the ordered lane.
 async fn run_blocking_lane(mut commands: mpsc::UnboundedReceiver<BlockingJob>) {
-    while let Some(command) = commands.recv().await {
-        if let Err(e) = tokio::task::spawn_blocking(command).await {
+    while let Some(job) = commands.recv().await {
+        // An error means that the ordered lane has shut down: nothing to wait for.
+        let _ = job.ordered_lane_caught_up.await;
+        if let Err(e) = tokio::task::spawn_blocking(job.run).await {
             tracing::error!("A blocking command failed: {e}");
         }
     }
@@ -166,7 +202,6 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use tokio::sync::oneshot;
 
     /// A log the commands of a test append to.
     #[derive(Clone, Default)]
@@ -332,6 +367,83 @@ mod tests {
 
         close_dialog.send(()).unwrap();
         assert_eq!(eventually(&journal, 2).await, ["command", "dialog closed"]);
+    }
+
+    /// "Rename the output file, then save": the dialog must see the rename.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_blocking_command_starts_after_the_ordered_commands_before_it() {
+        for _ in 0..20 {
+            let dispatcher = CommandDispatcher::new();
+            let journal = Journal::default();
+
+            let slow = journal.clone();
+            dispatcher.dispatch(async move {
+                std::thread::sleep(Duration::from_millis(20));
+                slow.record("edit");
+            });
+            let second = journal.clone();
+            dispatcher.dispatch(async move { second.record("second edit") });
+            let dialog = journal.clone();
+            dispatcher.dispatch_blocking(move || dialog.record("dialog"));
+            let later = journal.clone();
+            dispatcher.dispatch(async move { later.record("later") });
+
+            let entries = eventually(&journal, 4).await;
+            assert_eq!(entries[..2], ["edit", "second edit"]);
+            let position = |name: &str| entries.iter().position(|e| e == name).unwrap();
+            assert!(position("dialog") > position("second edit"), "{entries:?}");
+        }
+    }
+
+    /// The barrier waits for the commands before it to *start*: one that is suspended
+    /// (a running content search) does not keep a dialog from opening.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_suspended_command_does_not_hold_back_a_blocking_command() {
+        let dispatcher = CommandDispatcher::new();
+        let journal = Journal::default();
+        let (finish_search, search_finished) = oneshot::channel::<()>();
+
+        let search = journal.clone();
+        dispatcher.dispatch(async move {
+            search.record("search: started");
+            let _ = search_finished.await;
+            search.record("search: finished");
+        });
+        let dialog = journal.clone();
+        dispatcher.dispatch_blocking(move || dialog.record("dialog"));
+
+        assert_eq!(eventually(&journal, 2).await, ["search: started", "dialog"]);
+        finish_search.send(()).unwrap();
+        assert_eq!(eventually(&journal, 3).await[2], "search: finished");
+    }
+
+    /// The barrier of a second dialog command is reached while the first dialog is
+    /// still open; the ordered lane is not held up by either of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn queued_blocking_commands_do_not_stall_the_ordered_lane() {
+        let dispatcher = CommandDispatcher::new();
+        let journal = Journal::default();
+        let (close_first, first_closed) = std::sync::mpsc::channel::<()>();
+
+        let first = journal.clone();
+        dispatcher.dispatch_blocking(move || {
+            first.record("first: open");
+            first_closed.recv().unwrap();
+        });
+        let second = journal.clone();
+        dispatcher.dispatch_blocking(move || second.record("second: open"));
+        assert_eq!(eventually(&journal, 1).await, ["first: open"]);
+
+        let command = journal.clone();
+        dispatcher.dispatch(async move { command.record("command") });
+        ordered_lane_drained(&dispatcher).await;
+        assert_eq!(journal.entries(), ["first: open", "command"]);
+
+        close_first.send(()).unwrap();
+        assert_eq!(
+            eventually(&journal, 3).await,
+            ["first: open", "command", "second: open"]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

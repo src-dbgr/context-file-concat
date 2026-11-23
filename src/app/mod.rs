@@ -39,8 +39,9 @@ use shared_state::SharedState;
 /// is no process-wide state and tests can use their own instance.
 ///
 /// - Commands that open a native dialog block for as long as the user likes. They run
-///   on the blocking lane and therefore do not hold up, and are not ordered relative
-///   to, the commands that arrive while the dialog is open.
+///   on the blocking lane: they start after the commands that arrived before them, and
+///   they neither hold up nor are ordered relative to the commands that arrive later,
+///   while the dialog is open.
 /// - Every other command runs on the ordered lane, in arrival order.
 pub fn dispatch_ipc_message<P: EventProxy, D: DialogService + 'static>(
     dispatcher: &CommandDispatcher,
@@ -265,14 +266,30 @@ async fn run_command<P: EventProxy>(
 /// It translates each `UserEvent` into a JavaScript call in the WebView to update the UI.
 /// Events reach this function via [`transport::EventOutbox::next_event`], which has
 /// already dropped superseded `StateUpdate`s, so no stale snapshot is serialized here.
+///
+/// An event that cannot be serialized is logged and skipped: a call without its
+/// argument (`window.render();`) would only make the UI report an invalid payload.
 pub fn handle_user_event(event: UserEvent, webview: &WebView) {
-    let script = match event {
-        UserEvent::StateUpdate(state) => {
-            format!(
-                "window.render({});",
-                serde_json::to_string(&*state).unwrap_or_default()
-            )
+    let script = match script_for(&event) {
+        Ok(script) => script,
+        Err(e) => {
+            tracing::error!(
+                "Failed to serialize a {} event for the UI: {e}. The event is skipped.",
+                event_name(&event)
+            );
+            return;
         }
+    };
+    if let Err(e) = webview.evaluate_script(&script) {
+        tracing::error!("Failed to evaluate script: {}", e);
+    }
+}
+
+/// The `window.*` call that delivers `event` to the UI.
+fn script_for(event: &UserEvent) -> serde_json::Result<String> {
+    use serde_json::to_string as json;
+    Ok(match event {
+        UserEvent::StateUpdate(state) => format!("window.render({});", json(state)?),
         UserEvent::ShowFilePreview {
             content,
             language,
@@ -280,50 +297,51 @@ pub fn handle_user_event(event: UserEvent, webview: &WebView) {
             path,
         } => format!(
             "window.showPreviewContent({}, {}, {}, {});",
-            serde_json::to_string(&content).unwrap_or_default(),
-            serde_json::to_string(&language).unwrap_or_default(),
-            serde_json::to_string(&search_term).unwrap_or_default(),
-            serde_json::to_string(&path).unwrap_or_default(),
+            json(content)?,
+            json(language)?,
+            json(search_term)?,
+            // Lossy like the paths of the tree, see `view_model::lossy_path`.
+            json(&path.to_string_lossy())?,
         ),
         UserEvent::ShowGeneratedContent {
             content,
             token_count,
         } => format!(
             "window.showGeneratedContent({}, {});",
-            serde_json::to_string(&content).unwrap_or_default(),
+            json(content)?,
             token_count
         ),
-        UserEvent::ShowError(msg) => {
-            format!(
-                "window.showError({});",
-                serde_json::to_string(&msg).unwrap_or_default()
-            )
+        UserEvent::ShowError(msg) => format!("window.showError({});", json(msg)?),
+        UserEvent::SaveComplete(success, path) => {
+            format!("window.fileSaveStatus({}, {});", success, json(path)?)
         }
-        UserEvent::SaveComplete(success, path) => format!(
-            "window.fileSaveStatus({}, {});",
-            success,
-            serde_json::to_string(&path).unwrap_or_default()
-        ),
         UserEvent::ConfigExported(success) => format!(
             "window.showStatus('{}');",
-            if success {
+            if *success {
                 "Config exported successfully."
             } else {
                 "Failed to export config."
             }
         ),
         UserEvent::ScanProgress(progress) => {
-            format!(
-                "window.updateScanProgress({});",
-                serde_json::to_string(&progress).unwrap_or_default()
-            )
+            format!("window.updateScanProgress({});", json(progress)?)
         }
         UserEvent::DragStateChanged(is_dragging) => {
             format!("window.setDragState({is_dragging});")
         }
-    };
-    if let Err(e) = webview.evaluate_script(&script) {
-        tracing::error!("Failed to evaluate script: {}", e);
+    })
+}
+
+fn event_name(event: &UserEvent) -> &'static str {
+    match event {
+        UserEvent::StateUpdate(_) => "StateUpdate",
+        UserEvent::ShowFilePreview { .. } => "ShowFilePreview",
+        UserEvent::ShowGeneratedContent { .. } => "ShowGeneratedContent",
+        UserEvent::ShowError(_) => "ShowError",
+        UserEvent::SaveComplete(..) => "SaveComplete",
+        UserEvent::ConfigExported(_) => "ConfigExported",
+        UserEvent::ScanProgress(_) => "ScanProgress",
+        UserEvent::DragStateChanged(_) => "DragStateChanged",
     }
 }
 
@@ -1179,5 +1197,191 @@ mod tests {
         }
         let last_update = last_update.expect("state updates keep being sent");
         assert!(last_update.is_fully_scanned);
+    }
+
+    // --- Dialog commands and the ordered lane ---
+
+    /// A save dialog that is cancelled at once and remembers the name it was to
+    /// propose.
+    #[derive(Default)]
+    struct RecordingDialog {
+        proposed: Mutex<Vec<String>>,
+    }
+
+    impl DialogService for RecordingDialog {
+        fn pick_directory(&self) -> Option<PathBuf> {
+            None
+        }
+        fn pick_config_to_import(&self) -> Option<PathBuf> {
+            None
+        }
+        fn export_config_path(&self) -> Option<PathBuf> {
+            None
+        }
+        fn save_output_file_path(&self, config: &AppConfig) -> Option<PathBuf> {
+            self.proposed
+                .lock()
+                .unwrap()
+                .push(config.output_filename.clone());
+            None
+        }
+    }
+
+    /// Renaming the output file and pressing "Save" right away: the dialog command
+    /// starts after the rename that was posted before it, so it proposes the new name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn save_dialog_sees_the_config_edit_posted_right_before_it() {
+        let dispatcher = CommandDispatcher::new();
+        let dialog = Arc::new(RecordingDialog::default());
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let proxy = TestEventProxy(tx);
+        let state = SharedState::new(AppState::default());
+        let send = |command: &str, payload: serde_json::Value| {
+            dispatch_ipc_message(
+                &dispatcher,
+                serde_json::json!({ "command": command, "payload": payload }).to_string(),
+                dialog.clone(),
+                proxy.clone(),
+                state.clone(),
+            );
+        };
+
+        // Each round waits for its dialog: commands posted *after* a dialog command
+        // are deliberately not held back by it, so they would run ahead.
+        for round in 0..200 {
+            let name = format!("{round}.txt");
+            send(
+                "setConfigOption",
+                serde_json::json!({ "option": "output_filename", "value": name }),
+            );
+            send("saveFile", serde_json::json!("content"));
+
+            loop {
+                let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+                    .await
+                    .expect("the save dialog did not run")
+                    .expect("the event channel was closed");
+                if matches!(event, UserEvent::SaveComplete(false, _)) {
+                    break;
+                }
+            }
+            assert_eq!(dialog.proposed.lock().unwrap().last(), Some(&name));
+        }
+    }
+
+    // --- Serialization of events ---
+
+    fn ui_state_with_tree(paths: &[PathBuf]) -> Box<view_model::UiState> {
+        let mut state = AppState::default();
+        state.current_path = "/repo".to_string();
+        state.full_file_list = paths
+            .iter()
+            .map(|path| crate::core::FileItem {
+                path: path.clone(),
+                parent: path.parent().map(Path::to_path_buf),
+                depth: 1,
+                ..Default::default()
+            })
+            .collect();
+        filtering::apply_filters(&mut state);
+        Box::new(view_model::generate_ui_state(&state))
+    }
+
+    #[test]
+    fn every_event_becomes_one_call_with_its_arguments() {
+        let script = |event| script_for(&event).unwrap();
+
+        let render = script(UserEvent::StateUpdate(ui_state_with_tree(&[
+            PathBuf::from("/repo/a.rs"),
+        ])));
+        assert!(
+            render.starts_with("window.render({\"config\":{"),
+            "{render}"
+        );
+        assert!(render.contains("\"path\":\"/repo/a.rs\""), "{render}");
+        assert!(render.ends_with("});"), "{render}");
+
+        assert_eq!(
+            script(UserEvent::ShowFilePreview {
+                content: "let a = \"b\";".to_string(),
+                language: "rust".to_string(),
+                search_term: None,
+                path: PathBuf::from("/repo/a.rs"),
+            }),
+            r#"window.showPreviewContent("let a = \"b\";", "rust", null, "/repo/a.rs");"#
+        );
+        assert_eq!(
+            script(UserEvent::ShowGeneratedContent {
+                content: "x".to_string(),
+                token_count: 3,
+            }),
+            r#"window.showGeneratedContent("x", 3);"#
+        );
+        assert_eq!(
+            script(UserEvent::ShowError("it's \"broken\"".to_string())),
+            r#"window.showError("it's \"broken\"");"#
+        );
+        assert_eq!(
+            script(UserEvent::SaveComplete(true, "/out/a.txt".to_string())),
+            r#"window.fileSaveStatus(true, "/out/a.txt");"#
+        );
+        assert_eq!(
+            script(UserEvent::ConfigExported(false)),
+            "window.showStatus('Failed to export config.');"
+        );
+        assert_eq!(
+            script(UserEvent::DragStateChanged(true)),
+            "window.setDragState(true);"
+        );
+        let progress = script(UserEvent::ScanProgress(crate::core::ScanProgress {
+            files_scanned: 4,
+            large_files_skipped: 1,
+            current_scanning_path: "/repo/src".to_string(),
+        }));
+        assert!(
+            progress.starts_with("window.updateScanProgress({"),
+            "{progress}"
+        );
+        assert!(progress.contains("\"files_scanned\":4"), "{progress}");
+    }
+
+    /// A file name that is not valid Unicode must not cost the UI its snapshot: serde
+    /// refuses such a path, so paths are sent lossily.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_unicode_does_not_make_an_event_unserializable() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let odd = PathBuf::from("/repo").join(OsStr::from_bytes(b"caf\xe9.txt"));
+        assert!(
+            serde_json::to_string(&odd).is_err(),
+            "what serde does on its own"
+        );
+
+        let mut ui_state = ui_state_with_tree(&[odd.clone(), PathBuf::from("/repo/b.txt")]);
+        ui_state.config.output_directory = Some(odd.clone());
+        let render = script_for(&UserEvent::StateUpdate(ui_state)).unwrap();
+        assert!(
+            render.contains("\"path\":\"/repo/caf\u{fffd}.txt\""),
+            "{render}"
+        );
+        assert!(render.contains("\"path\":\"/repo/b.txt\""), "{render}");
+        assert!(
+            render.contains("\"output_directory\":\"/repo/caf\u{fffd}.txt\""),
+            "{render}"
+        );
+
+        let preview = script_for(&UserEvent::ShowFilePreview {
+            content: String::new(),
+            language: "plaintext".to_string(),
+            search_term: Some("x".to_string()),
+            path: odd,
+        })
+        .unwrap();
+        assert_eq!(
+            preview,
+            "window.showPreviewContent(\"\", \"plaintext\", \"x\", \"/repo/caf\u{fffd}.txt\");"
+        );
     }
 }

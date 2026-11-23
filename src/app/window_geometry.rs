@@ -42,6 +42,11 @@ const FALLBACK_OFFSET: (f64, f64) = (100.0, 100.0);
 const STATE_LOCK_BUDGET: Duration = Duration::from_millis(250);
 const STATE_LOCK_POLL: Duration = Duration::from_millis(5);
 
+/// How often the last save of a session is repeated because a background save got in
+/// its way, see [`persist`]. Each repetition needs another configuration change to
+/// be saved in the split second before; one is the realistic maximum.
+const FINAL_SAVE_ATTEMPTS: usize = 8;
+
 /// An axis-aligned rectangle in logical units (a monitor's area).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -217,25 +222,61 @@ impl WindowGeometry {
 /// but only for [`STATE_LOCK_BUDGET`]: quitting must not hang behind a worker that holds
 /// the state during a large scan/filter. If the budget runs out, the most recent
 /// snapshot the store knows is used instead. That is the configuration as of the last
-/// change that was saved, which every command does when it changes it; only a change
-/// made in that very moment could be missed. Disk I/O always happens without holding
-/// the state lock.
+/// change that was saved, which every command does when it changes it. Disk I/O always
+/// happens without holding the state lock.
+///
+/// Either way the snapshot is taken at one moment and written at a later one, and a
+/// worker can save a newer snapshot in between (the worker that kept the state busy,
+/// for one). The store then skips ours as superseded: the geometry would be missing
+/// from the file, and the store would stay open. So the save is checked afterwards
+/// and repeated with what is then the latest configuration, until no newer snapshot
+/// has turned up while it was written.
 pub fn persist(geometry: WindowGeometry, state: &SharedState, store: &ConfigStore) -> Result<()> {
-    let snapshot = match lock_within(state, STATE_LOCK_BUDGET) {
+    persist_with(geometry, state, store, || {})
+}
+
+/// [`persist`] with a hook that runs right before each write, for tests of what
+/// happens when another save gets in between.
+fn persist_with(
+    geometry: WindowGeometry,
+    state: &SharedState,
+    store: &ConfigStore,
+    mut before_write: impl FnMut(),
+) -> Result<()> {
+    let latest_known_to_the_store = || {
+        let mut config = store.latest();
+        geometry.apply_to(&mut config);
+        (store.snapshot(&config), config)
+    };
+
+    let (mut snapshot, mut config) = match lock_within(state, STATE_LOCK_BUDGET) {
         Some(mut guard) => {
             geometry.apply_to(&mut guard.config);
-            guard.config_snapshot()
+            (guard.config_snapshot(), guard.config.clone())
         }
         None => {
             tracing::warn!(
                 "Application state is busy; saving window geometry with the last saved config."
             );
-            let mut config = store.latest();
-            geometry.apply_to(&mut config);
-            store.snapshot(&config)
+            latest_known_to_the_store()
         }
     };
-    snapshot.save_and_close()
+
+    for _ in 0..FINAL_SAVE_ATTEMPTS {
+        before_write();
+        snapshot.save_and_close()?;
+        // Nobody has taken a snapshot since ours: it is what was written (or what was
+        // on disk already), and the store is closed.
+        if store.latest() == config {
+            return Ok(());
+        }
+        // A newer snapshot exists. If it was written before ours, ours was skipped and
+        // the store is still open: write again, on top of it. If ours came first, the
+        // store is closed and this is a no-op.
+        (snapshot, config) = latest_known_to_the_store();
+    }
+    tracing::warn!("The configuration kept changing while it was saved for the last time.");
+    Ok(())
 }
 
 /// Tries to lock the state for at most `budget`.
@@ -621,5 +662,80 @@ mod tests {
         assert_eq!(saved.output_filename, "changed.txt");
         assert_eq!(saved.window_size, (1000.0, 700.0));
         assert_eq!(saved.window_position, (7.0, 8.0));
+    }
+
+    /// A save that is attempted after the session's last one must not reach the disk.
+    fn assert_store_is_closed(store: &ConfigStore) {
+        let before = std::fs::read_to_string(store.path().unwrap()).unwrap();
+        let late = AppConfig {
+            output_filename: "too-late.txt".into(),
+            ..store.latest()
+        };
+        store.snapshot(&late).save().unwrap();
+        let after = std::fs::read_to_string(store.path().unwrap()).unwrap();
+        assert_eq!(after, before, "the store must be closed");
+    }
+
+    /// The worker that keeps the state busy changes the configuration and saves it
+    /// while the exit save is under way: after the exit snapshot was taken, before it
+    /// is written. The exit snapshot is then the older one and is skipped; the save
+    /// has to be repeated, or the geometry is lost and the store stays open.
+    #[test]
+    fn persist_is_repeated_when_a_worker_saves_a_newer_snapshot_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store) = state_with_config_file(dir.path());
+
+        let mut guard = state.lock(); // the busy worker
+        let mut worker_saves = 0;
+        persist_with(FINAL_GEOMETRY, &state, &store, || {
+            if worker_saves == 0 {
+                guard.config.output_filename = "worker.txt".into();
+                guard.config_snapshot().save().unwrap();
+            }
+            worker_saves += 1;
+        })
+        .unwrap();
+        drop(guard);
+
+        assert_eq!(worker_saves, 2, "one repetition is enough");
+        let saved = settings::load_config(store.path().unwrap()).unwrap();
+        assert_eq!(saved.output_filename, "worker.txt", "the latest config");
+        assert_eq!(saved.window_size, (1000.0, 700.0), "with the geometry");
+        assert_eq!(saved.window_position, (7.0, 8.0));
+        assert_eq!(saved.geometry_units, GeometryUnits::Logical);
+        assert_store_is_closed(&store);
+    }
+
+    /// The same race without the fallback: the state lock was free when the snapshot
+    /// was taken, and a command saved its change before the snapshot was written.
+    #[test]
+    fn persist_is_repeated_when_a_command_saves_between_snapshot_and_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store) = state_with_config_file(dir.path());
+
+        let mut first = true;
+        persist_with(FINAL_GEOMETRY, &state, &store, || {
+            if std::mem::take(&mut first) {
+                let mut guard = state.lock();
+                guard.config.output_filename = "command.txt".into();
+                guard.config_snapshot().save().unwrap();
+            }
+        })
+        .unwrap();
+
+        let saved = settings::load_config(store.path().unwrap()).unwrap();
+        assert_eq!(saved.output_filename, "command.txt");
+        assert_eq!(saved.window_size, (1000.0, 700.0));
+        assert_store_is_closed(&store);
+    }
+
+    #[test]
+    fn persist_closes_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store) = state_with_config_file(dir.path());
+
+        persist(FINAL_GEOMETRY, &state, &store).unwrap();
+
+        assert_store_is_closed(&store);
     }
 }

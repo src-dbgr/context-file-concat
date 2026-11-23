@@ -114,6 +114,11 @@
       "contentSearchQuery": "needle",
       "extensionFilter": "rs",
       "searchQuery": "main"
+    },
+    {
+      "contentSearchQuery": "",
+      "extensionFilter": "",
+      "searchQuery": ""
     }
   ]
 }

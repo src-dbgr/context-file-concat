@@ -10,7 +10,9 @@
 //! After an intentional change, regenerate the fixture with
 //! `UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture` and adapt the UI schema.
 
-use super::commands::{ConfigOption, IgnorePatternPayload, SetExpansionPayload};
+use super::commands::{
+    ConfigOption, IgnorePatternPayload, SetExpansionPayload, UpdateFiltersPayload,
+};
 use super::{Command, DialogCommand, OrderedCommand, COMMANDS};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -90,11 +92,14 @@ fn example_payloads(command: Command) -> Vec<Value> {
                 expanded: true,
             })],
             C::ExpandCollapseAll => vec![json!(true), json!(false)],
-            C::UpdateFilters => vec![json!({
-                "searchQuery": "main",
-                "extensionFilter": "rs",
-                "contentSearchQuery": "needle",
-            })],
+            C::UpdateFilters => vec![
+                to_json(UpdateFiltersPayload {
+                    search_query: "main".to_string(),
+                    extension_filter: "rs".to_string(),
+                    content_search_query: "needle".to_string(),
+                }),
+                to_json(UpdateFiltersPayload::default()),
+            ],
             C::AddIgnorePattern | C::RemoveIgnorePattern => vec![pattern()],
             C::SetConfigOption => config_option_examples().into_iter().map(to_json).collect(),
         },
@@ -160,5 +165,9 @@ fn typed_example_payloads_are_accepted_by_the_host() {
     }
     for payload in example_payloads(Command::Ordered(OrderedCommand::SetExpansion)) {
         serde_json::from_value::<SetExpansionPayload>(payload).unwrap();
+    }
+    for payload in example_payloads(Command::Ordered(OrderedCommand::UpdateFilters)) {
+        let parsed: UpdateFiltersPayload = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(to_json(parsed), payload);
     }
 }

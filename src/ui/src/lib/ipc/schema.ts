@@ -126,13 +126,14 @@ export const DragStateSchema = z.boolean();
 
 /* ------------------------------ Outgoing IPC ------------------------------- */
 const NullPayload = z.null();
+/** Strict like the backend (`UpdateFiltersPayload`), which rejects unknown fields. */
 const UpdateFiltersPayload = z
   .object({
     searchQuery: z.string().optional().default(""),
     extensionFilter: z.string().optional().default(""),
     contentSearchQuery: z.string().optional().default(""),
   })
-  .passthrough();
+  .strict();
 const PathPayload = PathString;
 const BoolPayload = z.boolean();
 /** Strict like the backend, which rejects unknown fields for this command. */

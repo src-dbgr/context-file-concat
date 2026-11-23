@@ -60,12 +60,6 @@ impl SharedState {
     }
 }
 
-impl From<AppState> for SharedState {
-    fn from(state: AppState) -> Self {
-        Self::new(state)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,7 +118,7 @@ mod tests {
 
     #[test]
     fn clones_share_one_state() {
-        let state = SharedState::from(AppState::default());
+        let state = SharedState::new(AppState::default());
         let clone = state.clone();
 
         clone.lock().current_path = "/shared".to_string();
