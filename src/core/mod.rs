@@ -48,10 +48,8 @@ pub struct SearchFilter {
     pub case_sensitive: bool,
 }
 
-// Re-export der ScanProgress aus scanner
-pub use scanner::ScanProgress;
-
+// The public vocabulary of the core, so that callers do not depend on its file layout.
 pub use file_handler::FileHandler;
-pub use scanner::DirectoryScanner;
-pub use search::{ContentSearch, SearchEngine};
+pub use scanner::{DirectoryScanner, ScanProgress, ScanRequest};
+pub use search::{ContentSearch, FileNameMatcher, SearchEngine};
 pub use tree_generator::TreeGenerator;

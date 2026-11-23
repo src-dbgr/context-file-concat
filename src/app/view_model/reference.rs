@@ -1,10 +1,12 @@
 //! The original, uncached tree building algorithm.
 //!
-//! Kept verbatim as a test-only oracle (apart from filling in `has_children`). It always
+//! Kept verbatim as a test-only oracle (apart from filling in `has_children` and using
+//! the `SelectionState` type instead of its string form). It always
 //! builds the *complete* tree; the index-based builder must produce exactly this tree
 //! with the subtrees of collapsed directories cut off.
 
-use super::{matches_extension, TreeNode};
+use super::TreeNode;
+use crate::app::selection::SelectionState;
 use crate::core::FileItem;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -105,16 +107,16 @@ fn build_node_recursive(
             selection_cache,
         );
         if counts.total_files == 0 || counts.selected == 0 {
-            "none".to_string()
+            SelectionState::None
         } else if counts.selected == counts.total_files {
-            "full".to_string()
+            SelectionState::Full
         } else {
-            "partial".to_string()
+            SelectionState::Partial
         }
     } else if args.selected.contains(&item.path) {
-        "full".to_string()
+        SelectionState::Full
     } else {
-        "none".to_string()
+        SelectionState::None
     };
 
     let name_match = if !args.filename_query.is_empty() {
@@ -165,6 +167,19 @@ fn build_node_recursive(
         is_match: name_match || extension_match || content_match,
         is_previewed,
         children_loaded: !item.is_directory || args.loaded_dirs.contains(&item.path),
+    }
+}
+
+/// The original extension rule of the tree builder, kept with the oracle so that it
+/// stays independent of the matcher the real builder uses.
+fn matches_extension(path: &Path, extension_filter: &str) -> bool {
+    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+        let filter = extension_filter
+            .strip_prefix('.')
+            .unwrap_or(extension_filter);
+        ext.eq_ignore_ascii_case(filter)
+    } else {
+        extension_filter.is_empty() || extension_filter == "no extension"
     }
 }
 

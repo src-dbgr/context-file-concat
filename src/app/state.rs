@@ -1,10 +1,10 @@
 //! Defines the central, mutable state of the application.
 
-use crate::app::view_model::TreeIndexCache;
+use crate::app::tree_index::{TreeIndex, TreeIndexCache};
 use crate::config::AppConfig;
 use crate::core::{FileItem, ScanProgress};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -158,6 +158,52 @@ impl GenerationToken {
 #[derive(Debug, Clone)]
 pub struct ContentSearchToken(RunTicket);
 
+impl ContentSearchToken {
+    /// The cancellation flag owned by this search, to be handed to the searcher so that
+    /// it stops reading files nobody is waiting for any more.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.0.cancel_flag()
+    }
+
+    /// `true` once this search has been superseded by a newer one or cleared.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
+
+/// The most recent noteworthy outcome, shown to the user while nothing is in progress.
+///
+/// This is *what happened*, as data. How it is worded is decided by the view model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum StatusNotice {
+    /// Nothing has happened yet (or the directory was reset).
+    #[default]
+    Ready,
+    /// The scan was cancelled before it completed.
+    ScanCancelled,
+    /// A full scan completed.
+    IndexingComplete {
+        /// The number of items of the filtered list at that moment.
+        visible_items: usize,
+    },
+    /// The scan ended with an error.
+    ScanFailed {
+        /// The error, in the words of the scanner.
+        reason: String,
+    },
+    /// The generation of the output was cancelled.
+    GenerationCancelled,
+}
+
+/// The progress of a scan that has not reported anything (yet).
+fn no_scan_progress() -> ScanProgress {
+    ScanProgress {
+        files_scanned: 0,
+        large_files_skipped: 0,
+        current_scanning_path: String::new(),
+    }
+}
+
 /// Ties a lazy (single directory level) load to the file list it was started for.
 ///
 /// Handed out by [`AppState::begin_lazy_load`]. The token goes stale as soon as the file
@@ -213,8 +259,11 @@ pub struct AppState {
     pub content_search_results: HashSet<PathBuf>,
     /// The filename of the currently loaded configuration file, if any.
     pub current_config_filename: Option<String>,
-    /// The current progress of the directory scan.
+    /// The progress of the directory scan. `current_scanning_path` is the path the scan
+    /// is working on and empty while there is none; outcomes are kept in `status`.
     pub scan_progress: ScanProgress,
+    /// The most recent outcome worth telling the user about.
+    pub status: StatusNotice,
     /// The path of the file currently being previewed in the editor.
     pub previewed_file_path: Option<PathBuf>,
     /// The set of ignore patterns that were actually matched during the last scan.
@@ -241,7 +290,7 @@ pub struct AppState {
     /// Incremented whenever `filtered_file_list` changes. Derived data (the tree index)
     /// is keyed by this revision.
     filtered_revision: u64,
-    /// The tree structure derived from `filtered_file_list`, owned by the view model.
+    /// The hierarchy derived from `filtered_file_list`, see [`AppState::file_tree`].
     tree_index_cache: TreeIndexCache,
 }
 
@@ -261,11 +310,8 @@ impl Default for AppState {
             content_search_query: String::new(),
             content_search_results: HashSet::new(),
             current_config_filename: None,
-            scan_progress: ScanProgress {
-                files_scanned: 0,
-                large_files_skipped: 0,
-                current_scanning_path: "Ready.".to_string(),
-            },
+            scan_progress: no_scan_progress(),
+            status: StatusNotice::Ready,
             previewed_file_path: None,
             active_ignore_patterns: HashSet::new(),
             is_fully_scanned: false,
@@ -330,11 +376,8 @@ impl AppState {
             return;
         }
 
-        self.scan_progress = ScanProgress {
-            files_scanned: 0,
-            large_files_skipped: 0,
-            current_scanning_path: "Scan cancelled.".to_string(),
-        };
+        self.scan_progress = no_scan_progress();
+        self.status = StatusNotice::ScanCancelled;
         tracing::info!("Scan cancelled.");
     }
 
@@ -481,14 +524,29 @@ impl AppState {
         self.filtered_revision += 1;
     }
 
+    /// The hierarchy of the filtered file list below the current path.
+    ///
+    /// The index refers to items by their position in [`AppState::filtered_file_list`].
+    /// It is derived data: built on first use and reused until the list (tracked by its
+    /// revision) or the current path changes, so asking for it repeatedly is cheap.
+    pub(crate) fn file_tree(&self) -> Arc<TreeIndex> {
+        self.tree_index_cache.get_or_build(
+            self.filtered_revision,
+            Path::new(&self.current_path),
+            &self.filtered_file_list,
+        )
+    }
+
     /// Identifies the current content of the filtered file list.
+    #[cfg(test)]
     pub(crate) fn filtered_revision(&self) -> u64 {
         self.filtered_revision
     }
 
-    /// The cache for the tree structure derived from the filtered file list.
-    pub(crate) fn tree_index_cache(&self) -> &TreeIndexCache {
-        &self.tree_index_cache
+    /// How often the hierarchy of the filtered file list had to be built.
+    #[cfg(test)]
+    pub(crate) fn file_tree_build_count(&self) -> usize {
+        self.tree_index_cache.build_count()
     }
 
     /// Resets all state related to a loaded directory.
@@ -511,11 +569,8 @@ impl AppState {
         self.active_ignore_patterns.clear();
         self.is_fully_scanned = false;
         self.patterns_need_rescan = false;
-        self.scan_progress = ScanProgress {
-            files_scanned: 0,
-            large_files_skipped: 0,
-            current_scanning_path: "Ready.".to_string(),
-        };
+        self.scan_progress = no_scan_progress();
+        self.status = StatusNotice::Ready;
     }
 
     /// Applies the complete set of current ignore patterns to the in-memory file lists.
@@ -610,8 +665,13 @@ mod tests {
         );
         assert!(!state.is_scanning(), "is_scanning should be false");
         assert_eq!(
-            state.scan_progress.current_scanning_path, "Scan cancelled.",
-            "Progress message should be updated"
+            state.status,
+            StatusNotice::ScanCancelled,
+            "The cancellation should be noted"
+        );
+        assert!(
+            state.scan_progress.current_scanning_path.is_empty(),
+            "The progress of the cancelled scan should be gone"
         );
         assert!(
             token.is_cancelled(),
@@ -727,7 +787,7 @@ mod tests {
         assert!(!state.is_scanning());
         assert!(token.is_cancelled());
         assert!(!state.is_current_scan(&token));
-        assert_eq!(state.scan_progress.current_scanning_path, "Scan cancelled.");
+        assert_eq!(state.status, StatusNotice::ScanCancelled);
 
         // The task handle arriving late must not resurrect the cancelled scan.
         let late_handle = create_dummy_task();
@@ -1011,7 +1071,7 @@ mod tests {
         assert!(!state.is_fully_scanned);
         assert!(state.previewed_file_path.is_none());
         assert!(!state.is_generating());
-        assert_eq!(state.scan_progress.current_scanning_path, "Ready.");
+        assert_eq!(state.status, StatusNotice::Ready);
 
         // Assert that the tasks were cancelled and removed
         assert!(!state.has_scan_task());
@@ -1128,6 +1188,30 @@ mod tests {
 
         assert!(!state.finish_content_search(&running, HashSet::from([PathBuf::from("/p/a")])));
         assert!(state.content_search_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_content_search_is_told_to_stop_when_superseded_or_cleared() {
+        let mut state = AppState::default();
+
+        let first = state.begin_content_search();
+        let first_flag = first.cancel_flag();
+        assert!(!first.is_cancelled());
+
+        let second = state.begin_content_search();
+        assert!(first.is_cancelled(), "A newer search stops the older one");
+        assert!(first_flag.load(Ordering::SeqCst));
+        assert!(!second.is_cancelled());
+
+        state.clear_content_search();
+        assert!(second.is_cancelled(), "Clearing the query stops the search");
+
+        let third = state.begin_content_search();
+        assert!(state.finish_content_search(&third, HashSet::new()));
+        assert!(
+            !third.is_cancelled(),
+            "A search that came to its end was never cancelled"
+        );
     }
 
     #[tokio::test]

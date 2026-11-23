@@ -9,9 +9,10 @@
 //! `UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture` and adapt the UI schema.
 
 use super::{generate_ui_state, UiState};
-use crate::app::state::AppState;
+use crate::app::selection::SelectionState;
+use crate::app::state::{AppState, StatusNotice};
 use crate::config::AppConfig;
-use crate::core::{FileItem, ScanProgress};
+use crate::core::FileItem;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -98,11 +99,9 @@ fn representative_state() -> AppState {
     state.search_query = "main".to_string();
     state.current_config_filename = Some("project.cfc.json".to_string());
     state.active_ignore_patterns = HashSet::from(["target".to_string()]);
-    state.scan_progress = ScanProgress {
-        files_scanned: 12,
-        large_files_skipped: 1,
-        current_scanning_path: "Indexing complete. Found 12 visible items.".to_string(),
-    };
+    state.scan_progress.files_scanned = 12;
+    state.scan_progress.large_files_skipped = 1;
+    state.status = StatusNotice::IndexingComplete { visible_items: 12 };
     state
 }
 
@@ -146,21 +145,21 @@ fn contract_fixture_state_covers_the_pruned_shapes() {
 
     let src = root("src");
     assert!(src.is_expanded && src.has_children && src.children_loaded);
-    assert_eq!(src.selection_state, "partial");
+    assert_eq!(src.selection_state, SelectionState::Partial);
     assert_eq!(src.children.len(), 3);
 
     let core = &src.children[0];
     assert_eq!(core.name, "core");
     assert!(!core.is_expanded && core.has_children && core.children.is_empty());
-    assert_eq!(core.selection_state, "full");
+    assert_eq!(core.selection_state, SelectionState::Full);
 
     let main = &src.children[2];
     assert!(main.is_match && main.is_previewed);
-    assert_eq!(main.selection_state, "full");
+    assert_eq!(main.selection_state, SelectionState::Full);
 
     let docs = root("docs");
     assert!(docs.has_children && docs.children.is_empty());
-    assert_eq!(docs.selection_state, "none");
+    assert_eq!(docs.selection_state, SelectionState::None);
 
     let vendor = root("vendor");
     assert!(!vendor.children_loaded && !vendor.has_children);

@@ -7,6 +7,7 @@
 use super::reference::{self, BuildTreeArgs};
 use super::{generate_ui_state, TreeNode};
 use crate::app::filtering;
+use crate::app::selection::{self, SelectionState};
 use crate::app::state::AppState;
 use crate::config::AppConfig;
 use crate::core::FileItem;
@@ -90,7 +91,7 @@ fn is_pruned(nodes: &[TreeNode]) -> bool {
 }
 
 fn builds(state: &AppState) -> usize {
-    state.tree_index_cache().build_count()
+    state.file_tree_build_count()
 }
 
 // --- Equivalence -------------------------------------------------------------------
@@ -362,6 +363,51 @@ proptest! {
         }
         check(&snapshot, &complete)?;
     }
+
+    /// What a click on a checkbox acts on is what the checkbox shows: for every node of
+    /// the tree, the subtree the selection commands work with has the node's selection
+    /// state, and a directory is "full" exactly if all files of that subtree are selected.
+    #[test]
+    fn subtree_selection_agrees_with_the_tree(
+        list in list_strategy(),
+        selected in prop::collection::vec(target_strategy(), 0..8),
+    ) {
+        let mut state = test_state();
+        state.set_filtered_file_list(list);
+        for target in selected {
+            let path = target.resolve(&state);
+            state.selected_files.insert(path);
+        }
+        state.expanded_dirs = state
+            .filtered_file_list()
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+
+        let index = state.file_tree();
+        let mut pending = generate_ui_state(&state).tree;
+        while let Some(node) = pending.pop() {
+            let subtree = selection::subtree_selection(
+                state.filtered_file_list(),
+                &index,
+                &state.selected_files,
+                &node.path,
+            )
+            .expect("every node of the tree is listed");
+
+            prop_assert_eq!(subtree.state, node.selection_state, "{:?}", &node.path);
+            if node.is_directory {
+                let all_selected = !subtree.files.is_empty()
+                    && subtree.files.iter().all(|f| state.selected_files.contains(f));
+                prop_assert_eq!(
+                    subtree.state == SelectionState::Full,
+                    all_selected,
+                    "{:?}", &node.path
+                );
+            }
+            pending.extend(node.children);
+        }
+    }
 }
 
 // --- Invalidation ------------------------------------------------------------------
@@ -401,7 +447,7 @@ fn index_is_reused_while_only_dynamic_state_changes() {
 
     assert_eq!(builds(&state), 1);
     let src = &ui_state.tree[0];
-    assert_eq!(src.selection_state, "full");
+    assert_eq!(src.selection_state, SelectionState::Full);
     assert!(src.is_expanded && src.children_loaded);
     assert!(ui_state.tree[1].is_previewed);
     assert_eq!(ui_state.tree, expected_tree(&state));

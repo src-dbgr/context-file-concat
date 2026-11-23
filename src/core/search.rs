@@ -5,6 +5,146 @@ use super::{FileItem, SearchFilter, MAX_FILE_SIZE};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+/// The extension filter value that stands for "files without an extension".
+const NO_EXTENSION: &str = "no extension";
+
+/// The single definition of what it means for a path to match the filename query and
+/// the extension filter.
+///
+/// Everything that needs this decision (filtering the file list, highlighting matches
+/// in the tree, expanding the directories of matches) asks a `FileNameMatcher`, so the
+/// answers cannot drift apart. The matcher is normalised once on construction and can
+/// then be applied to any number of paths.
+///
+/// # Rules
+///
+/// **Filename query**
+/// - An empty query is *inactive*. It is not trimmed: a query of blanks is active and
+///   looks for blanks.
+/// - The query must be contained in the *file name* (the last path component), never in
+///   the directories leading to it.
+/// - File names that are not valid Unicode are compared in their lossy form (invalid
+///   sequences become `U+FFFD`), i.e. exactly as they are displayed.
+/// - Case-insensitive matching compares the Unicode lowercase forms of both sides.
+///
+/// **Extension filter**
+/// - An empty filter is *inactive*.
+/// - One leading dot of the filter is ignored (`.rs` equals `rs`).
+/// - A path *with* an extension (as defined by [`Path::extension`]) matches if the
+///   extension equals the filter, ignoring ASCII case. Only the last extension counts
+///   (`archive.tar.gz` has the extension `gz`).
+/// - A path *without* an extension matches only the filter `no extension` (in any ASCII
+///   case). This includes dotfiles such as `.gitignore`, whose name is not an extension.
+/// - An extension that is not valid Unicode cannot be named by a filter; such a path is
+///   treated like one without an extension.
+///
+/// The two criteria can be combined in two ways, depending on what the caller needs:
+/// [`matches_all`](Self::matches_all) to narrow a list down and
+/// [`matches_any`](Self::matches_any) to point out matches.
+#[derive(Debug, Clone)]
+pub struct FileNameMatcher {
+    name: Option<NameQuery>,
+    extension: Option<ExtensionFilter>,
+}
+
+/// An active filename query.
+#[derive(Debug, Clone)]
+enum NameQuery {
+    CaseSensitive(String),
+    /// Holds the lowercased query.
+    CaseInsensitive(String),
+}
+
+impl NameQuery {
+    fn matches(&self, path: &Path) -> bool {
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+        match self {
+            Self::CaseSensitive(query) => file_name.contains(query.as_str()),
+            Self::CaseInsensitive(query) => file_name.to_lowercase().contains(query.as_str()),
+        }
+    }
+}
+
+/// An active extension filter.
+#[derive(Debug, Clone)]
+struct ExtensionFilter {
+    /// The extension to look for, without the leading dot.
+    extension: String,
+    /// Whether paths without an extension match.
+    matches_missing_extension: bool,
+}
+
+impl ExtensionFilter {
+    fn matches(&self, path: &Path) -> bool {
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some(extension) => extension.eq_ignore_ascii_case(&self.extension),
+            None => self.matches_missing_extension,
+        }
+    }
+}
+
+impl FileNameMatcher {
+    /// Creates a matcher for the given filename query and extension filter.
+    pub fn new(query: &str, extension_filter: &str, case_sensitive: bool) -> Self {
+        let name = (!query.is_empty()).then(|| {
+            if case_sensitive {
+                NameQuery::CaseSensitive(query.to_string())
+            } else {
+                NameQuery::CaseInsensitive(query.to_lowercase())
+            }
+        });
+        let extension = (!extension_filter.is_empty()).then(|| ExtensionFilter {
+            extension: extension_filter
+                .strip_prefix('.')
+                .unwrap_or(extension_filter)
+                .to_string(),
+            matches_missing_extension: extension_filter.eq_ignore_ascii_case(NO_EXTENSION),
+        });
+        Self { name, extension }
+    }
+
+    /// `true` if a filename query or an extension filter is set.
+    pub fn is_active(&self) -> bool {
+        self.name.is_some() || self.extension.is_some()
+    }
+
+    /// `true` if the path satisfies *every* active criterion.
+    ///
+    /// This is the rule for narrowing a list down. Without an active criterion every
+    /// path matches.
+    pub fn matches_all(&self, path: &Path) -> bool {
+        let name_ok = match &self.name {
+            Some(name) => name.matches(path),
+            None => true,
+        };
+        let extension_ok = match &self.extension {
+            Some(extension) => extension.matches(path),
+            None => true,
+        };
+        name_ok && extension_ok
+    }
+
+    /// `true` if the path satisfies *at least one* active criterion.
+    ///
+    /// This is the rule for pointing out matches. Without an active criterion no path
+    /// matches.
+    pub fn matches_any(&self, path: &Path) -> bool {
+        self.name.as_ref().is_some_and(|name| name.matches(path))
+            || self
+                .extension
+                .as_ref()
+                .is_some_and(|extension| extension.matches(path))
+    }
+}
+
+impl From<&SearchFilter> for FileNameMatcher {
+    fn from(filter: &SearchFilter) -> Self {
+        Self::new(&filter.query, &filter.extension, filter.case_sensitive)
+    }
+}
 
 /// A utility struct for searching and filtering file lists.
 ///
@@ -12,58 +152,12 @@ use std::path::{Path, PathBuf};
 pub struct SearchEngine;
 
 impl SearchEngine {
-    /// Filters a slice of `FileItem`s based on the provided `SearchFilter`.
-    ///
-    /// This is the main entry point for applying dynamic UI filters (name, extension).
-    /// Ignore patterns are handled during the initial scan by the `scanner` module.
-    pub fn filter_files(files: &[FileItem], filter: &SearchFilter) -> Vec<FileItem> {
-        files
-            .par_iter()
-            .filter(|file| Self::matches_filter(file, filter))
-            .cloned()
-            .collect()
-    }
-
     /// Checks if a single `FileItem` matches the given filter criteria.
+    ///
+    /// Shorthand for [`FileNameMatcher::matches_all`]. To test many items against the
+    /// same filter, build the [`FileNameMatcher`] once instead.
     pub fn matches_filter(file: &FileItem, filter: &SearchFilter) -> bool {
-        if !filter.query.is_empty()
-            && !Self::matches_search_query(&file.path, &filter.query, filter.case_sensitive)
-        {
-            return false;
-        }
-
-        if !filter.extension.is_empty() && !Self::matches_extension(&file.path, &filter.extension) {
-            return false;
-        }
-
-        true
-    }
-
-    /// Checks if a path's filename contains the search query.
-    fn matches_search_query(path: &Path, query: &str, case_sensitive: bool) -> bool {
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-
-        if case_sensitive {
-            file_name.contains(query)
-        } else {
-            let query_lower = query.to_lowercase();
-            file_name.to_lowercase().contains(&query_lower)
-        }
-    }
-
-    /// Checks if a path's extension matches the extension filter.
-    fn matches_extension(path: &Path, extension_filter: &str) -> bool {
-        if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-            let filter = extension_filter
-                .strip_prefix('.')
-                .unwrap_or(extension_filter);
-            ext.eq_ignore_ascii_case(filter)
-        } else {
-            extension_filter.is_empty() || extension_filter.eq_ignore_ascii_case("no extension")
-        }
+        FileNameMatcher::from(filter).matches_all(&file.path)
     }
 
     /// Recursively removes directories from a list that do not contain any files.
@@ -133,11 +227,15 @@ impl SearchEngine {
 /// The query is normalised once on construction, so the same instance can be applied
 /// to any number of files. All methods perform blocking file I/O; async callers must
 /// run them on a blocking thread.
+///
+/// A search can be told to stop through a [cancellation flag](Self::with_cancel_flag).
 pub struct ContentSearch {
     /// The query, already lowercased if the search is case-insensitive.
     needle: String,
     case_sensitive: bool,
     max_file_size: u64,
+    /// Raised by whoever started the search once nobody waits for its result any more.
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl ContentSearch {
@@ -152,7 +250,17 @@ impl ContentSearch {
             needle,
             case_sensitive,
             max_file_size: MAX_FILE_SIZE,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Makes the search stop as soon as `cancel_flag` is raised.
+    ///
+    /// The flag is checked before every file, so a cancelled search finishes the files
+    /// it is reading at that moment and does not open any further one.
+    pub fn with_cancel_flag(mut self, cancel_flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = cancel_flag;
+        self
     }
 
     /// Overrides the size limit, so tests do not need to create huge files.
@@ -167,12 +275,29 @@ impl ContentSearch {
     /// Directories, binary files, files above the size limit and files that cannot be
     /// read are skipped silently. Text is decoded exactly as for the generated output,
     /// so files in a legacy encoding (e.g. Latin-1) are searched as well.
+    ///
+    /// If the search is cancelled, the result is incomplete (it holds the matches found
+    /// up to then) and must be discarded by the caller.
     pub fn matching_paths(&self, files: &[FileItem]) -> HashSet<PathBuf> {
+        self.matching_paths_by(files, |item| self.matches_file(item))
+    }
+
+    /// Collects the paths of the files accepted by `matches_file`, which is no longer
+    /// asked once the search has been cancelled.
+    fn matching_paths_by(
+        &self,
+        files: &[FileItem],
+        matches_file: impl Fn(&FileItem) -> bool + Sync,
+    ) -> HashSet<PathBuf> {
         files
             .par_iter()
-            .filter(|item| self.matches_file(item))
+            .filter(|item| !self.is_cancelled() && matches_file(item))
             .map(|item| item.path.clone())
             .collect()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::Relaxed)
     }
 
     fn matches_file(&self, item: &FileItem) -> bool {
@@ -346,131 +471,245 @@ mod tests {
         );
     }
 
-    fn file(path: &str) -> FileItem {
-        FileItem {
-            path: PathBuf::from(path),
-            is_directory: false,
-            is_binary: false,
-            size: 100,
-            depth: path.split('/').count(),
-            parent: PathBuf::from(path).parent().map(|p| p.to_path_buf()),
-        }
-    }
-
-    fn dir(path: &str) -> FileItem {
-        FileItem {
-            path: PathBuf::from(path),
-            is_directory: true,
-            is_binary: false,
-            size: 0,
-            depth: path.split('/').count(),
-            parent: PathBuf::from(path).parent().map(|p| p.to_path_buf()),
-        }
-    }
-
-    fn create_test_files() -> Vec<FileItem> {
-        vec![
-            dir("src"),
-            file("src/main.rs"),
-            file("src/lib.rs"),
-            dir("src/module"),
-            file("src/module/component.rs"),
-            dir("docs"),
-            file("docs/README.md"),
-            file("README.md"),
-            dir("target"),
-            file("target/app.exe"),
-        ]
-    }
-
     #[test]
-    fn test_filter_by_name_case_sensitive() {
-        let files = create_test_files();
-        let filter = SearchFilter {
-            query: "README".to_string(),
-            extension: String::new(),
-            case_sensitive: true,
-        };
-        let result = SearchEngine::filter_files(&files, &filter);
-        assert_eq!(result.len(), 2);
-        assert!(result
-            .iter()
-            .any(|f| f.path.to_str() == Some("docs/README.md")));
-        assert!(result.iter().any(|f| f.path.to_str() == Some("README.md")));
-    }
-
-    #[test]
-    fn test_filter_by_name_case_insensitive() {
-        let files = create_test_files();
-        let filter = SearchFilter {
-            query: "readme".to_string(),
-            extension: String::new(),
-            case_sensitive: false,
-        };
-        let result = SearchEngine::filter_files(&files, &filter);
-        assert_eq!(result.len(), 2);
-        assert!(result
-            .iter()
-            .any(|f| f.path.to_str() == Some("docs/README.md")));
-        assert!(result.iter().any(|f| f.path.to_str() == Some("README.md")));
-    }
-
-    #[test]
-    fn test_filter_by_extension() {
-        let files = create_test_files();
-        let filter = SearchFilter {
-            query: String::new(),
-            extension: "rs".to_string(),
-            case_sensitive: false,
-        };
-        let result = SearchEngine::filter_files(&files, &filter);
-        assert_eq!(result.len(), 3);
-        assert!(result
-            .iter()
-            .any(|f| f.path.to_str() == Some("src/main.rs")));
-        assert!(result.iter().any(|f| f.path.to_str() == Some("src/lib.rs")));
-        assert!(result
-            .iter()
-            .any(|f| f.path.to_str() == Some("src/module/component.rs")));
-    }
-
-    #[test]
-    fn test_filter_by_name_and_extension() {
-        let files = create_test_files();
-        let filter = SearchFilter {
-            query: "main".to_string(),
-            extension: "rs".to_string(),
-            case_sensitive: false,
-        };
-        let result = SearchEngine::filter_files(&files, &filter);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].path.to_str(), Some("src/main.rs"));
-    }
-
-    #[test]
-    fn test_filter_by_no_extension() {
+    fn test_content_search_that_is_cancelled_up_front_reads_nothing() {
+        let dir = tempdir().unwrap();
         let files = vec![
-            file("src/main.rs"),
-            file("Makefile"),
-            file(".config"),
-            file("archive.tar.gz"),
+            write_text_file(dir.path(), "a.txt", "needle"),
+            write_text_file(dir.path(), "b.txt", "needle"),
         ];
-        let filter = SearchFilter {
-            query: String::new(),
-            extension: "no extension".to_string(),
-            case_sensitive: false,
-        };
+        let cancel_flag = Arc::new(AtomicBool::new(true));
 
-        let result = SearchEngine::filter_files(&files, &filter);
-        let result_paths: std::collections::HashSet<_> =
-            result.iter().map(|f| f.path.to_str().unwrap()).collect();
+        let result = ContentSearch::new("needle", true)
+            .with_cancel_flag(cancel_flag)
+            .matching_paths(&files);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_content_search_with_a_flag_that_is_never_raised_finds_everything() {
+        let dir = tempdir().unwrap();
+        let files = vec![
+            write_text_file(dir.path(), "a.txt", "needle"),
+            write_text_file(dir.path(), "b.txt", "nothing"),
+        ];
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let result = ContentSearch::new("needle", true)
+            .with_cancel_flag(cancel_flag)
+            .matching_paths(&files);
+
+        assert_eq!(result, HashSet::from([files[0].path.clone()]));
+    }
+
+    #[test]
+    fn test_cancelled_content_search_stops_between_files() {
+        use std::sync::atomic::AtomicUsize;
+
+        let files: Vec<FileItem> = (0..200)
+            .map(|i| FileItem {
+                path: PathBuf::from(format!("/virtual/{i}.txt")),
+                ..Default::default()
+            })
+            .collect();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let search = ContentSearch::new("needle", true).with_cancel_flag(cancel_flag.clone());
+        let files_looked_at = AtomicUsize::new(0);
+
+        // One worker thread makes "between files" deterministic: the search is
+        // superseded while it looks at the third file.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let result = pool.install(|| {
+            search.matching_paths_by(&files, |_| {
+                if files_looked_at.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+                    cancel_flag.store(true, Ordering::SeqCst);
+                }
+                true
+            })
+        });
 
         assert_eq!(
-            result.len(),
-            2,
-            "Should find the two files without the file ending"
+            files_looked_at.load(Ordering::SeqCst),
+            3,
+            "No file may be looked at after the cancellation"
         );
-        assert!(result_paths.contains("Makefile"));
-        assert!(result_paths.contains(".config"));
+        assert_eq!(result.len(), 3, "The file being read is still finished");
+    }
+
+    // --- FileNameMatcher -----------------------------------------------------------
+
+    /// How a query/filter combination is expected to treat one path.
+    struct Case {
+        query: &'static str,
+        extension: &'static str,
+        case_sensitive: bool,
+        path: &'static str,
+        /// Expected result of `matches_all` (filtering).
+        all: bool,
+        /// Expected result of `matches_any` (highlighting).
+        any: bool,
+    }
+
+    const fn case(
+        query: &'static str,
+        extension: &'static str,
+        case_sensitive: bool,
+        path: &'static str,
+        all: bool,
+        any: bool,
+    ) -> Case {
+        Case {
+            query,
+            extension,
+            case_sensitive,
+            path,
+            all,
+            any,
+        }
+    }
+
+    #[rustfmt::skip]
+    const CASES: &[Case] = &[
+        // Nothing active: filtering lets everything through, nothing is pointed out.
+        case("", "", false, "src/main.rs", true, false),
+        case("", "", true, "Makefile", true, false),
+
+        // Filename query: contained in the file name.
+        case("main", "", false, "src/main.rs", true, true),
+        case("ain.r", "", false, "src/main.rs", true, true),
+        case("lib", "", false, "src/main.rs", false, false),
+        // ... but never in the directories leading to it.
+        case("src", "", false, "src/main.rs", false, false),
+        case("src", "", false, "src", true, true),
+
+        // Case sensitivity of the query.
+        case("README", "", true, "docs/README.md", true, true),
+        case("readme", "", true, "docs/README.md", false, false),
+        case("readme", "", false, "docs/README.md", true, true),
+        case("README", "", false, "docs/readme.md", true, true),
+        // Case-insensitive means Unicode lowercase, not just ASCII.
+        case("ÄRGER", "", false, "ärger.txt", true, true),
+        case("ÄRGER", "", true, "ärger.txt", false, false),
+
+        // The query is not trimmed.
+        case(" ", "", false, "my file.txt", true, true),
+        case(" ", "", false, "myfile.txt", false, false),
+
+        // Extension filter: equal to the extension, ignoring ASCII case.
+        case("", "rs", false, "src/main.rs", true, true),
+        case("", "RS", false, "src/main.rs", true, true),
+        case("", "rs", false, "src/MAIN.RS", true, true),
+        // The case-sensitivity setting only concerns the query.
+        case("", "RS", true, "src/main.rs", true, true),
+        case("", "rs", false, "src/main.rss", false, false),
+        case("", "r", false, "src/main.rs", false, false),
+        // One leading dot of the filter is ignored.
+        case("", ".rs", false, "src/main.rs", true, true),
+        case("", "..rs", false, "src/main.rs", false, false),
+        // Only the last extension counts.
+        case("", "gz", false, "archive.tar.gz", true, true),
+        case("", "tar", false, "archive.tar.gz", false, false),
+        case("", "tar.gz", false, "archive.tar.gz", false, false),
+
+        // Files without an extension.
+        case("", "no extension", false, "Makefile", true, true),
+        case("", "No Extension", false, "Makefile", true, true),
+        case("", "NO EXTENSION", true, "Makefile", true, true),
+        case("", "no extension", false, ".gitignore", true, true),
+        case("", "no extension", false, "src/main.rs", false, false),
+        case("", "no extension", false, "archive.tar.gz", false, false),
+        case("", "rs", false, "Makefile", false, false),
+        case("", "gitignore", false, ".gitignore", false, false),
+        // The special value is not trimmed and takes no leading dot.
+        case("", " no extension", false, "Makefile", false, false),
+        case("", ".no extension", false, "Makefile", false, false),
+
+        // Both active: filtering needs both, highlighting needs one.
+        case("main", "rs", false, "src/main.rs", true, true),
+        case("main", "rs", false, "src/main.py", false, true),
+        case("main", "rs", false, "src/lib.rs", false, true),
+        case("main", "rs", false, "docs/README.md", false, false),
+        case("make", "no extension", false, "Makefile", true, true),
+        case("make", "no extension", true, "Makefile", false, true),
+    ];
+
+    #[test]
+    fn test_file_name_matcher_rules() {
+        for case in CASES {
+            let matcher = FileNameMatcher::new(case.query, case.extension, case.case_sensitive);
+            let path = Path::new(case.path);
+            let context = format!(
+                "query {:?}, extension {:?}, case_sensitive {}, path {:?}",
+                case.query, case.extension, case.case_sensitive, case.path
+            );
+
+            assert_eq!(
+                matcher.matches_all(path),
+                case.all,
+                "matches_all: {context}"
+            );
+            assert_eq!(
+                matcher.matches_any(path),
+                case.any,
+                "matches_any: {context}"
+            );
+            assert_eq!(
+                matcher.is_active(),
+                !case.query.is_empty() || !case.extension.is_empty(),
+                "is_active: {context}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_matches_filter_applies_the_same_rules_as_the_matcher() {
+        for case in CASES {
+            let filter = SearchFilter {
+                query: case.query.to_string(),
+                extension: case.extension.to_string(),
+                case_sensitive: case.case_sensitive,
+            };
+            let item = FileItem {
+                path: PathBuf::from(case.path),
+                ..Default::default()
+            };
+
+            assert_eq!(
+                SearchEngine::matches_filter(&item, &filter),
+                case.all,
+                "query {:?}, extension {:?}, path {:?}",
+                case.query,
+                case.extension,
+                case.path
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_name_matcher_compares_non_unicode_names_in_their_lossy_form() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // "caf\xe9.txt": Latin-1 bytes, not valid UTF-8. Displayed as "caf\u{fffd}.txt".
+        let latin1_name = Path::new(OsStr::from_bytes(b"dir/caf\xe9.txt"));
+        // "data.\xff": the extension itself is not valid UTF-8.
+        let broken_extension = Path::new(OsStr::from_bytes(b"dir/data.\xff"));
+
+        let by_name = |query: &str| FileNameMatcher::new(query, "", false);
+        assert!(by_name("caf").matches_all(latin1_name));
+        assert!(by_name("CAF").matches_any(latin1_name));
+        assert!(by_name("\u{fffd}.txt").matches_all(latin1_name));
+        assert!(!by_name("café").matches_all(latin1_name));
+
+        let by_extension = |filter: &str| FileNameMatcher::new("", filter, false);
+        assert!(by_extension("txt").matches_all(latin1_name));
+        // An extension that is not Unicode cannot be named; it counts as missing.
+        assert!(by_extension("no extension").matches_all(broken_extension));
+        assert!(!by_extension("\u{fffd}").matches_all(broken_extension));
     }
 }

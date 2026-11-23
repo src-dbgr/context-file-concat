@@ -4,6 +4,7 @@
 use super::reference::{self, BuildTreeArgs};
 use super::{auto_expand_for_matches, generate_ui_state, TreeNode, UiState};
 use crate::app::filtering;
+use crate::app::selection::SelectionState;
 use crate::app::state::AppState;
 use crate::config::AppConfig;
 use crate::core::FileItem;
@@ -129,14 +130,14 @@ fn collapsed_directory_reports_selection_of_its_hidden_descendants() {
         let ui_state = generate_ui_state(state);
         let src = node(&ui_state, "/root/src");
         assert!(src.children.is_empty(), "src must stay collapsed");
-        src.selection_state.clone()
+        src.selection_state
     };
 
-    assert_eq!(selection_of_src(&state), "none");
+    assert_eq!(selection_of_src(&state), SelectionState::None);
 
     // A file two levels below the collapsed directory.
     select(&mut state, &["/root/src/core/a.rs"]);
-    assert_eq!(selection_of_src(&state), "partial");
+    assert_eq!(selection_of_src(&state), SelectionState::Partial);
 
     select(
         &mut state,
@@ -146,14 +147,14 @@ fn collapsed_directory_reports_selection_of_its_hidden_descendants() {
             "/root/src/main.rs",
         ],
     );
-    assert_eq!(selection_of_src(&state), "full");
+    assert_eq!(selection_of_src(&state), SelectionState::Full);
 
     // Selections elsewhere do not leak in.
     select(&mut state, &["/root/docs/guide.md"]);
-    assert_eq!(selection_of_src(&state), "none");
+    assert_eq!(selection_of_src(&state), SelectionState::None);
     assert_eq!(
         node(&generate_ui_state(&state), "/root/docs").selection_state,
-        "full"
+        SelectionState::Full
     );
 }
 
@@ -165,11 +166,17 @@ fn collapsed_directory_inside_an_expanded_one_keeps_its_selection_state() {
 
     let ui_state = generate_ui_state(&state);
 
-    assert_eq!(node(&ui_state, "/root/src").selection_state, "partial");
+    assert_eq!(
+        node(&ui_state, "/root/src").selection_state,
+        SelectionState::Partial
+    );
     let core = node(&ui_state, "/root/src/core");
-    assert_eq!(core.selection_state, "partial");
+    assert_eq!(core.selection_state, SelectionState::Partial);
     assert!(core.children.is_empty() && core.has_children);
-    assert_eq!(node(&ui_state, "/root/src/main.rs").selection_state, "none");
+    assert_eq!(
+        node(&ui_state, "/root/src/main.rs").selection_state,
+        SelectionState::None
+    );
 }
 
 #[test]

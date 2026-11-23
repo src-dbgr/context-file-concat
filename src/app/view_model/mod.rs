@@ -10,8 +10,8 @@
 //! (`AppState::expanded_dirs` is the single source of truth for expansion). Totals that
 //! would otherwise require the whole tree are sent as counters.
 
+mod status;
 mod tree_builder;
-mod tree_index;
 
 #[cfg(test)]
 mod cache_tests;
@@ -22,16 +22,15 @@ mod pruning_tests;
 #[cfg(test)]
 mod reference;
 
-pub use tree_index::TreeIndexCache;
-
+use crate::app::selection::SelectionState;
 use crate::app::state::AppState;
+use crate::app::tree_index::TreeCounts;
 use crate::config::AppConfig;
-use crate::core::FileItem;
+use crate::core::{FileItem, FileNameMatcher};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tree_builder::{build_tree_nodes, TreeView};
-use tree_index::TreeCounts;
 
 /// A serializable representation of the application state for the UI.
 #[derive(Serialize, Clone, Debug)]
@@ -79,7 +78,7 @@ pub struct TreeNode {
     /// Whether the directory has children in the filtered list, even if they are not
     /// part of `children` because the directory is collapsed. Always `false` for files.
     pub has_children: bool,
-    pub selection_state: String,
+    pub selection_state: SelectionState,
     pub is_expanded: bool,
     pub is_match: bool,
     pub is_previewed: bool,
@@ -98,17 +97,6 @@ struct TreeSnapshot {
 pub fn generate_ui_state(state: &AppState) -> UiState {
     let tree = build_tree_snapshot(state);
 
-    let status_message = if state.is_scanning() {
-        format!(
-            "Scanning... {} files processed. {} large files skipped ({})",
-            state.scan_progress.files_scanned,
-            state.scan_progress.large_files_skipped,
-            state.scan_progress.current_scanning_path
-        )
-    } else {
-        state.scan_progress.current_scanning_path.clone()
-    };
-
     UiState {
         config: state.config.clone(),
         current_path: state.current_path.clone(),
@@ -121,12 +109,12 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
         is_scanning: state.is_scanning(),
         is_generating: state.is_generating(),
         is_fully_scanned: state.is_fully_scanned,
-        status_message,
+        status_message: status::status_message(state),
         search_query: state.search_query.clone(),
         extension_filter: state.extension_filter.clone(),
         content_search_query: state.content_search_query.clone(),
         current_config_filename: state.current_config_filename.clone(),
-        scan_progress: state.scan_progress.clone(),
+        scan_progress: status::scan_progress_for_ui(state),
         active_ignore_patterns: state.active_ignore_patterns.clone(),
         patterns_need_rescan: state.patterns_need_rescan,
     }
@@ -145,25 +133,28 @@ fn build_tree_snapshot(state: &AppState) -> TreeSnapshot {
     }
 
     let items = state.filtered_file_list();
-    let index = state.tree_index_cache().get_or_build(
-        state.filtered_revision(),
-        Path::new(&state.current_path),
-        items,
-    );
+    let index = state.file_tree();
     let view = TreeView {
         selected: &state.selected_files,
         expanded: &state.expanded_dirs,
         loaded_dirs: &state.loaded_dirs,
         content_search_matches: &state.content_search_results,
-        filename_query: &state.search_query,
-        extension_filter: &state.extension_filter,
-        case_sensitive: state.config.case_sensitive_search,
+        name_matcher: &name_matcher(state),
         previewed_path: state.previewed_file_path.as_deref(),
     };
     TreeSnapshot {
         nodes: build_tree_nodes(items, &index, &view),
         counts: index.counts(),
     }
+}
+
+/// The matcher for the filename query and the extension filter of the state.
+fn name_matcher(state: &AppState) -> FileNameMatcher {
+    FileNameMatcher::new(
+        &state.search_query,
+        &state.extension_filter,
+        state.config.case_sensitive_search,
+    )
 }
 
 /// Expands the parent directories of files that match the current search criteria.
@@ -173,36 +164,14 @@ fn build_tree_snapshot(state: &AppState) -> TreeSnapshot {
 /// ensuring that search results are visible in the file tree.
 pub fn auto_expand_for_matches(state: &mut AppState) {
     let root_path = PathBuf::from(&state.current_path);
-    let search_query_lowercase = state.search_query.to_lowercase();
+    let name_matcher = name_matcher(state);
     let matches: Vec<PathBuf> = state
         .filtered_file_list()
         .iter()
         .filter(|item| {
-            if item.is_directory {
-                return false;
-            }
-
-            let file_name = item.path.file_name().unwrap_or_default().to_string_lossy();
-
-            let name_match = if !state.search_query.is_empty() {
-                if state.config.case_sensitive_search {
-                    file_name.contains(&state.search_query)
-                } else {
-                    file_name.to_lowercase().contains(&search_query_lowercase)
-                }
-            } else {
-                false
-            };
-
-            let extension_match = if !state.extension_filter.is_empty() {
-                matches_extension(&item.path, &state.extension_filter)
-            } else {
-                false
-            };
-
-            let content_match = state.content_search_results.contains(&item.path);
-
-            name_match || extension_match || content_match
+            !item.is_directory
+                && (name_matcher.matches_any(&item.path)
+                    || state.content_search_results.contains(&item.path))
         })
         .map(|item| item.path.clone())
         .collect();
@@ -217,47 +186,6 @@ pub fn auto_expand_for_matches(state: &mut AppState) {
             }
             current = parent.parent();
         }
-    }
-}
-
-/// Checks if a path's extension matches the extension filter.
-fn matches_extension(path: &Path, extension_filter: &str) -> bool {
-    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-        let filter = extension_filter
-            .strip_prefix('.')
-            .unwrap_or(extension_filter);
-        ext.eq_ignore_ascii_case(filter)
-    } else {
-        extension_filter.is_empty() || extension_filter == "no extension"
-    }
-}
-
-/// Determines the selection state of a directory ('none', 'partial', 'full').
-pub fn get_directory_selection_state(
-    dir_path: &Path,
-    all_items: &[FileItem],
-    selected_files: &HashSet<PathBuf>,
-) -> String {
-    let child_files: Vec<_> = all_items
-        .iter()
-        .filter(|i| !i.is_directory && i.path.starts_with(dir_path))
-        .collect();
-
-    if child_files.is_empty() {
-        return "none".to_string();
-    }
-
-    let selected_count = child_files
-        .iter()
-        .filter(|f| selected_files.contains(&f.path))
-        .count();
-
-    if selected_count == 0 {
-        "none".to_string()
-    } else if selected_count == child_files.len() {
-        "full".to_string()
-    } else {
-        "partial".to_string()
     }
 }
 
@@ -370,6 +298,31 @@ mod tests {
         assert_eq!(src_node.children[0].name, "main.rs");
     }
 
+    /// Filtering, highlighting and auto-expansion share one matching rule, so a filter
+    /// spelled in a way the file list accepts also highlights and expands its matches.
+    #[test]
+    fn test_filter_highlight_and_auto_expand_agree_on_matches() {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            create_test_file_item("/project/build", true),
+            create_test_file_item("/project/build/Makefile", false),
+            create_test_file_item("/project/build/main.rs", false),
+        ];
+        state.extension_filter = "No Extension".to_string();
+
+        crate::app::filtering::apply_filters(&mut state);
+        auto_expand_for_matches(&mut state);
+        let ui_state = generate_ui_state(&state);
+
+        let build = &ui_state.tree[0];
+        assert!(build.is_expanded, "The directory of the match is expanded");
+        assert_eq!(build.children.len(), 1, "Only the match is listed");
+        assert_eq!(build.children[0].name, "Makefile");
+        assert!(build.children[0].is_match, "The match is highlighted");
+    }
+
     #[test]
     fn test_stats_and_node_properties() {
         let mut state = AppState::default();
@@ -399,6 +352,6 @@ mod tests {
             .find(|n| n.path == main_rs_path)
             .unwrap();
         assert!(main_rs_node.is_previewed);
-        assert_eq!(main_rs_node.selection_state, "full");
+        assert_eq!(main_rs_node.selection_state, SelectionState::Full);
     }
 }

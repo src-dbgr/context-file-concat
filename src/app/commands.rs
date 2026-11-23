@@ -373,30 +373,29 @@ pub fn toggle_directory_selection<P: EventProxy>(
     if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
         with_state_and_notify(&state, &proxy, |s| {
             let dir_path = PathBuf::from(path_str);
-            let selection_state = super::view_model::get_directory_selection_state(
-                &dir_path,
+            // Important: only operate on the currently *visible* files in that directory.
+            // The same subtree determines the checkbox state the UI shows for it.
+            let Some(subtree) = super::selection::subtree_selection(
                 s.filtered_file_list(),
+                &s.file_tree(),
                 &s.selected_files,
-            );
+                &dir_path,
+            ) else {
+                tracing::warn!(
+                    "Cannot toggle the selection of unlisted path {:?}",
+                    dir_path
+                );
+                return;
+            };
 
-            // Important: only operate on the currently *visible* files in that directory
-            let files_in_dir: Vec<PathBuf> = s
-                .filtered_file_list()
-                .iter()
-                .filter(|item| !item.is_directory && item.path.starts_with(&dir_path))
-                .map(|item| item.path.clone())
-                .collect();
-
-            if selection_state == "full" {
+            if subtree.state == super::selection::SelectionState::Full {
                 // If fully selected, deselect all
-                for file in files_in_dir {
-                    s.selected_files.remove(&file);
+                for file in &subtree.files {
+                    s.selected_files.remove(file);
                 }
             } else {
                 // If partially or not selected, select all
-                for file in files_in_dir {
-                    s.selected_files.insert(file);
-                }
+                s.selected_files.extend(subtree.files);
             }
         });
     } else {

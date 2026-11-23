@@ -10,9 +10,11 @@ pub mod file_dialog;
 pub mod filtering;
 mod helpers;
 pub mod proxy;
+pub mod selection;
 pub mod state;
 pub mod tasks;
 pub mod transport;
+pub mod tree_index;
 pub mod view_model;
 pub mod window_geometry;
 

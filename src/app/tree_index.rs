@@ -1,9 +1,14 @@
 //! The structural index of the file tree and its revision-keyed cache.
 //!
 //! The *structure* of the tree (which item is a child of which directory, and in which
-//! order siblings are displayed) depends only on the filtered file list and the root
-//! path. It is therefore computed once per filtered list and reused for every UI update
-//! that merely changes dynamic properties (selection, expansion, preview, ...).
+//! order siblings are listed) depends only on the filtered file list and the root
+//! path. It is therefore computed once per filtered list and reused for everything that
+//! merely changes dynamic properties (selection, expansion, preview, ...).
+//!
+//! This module is deliberately neutral: it knows the file list, but neither the
+//! application state nor the view model. [`AppState`](crate::app::state::AppState) owns
+//! the cache next to the list it is derived from; the view model and the commands that
+//! work on subtrees are its consumers.
 //!
 //! Items are referred to by their position in the list the index was built from, so an
 //! index must only ever be used together with that exact list. [`TreeIndexCache`]
@@ -107,6 +112,38 @@ impl TreeIndex {
     pub(crate) fn name(&self, index: usize) -> &str {
         &self.names[index]
     }
+
+    /// The position of the item that represents `path` in `items`, if it is listed.
+    ///
+    /// `items` must be the list the index was built from. This is a linear search; the
+    /// index does not keep a second copy of every path just for the rare lookups.
+    pub(crate) fn position(&self, items: &[FileItem], path: &Path) -> Option<usize> {
+        debug_assert_eq!(self.len(), items.len());
+        // The last occurrence of a path is the one the tree is built from.
+        items.iter().rposition(|item| item.path == path)
+    }
+
+    /// The files at or below the given item, in display order.
+    ///
+    /// For a file this is the file itself. For a directory these are the files of its
+    /// subtree, i.e. exactly the files that make up the directory's selection state.
+    pub(crate) fn files_in_subtree(&self, items: &[FileItem], index: usize) -> Vec<usize> {
+        debug_assert_eq!(self.len(), items.len());
+        if !items[index].is_directory {
+            return vec![index];
+        }
+
+        let mut files = Vec::new();
+        let mut pending: Vec<usize> = self.children[index].iter().rev().copied().collect();
+        while let Some(current) = pending.pop() {
+            if items[current].is_directory {
+                pending.extend(self.children[current].iter().rev());
+            } else {
+                files.push(current);
+            }
+        }
+        files
+    }
 }
 
 /// Counts the nodes reachable from `roots`, descending into directories only.
@@ -145,10 +182,10 @@ fn display_order(items: &[FileItem], names: &[String], a: usize, b: usize) -> Or
 /// Remembers the [`TreeIndex`] of the most recent filtered file list.
 ///
 /// The cache is keyed by the revision of the filtered list and the root path; asking for
-/// any other key rebuilds the index. Interior mutability keeps it usable from the
-/// read-only view model.
+/// any other key rebuilds the index. Interior mutability keeps it usable through a
+/// shared reference to its owner.
 #[derive(Debug, Default)]
-pub struct TreeIndexCache {
+pub(crate) struct TreeIndexCache {
     slot: Mutex<Option<CachedIndex>>,
     #[cfg(test)]
     builds: std::sync::atomic::AtomicUsize,
@@ -268,6 +305,52 @@ mod tests {
             TreeIndex::build(&[], Path::new("/r")).counts(),
             TreeCounts::default()
         );
+    }
+
+    #[test]
+    fn position_finds_the_last_occurrence_of_a_listed_path() {
+        let items = vec![
+            item("/r/a", true),
+            item("/r/a/f.rs", false),
+            item("/r/a", true),
+        ];
+        let index = TreeIndex::build(&items, Path::new("/r"));
+
+        assert_eq!(index.position(&items, Path::new("/r/a")), Some(2));
+        assert_eq!(index.position(&items, Path::new("/r/a/f.rs")), Some(1));
+        assert_eq!(index.position(&items, Path::new("/r")), None);
+        assert_eq!(index.position(&items, Path::new("/r/unlisted")), None);
+    }
+
+    #[test]
+    fn files_in_subtree_lists_all_nested_files_in_display_order() {
+        let items = vec![
+            item("/r/a", true),
+            item("/r/a/z.rs", false),
+            item("/r/a/deep", true),
+            item("/r/a/deep/f.rs", false),
+            item("/r/a/empty", true),
+            item("/r/a/b.rs", false),
+            item("/r/other.rs", false),
+            // Not part of the tree: its parent is not listed.
+            item("/r/a/missing/orphan.rs", false),
+        ];
+        let index = TreeIndex::build(&items, Path::new("/r"));
+        let paths = |indices: Vec<usize>| -> Vec<&str> {
+            indices
+                .into_iter()
+                .map(|i| items[i].path.to_str().unwrap())
+                .collect()
+        };
+
+        assert_eq!(
+            paths(index.files_in_subtree(&items, 0)),
+            ["/r/a/deep/f.rs", "/r/a/b.rs", "/r/a/z.rs"]
+        );
+        assert_eq!(paths(index.files_in_subtree(&items, 2)), ["/r/a/deep/f.rs"]);
+        assert!(index.files_in_subtree(&items, 4).is_empty());
+        // A file is its own subtree.
+        assert_eq!(paths(index.files_in_subtree(&items, 6)), ["/r/other.rs"]);
     }
 
     #[test]
