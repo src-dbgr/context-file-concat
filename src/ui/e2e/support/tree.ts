@@ -212,3 +212,22 @@ export async function setHostLatency(
     ).__e2e.host.setLatency(ms);
   }, milliseconds);
 }
+
+type HeldHost = {
+  __e2e: { host: { hold: () => void; release: () => void } };
+};
+
+/**
+ * Makes the stand-in host keep back its answers until `releaseHost`. What a
+ * test does in between happens before any answer, however long it takes.
+ */
+export async function holdHost(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as HeldHost).__e2e.host.hold());
+}
+
+/** Delivers the answers the stand-in host has kept back since `holdHost`. */
+export async function releaseHost(page: Page): Promise<void> {
+  await page.evaluate(() =>
+    (window as unknown as HeldHost).__e2e.host.release(),
+  );
+}
