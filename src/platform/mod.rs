@@ -5,8 +5,8 @@
 #[cfg(target_os = "macos")]
 pub mod macos;
 
-// The origin of the UI and the check of where an IPC message comes from apply to
-// every build.
+// The origin of the UI and the gate for IPC messages apply to every build.
+pub mod ipc;
 pub mod origin;
 
 // These policies are only wired up for the embedded UI (release builds); the dev

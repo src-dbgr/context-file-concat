@@ -838,17 +838,24 @@ pub fn export_config<P: EventProxy, D: DialogService + ?Sized>(
     proxy: P,
     state: SharedState,
 ) {
-    if let Some(path) = dialog.export_config_path() {
-        let settings = shared_settings(&state);
-        let result = config::settings::export_config(&settings, &path).is_ok();
-        proxy.send_event(UserEvent::ConfigExported(result));
-    }
+    export_config_with(dialog, proxy, state, config::settings::export_config);
 }
 
-/// A copy of the shareable settings as they are right now. The state is locked for
-/// the copy only.
-fn shared_settings(state: &SharedState) -> config::SharedConfig {
-    config::SharedConfig::from(&state.lock().config)
+/// [`export_config`] with the function that writes the file as a parameter. `write`
+/// is called without the state lock.
+fn export_config_with<P: EventProxy, D: DialogService + ?Sized>(
+    dialog: &D,
+    proxy: P,
+    state: SharedState,
+    write: impl FnOnce(&config::SharedConfig, &Path) -> anyhow::Result<()>,
+) {
+    if let Some(path) = dialog.export_config_path() {
+        // The guard is a temporary of this statement: the lock is released before
+        // the file is written.
+        let settings = config::SharedConfig::from(&state.lock().config);
+        let result = write(&settings, &path).is_ok();
+        proxy.send_event(UserEvent::ConfigExported(result));
+    }
 }
 
 #[cfg(test)]
@@ -2549,18 +2556,51 @@ mod tests {
         assert_geometry_is_kept(&config);
     }
 
-    /// The file is written without the state lock: a state that is in use while the
-    /// export writes does not wait for the disk, and the export does not wait for it.
+    /// The file is written without the state lock: while the export writes, the state
+    /// can be locked by anybody else, and what is written is the copy taken before.
     #[tokio::test]
-    async fn test_export_config_copies_the_settings_under_the_lock_only() {
-        let harness = TestHarness::new();
+    async fn test_export_config_writes_without_holding_the_state_lock() {
+        let mut harness = TestHarness::new();
+        let save_path = harness.root_path.join("exported.json");
+        harness.dialog.set_save_file(Some(save_path.clone()));
         harness.state.lock().config.output_filename = "before.txt".to_string();
+        let observed_state = harness.state.clone();
+        let mut written = None;
 
-        let settings = shared_settings(&harness.state);
+        export_config_with(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+            |settings, path| {
+                // The lock is free while the file is written ...
+                let mut state = observed_state
+                    .try_lock()
+                    .expect("the state lock must not be held during the write");
+                // ... and an edit made meanwhile does not reach the file.
+                state.config.output_filename = "meanwhile.txt".to_string();
+                written = Some((settings.clone(), path.to_path_buf()));
+                Ok(())
+            },
+        );
 
-        // The lock is free again, and the copy does not follow later edits.
-        harness.state.lock().config.output_filename = "after.txt".to_string();
+        let (settings, path) = written.expect("the file is written");
         assert_eq!(settings.output_filename, "before.txt");
+        assert_eq!(path, save_path);
+        assert!(matches!(
+            harness.get_next_event().await,
+            Some(UserEvent::ConfigExported(true))
+        ));
+    }
+
+    /// The seam of the test above sees a held lock: it would fail if the export wrote
+    /// under the lock.
+    #[test]
+    fn test_a_held_state_lock_is_observable() {
+        let state = SharedState::new(AppState::default());
+        let guard = state.lock();
+        assert!(state.try_lock().is_none());
+        drop(guard);
+        assert!(state.try_lock().is_some());
     }
 
     #[tokio::test]

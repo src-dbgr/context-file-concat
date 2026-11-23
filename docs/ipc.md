@@ -205,7 +205,7 @@ Whether a file is text or binary is decided by one rule (`is_binary` in `src/uti
 - A file is binary if its extension names a format that is certainly binary: images (not SVG), audio and video, archives and packages, executables and other compiler output (`wasm` among them), PDF and the zipped office formats, databases, fonts. The case of the extension does not matter.
 - Every other file is what its content says: binary if its first kilobyte holds a NUL byte or, where it is not valid UTF-8, more than 5 % control characters; text otherwise. An empty file is text.
 
-An extension never makes a file text, and extensions that are merely often binary (`dat`, `tmp`, `bak`, `cache`, `d`, `snap`, ...) are left to the content.
+An extension never makes a file text, and extensions that are merely often binary (`dat`, `tmp`, `bak`, `cache`, `d`, `snap`, `raw`, ...) are left to the content. A symbolic link is judged by the name it is listed under and the content of the file it points to; a link that leads to no file is not binary (its preview and its block in the output report it as unreadable).
 
 The text of a file is decoded by one rule as well (`decode_text` in `src/core/file_handler.rs`), for the file preview (`showPreviewContent`), the generated output (`showGeneratedContent`) and the content search:
 
@@ -358,7 +358,7 @@ There is no optimistic update: a row changes when the snapshot arrives. Snapshot
 
 ## Transport notes
 
-The host takes commands from the UI's own origin only. wry reports the URL of the document a message was posted from; a message from any other document (`about:blank`, a `data:` or `blob:` document, a web page) is logged and dropped before it is parsed (`AppOrigin::is_own_page` in `src/platform/origin.rs`). The origin is `cfc://index.html` in a release build (`http://cfc.index.html` on Windows, where wry rewrites custom schemes) and the Vite dev server `http://localhost:1420` in a debug build. See [Security of the WebView](./architecture.md#security-of-the-webview).
+The host takes commands from the UI's own origin only. wry reports the URL of the document a message was posted from; a message from any other document (`about:blank`, a `data:` or `blob:` document, a web page) is logged and dropped before it is parsed (`accepted_message` in `src/platform/ipc.rs`, decided by `AppOrigin::is_own_page`). The origin is `cfc://index.html` in a release build (`http://cfc.index.html` on Windows, where wry rewrites custom schemes) and the Vite dev server `http://localhost:1420` in a debug build. See [Security of the WebView](./architecture.md#security-of-the-webview).
 
 The host serializes each `UserEvent` on the UI thread and evaluates the resulting `window.*` call in the WebView. An event that cannot be serialized is logged and skipped; no call is made for it. Consecutive undelivered state updates are coalesced to the latest one; the order relative to all other events is preserved (`src/app/transport.rs`).
 

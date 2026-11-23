@@ -131,15 +131,10 @@ mod tests {
         }
     }
 
-    /// `script-src` allows no inline script, so the page must not rely on one: every
-    /// `<script>` of `index.html` has to load a file, and there are no inline event
-    /// handlers.
-    #[test]
-    fn index_html_has_no_inline_script() {
-        let html =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui/index.html"))
-                .expect("src/ui/index.html");
-
+    /// Fails if `html` relies on something `script-src` does not allow: every
+    /// `<script>` has to load a file, and there are no inline event handlers.
+    #[track_caller]
+    fn assert_no_inline_script(html: &str) {
         let scripts: Vec<&str> = html
             .match_indices("<script")
             .map(|(start, _)| {
@@ -156,5 +151,47 @@ mod tests {
         }
         // A policy in the markup would only add a second place to maintain.
         assert!(!html.contains("Content-Security-Policy"));
+    }
+
+    const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui");
+
+    /// `script-src` allows no inline script, so the page must not rely on one.
+    #[test]
+    fn index_html_has_no_inline_script() {
+        let html = std::fs::read_to_string(format!("{UI_DIR}/index.html")).expect("index.html");
+        assert_no_inline_script(&html);
+    }
+
+    /// The page as the release build embeds it: the bundler must not have turned
+    /// anything into an inline script either. The built UI is not part of the
+    /// repository; without it there is nothing to check.
+    #[test]
+    fn built_index_html_has_no_inline_script() {
+        let built = format!("{UI_DIR}/dist/index.html");
+        let Ok(html) = std::fs::read_to_string(&built) else {
+            eprintln!("SKIPPED: {built} does not exist (run `npm run build` in src/ui).");
+            return;
+        };
+        assert_no_inline_script(&html);
+    }
+
+    #[test]
+    fn inline_scripts_and_handlers_are_recognised() {
+        let rejects = |html: &str| {
+            let html = html.to_string();
+            std::panic::catch_unwind(move || assert_no_inline_script(&html)).is_err()
+        };
+        assert!(!rejects(r#"<script src="./a.js"></script>"#));
+        assert!(!rejects(
+            r#"<script type="module" crossorigin src="./a.js"></script>"#
+        ));
+        assert!(rejects("<script>alert(1)</script>"));
+        assert!(rejects(
+            r#"<script src="./a.js"></script><script type="module">x()</script>"#
+        ));
+        assert!(rejects(
+            r#"<script src="./a.js"></script><body onload="x()">"#
+        ));
+        assert!(rejects("<p>no script at all</p>"));
     }
 }

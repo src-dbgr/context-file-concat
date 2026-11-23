@@ -92,15 +92,13 @@ async fn main() {
     let origin = AppOrigin::embedded();
 
     let ipc_handler = move |request: wry::http::Request<String>| {
-        // wry reports the URL of the document the message was posted from.
-        let source = request.uri().to_string();
-        if !origin.is_own_page(&source) {
-            tracing::warn!("Dropping an IPC message from a foreign origin: {source}");
+        // Only the UI itself may send commands (see `platform::ipc`).
+        let Some(message) = platform::ipc::accepted_message(&origin, request) else {
             return;
-        }
+        };
         app::dispatch_ipc_message(
             &ipc_dispatcher,
-            request.into_body(),
+            message,
             ipc_handler_dialog.clone(),
             ipc_handler_proxy.clone(),
             ipc_handler_state.clone(),

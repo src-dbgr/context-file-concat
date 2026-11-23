@@ -28,12 +28,12 @@ use std::path::Path;
 ///
 /// Only formats belong here whose files are never text. Extensions that are merely
 /// often binary (`dat`, `tmp`, `bak`, `cache`, ...) or that are shared with text
-/// formats (`d`: D sources and dependency files of Make; `snap`: snapshot tests) are
-/// left to the content.
+/// formats (`d`: D sources and dependency files of Make; `snap`: snapshot tests;
+/// `raw`: camera images, but also plain dumps and text) are left to the content.
 const BINARY_EXTENSIONS: &[&str] = &[
     // Images (SVG is text and is not listed)
-    "jpg", "jpeg", "jfif", "png", "gif", "bmp", "ico", "icns", "webp", "tiff", "tif", "raw", "cr2",
-    "nef", "orf", "dng", "heic", "heif", "avif", "psd", // Audio and video
+    "jpg", "jpeg", "jfif", "png", "gif", "bmp", "ico", "icns", "webp", "tiff", "tif", "cr2", "nef",
+    "orf", "dng", "heic", "heif", "avif", "psd", // Audio and video
     "mp3", "wav", "flac", "ogg", "m4a", "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm",
     // Archives and packages
     "zip", "tar", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "jar", "war", "crate", "gem", "whl",
@@ -76,12 +76,23 @@ pub fn is_binary(path: &Path, content: &[u8]) -> bool {
 /// A file that does not exist is not text; one that exists but cannot be read is an
 /// error.
 pub fn is_text_file(path: &Path) -> Result<bool> {
+    is_text_file_with(path, |path| File::open(path))
+}
+
+/// [`is_text_file`] with the function that opens the file as a parameter.
+///
+/// `open` is not called for a file whose extension settles the question: such a file
+/// costs no file system access at all.
+pub fn is_text_file_with<R: Read>(
+    path: &Path,
+    open: impl FnOnce(&Path) -> io::Result<R>,
+) -> Result<bool> {
     if has_binary_extension(path) {
         return Ok(false);
     }
     // Opened without asking for the metadata first: the scan calls this for every
     // file it lists, and each system call counts there.
-    let file = match File::open(path) {
+    let file = match open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
@@ -322,6 +333,8 @@ mod tests {
             ("old.backup", TEXT, false),
             ("build.cache", TEXT, false),
             ("values.dat", b"1;2;3\n", false),
+            ("dump.raw", b"0 1 2 3\n", false),
+            ("photo.raw", NUL, true),
             ("symbols.exp", TEXT, false),
             ("Cargo.lock.temp", TEXT, false),
             // ... and are binary if their content is.
@@ -381,6 +394,36 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// The opener is the only way to the content, and it is not used where the
+    /// extension settles the question.
+    #[test]
+    fn test_certainly_binary_extension_never_opens_the_file() {
+        let opened = std::cell::RefCell::new(Vec::new());
+        let open = |path: &Path| {
+            opened.borrow_mut().push(path.to_path_buf());
+            Ok(&b"text"[..])
+        };
+
+        for name in ["a.png", "b.ZIP", "c.wasm", "d.pdf", "dir/e.exe"] {
+            assert!(!is_text_file_with(Path::new(name), open).unwrap(), "{name}");
+        }
+        assert!(opened.borrow().is_empty(), "{:?}", opened.borrow());
+
+        assert!(is_text_file_with(Path::new("f.raw"), open).unwrap());
+        assert!(is_text_file_with(Path::new("g.txt"), open).unwrap());
+        assert_eq!(*opened.borrow(), [Path::new("f.raw"), Path::new("g.txt")]);
+    }
+
+    #[test]
+    fn test_opener_errors_are_passed_on_except_for_a_missing_file() {
+        let missing = |_: &Path| -> io::Result<&[u8]> { Err(io::ErrorKind::NotFound.into()) };
+        let denied =
+            |_: &Path| -> io::Result<&[u8]> { Err(io::ErrorKind::PermissionDenied.into()) };
+
+        assert!(!is_text_file_with(Path::new("gone.txt"), missing).unwrap());
+        assert!(is_text_file_with(Path::new("locked.txt"), denied).is_err());
     }
 
     #[test]

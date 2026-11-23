@@ -89,7 +89,7 @@ The backend is written in Rust and is responsible for all business logic and sys
 
   - **Responsibilities:** Provides stateless services for the core operations. "Stateless" does not mean free of IO: scanning, the content search, the preview and the generation read the file system (blocking; callers run them off the async runtime). The rules themselves (which path is ignored, how bytes become text, how the output is laid out) are pure functions and types inside these modules, tested without IO where possible.
   - **Key Modules:**
-    - `scanner.rs`: High-performance, cancellable directory traversal using the `ignore` crate.
+    - `scanner.rs`: High-performance, cancellable directory traversal using the `ignore` crate. The walk is sequential and opens no file; whether the listed files are binary is found out afterwards, in parallel on a small thread pool of its own (opening a file is the expensive part of a scan), in the order of the walk and honouring the cancellation.
     - `ignore_rules.rs`: `IgnoreRules`, the one definition of what the ignore patterns hide (gitignore syntax including negation, see [IPC Contracts](./ipc.md#ignore-pattern-semantics)). Used by the scanner, by the application layer when a pattern is added to a loaded list, and by the tree generator.
     - `file_handler.rs`: Reads files for the preview (a bounded prefix only) and the generated output, decodes them (`decode_text`: UTF-8, else Windows-1252, see [IPC Contracts](./ipc.md#file-content)) and formats the output document, including the markers for files that cannot be embedded.
     - `search.rs`: `SearchEngine` / `FileNameMatcher` filter the file list in memory (name, extension); `ContentSearch` reads the files to search their content, decoded by the same rule and within the configured size limit.
@@ -129,6 +129,7 @@ The backend is written in Rust and is responsible for all business logic and sys
 
 - **`src/platform/*` (Platform and WebView policy, part of the binary)**
 
+  - `ipc.rs`: `accepted_message`, the gate every IPC message passes before it is parsed.
   - `origin.rs`: `AppOrigin`, the origin the UI is served from in the form the web engine reports it, and `is_own_page`, which tells the UI's own documents from everything else.
   - `navigation.rs`: What happens with a navigation: the UI itself is loaded, web links go to the system browser, everything else is blocked.
   - `csp.rs`: The content security policy of the embedded UI.
@@ -193,7 +194,7 @@ The WebView shows the application's own UI and nothing else. Four policies in `s
 | Policy                  | Where                                 | What it does                                                                                                                                                                                                          |
 | ----------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Content security policy | `csp.rs`, sent by `asset_protocol.rs` | A `Content-Security-Policy` header on every response of the `cfc` protocol (the document, the scripts, the workers; a 404 too). The header is the single source of truth: there is no `<meta>` policy in `index.html` |
-| IPC origin              | `origin.rs` (`is_own_page`)           | A command is only taken from a document of the UI's own origin; anything else is logged and dropped                                                                                                                   |
+| IPC origin              | `ipc.rs`, `origin.rs` (`is_own_page`) | A command is only taken from a document of the UI's own origin; anything else is logged and dropped                                                                                                                   |
 | Navigation              | `navigation.rs`                       | Only the UI's origin and `about:` are loaded; `http(s)` links open in the system browser; `data:`, `blob:`, `file:` and everything else are blocked                                                                   |
 | Downloads               | `main.rs`                             | Denied                                                                                                                                                                                                                |
 
