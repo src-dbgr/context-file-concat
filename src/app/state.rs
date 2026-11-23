@@ -1,5 +1,6 @@
 //! Defines the central, mutable state of the application.
 
+use crate::app::filtering::FilterInputs;
 use crate::app::selection::{DirectorySelection, Rejected, SelectedFiles, SelectionCountsCache};
 use crate::app::tracked::Tracked;
 use crate::app::tree_index::{IndexedList, TreeIndex, TreeIndexCache};
@@ -391,6 +392,8 @@ pub(crate) struct FileLists {
     /// `Some(n)` if the new filtered list is the one before it with items appended
     /// from position `n` on: what was counted for the list before still holds then.
     pub appended_from: Option<usize>,
+    /// The filters the new filtered list was made with, out of the new file list.
+    pub made_with: Arc<FilterInputs>,
 }
 
 /// The items of `items` whose path is not in `list`, in their order.
@@ -442,6 +445,9 @@ pub struct AppState {
     filtered_file_list: Arc<Vec<FileItem>>,
     /// The revision of the file list the filtered list was made from.
     filtered_from: u64,
+    /// The filters the filtered list was made with, if whoever made it said so
+    /// ([`AppState::filters_of_filtered_list`]).
+    filtered_with: Option<Arc<FilterInputs>>,
     /// The set of absolute paths to files that are currently selected by the user.
     pub selected_files: SelectedFiles,
     /// The set of absolute paths to directories that are expanded in the UI tree.
@@ -550,6 +556,7 @@ impl AppState {
             file_list_revision: 0,
             filtered_file_list: Arc::default(),
             filtered_from: 0,
+            filtered_with: None,
             selected_files: SelectedFiles::default(),
             expanded_dirs: Tracked::default(),
             collapsed_under_filter: HashSet::new(),
@@ -1371,10 +1378,30 @@ impl AppState {
     /// derived from it is kept.
     pub(crate) fn set_shared_filtered_file_list(&mut self, items: Arc<Vec<FileItem>>) {
         self.filtered_from = self.file_list_revision;
+        self.filtered_with = None;
         if !Arc::ptr_eq(&self.filtered_file_list, &items) {
             self.filtered_file_list = items;
             self.filtered_revision += 1;
         }
+    }
+
+    /// Records that the filtered list, as it has just been set, is what `inputs`
+    /// make of the file list as it is now.
+    pub(crate) fn note_filters_of_filtered_list(&mut self, inputs: Arc<FilterInputs>) {
+        self.filtered_with = Some(inputs);
+    }
+
+    /// The filters that made the filtered list out of the file list as it is now.
+    /// `None` if that is not known: the file list has changed since, or the
+    /// filtered list was set without saying what it was made with (which
+    /// [`AppState::note_filters_of_filtered_list`] and [`FileLists::made_with`]
+    /// do). Nothing is assumed about the filters of the state as they are now; the
+    /// caller compares ([`FilterInputs::filters_like`]).
+    pub(crate) fn filters_of_filtered_list(&self) -> Option<Arc<FilterInputs>> {
+        self.filtered_with
+            .as_ref()
+            .filter(|_| self.filtered_from == self.file_list_revision)
+            .map(Arc::clone)
     }
 
     /// Handles of the lists and of the hierarchy as they are now, for a caller that
@@ -1415,9 +1442,11 @@ impl AppState {
         }
         self.filtered_from = self.file_list_revision;
         let Some(filtered) = lists.filtered else {
+            discarded.add(lists.made_with);
             return discarded;
         };
 
+        discarded.add(self.filtered_with.replace(lists.made_with));
         let (items, root_path, index) = filtered.into_parts();
         // The selection counts of a list that only grew follow from the ones the
         // state has; everything else is counted when it is asked for.
@@ -1914,6 +1943,7 @@ mod tests {
             full: Some(Arc::clone(&longer)),
             filtered: Some(IndexedList::build(longer, PathBuf::from("/p"))),
             appended_from: Some(2),
+            made_with: Arc::new(FilterInputs::of(&state)),
         }));
 
         assert_eq!(listed_paths(&state), ["/p/a", "/p/f.txt", "/p/a/x.txt"]);
@@ -1931,6 +1961,7 @@ mod tests {
             full: None,
             filtered: None,
             appended_from: None,
+            made_with: Arc::new(FilterInputs::of(&state)),
         }));
         assert_eq!(state.file_list_revision(), file_revision);
         assert_eq!(state.filtered_revision(), filtered_revision);
@@ -1953,6 +1984,7 @@ mod tests {
             full: Some(Arc::clone(&longer)),
             filtered: Some(IndexedList::build(longer, PathBuf::from("/p"))),
             appended_from: Some(2),
+            made_with: Arc::new(FilterInputs::of(&state)),
         }));
 
         let counts = state.directory_selection();

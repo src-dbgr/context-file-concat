@@ -50,12 +50,38 @@ fn first_batch() -> Vec<FileItem> {
     ]
 }
 
+impl<C> Committed<C> {
+    /// Whether the event has happened, for an event that is not staged again.
+    #[track_caller]
+    fn done(self) -> bool {
+        match self {
+            Committed::Done(happened, discarded) => {
+                drop(discarded);
+                happened
+            }
+            Committed::Again(..) => panic!("the event was staged again"),
+        }
+    }
+
+    /// The event as it was staged again.
+    #[track_caller]
+    fn again(self) -> Staged<C> {
+        match self {
+            Committed::Again(staged, discarded) => {
+                drop(discarded);
+                staged
+            }
+            Committed::Done(..) => panic!("the event was not staged again"),
+        }
+    }
+}
+
 /// The three steps of a batch in a row.
 fn add_in_steps(state: &mut AppState, token: &ScanToken, items: Vec<FileItem>) -> bool {
     let Some(staged) = stage_scanned_items(state, token, items) else {
         return false;
     };
-    commit_scanned_items(state, token, staged.prepare()).0
+    commit_scanned_items(state, token, staged.prepare()).done()
 }
 
 /// Asserts that the lists of `state` are what the plain way makes of its file
@@ -105,8 +131,7 @@ fn scanned_items_are_added_with_lists_that_were_built_outside_the_lock() {
             (state.file_list_revision(), state.filtered_revision()),
             revisions
         );
-        let (is_current, discarded) = commit_scanned_items(&mut state, &token, prepared);
-        drop(discarded);
+        let is_current = commit_scanned_items(&mut state, &token, prepared).done();
 
         assert!(is_current);
         assert_eq!(
@@ -151,13 +176,190 @@ fn items_that_are_all_listed_already_change_nothing() {
     );
 }
 
+/// An event that brings nothing and leaves the filters alone builds nothing, also
+/// where a filter is active: the filtered list is known to be what these filters
+/// make of the file list.
+#[test]
+fn an_event_that_changes_nothing_under_a_filter_leaves_the_lists_alone() {
+    // The filtered list is one that an event has installed.
+    let (mut state, token) = state_with_a_walking_scan();
+    state.set_filter_texts("main".to_string(), String::new(), String::new());
+    apply_filter_texts(&mut state);
+    assert!(add_in_steps(&mut state, &token, first_batch()));
+    state
+        .selected_files
+        .insert(PathBuf::from("/project/src/main.rs"));
+    generate_ui_state(&state);
+    let rows = all_rows(&state);
+    assert_eq!(rows.len(), 2, "src and main.rs");
+    let untouched = |state: &AppState| {
+        (
+            state.file_list_revision(),
+            state.filtered_revision(),
+            state.file_tree_build_count(),
+            state.selection_count_count(),
+        )
+    };
+    let before = untouched(&state);
+
+    // A batch of items that are listed ahead of the walk, and an empty one.
+    for items in [vec![item("/project/docs", true)], Vec::new()] {
+        let prepared = stage_scanned_items(&mut state, &token, items)
+            .unwrap()
+            .prepare();
+        assert!(prepared.lists.full.is_none() && prepared.lists.filtered.is_none());
+        assert!(commit_scanned_items(&mut state, &token, prepared).done());
+        generate_ui_state(&state);
+        assert_eq!(untouched(&state), before);
+        assert_eq!(all_rows(&state), rows);
+    }
+
+    // A level whose items are all listed.
+    let lazy_load = state.begin_lazy_load();
+    for _ in 0..2 {
+        let level = vec![item("/project/src/main.rs", false)];
+        let src = Path::new("/project/src");
+        let staged = stage_directory_level(&state, &lazy_load, src, level, HashSet::new());
+        assert!(commit_directory_level(&mut state, &lazy_load, staged.unwrap().prepare()).done());
+        generate_ui_state(&state);
+        assert_eq!(untouched(&state), before);
+    }
+    assert!(state.loaded_dirs.contains(Path::new("/project/src")));
+
+    // The end of a walk that found everything.
+    let prepared = complete(&state, &token).prepare();
+    assert!(commit_scan_completion(&mut state, &token, prepared).done());
+    assert!(state.is_fully_scanned);
+    generate_ui_state(&state);
+    assert_eq!(untouched(&state), before);
+    // The rows are the same but for what they say about the directories, which
+    // are all loaded now.
+    let loaded = rows.into_iter().map(|row| crate::app::view_model::TreeRow {
+        children_loaded: true,
+        ..row
+    });
+    assert_eq!(all_rows(&state), loaded.collect::<Vec<_>>());
+    assert_filtered_list_is_current(&mut state);
+}
+
+/// The same for a filtered list that a command has made (`apply_filters`).
+#[test]
+fn an_event_that_changes_nothing_leaves_a_list_alone_that_a_command_has_filtered() {
+    let (mut state, token) = state_with_a_walking_scan();
+    assert!(add_in_steps(&mut state, &token, first_batch()));
+    state.set_filter_texts("main".to_string(), String::new(), String::new());
+    apply_filter_texts(&mut state);
+    generate_ui_state(&state);
+    let before = (state.filtered_revision(), state.file_tree_build_count());
+
+    assert!(add_in_steps(&mut state, &token, Vec::new()));
+
+    generate_ui_state(&state);
+    assert_eq!(
+        (state.filtered_revision(), state.file_tree_build_count()),
+        before
+    );
+}
+
+/// A filtered list that a completion made with every directory loaded is not taken
+/// for one made with a set of loaded directories: "every directory" and a set are
+/// not compared, so the list is made anew, also for an event that brings nothing.
+#[test]
+fn a_list_made_with_every_directory_loaded_is_made_anew_for_a_set_of_them() {
+    let (mut state, token) = state_with_a_walking_scan();
+    state.config.remove_empty_directories = true;
+    assert!(add_in_steps(&mut state, &token, first_batch()));
+    let prepared = complete(&state, &token).prepare();
+    assert!(commit_scan_completion(&mut state, &token, prepared).done());
+    assert_eq!(
+        paths_of(state.filtered_file_list()),
+        [
+            "/project/src",
+            "/project/src/main.rs",
+            "/project/src/notes.txt"
+        ]
+    );
+
+    // The empty directory stops being loaded: it is not known to be empty.
+    assert!(state.loaded_dirs.remove(Path::new("/project/docs")));
+    let revisions = (state.file_list_revision(), state.filtered_revision());
+    let lazy_load = state.begin_lazy_load();
+    let level = vec![item("/project/src/main.rs", false)];
+    let src = Path::new("/project/src");
+    let staged = stage_directory_level(&state, &lazy_load, src, level, HashSet::new()).unwrap();
+    assert!(commit_directory_level(&mut state, &lazy_load, staged.prepare()).done());
+
+    assert_eq!(state.file_list_revision(), revisions.0);
+    assert_ne!(state.filtered_revision(), revisions.1);
+    assert!(paths_of(state.filtered_file_list()).contains(&"/project/docs"));
+    assert_filtered_list_is_current(&mut state);
+}
+
+/// "Nothing to build" is not assumed. Where the filtered list is not known to be
+/// what the filters of the event make of the file list, it is made, also for an
+/// event that brings nothing.
+#[test]
+fn an_event_that_changes_nothing_still_makes_a_filtered_list_that_is_not_current() {
+    type Change = fn(&mut AppState);
+    let changes: [(&str, Change); 7] = [
+        (
+            "a filter text was changed, the filters not applied",
+            |state| {
+                state.search_query = "notes".to_string();
+            },
+        ),
+        ("another filter text was changed", |state| {
+            state.extension_filter = "txt".to_string();
+        }),
+        ("case sensitivity was changed", |state| {
+            state.config.case_sensitive_search ^= true;
+        }),
+        ("the path was changed", |state| {
+            state.current_path = "/project/src".to_string();
+        }),
+        ("the file list was changed behind the filters", |state| {
+            state.edit_full_file_list(|list| {
+                list.retain(|item| item.path != Path::new("/project/src/Main.rs"))
+            });
+        }),
+        ("the filtered list was set by hand", |state| {
+            state.set_filtered_file_list(Vec::new());
+        }),
+        ("empty directories are removed now", |state| {
+            state.config.remove_empty_directories = true;
+            state.is_fully_scanned = true;
+            state.loaded_dirs.insert(PathBuf::from("/project/docs"));
+        }),
+    ];
+    for (what, change) in changes {
+        let (mut state, token) = state_with_a_walking_scan();
+        let mut batch = first_batch();
+        batch.push(item("/project/src/Main.rs", false));
+        assert!(add_in_steps(&mut state, &token, batch));
+        state.set_filter_texts("Main".to_string(), String::new(), String::new());
+        apply_filter_texts(&mut state);
+        let ignores_case = !state.config.case_sensitive_search;
+        assert_eq!(
+            state.filtered_file_list().len(),
+            2 + usize::from(ignores_case)
+        );
+
+        change(&mut state);
+        let revision = state.filtered_revision();
+        assert!(add_in_steps(&mut state, &token, Vec::new()), "{what}");
+
+        assert_ne!(state.filtered_revision(), revision, "{what}");
+        assert_filtered_list_is_current(&mut state);
+    }
+}
+
 #[test]
 fn a_stale_scan_can_neither_stage_nor_commit() {
     // Stale before the first step.
     let (mut state, token) = state_with_a_walking_scan();
     state.cancel_current_scan();
     assert!(stage_scanned_items(&mut state, &token, first_batch()).is_none());
-    assert!(stage_scan_completion(&state, &token).is_none());
+    assert!(stage_scan_completion(&state, &token, HashSet::new()).is_none());
     assert_eq!(state.full_file_list().len(), 2);
 
     // Cancelled, or superseded by another scan, between the first and the last
@@ -174,8 +376,11 @@ fn a_stale_scan_can_neither_stage_nor_commit() {
                         .unwrap()
                         .prepare()
                 });
-                let end =
-                    completion.then(|| stage_scan_completion(&state, &token).unwrap().prepare());
+                let end = completion.then(|| {
+                    stage_scan_completion(&state, &token, HashSet::new())
+                        .unwrap()
+                        .prepare()
+                });
 
                 if supersede {
                     let _ = state.begin_scan();
@@ -184,14 +389,11 @@ fn a_stale_scan_can_neither_stage_nor_commit() {
                 }
                 let revisions = (state.file_list_revision(), state.filtered_revision());
                 let built = state.file_tree_build_count();
-                let (is_current, discarded) = match (batch, end) {
-                    (Some(batch), _) => commit_scanned_items(&mut state, &token, batch),
-                    (_, Some(end)) => {
-                        commit_scan_completion(&mut state, &token, end, HashSet::new())
-                    }
+                let is_current = match (batch, end) {
+                    (Some(batch), _) => commit_scanned_items(&mut state, &token, batch).done(),
+                    (_, Some(end)) => commit_scan_completion(&mut state, &token, end).done(),
                     _ => unreachable!(),
                 };
-                drop(discarded);
 
                 assert!(!is_current, "{context}");
                 assert_eq!(
@@ -208,8 +410,11 @@ fn a_stale_scan_can_neither_stage_nor_commit() {
 }
 
 /// What was prepared belongs to the state it was prepared for. If the file list,
-/// the filtered list or the filters are others by the last step, it is dropped;
-/// the items are listed all the same, and the lists are right.
+/// the filtered list or the filters are others by the last step, it is dropped and
+/// nothing happens there: the event is staged again, for the state as it is, and
+/// what is prepared for that one is installed. If the state has changed once more
+/// by then, the event happens under the lock. Either way the items are listed, and
+/// the lists are right.
 #[test]
 fn prepared_lists_are_not_installed_into_a_state_that_has_changed() {
     type Change = fn(&mut AppState);
@@ -267,8 +472,11 @@ fn prepared_lists_are_not_installed_into_a_state_that_has_changed() {
         ),
     ];
     for (what, change) in changes {
-        for with_content_filter in [false, true] {
-            let context = format!("{what} (content filter: {with_content_filter})");
+        for (with_content_filter, changes_again) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let context =
+                format!("{what} (content filter: {with_content_filter}, again: {changes_again})");
             let (mut state, token) = state_with_a_walking_scan();
             if with_content_filter {
                 state.content_search_query = "fn".to_string();
@@ -285,9 +493,22 @@ fn prepared_lists_are_not_installed_into_a_state_that_has_changed() {
             let prepared = staged.prepare();
 
             change(&mut state);
+            let revisions = (state.file_list_revision(), state.filtered_revision());
             let built = state.file_tree_build_count();
-            let (is_current, discarded) = commit_scanned_items(&mut state, &token, prepared);
-            drop(discarded);
+            let staged = commit_scanned_items(&mut state, &token, prepared).again();
+            assert_eq!(
+                (state.file_list_revision(), state.filtered_revision()),
+                revisions,
+                "{context}: nothing has happened yet"
+            );
+            assert_eq!(state.file_tree_build_count(), built, "{context}");
+
+            let prepared = staged.prepare();
+            if changes_again {
+                state.set_full_file_list(state.full_file_list().to_vec());
+            }
+            let built = state.file_tree_build_count();
+            let is_current = commit_scanned_items(&mut state, &token, prepared).done();
 
             assert!(is_current, "{context}");
             let mut listed = paths_of(state.full_file_list());
@@ -297,7 +518,8 @@ fn prepared_lists_are_not_installed_into_a_state_that_has_changed() {
             for path in ["/project/src/main.rs", "/project/src/notes.txt"] {
                 assert!(listed.contains(&path), "{context}: {path} is listed");
             }
-            assert_hierarchy_builds(&state, built, 1, &context);
+            // Installed with its hierarchy, or made under the lock.
+            assert_hierarchy_builds(&state, built, usize::from(changes_again), &context);
             assert_filtered_list_is_current(&mut state);
         }
     }
@@ -319,8 +541,7 @@ fn prepared_lists_are_installed_whatever_else_has_changed() {
     // Applying the filters again leaves a filtered list that is the file list.
     apply_filters(&mut state);
     let built = state.file_tree_build_count();
-    let (is_current, discarded) = commit_scanned_items(&mut state, &token, prepared);
-    drop(discarded);
+    let is_current = commit_scanned_items(&mut state, &token, prepared).done();
 
     assert!(is_current);
     let ui_state = generate_ui_state(&state);
@@ -384,14 +605,13 @@ fn a_level_loaded_on_demand_is_added_in_steps() {
             item("/project/src/lib.rs", false),
         ];
 
+        let patterns = HashSet::from(["target".to_string()]);
+        let src = Path::new("/project/src");
         let staged =
-            stage_directory_level(&state, &lazy_load, Path::new("/project/src"), level).unwrap();
+            stage_directory_level(&state, &lazy_load, src, level, patterns.clone()).unwrap();
         let prepared = staged.prepare();
         assert_eq!(state.full_file_list().len(), 2);
-        let patterns = HashSet::from(["target".to_string()]);
-        let (is_current, discarded) =
-            commit_directory_level(&mut state, &lazy_load, prepared, patterns.clone());
-        drop(discarded);
+        let is_current = commit_directory_level(&mut state, &lazy_load, prepared).done();
 
         assert!(is_current);
         assert_eq!(state.full_file_list().len(), 4);
@@ -411,9 +631,8 @@ fn a_level_loaded_on_demand_is_added_in_steps() {
         apply_filters(&mut state);
         let lazy_load = state.begin_lazy_load();
         let level = vec![item("/project/src/main.rs", false)];
-        let staged =
-            stage_directory_level(&state, &lazy_load, Path::new("/project/src"), level).unwrap();
-        assert!(commit_directory_level(&mut state, &lazy_load, staged.prepare(), HashSet::new()).0);
+        let staged = stage_directory_level(&state, &lazy_load, src, level, HashSet::new()).unwrap();
+        assert!(commit_directory_level(&mut state, &lazy_load, staged.prepare()).done());
         assert!(add_in_steps(&mut state, &token, first_batch()));
         let mut listed = paths_of(state.full_file_list());
         listed.sort_unstable();
@@ -434,17 +653,15 @@ fn a_level_of_another_file_list_is_not_added() {
     let (mut state, _token) = state_with_a_walking_scan();
     let lazy_load = state.begin_lazy_load();
     let level = || vec![item("/project/src/main.rs", false)];
-    let staged =
-        stage_directory_level(&state, &lazy_load, Path::new("/project/src"), level()).unwrap();
+    let src = Path::new("/project/src");
+    let staged = stage_directory_level(&state, &lazy_load, src, level(), HashSet::new()).unwrap();
     let prepared = staged.prepare();
 
     // New ignore patterns: the level was listed by the old ones.
     state.config.ignore_patterns.insert("nothing".to_string());
     state.apply_ignore_patterns();
     let revisions = (state.file_list_revision(), state.filtered_revision());
-    let (is_current, discarded) =
-        commit_directory_level(&mut state, &lazy_load, prepared, HashSet::new());
-    drop(discarded);
+    let is_current = commit_directory_level(&mut state, &lazy_load, prepared).done();
 
     assert!(!is_current);
     assert_eq!(
@@ -452,9 +669,12 @@ fn a_level_of_another_file_list_is_not_added() {
         revisions
     );
     assert!(!state.loaded_dirs.contains(Path::new("/project/src")));
-    assert!(
-        stage_directory_level(&state, &lazy_load, Path::new("/project/src"), level()).is_none()
-    );
+    assert!(stage_directory_level(&state, &lazy_load, src, level(), HashSet::new()).is_none());
+}
+
+/// The first step of the completion of a walk that had no ignore patterns.
+fn complete(state: &AppState, token: &ScanToken) -> Staged<Completion> {
+    stage_scan_completion(state, token, HashSet::new()).unwrap()
 }
 
 #[test]
@@ -465,9 +685,9 @@ fn the_list_is_completed_in_steps() {
     generate_ui_state(&state);
     let revisions = (state.file_list_revision(), state.filtered_revision());
     let built = state.file_tree_build_count();
-    let staged = stage_scan_completion(&state, &token).unwrap();
     let patterns = HashSet::from(["target".to_string()]);
-    assert!(commit_scan_completion(&mut state, &token, staged.prepare(), patterns.clone()).0);
+    let staged = stage_scan_completion(&state, &token, patterns.clone()).unwrap();
+    assert!(commit_scan_completion(&mut state, &token, staged.prepare()).done());
     assert!(state.is_fully_scanned);
     assert_eq!(state.active_ignore_patterns, patterns);
     assert_eq!(
@@ -503,11 +723,11 @@ fn the_list_is_completed_in_steps() {
         }
         generate_ui_state(&state);
         let built = state.file_tree_build_count();
-        let prepared = stage_scan_completion(&state, &token).unwrap().prepare();
+        let prepared = complete(&state, &token).prepare();
         if selected_between {
             select(&mut state);
         }
-        assert!(commit_scan_completion(&mut state, &token, prepared, HashSet::new()).0);
+        assert!(commit_scan_completion(&mut state, &token, prepared).done());
 
         assert_eq!(
             paths_of(state.full_file_list()),
@@ -532,8 +752,8 @@ fn the_list_is_completed_in_steps() {
     assert_eq!(state.filtered_file_list().len(), 4);
     generate_ui_state(&state);
     let built = state.file_tree_build_count();
-    let prepared = stage_scan_completion(&state, &token).unwrap().prepare();
-    assert!(commit_scan_completion(&mut state, &token, prepared, HashSet::new()).0);
+    let prepared = complete(&state, &token).prepare();
+    assert!(commit_scan_completion(&mut state, &token, prepared).done());
     assert_eq!(
         paths_of(state.filtered_file_list()),
         [
@@ -561,8 +781,7 @@ fn the_matches_of_a_content_search_are_applied_in_steps() {
     let staged = stage_content_matches(&state, &search, matches.clone()).unwrap();
     let prepared = staged.prepare();
     assert_eq!(state.filtered_file_list().len(), 4);
-    let (is_current, discarded) = commit_content_matches(&mut state, &search, prepared);
-    drop(discarded);
+    let is_current = commit_content_matches(&mut state, &search, prepared).done();
 
     assert!(is_current);
     assert_eq!(*state.content_search_results(), matches);
@@ -580,14 +799,15 @@ fn the_matches_of_a_content_search_are_applied_in_steps() {
         .prepare();
     let newer = state.begin_content_search();
     let revision = state.filtered_revision();
-    assert!(!commit_content_matches(&mut state, &search, prepared).0);
+    assert!(!commit_content_matches(&mut state, &search, prepared).done());
     assert_eq!(*state.content_search_results(), matches);
     assert_eq!(state.filtered_revision(), revision);
     assert!(stage_content_matches(&state, &search, HashSet::new()).is_none());
 
-    // The list changed while the matches were prepared: they are applied to the
-    // list as it is.
-    let prepared = stage_content_matches(&state, &newer, matches.clone())
+    // The list changed while the matches were prepared: they are prepared again,
+    // for the list as it is, and nothing has happened until then.
+    let other_matches = HashSet::from([PathBuf::from("/project/src/more.rs")]);
+    let prepared = stage_content_matches(&state, &newer, other_matches.clone())
         .unwrap()
         .prepare();
     assert!(add_in_steps(
@@ -595,10 +815,22 @@ fn the_matches_of_a_content_search_are_applied_in_steps() {
         &token,
         vec![item("/project/src/more.rs", false)]
     ));
+    let revisions = (state.file_list_revision(), state.filtered_revision());
+    let staged = commit_content_matches(&mut state, &newer, prepared).again();
+    assert_eq!(*state.content_search_results(), matches);
+    assert!(state.is_current_content_search(&newer));
+    assert_eq!(
+        (state.file_list_revision(), state.filtered_revision()),
+        revisions
+    );
     let built = state.file_tree_build_count();
-    assert!(commit_content_matches(&mut state, &newer, prepared).0);
-    assert_eq!(state.full_file_list().len(), 5);
-    assert_hierarchy_builds(&state, built, 1, "the list changed");
+    assert!(commit_content_matches(&mut state, &newer, staged.prepare()).done());
+    assert_eq!(*state.content_search_results(), other_matches);
+    assert_eq!(
+        paths_of(state.filtered_file_list()),
+        ["/project/src", "/project/src/more.rs"]
+    );
+    assert_hierarchy_builds(&state, built, 0, "prepared again");
     assert_filtered_list_is_current(&mut state);
 }
 
@@ -617,7 +849,7 @@ fn matches_are_not_applied_as_a_filter_that_is_not_there() {
         .prepare();
 
     state.content_search_query.clear();
-    assert!(commit_content_matches(&mut state, &search, prepared).0);
+    assert!(commit_content_matches(&mut state, &search, prepared).done());
 
     assert_eq!(state.filtered_file_list().len(), 4);
     assert_filtered_list_is_current(&mut state);
@@ -686,7 +918,12 @@ fn project() -> Vec<FileItem> {
 /// One state and the tokens of what is running in it.
 struct Side {
     state: AppState,
+    /// The scan that is walking the project: its first level is in the list.
     scan: Option<ScanToken>,
+    /// A scan that has begun and has not published its first level.
+    scan_before_first_level: Option<ScanToken>,
+    /// How many items of the project the walk has delivered.
+    walked: usize,
     search: Option<ContentSearchToken>,
 }
 
@@ -698,6 +935,8 @@ impl Side {
         Self {
             state,
             scan: None,
+            scan_before_first_level: None,
+            walked: 0,
             search: None,
         }
     }
@@ -725,13 +964,30 @@ enum Command {
     AnswerContentSearch(Vec<PathBuf>),
     ClearContentSearch,
     CancelScan,
+    /// A scan from its beginning to its first level, in one go.
     Rescan {
         first_level: Vec<FileItem>,
     },
+    /// A scan begins. Its task has not found the directory yet: the list stays as
+    /// it is, and as complete as it is.
+    BeginScan,
+    /// The scan that has begun starts its walk, and nothing else: the list is no
+    /// longer complete, and it is the same list.
+    BeginScanWalk,
+    /// The scan that has begun publishes its first level.
+    PublishFirstLevel(Vec<FileItem>),
+    /// The path changes and the list stays, as with a re-scan that is started
+    /// (`start_scan_on_path`).
+    SetCurrentPath(String),
+    /// The setting changes and the filters are not applied.
+    ToggleCaseSensitivity,
     /// The file list changed behind the back of the filters, keeping its length.
     ReplaceAnItem(usize),
     /// The filter text changed and the filters have not been applied.
     SetQueryOnly(String),
+    /// A directory stops being loaded, and nothing else happens. No method of the
+    /// state does that; the field is public.
+    ForgetLoadedDirectory(PathBuf),
 }
 
 fn run(side: &mut Side, command: &Command) {
@@ -786,6 +1042,7 @@ fn run(side: &mut Side, command: &Command) {
         Command::CancelScan => {
             state.cancel_current_scan();
             side.scan = None;
+            side.scan_before_first_level = None;
         }
         Command::Rescan { first_level } => {
             let token = state.begin_scan();
@@ -793,7 +1050,29 @@ fn run(side: &mut Side, command: &Command) {
             state.replace_with_shallow_file_list(Path::new("/p"), first_level);
             apply_filters(state);
             side.scan = Some(token);
+            side.scan_before_first_level = None;
+            side.walked = 0;
         }
+        Command::BeginScan => {
+            side.scan = None;
+            side.scan_before_first_level = Some(state.begin_scan());
+        }
+        Command::BeginScanWalk => {
+            if let Some(token) = &side.scan_before_first_level {
+                state.begin_scan_walk(token);
+            }
+        }
+        Command::PublishFirstLevel(first_level) => {
+            if let Some(token) = side.scan_before_first_level.take() {
+                state.begin_scan_walk(&token);
+                state.replace_with_shallow_file_list(Path::new("/p"), first_level);
+                apply_filters(state);
+                side.scan = Some(token);
+                side.walked = 0;
+            }
+        }
+        Command::SetCurrentPath(path) => state.current_path = path,
+        Command::ToggleCaseSensitivity => state.config.case_sensitive_search ^= true,
         Command::ReplaceAnItem(position) => {
             if !state.full_file_list().is_empty() {
                 let position = position % state.full_file_list().len();
@@ -801,6 +1080,9 @@ fn run(side: &mut Side, command: &Command) {
             }
         }
         Command::SetQueryOnly(query) => state.search_query = query,
+        Command::ForgetLoadedDirectory(path) => {
+            state.loaded_dirs.remove(&path);
+        }
     }
 }
 
@@ -808,7 +1090,7 @@ fn random_command(random: &mut Random, project: &[FileItem]) -> Command {
     let directories: Vec<&FileItem> = project.iter().filter(|item| item.is_directory).collect();
     let files: Vec<&FileItem> = project.iter().filter(|item| !item.is_directory).collect();
     let queries = ["", "", "f1", "a", "zzz", "F0"];
-    match random.below(16) {
+    match random.below(24) {
         0 | 1 => Command::SetFilters {
             query: random.pick(&queries).to_string(),
             extension: random.pick(&["", "", "rs", "md"]).to_string(),
@@ -821,18 +1103,24 @@ fn random_command(random: &mut Random, project: &[FileItem]) -> Command {
                 .pick(&["f2.txt", "empty/", "/b/", "*.md"])
                 .to_string(),
         ),
-        7 => Command::ToggleRemoveEmptyDirectories,
-        8 | 9 => {
+        7 | 8 => Command::ToggleRemoveEmptyDirectories,
+        9 | 10 => {
             let (directory, items) = random_level(random, project);
             Command::LoadLevel { directory, items }
         }
-        10 => Command::OpenContentSearch,
-        11 => Command::AnswerContentSearch(random_matches(random, project)),
-        12 => Command::ClearContentSearch,
-        13 => Command::CancelScan,
-        14 => Command::Rescan {
+        11 => Command::OpenContentSearch,
+        12 => Command::AnswerContentSearch(random_matches(random, project)),
+        13 => Command::ClearContentSearch,
+        14 => Command::CancelScan,
+        15 => Command::Rescan {
             first_level: random_first_level(random, project),
         },
+        16 => Command::BeginScan,
+        17 | 18 => Command::BeginScanWalk,
+        19 => Command::PublishFirstLevel(random_first_level(random, project)),
+        20 => Command::SetCurrentPath(random.pick(&["/p", "/p", "/p/a", "/"]).to_string()),
+        21 => Command::ToggleCaseSensitivity,
+        22 => Command::ForgetLoadedDirectory(random.pick(&directories).path.clone()),
         _ => {
             if random.below(2) == 0 {
                 Command::ReplaceAnItem(random.below(64))
@@ -897,11 +1185,47 @@ enum Event {
     Matches(Vec<PathBuf>),
 }
 
-/// The event in three steps on `stepped`, with `between` happening after the first
-/// step, and under one lock on `plain`, where `between` has happened before.
-fn happen(stepped: &mut Side, plain: &mut Side, event: Event, between: &[Command]) {
-    let meanwhile = |stepped: &mut Side, plain: &mut Side| {
-        for command in between {
+/// What happens on both sides while an event is being prepared on one of them:
+/// after it was staged, and, if that made the event be staged again, after that.
+#[derive(Debug, Clone)]
+struct Meanwhile {
+    after_staging: Vec<Command>,
+    after_staging_again: Vec<Command>,
+}
+
+/// The last step of an event on `stepped`, with everything it takes: an event that
+/// is staged again is prepared again, `meanwhile.after_staging_again` happens on
+/// both sides, and it is committed. Returns `true` if the event has happened.
+fn commit_in_steps<C: Change>(
+    stepped: &mut Side,
+    plain: &mut Side,
+    prepared: Prepared<C::Rest>,
+    meanwhile: &Meanwhile,
+    commit: impl Fn(&mut AppState, Prepared<C::Rest>) -> Committed<C>,
+) -> bool {
+    let staged = match commit(&mut stepped.state, prepared) {
+        Committed::Done(happened, discarded) => {
+            drop(discarded);
+            return happened;
+        }
+        Committed::Again(staged, discarded) => {
+            drop(discarded);
+            staged
+        }
+    };
+    let prepared = staged.prepare();
+    for command in &meanwhile.after_staging_again {
+        run(stepped, command);
+        run(plain, command);
+    }
+    commit(&mut stepped.state, prepared).done()
+}
+
+/// The event in three steps on `stepped`, with `meanwhile` happening between them,
+/// and under one lock on `plain`, where `meanwhile` has happened before.
+fn happen(stepped: &mut Side, plain: &mut Side, event: Event, meanwhile: &Meanwhile) {
+    let after_staging = |stepped: &mut Side, plain: &mut Side| {
+        for command in &meanwhile.after_staging {
             run(stepped, command);
             run(plain, command);
         }
@@ -913,9 +1237,11 @@ fn happen(stepped: &mut Side, plain: &mut Side, event: Event, between: &[Command
             let staged = tokens.0.as_ref().and_then(|token| {
                 stage_scanned_items(&mut stepped.state, token, items.clone()).map(Staged::prepare)
             });
-            meanwhile(stepped, plain);
+            after_staging(stepped, plain);
             if let (Some(token), Some(prepared)) = (&tokens.0, staged) {
-                drop(commit_scanned_items(&mut stepped.state, token, prepared));
+                commit_in_steps(stepped, plain, prepared, meanwhile, |state, prepared| {
+                    commit_scanned_items(state, token, prepared)
+                });
             }
             if let Some(token) = &tokens.1 {
                 if plain.state.merge_scanned_items(token, items) {
@@ -926,13 +1252,14 @@ fn happen(stepped: &mut Side, plain: &mut Side, event: Event, between: &[Command
         Event::Completion => {
             let tokens = (stepped.scan.clone(), plain.scan.clone());
             let staged = tokens.0.as_ref().and_then(|token| {
-                stage_scan_completion(&stepped.state, token).map(Staged::prepare)
+                stage_scan_completion(&stepped.state, token, patterns()).map(Staged::prepare)
             });
-            meanwhile(stepped, plain);
+            after_staging(stepped, plain);
             if let (Some(token), Some(prepared)) = (&tokens.0, staged) {
-                let (done, discarded) =
-                    commit_scan_completion(&mut stepped.state, token, prepared, patterns());
-                drop(discarded);
+                let done =
+                    commit_in_steps(stepped, plain, prepared, meanwhile, |state, prepared| {
+                        commit_scan_completion(state, token, prepared)
+                    });
                 if done && stepped.state.finish_scan(token) {
                     stepped.scan = None;
                 }
@@ -951,17 +1278,15 @@ fn happen(stepped: &mut Side, plain: &mut Side, event: Event, between: &[Command
                 stepped.state.begin_lazy_load(),
                 plain.state.begin_lazy_load(),
             );
+            let level = items.clone();
             let staged =
-                stage_directory_level(&stepped.state, &tokens.0, &directory, items.clone())
+                stage_directory_level(&stepped.state, &tokens.0, &directory, level, patterns())
                     .map(Staged::prepare);
-            meanwhile(stepped, plain);
+            after_staging(stepped, plain);
             if let Some(prepared) = staged {
-                drop(commit_directory_level(
-                    &mut stepped.state,
-                    &tokens.0,
-                    prepared,
-                    patterns(),
-                ));
+                commit_in_steps(stepped, plain, prepared, meanwhile, |state, prepared| {
+                    commit_directory_level(state, &tokens.0, prepared)
+                });
             }
             if plain
                 .state
@@ -976,11 +1301,12 @@ fn happen(stepped: &mut Side, plain: &mut Side, event: Event, between: &[Command
             let staged = tokens.0.as_ref().and_then(|token| {
                 stage_content_matches(&stepped.state, token, matches.clone()).map(Staged::prepare)
             });
-            meanwhile(stepped, plain);
+            after_staging(stepped, plain);
             if let (Some(token), Some(prepared)) = (&tokens.0, staged) {
-                let (applied, discarded) =
-                    commit_content_matches(&mut stepped.state, token, prepared);
-                drop(discarded);
+                let applied =
+                    commit_in_steps(stepped, plain, prepared, meanwhile, |state, prepared| {
+                        commit_content_matches(state, token, prepared)
+                    });
                 if applied {
                     auto_expand_for_matches(&mut stepped.state);
                 }
@@ -1055,38 +1381,66 @@ fn assert_same(stepped: &Side, plain: &Side, context: &str) {
     );
 }
 
+/// Scans the whole project, from the first level to the end of the scan.
+fn scan_to_the_end(side: &mut Side, first_level: Vec<FileItem>, project: &[FileItem]) {
+    run(side, &Command::Rescan { first_level });
+    let token = side.scan.take().unwrap();
+    assert!(side.state.merge_scanned_items(&token, project.to_vec()));
+    assert!(side
+        .state
+        .complete_scanned_file_list(&token, HashSet::new()));
+    apply_filters(&mut side.state);
+    assert!(side.state.finish_scan(&token));
+    side.walked = project.len();
+}
+
 /// One sequence: a scan (and, now and then, a re-scan) of the project, with
-/// commands before, between and after the steps of its events.
+/// commands before, between and after the steps of its events. It starts with the
+/// first level of a scan, or with the project scanned to its end, and then
+/// sometimes with a re-scan that has begun.
 fn play(seed: u64) {
     let project = project();
     let mut random = Random::new(seed);
     let (mut stepped, mut plain) = (Side::new(), Side::new());
-    let begin = Command::Rescan {
-        first_level: random_first_level(&mut random, &project),
-    };
-    run(&mut stepped, &begin);
-    run(&mut plain, &begin);
-    let mut walked = 0;
+    let first_level = random_first_level(&mut random, &project);
+    let start = random.below(4);
+    for side in [&mut stepped, &mut plain] {
+        match start {
+            0 | 1 => run(
+                side,
+                &Command::Rescan {
+                    first_level: first_level.clone(),
+                },
+            ),
+            2 => scan_to_the_end(side, first_level.clone(), &project),
+            _ => {
+                scan_to_the_end(side, first_level.clone(), &project);
+                run(side, &Command::BeginScan);
+            }
+        }
+    }
+    if random.below(3) == 0 {
+        run(&mut stepped, &Command::ToggleRemoveEmptyDirectories);
+        run(&mut plain, &Command::ToggleRemoveEmptyDirectories);
+    }
+    assert_same(&stepped, &plain, &format!("seed {seed}, start"));
 
     for step in 0..12 {
         let context = format!("seed {seed}, step {step}");
         if random.below(3) == 0 {
             let command = random_command(&mut random, &project);
-            if matches!(command, Command::Rescan { .. }) {
-                walked = 0;
-            }
             run(&mut stepped, &command);
             run(&mut plain, &command);
             assert_same(&stepped, &plain, &format!("{context}, after {command:?}"));
             continue;
         }
 
+        let walked = stepped.walked;
         let event = match random.below(8) {
             0..=3 if walked < project.len() => {
                 let until = (walked + 1 + random.below(6)).min(project.len());
-                let batch = project[walked..until].to_vec();
-                walked = until;
-                Event::Batch(batch)
+                (stepped.walked, plain.walked) = (until, until);
+                Event::Batch(project[walked..until].to_vec())
             }
             0..=3 => Event::Completion,
             4 | 5 => {
@@ -1096,17 +1450,21 @@ fn play(seed: u64) {
             6 => Event::Matches(random_matches(&mut random, &project)),
             _ => Event::Completion,
         };
-        let between: Vec<Command> = (0..random.below(3))
-            .map(|_| random_command(&mut random, &project))
-            .collect();
-        if between.iter().any(|c| matches!(c, Command::Rescan { .. })) {
-            walked = 0;
-        }
-        happen(&mut stepped, &mut plain, event.clone(), &between);
+        let mut commands = |at_most: usize| -> Vec<Command> {
+            (0..random.below(at_most + 1))
+                .map(|_| random_command(&mut random, &project))
+                .collect()
+        };
+        let meanwhile = Meanwhile {
+            after_staging: commands(2),
+            after_staging_again: commands(1),
+        };
+        happen(&mut stepped, &mut plain, event.clone(), &meanwhile);
+        assert_eq!(stepped.walked, plain.walked, "{context}");
         assert_same(
             &stepped,
             &plain,
-            &format!("{context}, after {event:?} with {between:?} between its steps"),
+            &format!("{context}, after {event:?} with {meanwhile:?} between its steps"),
         );
     }
 }
@@ -1114,8 +1472,10 @@ fn play(seed: u64) {
 /// Whatever happens between the steps of an event (filters set and cleared, ignore
 /// patterns, levels that overlap with the walk, selection, expansion, a content
 /// search opened, answered or cleared, the removal of empty directories, a
-/// cancellation, a re-scan, changes behind the back of the filters): the state ends
-/// as it ends when the event happens under one lock after all of that.
+/// cancellation, a re-scan in one go or step by step, another path, another case
+/// sensitivity, changes behind the back of the filters), and whatever happens
+/// while an event that met such a change is prepared a second time: the state
+/// ends as it ends when the event happens under one lock after all of that.
 #[test]
 fn events_in_steps_end_like_events_under_one_lock() {
     use rayon::prelude::*;
