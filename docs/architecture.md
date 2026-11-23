@@ -279,7 +279,7 @@ default-src 'none'; script-src 'self' cfc:; style-src 'self' cfc: 'unsafe-inline
 - `img-src` allows `data:` for the icons embedded into the style sheets. `connect-src` is limited to the UI's own files (Vite's preload helper fetches chunks); the UI talks to the host through IPC, not through the network.
 - The dev build loads the UI from the Vite dev server, which needs inline scripts and a WebSocket for hot reloading, and carries no policy. The IPC origin check applies there as well (origin `http://localhost:1420`).
 
-What the UI may ask the host for is limited on the host side too: `loadFilePreview` reads entries of the loaded list only (see [IPC Contracts](./ipc.md#file-content)).
+What the UI may ask the host for is limited on the host side too: `loadFilePreview` reads entries of the loaded list only, `loadDirectoryLevel` scans listed directories only, and no path of a command is trusted to lie inside the loaded directory because it starts with it (see [IPC Contracts](./ipc.md#paths-the-ui-sends)).
 
 ---
 

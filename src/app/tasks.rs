@@ -1122,6 +1122,23 @@ fn handle_scan_error<P: EventProxy>(
     send_snapshot(proxy, &state_lock);
 }
 
+/// The directory of the loaded list that `path` names, as the list writes it; `None`
+/// if there is none (or no directory is loaded).
+///
+/// The list is the reference, not the disk: it is what the user was shown, and
+/// comparing against it needs no file system access. Paths are compared name by
+/// name, so a path that only resolves to a listed directory (`a/../b`) is not one.
+fn listed_directory(state: &AppState, path: &Path) -> Option<PathBuf> {
+    if state.current_path.is_empty() {
+        return None;
+    }
+    state
+        .full_file_list()
+        .iter()
+        .find(|item| item.is_directory && item.path == path)
+        .map(|item| item.path.clone())
+}
+
 /// Initiates a scan for a specific subdirectory level (lazy loading).
 ///
 /// Asking for the content of a directory is a request to see it, so the directory is
@@ -1134,9 +1151,17 @@ fn handle_scan_error<P: EventProxy>(
 /// the list ahead of the walk, which does not add it a second time
 /// ([`AppState::merge_directory_level`]).
 ///
+/// Only a directory of the loaded list can be loaded: the path has to be one the scan
+/// has listed, as a directory (compared, not resolved; the file system is not asked
+/// on the command lane). That is what the UI can ask for, since it only knows the
+/// rows of the tree, and it leaves nothing a `..` in the path could get around; the
+/// request for the scan checks the path a second time ([`ScanRequest::directory_level`]).
+/// Any other path is refused: nothing is expanded or scanned, and the request is
+/// answered with the state as it is.
+///
 /// Only the scan itself runs in a spawned task. Returns its handle, which completes
 /// when the result has been dealt with (merged or discarded), or `None` if the request
-/// was refused: the directory is not part of the project.
+/// was refused.
 pub fn start_lazy_load_scan<P: EventProxy>(
     path: PathBuf,
     proxy: P,
@@ -1144,17 +1169,21 @@ pub fn start_lazy_load_scan<P: EventProxy>(
 ) -> Option<JoinHandle<()>> {
     let (scanner, token, request) = {
         let mut state_guard = state.lock();
-        let token = state_guard.begin_lazy_load();
-        // The project root anchors the ignore rules and the depth of the new items.
-        let request = match ScanRequest::directory_level(&state_guard.current_path, &path) {
-            Ok(request) if !state_guard.current_path.is_empty() => request,
-            _ => {
-                // Refused, and answered like every request: with the state as it is.
-                tracing::warn!("Ignoring lazy load outside the project: {:?}", path);
-                send_snapshot(&proxy, &state_guard);
-                return None;
-            }
+        // The directory as the list names it, and the request for its level. The
+        // project root anchors the ignore rules and the depth of the new items.
+        let listed = listed_directory(&state_guard, &path);
+        let request = listed.and_then(|directory| {
+            ScanRequest::directory_level(&state_guard.current_path, &directory)
+                .ok()
+                .map(|request| (directory, request))
+        });
+        let Some((path, request)) = request else {
+            // Refused, and answered like every request: with the state as it is.
+            tracing::warn!("Refusing to load {path:?}: not a directory of the loaded list.");
+            send_snapshot(&proxy, &state_guard);
+            return None;
         };
+        let token = state_guard.begin_lazy_load();
         state_guard.expand_directories([path]);
         send_snapshot(&proxy, &state_guard);
         let scanner = lazy_load_scanner(&state_guard.config, &token);

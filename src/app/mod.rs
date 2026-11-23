@@ -468,6 +468,19 @@ mod tests {
             harness
         }
 
+        /// Lists `directory` (not loaded yet), as the first level of a scan does.
+        fn list_directory(&self, directory: &Path) {
+            let mut state = self.state.lock();
+            state.set_full_file_list(vec![crate::core::FileItem {
+                path: directory.to_path_buf(),
+                is_directory: true,
+                parent: directory.parent().map(Path::to_path_buf),
+                depth: 1,
+                ..Default::default()
+            }]);
+            filtering::apply_filters(&mut state);
+        }
+
         fn drop_path(&self, path: &Path) {
             dispatch_dropped_path(
                 &self.dispatcher,
@@ -1126,26 +1139,168 @@ mod tests {
             .all(|event| [old, new].contains(&named(std::slice::from_ref(event)))));
     }
 
-    /// `loadDirectoryLevel` for a directory outside the loaded one loads nothing. It
-    /// is answered like every request that is refused: with the unchanged snapshot.
-    #[tokio::test]
-    async fn a_lazy_load_outside_the_loaded_directory_is_answered_unchanged() {
-        let mut harness = Harness::new().await;
+    /// `loadDirectoryLevel` loads a directory of the loaded list and nothing else. A
+    /// path that is not one is refused, however it is written and whatever it would
+    /// resolve to: nothing is expanded, nothing outside the project is read, and the
+    /// request is answered with the unchanged snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lazy_load_of_anything_but_a_listed_directory_is_refused() {
+        // Next to the project: a directory whose name starts like the project's, and
+        // one that a `..` leads to. Both hold a file that must never be listed.
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("repo");
+        let sibling = parent.path().join("repository");
+        let secret = parent.path().join("secret");
+        for dir in [&project.join("src"), &sibling, &secret] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("inside.txt"), "content").unwrap();
+        }
+        std::fs::write(project.join("a.txt"), "content").unwrap();
+        let src = project.join("src");
+        let text = |path: &Path| path.to_string_lossy().into_owned();
+
+        let mut harness = Harness::with_project(&project).await;
+        harness.list_directory(&src);
         let before = harness.fingerprint();
 
-        for path in ["/elsewhere", "/repository", ""] {
+        let refused = [
+            // Leaves the project and comes back, or does not.
+            format!("{}/../secret", text(&project)),
+            format!("{}/src/../../secret", text(&project)),
+            format!("{}/../repo/src", text(&project)),
+            format!("{}/src/../src", text(&project)),
+            format!("{}/./../secret", text(&project)),
+            format!("{}//../secret", text(&project)),
+            format!("{}/src/..", text(&project)),
+            format!("{}/..", text(&project)),
+            // Outside, without any `..`.
+            text(&secret),
+            text(&sibling),
+            text(parent.path()),
+            "/".to_string(),
+            String::new(),
+            "src".to_string(),
+            "../secret".to_string(),
+            // Inside, but not a directory of the list: the root itself, a file, a
+            // directory the scan has not listed.
+            text(&project),
+            text(&project.join("a.txt")),
+            text(&project.join("src/inside.txt")),
+            text(&project.join("not-listed")),
+        ];
+        for path in &refused {
             let seq = harness.send("loadDirectoryLevel", serde_json::json!(path));
             assert_eq!(seqs_of(&harness.events(1).await), [seq], "{path:?}");
             assert_eq!(harness.fingerprint(), before, "{path:?}");
         }
-        harness.state.lock().current_path.clear();
-        let unloaded = harness.fingerprint();
-        let seq = harness.send("loadDirectoryLevel", serde_json::json!("/repo/src"));
-        assert_eq!(seqs_of(&harness.events(1).await), [seq]);
-        assert_eq!(harness.fingerprint(), unloaded);
-
         harness.quiescence().await;
         assert!(harness.events.try_recv().is_err(), "one answer each");
+        {
+            let state = harness.state.lock();
+            assert_eq!(listed_names(&state), ["src"]);
+            assert!(state.loaded_dirs.is_empty());
+        }
+
+        // The listed directory itself is loaded, also when it is written with `.`,
+        // doubled or trailing separators: that is the same path, and what is listed
+        // is written the way the list writes it.
+        for spelling in [
+            format!("{}/./src", text(&project)),
+            format!("{}//src/", text(&project)),
+            text(&src),
+        ] {
+            harness.send("loadDirectoryLevel", serde_json::json!(spelling));
+            harness.quiescence().await;
+            let state = harness.state.lock();
+            assert!(state.loaded_dirs.contains(&src), "{spelling}");
+            assert_eq!(listed_names(&state), ["inside.txt", "src"], "{spelling}");
+            assert!(
+                state.full_file_list().iter().all(|item| text(&item.path)
+                    .starts_with(&format!("{}/", text(&src)))
+                    || item.path == src),
+                "{spelling}: {:?}",
+                state.full_file_list()
+            );
+            assert!(state
+                .expanded_dirs
+                .iter()
+                .all(|dir| dir.as_os_str() == src.as_os_str()));
+        }
+
+        // Without a loaded directory nothing is one of its directories.
+        harness.sent_errors();
+        harness.state.lock().current_path.clear();
+        let unloaded = harness.fingerprint();
+        let seq = harness.send("loadDirectoryLevel", serde_json::json!(src));
+        assert_eq!(seqs_of(&harness.events(1).await), [seq]);
+        assert_eq!(harness.fingerprint(), unloaded);
+    }
+
+    /// The other commands that take a path of the UI do not reach beyond the loaded
+    /// list either, whatever the path is: a preview reads listed files only, an
+    /// ignore pattern is made of the names below the root, a directory selection
+    /// selects listed files, and what is generated is made of listed files.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn paths_that_leave_the_loaded_directory_reach_nothing() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("repo");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(project.join("a.txt"), "marker").unwrap();
+        std::fs::create_dir_all(parent.path().join("repository")).unwrap();
+        std::fs::write(parent.path().join("secret.txt"), "secret").unwrap();
+        std::fs::write(parent.path().join("repository/secret.txt"), "secret").unwrap();
+        let text = |path: &Path| path.to_string_lossy().into_owned();
+
+        let mut harness = Harness::with_scanned_project(&project).await;
+        harness.send("updateFilters", serde_json::json!({ "searchQuery": "" }));
+        harness.quiescence().await;
+        harness.sent_errors();
+        let patterns = harness.state.lock().config.ignore_patterns.clone();
+
+        let outside = [
+            format!("{}/../secret.txt", text(&project)),
+            format!("{}/src/../../secret.txt", text(&project)),
+            format!("{}/./../secret.txt", text(&project)),
+            format!("{}//../secret.txt", text(&project)),
+            format!("{}/../repo/a.txt", text(&project)),
+            text(&parent.path().join("secret.txt")),
+            text(&parent.path().join("repository/secret.txt")),
+            text(&parent.path().join("repository")),
+        ];
+        for path in &outside {
+            // No preview: an error and the unchanged snapshot, no content.
+            harness.send("loadFilePreview", serde_json::json!(path));
+            harness.quiescence().await;
+            let events: Vec<_> = std::iter::from_fn(|| harness.events.try_recv().ok()).collect();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [UserEvent::ShowError(_), UserEvent::StateUpdate(_)]
+                ),
+                "{path}: {events:?}"
+            );
+            assert_eq!(harness.state.lock().previewed_file_path, None, "{path}");
+
+            // No ignore pattern, and no selection of a directory.
+            harness.send("addIgnorePath", serde_json::json!(path));
+            harness.send("toggleDirectorySelection", serde_json::json!(path));
+            harness.quiescence().await;
+            let state = harness.state.lock();
+            assert_eq!(state.config.ignore_patterns, patterns, "{path}");
+            assert_eq!(state.selected_files.len(), 1, "{path}");
+            drop(state);
+            harness.sent_errors();
+        }
+
+        // A file that is selected by such a path is no file of the list, so it is
+        // not part of what is generated.
+        for path in &outside {
+            harness.send("toggleSelection", serde_json::json!(path));
+        }
+        harness.quiescence().await;
+        let plan = tasks::GenerationPlan::of(&harness.state.lock());
+        assert_eq!(plan.selected_files, [project.join("a.txt")]);
     }
 
     /// A dialog command is accounted for when the ordered lane reaches it, not when
@@ -1283,6 +1438,7 @@ mod tests {
             let project = project_on_disk("a.txt");
             let harness = Harness::with_project(project.path()).await;
             let src = project.path().join("src");
+            harness.list_directory(&src);
 
             harness.send("loadDirectoryLevel", serde_json::json!(src));
             harness.send(
@@ -1295,7 +1451,7 @@ mod tests {
             assert!(!state.expanded_dirs.contains(&src), "round {round}");
             // The load itself is not affected by the collapse.
             assert!(state.loaded_dirs.contains(&src), "round {round}");
-            assert_eq!(listed_names(&state), ["main.rs"], "round {round}");
+            assert_eq!(listed_names(&state), ["main.rs", "src"], "round {round}");
         }
     }
 
@@ -1305,6 +1461,7 @@ mod tests {
         let project = project_on_disk("a.txt");
         let harness = Harness::with_project(project.path()).await;
         let src = project.path().join("src");
+        harness.list_directory(&src);
 
         harness.send(
             "setExpansion",
