@@ -23,7 +23,7 @@ async fn test_add_ignore_path_applies_pattern_to_loaded_list() {
         .any(|n| n.name == "docs"));
     let state = harness.state.lock();
     assert!(!state.is_scanning() && !state.is_fully_scanned);
-    assert!(state.config.ignore_patterns.contains("/docs/"));
+    assert!(state.config().ignore_patterns.contains("/docs/"));
 }
 
 #[tokio::test]
@@ -33,14 +33,14 @@ async fn test_add_ignore_path_does_nothing_when_no_directory_is_loaded() {
     {
         let mut state = harness.state.lock();
         state.current_path = String::new();
-        initial_patterns_count = state.config.ignore_patterns.len();
+        initial_patterns_count = state.config().ignore_patterns.len();
     }
 
     let payload = json!("/some/path/to/ignore.txt");
     add_ignore_path(typed(payload), harness.proxy.clone(), harness.state.clone()).await;
 
     {
-        let final_patterns_count = harness.state.lock().config.ignore_patterns.len();
+        let final_patterns_count = harness.state.lock().config().ignore_patterns.len();
         assert_eq!(
             initial_patterns_count, final_patterns_count,
             "Ignore patterns should not change"
@@ -58,7 +58,7 @@ async fn test_add_ignore_path_does_nothing_when_no_directory_is_loaded() {
 async fn test_add_ignore_path_handles_path_outside_root() {
     let mut harness = TestHarness::new();
     harness.set_initial_files(&["src/main.rs"]);
-    let initial_patterns_count = harness.state.lock().config.ignore_patterns.len();
+    let initial_patterns_count = harness.state.lock().config().ignore_patterns.len();
     let outside_path = json!("/etc/hosts");
 
     add_ignore_path(
@@ -73,7 +73,7 @@ async fn test_add_ignore_path_handles_path_outside_root() {
     harness
         .expect_no_event_within(QUIET_PERIOD, "Nothing else is sent")
         .await;
-    let final_patterns_count = harness.state.lock().config.ignore_patterns.len();
+    let final_patterns_count = harness.state.lock().config().ignore_patterns.len();
     assert_eq!(initial_patterns_count, final_patterns_count);
 }
 
@@ -344,7 +344,7 @@ fn test_gitignore_pattern_of_a_file_that_ends_with_other_whitespace_is_none() {
 async fn test_add_ignore_path_for_a_name_that_ends_with_other_whitespace_adds_nothing() {
     let mut harness = TestHarness::new();
     harness.set_initial_files(&["name\u{a0}", "name"]);
-    let patterns = harness.state.lock().config.ignore_patterns.clone();
+    let patterns = harness.state.lock().config().ignore_patterns.clone();
 
     add_ignore_path(
         typed(json!(harness.root_path.join("name\u{a0}"))),
@@ -355,7 +355,7 @@ async fn test_add_ignore_path_for_a_name_that_ends_with_other_whitespace_adds_no
 
     {
         let state = harness.state.lock();
-        assert_eq!(state.config.ignore_patterns, patterns);
+        assert_eq!(state.config().ignore_patterns, patterns);
         assert_eq!(state.full_file_list().len(), 2);
     }
     let events: Vec<UserEvent> = std::iter::from_fn(|| harness.event_rx.try_recv().ok()).collect();
@@ -386,7 +386,7 @@ async fn test_add_ignore_path_for_a_name_that_is_not_unicode_says_so() {
         state.set_full_file_list(vec![file_item(path.clone(), false)]);
         filtering::apply_filters(&mut state);
     }
-    let patterns = harness.state.lock().config.ignore_patterns.clone();
+    let patterns = harness.state.lock().config().ignore_patterns.clone();
 
     add_ignore_path(
         typed(json!(path.to_string_lossy())),
@@ -395,7 +395,7 @@ async fn test_add_ignore_path_for_a_name_that_is_not_unicode_says_so() {
     )
     .await;
 
-    assert_eq!(harness.state.lock().config.ignore_patterns, patterns);
+    assert_eq!(harness.state.lock().config().ignore_patterns, patterns);
     let events: Vec<UserEvent> = std::iter::from_fn(|| harness.event_rx.try_recv().ok()).collect();
     assert!(
         matches!(
@@ -476,9 +476,9 @@ async fn test_add_ignore_path_for_a_nested_directory_uses_slashes() {
 
     let state = harness.state.lock();
     assert!(
-        state.config.ignore_patterns.contains("/src/gen/"),
+        state.config().ignore_patterns.contains("/src/gen/"),
         "{:?}",
-        state.config.ignore_patterns
+        state.config().ignore_patterns
     );
     let remaining: HashSet<PathBuf> = state
         .full_file_list()
@@ -529,8 +529,8 @@ async fn test_add_ignore_path_takes_the_kind_of_the_path_from_the_loaded_list() 
 
     assert_eq!(harness.state_updates_sent(), 2);
     let state = harness.state.lock();
-    assert!(state.config.ignore_patterns.contains("/build/"));
-    assert!(state.config.ignore_patterns.contains("/notes"));
+    assert!(state.config().ignore_patterns.contains("/build/"));
+    assert!(state.config().ignore_patterns.contains("/notes"));
     assert!(state.full_file_list().is_empty());
 }
 
@@ -552,7 +552,7 @@ async fn test_add_ignore_path_handles_duplicate_pattern() {
     assert!(harness.last_state_update().is_some());
 
     let _ = harness.last_state_update();
-    let patterns_before = harness.state.lock().config.ignore_patterns.clone();
+    let patterns_before = harness.state.lock().config().ignore_patterns.clone();
 
     add_ignore_path(typed(payload), harness.proxy.clone(), harness.state.clone()).await;
 
@@ -564,5 +564,5 @@ async fn test_add_ignore_path_handles_duplicate_pattern() {
     assert!(!ui_state.patterns_need_rescan);
     let state = harness.state.lock();
     assert!(!state.is_scanning());
-    assert_eq!(state.config.ignore_patterns, patterns_before);
+    assert_eq!(state.config().ignore_patterns, patterns_before);
 }

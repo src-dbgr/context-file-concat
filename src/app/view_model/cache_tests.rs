@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 fn test_state() -> AppState {
     let mut state = AppState::default();
-    state.config = AppConfig {
+    *state.config_mut() = AppConfig {
         ignore_patterns: HashSet::new(),
         remove_empty_directories: false,
         ..Default::default()
@@ -47,7 +47,7 @@ fn reference_tree(state: &AppState) -> Vec<TreeNode> {
         content_search_matches: state.content_search_results(),
         filename_query: &state.search_query,
         extension_filter: &state.extension_filter,
-        case_sensitive: state.config.case_sensitive_search,
+        case_sensitive: state.config().case_sensitive_search,
         previewed_path: &state.previewed_file_path,
     })
 }
@@ -283,7 +283,7 @@ fn apply(state: &mut AppState, op: Op) {
         }
         Op::FilenameQuery(query) => state.search_query = query.to_string(),
         Op::ExtensionFilter(filter) => state.extension_filter = filter.to_string(),
-        Op::CaseSensitive(value) => state.config.case_sensitive_search = value,
+        Op::CaseSensitive(value) => state.config_mut().case_sensitive_search = value,
     }
 }
 

@@ -117,7 +117,7 @@ async fn test_import_config_resets_and_opens_the_imported_last_directory() {
             ["file.rs"],
             "the imported ignore pattern applies to the opened directory"
         );
-        assert_eq!(state.config, expected);
+        assert_eq!(*state.config(), expected);
     }
     let saved = config_on_disk(&store, |saved| {
         saved.last_directory.as_ref() == Some(&project_to_open)
@@ -135,7 +135,7 @@ async fn test_import_config_without_a_last_directory_leaves_a_clean_state() {
     harness.create_file("kept.txt", "");
     harness.set_initial_files(&["kept.txt"]);
     let last_directory = Some(harness.root_path.clone());
-    harness.state.lock().config.last_directory = last_directory.clone();
+    harness.state.lock().config_mut().last_directory = last_directory.clone();
     let imported = foreign_config(None);
 
     import_file(&harness, &imported);
@@ -160,7 +160,7 @@ async fn test_import_config_without_a_last_directory_leaves_a_clean_state() {
         let state = harness.state.lock();
         assert_eq!(state.current_path, "");
         assert!(state.full_file_list().is_empty() && !state.is_scanning());
-        assert_eq!(state.config, expected);
+        assert_eq!(*state.config(), expected);
     }
     assert_eq!(
         config_on_disk(&store, |saved| saved.output_filename == "imported.txt").await,
@@ -229,7 +229,7 @@ async fn test_import_config_sends_error_on_corrupt_file() {
 #[tokio::test]
 async fn test_config_commands_answer_what_they_refuse() {
     let mut harness = TestHarness::new();
-    let initial_config = harness.state.lock().config.clone();
+    let initial_config = harness.state.lock().config().clone();
 
     // A blank text is not a pattern.
     for blank in ["", "   ", "\t"] {
@@ -246,7 +246,7 @@ async fn test_config_commands_answer_what_they_refuse() {
     assert_eq!(harness.state_updates_sent(), 1, "answer to addIgnorePath");
 
     // Nothing was changed, nothing was saved, and each refusal was answered once.
-    assert_eq!(harness.state.lock().config, initial_config);
+    assert_eq!(*harness.state.lock().config(), initial_config);
     harness
         .expect_no_event_within(QUIET_PERIOD, "Nothing else is sent")
         .await;
@@ -311,7 +311,7 @@ async fn test_pick_output_directory_updates_config() {
     );
 
     let state = harness.state.lock();
-    assert_eq!(state.config.output_directory, Some(new_dir));
+    assert_eq!(state.config().output_directory, Some(new_dir));
 }
 
 // --- Every change of the configuration is persisted, through the ordered path ---
@@ -332,7 +332,7 @@ async fn test_pick_output_directory_persists_the_choice() {
         saved.output_directory.as_ref() == Some(&new_dir)
     })
     .await;
-    assert_eq!(saved, harness.state.lock().config);
+    assert_eq!(saved, *harness.state.lock().config());
     let answered = harness.last_state_update().expect("the choice is answered");
     assert_eq!(answered.config.output_directory, Some(new_dir));
 }
@@ -346,7 +346,7 @@ async fn test_config_commands_persist_their_change() {
     set_option(&harness, ConfigOption::OutputFilename("named.txt".into())).await;
 
     let saved = config_on_disk(&store, |saved| saved.output_filename == "named.txt").await;
-    assert_eq!(saved, harness.state.lock().config);
+    assert_eq!(saved, *harness.state.lock().config());
     assert!(saved.case_sensitive_search);
     assert!(saved.ignore_patterns.contains("generated/"));
 }
@@ -368,7 +368,7 @@ async fn test_rapid_config_changes_end_with_the_last_one_on_disk() {
         let saved = config_on_disk(&store, |saved| saved.output_filename == expected).await;
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        assert_eq!(saved, harness.state.lock().config);
+        assert_eq!(saved, *harness.state.lock().config());
         let path = store.path().unwrap();
         assert_eq!(
             config::settings::load_config(path).unwrap().output_filename,
@@ -387,11 +387,11 @@ async fn test_export_config_writes_the_shared_settings_only() {
     harness.dialog.set_save_file(Some(save_path.clone()));
     {
         let mut state = harness.state.lock();
-        state.config.ignore_patterns = HashSet::from(["*.shared".to_string()]);
-        state.config.case_sensitive_search = true;
-        state.config.output_filename = "shared.txt".to_string();
-        state.config.output_directory = Some(PathBuf::from("/home/alice/out"));
-        state.config.last_directory = Some(PathBuf::from("/home/alice/project"));
+        state.config_mut().ignore_patterns = HashSet::from(["*.shared".to_string()]);
+        state.config_mut().case_sensitive_search = true;
+        state.config_mut().output_filename = "shared.txt".to_string();
+        state.config_mut().output_directory = Some(PathBuf::from("/home/alice/out"));
+        state.config_mut().last_directory = Some(PathBuf::from("/home/alice/project"));
     }
 
     export_config(
@@ -408,7 +408,7 @@ async fn test_export_config_writes_the_shared_settings_only() {
     let exported: serde_json::Value = serde_json::from_str(&written).unwrap();
     assert_eq!(
         exported,
-        serde_json::to_value(config::SharedConfig::from(&harness.state.lock().config)).unwrap()
+        serde_json::to_value(config::SharedConfig::from(harness.state.lock().config())).unwrap()
     );
     assert_eq!(exported["ignore_patterns"], json!(["*.shared"]));
     for personal in [
@@ -432,10 +432,10 @@ async fn test_exported_config_can_be_imported() {
     exporter.dialog.set_save_file(Some(exported_path.clone()));
     {
         let mut state = exporter.state.lock();
-        state.config.ignore_patterns = HashSet::from(["*.shared".to_string()]);
-        state.config.case_sensitive_search = true;
-        state.config.max_file_size_mb = 3;
-        state.config.output_directory = Some(PathBuf::from("/home/alice/out"));
+        state.config_mut().ignore_patterns = HashSet::from(["*.shared".to_string()]);
+        state.config_mut().case_sensitive_search = true;
+        state.config_mut().max_file_size_mb = 3;
+        state.config_mut().output_directory = Some(PathBuf::from("/home/alice/out"));
     }
     export_config(
         exporter.dialog.as_ref(),
@@ -450,8 +450,8 @@ async fn test_exported_config_can_be_imported() {
     let mut importer = TestHarness::new();
     {
         let mut state = importer.state.lock();
-        state.config.output_directory = Some(PathBuf::from("/home/bob/out"));
-        state.config.last_directory = Some(PathBuf::from("/home/bob/project"));
+        state.config_mut().output_directory = Some(PathBuf::from("/home/bob/out"));
+        state.config_mut().last_directory = Some(PathBuf::from("/home/bob/project"));
     }
     importer.dialog.set_pick_file(Some(exported_path));
     import_config(
@@ -467,10 +467,10 @@ async fn test_exported_config_can_be_imported() {
     importer
         .expect_no_event_within(QUIET_PERIOD, "An export names no directory to open")
         .await;
-    let config = importer.state.lock().config.clone();
+    let config = importer.state.lock().config().clone();
     assert_eq!(
         config::SharedConfig::from(&config),
-        config::SharedConfig::from(&exporter.state.lock().config)
+        config::SharedConfig::from(exporter.state.lock().config())
     );
     assert_eq!(
         config.output_directory,
@@ -489,7 +489,7 @@ async fn test_export_config_writes_without_holding_the_state_lock() {
     let mut harness = TestHarness::new();
     let save_path = harness.root_path.join("exported.json");
     harness.dialog.set_save_file(Some(save_path.clone()));
-    harness.state.lock().config.output_filename = "before.txt".to_string();
+    harness.state.lock().config_mut().output_filename = "before.txt".to_string();
     let observed_state = harness.state.clone();
     let mut written = None;
 
@@ -503,7 +503,7 @@ async fn test_export_config_writes_without_holding_the_state_lock() {
                 .try_lock()
                 .expect("the state lock must not be held during the write");
             // ... and an edit made meanwhile does not reach the file.
-            state.config.output_filename = "meanwhile.txt".to_string();
+            state.config_mut().output_filename = "meanwhile.txt".to_string();
             written = Some((settings.clone(), path.to_path_buf()));
             Ok(())
         },
@@ -570,13 +570,13 @@ async fn test_export_config_sends_no_event_on_cancel() {
 async fn test_pick_output_directory_does_nothing_on_cancel() {
     let mut harness = TestHarness::new();
     harness.dialog.set_pick_folder(None);
-    let initial_config = harness.state.lock().config.clone();
+    let initial_config = harness.state.lock().config().clone();
     pick_output_directory(
         harness.dialog.as_ref(),
         harness.proxy.clone(),
         harness.state.clone(),
     );
-    let final_config = harness.state.lock().config.clone();
+    let final_config = harness.state.lock().config().clone();
     harness
         .expect_no_event_within(QUIET_PERIOD, "No event expected")
         .await;
@@ -652,9 +652,9 @@ async fn test_quick_successive_config_edits_do_not_overwrite_each_other() {
     harness.set_initial_files(&["src"]);
     {
         let mut state = harness.state.lock();
-        state.config.ignore_patterns = HashSet::from(["keep".to_string()]);
-        state.config.max_file_size_mb = 7;
-        state.config.last_directory = Some(PathBuf::from("/somewhere"));
+        state.config_mut().ignore_patterns = HashSet::from(["keep".to_string()]);
+        state.config_mut().max_file_size_mb = 7;
+        state.config_mut().last_directory = Some(PathBuf::from("/somewhere"));
     }
 
     // None of these has seen the outcome of the ones before it.
@@ -677,12 +677,12 @@ async fn test_quick_successive_config_edits_do_not_overwrite_each_other() {
         "Adding patterns must never look like a removal"
     );
     let state = harness.state.lock();
-    assert!(state.config.case_sensitive_search);
-    assert!(!state.config.use_relative_paths);
+    assert!(state.config().case_sensitive_search);
+    assert!(!state.config().use_relative_paths);
     // What the UI never edits cannot be touched by its commands.
-    assert_eq!(state.config.max_file_size_mb, 7);
+    assert_eq!(state.config().max_file_size_mb, 7);
     assert_eq!(
-        state.config.last_directory,
+        state.config().last_directory,
         Some(PathBuf::from("/somewhere"))
     );
 }
@@ -710,7 +710,7 @@ async fn test_clear_ignore_patterns_removes_all_and_recommends_rescan() {
 async fn test_pattern_commands_are_idempotent() {
     let mut harness = TestHarness::new();
     harness.set_initial_files(&["src"]);
-    let before = harness.state.lock().config.clone();
+    let before = harness.state.lock().config().clone();
     let existing = before.ignore_patterns.iter().next().unwrap().clone();
 
     remove_pattern(&harness, "never-added").await;
@@ -720,7 +720,7 @@ async fn test_pattern_commands_are_idempotent() {
         .last_state_update()
         .expect("the commands are answered");
     assert!(!ui_state.patterns_need_rescan);
-    assert_eq!(harness.state.lock().config, before);
+    assert_eq!(*harness.state.lock().config(), before);
 }
 
 /// A file that names only some settings is completed with the defaults.
@@ -748,7 +748,7 @@ async fn test_import_config_with_a_partial_file() {
     harness
         .expect_no_event_within(QUIET_PERIOD, "No scan should start without a directory")
         .await;
-    assert!(harness.state.lock().config.ignore_patterns.is_empty());
+    assert!(harness.state.lock().config().ignore_patterns.is_empty());
 }
 
 #[tokio::test]
@@ -776,7 +776,7 @@ async fn test_add_ignore_pattern_applies_locally() {
 
     // Ensure a clean state for the test run.
     {
-        harness.state.lock().config.ignore_patterns.clear();
+        harness.state.lock().config_mut().ignore_patterns.clear();
     }
 
     // The `current_path` is the root for the ignore matcher. All file paths
@@ -835,9 +835,12 @@ async fn test_remove_ignore_pattern_sets_rescan_flag() {
     // Set initial patterns
     {
         let mut state = harness.state.lock();
-        state.config.ignore_patterns.insert("*.log".to_string());
         state
-            .config
+            .config_mut()
+            .ignore_patterns
+            .insert("*.log".to_string());
+        state
+            .config_mut()
             .ignore_patterns
             .insert("node_modules/".to_string());
     }
@@ -891,7 +894,7 @@ async fn test_add_ignore_pattern_isolated() {
     let proxy = TestEventProxy::new(tx);
     let state = {
         let mut s = AppState::default();
-        s.config.ignore_patterns.clear();
+        s.config_mut().ignore_patterns.clear();
         s.current_path = "/app".to_string();
         s.set_full_file_list(vec![
             FileItem {
@@ -924,7 +927,7 @@ async fn test_add_ignore_pattern_isolated() {
 
     let final_state = state.lock();
     assert_eq!(final_state.full_file_list().len(), 1);
-    assert!(final_state.config.ignore_patterns.contains("*.log"));
+    assert!(final_state.config().ignore_patterns.contains("*.log"));
 }
 
 /// A comprehensive integration test for the entire user workflow of removing an ignore pattern.
@@ -968,7 +971,7 @@ async fn test_removing_pattern_and_rescanning_updates_file_list() {
     {
         let mut state = harness.state.lock();
         state
-            .config
+            .config_mut()
             .ignore_patterns
             .insert(format!("{}/", artifact_dir_name));
     }
@@ -1081,7 +1084,7 @@ async fn test_pattern_change_restarts_running_scan_when_pattern_is_removed() {
     harness
         .state
         .lock()
-        .config
+        .config_mut()
         .ignore_patterns
         .insert("docs/".to_string());
     let old_scan = begin_parked_scan(&harness);
@@ -1134,7 +1137,7 @@ async fn test_case_sensitivity_change_repeats_content_search() {
     {
         // The state a case-insensitive search for "needle" has left behind.
         let mut state = harness.state.lock();
-        state.config.case_sensitive_search = false;
+        state.config_mut().case_sensitive_search = false;
         state.content_search_query = "needle".to_string();
         state.set_content_search_results(HashSet::from([lower.clone(), upper.clone()]));
     }

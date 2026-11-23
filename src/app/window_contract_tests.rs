@@ -89,7 +89,7 @@ fn project() -> AppState {
     }
 
     let mut state = AppState::default();
-    state.config.remove_empty_directories = false;
+    state.config_mut().remove_empty_directories = false;
     state.current_path = "/project".to_string();
     state.loaded_dirs = items
         .iter()

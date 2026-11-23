@@ -441,7 +441,7 @@ async fn start_scan_on_path_registers_the_scan_before_it_returns() {
     let state = harness.state.lock();
     assert_eq!(state.current_path, previous);
     assert_eq!(state.selected_files.len(), 1);
-    assert_eq!(state.config.last_directory, None);
+    assert_eq!(state.config().last_directory, None);
 }
 
 /// Once the path has been found, the directory replaces the loaded one: everything
@@ -483,7 +483,7 @@ async fn opening_a_path_replaces_the_loaded_directory_once_it_is_found() {
     let state = harness.state.lock();
     assert!(state.selected_files.is_empty() && state.expanded_dirs.is_empty());
     assert_eq!(
-        state.config.last_directory.as_deref(),
+        state.config().last_directory.as_deref(),
         Some(project.as_path())
     );
     let listed: Vec<_> = state
@@ -511,7 +511,7 @@ async fn locating_the_scan_root_is_discarded_for_a_cancelled_scan() {
     harness.assert_no_events("A superseded scan must stay silent");
     let state = harness.state.lock();
     assert_eq!(state.current_path, "untouched");
-    assert_eq!(state.config.last_directory, None);
+    assert_eq!(state.config().last_directory, None);
 }
 
 /// A path that does not exist is reported, and the directory that was loaded stays
@@ -583,7 +583,7 @@ async fn opening_a_nonexistent_path_keeps_the_loaded_directory() {
     let state = harness.state.lock();
     assert!(!state.is_scanning(), "The scan must have ended.");
     assert!(!state.is_opening());
-    assert_eq!(state.config.last_directory, None);
+    assert_eq!(state.config().last_directory, None);
     assert_eq!(state.selected_files, HashSet::from([file]));
 }
 
@@ -635,7 +635,7 @@ async fn a_failed_opening_restarts_the_scan_it_interrupted() {
     let state = harness.state.lock();
     assert_eq!(state.full_file_list().len(), 2);
     assert_eq!(
-        state.config.last_directory.as_deref(),
+        state.config().last_directory.as_deref(),
         Some(loaded.as_path())
     );
 }
@@ -672,7 +672,7 @@ async fn start_scan_on_path_handles_path_is_file() {
     let state = harness.state.lock();
     assert_eq!(state.current_path, root);
     assert_eq!(
-        state.config.last_directory.as_deref(),
+        state.config().last_directory.as_deref(),
         Some(harness.root_path.as_path())
     );
     assert!(state
@@ -959,7 +959,7 @@ fn load_complete_list(harness: &TestHarness) -> PathBuf {
         file_item(&file, 2),
     ]);
     state.is_fully_scanned = true;
-    state.config.remove_empty_directories = true;
+    state.config_mut().remove_empty_directories = true;
     filtering::apply_filters(&mut state);
     file
 }

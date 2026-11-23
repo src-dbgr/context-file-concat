@@ -42,7 +42,7 @@ fn paths(paths: &[&str]) -> HashSet<PathBuf> {
 /// so that the output is deterministic.
 fn representative_state() -> AppState {
     let mut state = AppState::default();
-    state.config = AppConfig {
+    *state.config_mut() = AppConfig {
         ignore_patterns: HashSet::from(["target".to_string()]),
         tree_ignore_patterns: HashSet::new(),
         last_directory: Some(PathBuf::from("/project")),

@@ -12,7 +12,7 @@ async fn a_refused_message_changes_nothing_and_is_answered_under_its_number() {
     let mut harness = Harness::new().await;
     let whole_config = serde_json::to_value(AppConfig {
         output_filename: "smuggled.txt".to_string(),
-        ..harness.state.lock().config.clone()
+        ..harness.state.lock().config().clone()
     })
     .unwrap();
     let before = harness.fingerprint();
@@ -397,7 +397,7 @@ async fn paths_that_leave_the_loaded_directory_reach_nothing() {
     harness.send("updateFilters", serde_json::json!({ "searchQuery": "" }));
     harness.quiescence().await;
     harness.sent_errors();
-    let patterns = harness.state.lock().config.ignore_patterns.clone();
+    let patterns = harness.state.lock().config().ignore_patterns.clone();
 
     let outside = [
         format!("{}/../secret.txt", text(&project)),
@@ -428,7 +428,7 @@ async fn paths_that_leave_the_loaded_directory_reach_nothing() {
         harness.send("toggleDirectorySelection", serde_json::json!(path));
         harness.quiescence().await;
         let state = harness.state.lock();
-        assert_eq!(state.config.ignore_patterns, patterns, "{path}");
+        assert_eq!(state.config().ignore_patterns, patterns, "{path}");
         assert_eq!(state.selected_files.len(), 1, "{path}");
         drop(state);
         harness.sent_errors();

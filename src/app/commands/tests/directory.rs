@@ -87,7 +87,7 @@ async fn test_clear_directory_resets_state() {
     {
         let mut state = harness.state.lock();
         state.selected_files.insert(file_path);
-        state.config.last_directory = Some(harness.root_path.clone());
+        state.config_mut().last_directory = Some(harness.root_path.clone());
     }
 
     clear_directory(harness.proxy.clone(), harness.state.clone());
@@ -99,7 +99,7 @@ async fn test_clear_directory_resets_state() {
     assert!(state.current_path.is_empty());
     assert!(state.full_file_list().is_empty());
     assert!(state.selected_files.is_empty());
-    assert!(state.config.last_directory.is_none());
+    assert!(state.config().last_directory.is_none());
 }
 
 #[tokio::test]
@@ -132,12 +132,12 @@ async fn test_clear_directory_persists_the_forgotten_last_directory() {
     let (harness, store) = TestHarness::with_config_file();
     {
         let mut state = harness.state.lock();
-        state.config.last_directory = Some(harness.root_path.clone());
+        state.config_mut().last_directory = Some(harness.root_path.clone());
         state.config_snapshot().save().unwrap();
     }
 
     clear_directory(harness.proxy.clone(), harness.state.clone());
 
     let saved = config_on_disk(&store, |saved| saved.last_directory.is_none()).await;
-    assert_eq!(saved, harness.state.lock().config);
+    assert_eq!(saved, *harness.state.lock().config());
 }

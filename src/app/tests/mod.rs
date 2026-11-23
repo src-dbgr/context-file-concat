@@ -111,7 +111,7 @@ impl Harness {
         // The receiver may already be gone when a test has finished.
         let (proxy, events) = lenient_event_channel();
         let mut state = AppState::default();
-        state.config = AppConfig::default();
+        *state.config_mut() = AppConfig::default();
         state.current_path = "/repo".to_string();
         // What the tree shows: commands that act on a row act on one of these.
         state.set_full_file_list(
@@ -234,7 +234,7 @@ impl Harness {
         let state = self.state.lock();
         format!(
             "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
-            state.config,
+            state.config(),
             state.current_path,
             state.expanded_dirs,
             state.selected_files,
@@ -357,7 +357,7 @@ impl Harness {
         );
         assert_eq!(state.search_query, "a", "{context}");
         assert_eq!(
-            state.config.last_directory.as_deref(),
+            state.config().last_directory.as_deref(),
             Some(project),
             "{context}"
         );

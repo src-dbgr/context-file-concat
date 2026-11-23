@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 fn test_state(paths: &[(&str, bool)]) -> AppState {
     let mut state = AppState::default();
-    state.config = AppConfig {
+    *state.config_mut() = AppConfig {
         ignore_patterns: HashSet::new(),
         remove_empty_directories: false,
         ..Default::default()
@@ -229,7 +229,7 @@ fn fully_expanded_snapshot_is_the_complete_tree() {
         content_search_matches: state.content_search_results(),
         filename_query: &state.search_query,
         extension_filter: &state.extension_filter,
-        case_sensitive: state.config.case_sensitive_search,
+        case_sensitive: state.config().case_sensitive_search,
         previewed_path: &state.previewed_file_path,
     });
     assert_eq!(ui_state.tree, complete);

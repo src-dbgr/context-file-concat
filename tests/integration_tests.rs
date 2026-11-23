@@ -6,7 +6,7 @@
 use context_file_concat::app::{
     self, events::UserEvent, proxy::EventProxy, shared_state::SharedState, state::AppState,
 };
-use context_file_concat::config::AppConfig;
+use context_file_concat::config::{AppConfig, ConfigStore};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -50,7 +50,7 @@ mod helpers {
     impl TestHarness {
         /// Creates a new test harness with a clean configuration.
         ///
-        /// The state is a default `AppState` with another configuration: it is not
+        /// The state has a configuration of its own and a detached store: it is not
         /// bound to a config file, so the tests neither read nor write the developer's
         /// real configuration (see `test_state_of_the_tests_is_not_bound_to_a_config_file`).
         pub fn new() -> Self {
@@ -59,8 +59,7 @@ mod helpers {
             let (event_tx, event_rx) = mpsc::unbounded_channel();
 
             let config = Self::create_clean_test_config(root_path.clone());
-            let mut state = AppState::default();
-            state.config = config;
+            let state = AppState::new(config, ConfigStore::detached());
             // current_path is set by start_scan_on_path, so we leave it empty here.
 
             Self {
@@ -136,9 +135,8 @@ mod helpers {
 }
 
 /// No test may ever read or write the developer's real configuration: the state the
-/// tests work with is an `AppState::default()`, which is bound to no config file (see
-/// `test_default_state_has_the_default_config_and_is_not_bound_to_a_file` in
-/// `app/state/tests`), so "saving" its configuration succeeds and writes nothing.
+/// tests work with has a detached store (`ConfigStore::detached`), which is bound to no
+/// config file, so "saving" its configuration succeeds and writes nothing.
 #[test]
 fn test_state_of_the_tests_is_not_bound_to_a_config_file() {
     let harness = helpers::TestHarness::new();

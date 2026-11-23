@@ -136,7 +136,7 @@ async fn a_command_that_suspends_is_accounted_for_by_its_first_answer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_snapshot_sent_while_a_command_is_about_to_run_does_not_name_it() {
     let mut harness = Harness::new().await;
-    let old_name = harness.state.lock().config.output_filename.clone();
+    let old_name = harness.state.lock().config().output_filename.clone();
     let before = harness.send("selectAll", serde_json::Value::Null);
     assert_eq!(seqs_of(&harness.events(1).await), [before]);
 

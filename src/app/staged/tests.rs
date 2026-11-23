@@ -27,7 +27,7 @@ fn paths_of(items: &[FileItem]) -> Vec<&str> {
 /// A scan of `/project` whose first level (`src`, `docs`) has been published.
 fn state_with_a_walking_scan() -> (AppState, ScanToken) {
     let mut state = AppState::default();
-    state.config.ignore_patterns.clear();
+    state.config_mut().ignore_patterns.clear();
     state.current_path = "/project".to_string();
     let token = state.begin_scan();
     state.begin_scan_walk(&token);
@@ -267,7 +267,7 @@ fn an_event_that_changes_nothing_leaves_a_list_alone_that_a_command_has_filtered
 #[test]
 fn a_list_made_with_every_directory_loaded_is_made_anew_for_a_set_of_them() {
     let (mut state, token) = state_with_a_walking_scan();
-    state.config.remove_empty_directories = true;
+    state.config_mut().remove_empty_directories = true;
     assert!(add_in_steps(&mut state, &token, first_batch()));
     let prepared = complete(&state, &token).prepare();
     assert!(commit_scan_completion(&mut state, &token, prepared).done());
@@ -312,7 +312,7 @@ fn an_event_that_changes_nothing_still_makes_a_filtered_list_that_is_not_current
             state.extension_filter = "txt".to_string();
         }),
         ("case sensitivity was changed", |state| {
-            state.config.case_sensitive_search ^= true;
+            state.config_mut().case_sensitive_search ^= true;
         }),
         ("the path was changed", |state| {
             state.current_path = "/project/src".to_string();
@@ -326,7 +326,7 @@ fn an_event_that_changes_nothing_still_makes_a_filtered_list_that_is_not_current
             state.set_filtered_file_list(Vec::new());
         }),
         ("empty directories are removed now", |state| {
-            state.config.remove_empty_directories = true;
+            state.config_mut().remove_empty_directories = true;
             state.is_fully_scanned = true;
             state.loaded_dirs.insert(PathBuf::from("/project/docs"));
         }),
@@ -338,7 +338,7 @@ fn an_event_that_changes_nothing_still_makes_a_filtered_list_that_is_not_current
         assert!(add_in_steps(&mut state, &token, batch));
         state.set_filter_texts("Main".to_string(), String::new(), String::new());
         apply_filter_texts(&mut state);
-        let ignores_case = !state.config.case_sensitive_search;
+        let ignores_case = !state.config().case_sensitive_search;
         assert_eq!(
             state.filtered_file_list().len(),
             2 + usize::from(ignores_case)
@@ -443,7 +443,10 @@ fn prepared_lists_are_not_installed_into_a_state_that_has_changed() {
             apply_filters(state);
         }),
         ("items were removed by an ignore pattern", |state| {
-            state.config.ignore_patterns.insert("docs".to_string());
+            state
+                .config_mut()
+                .ignore_patterns
+                .insert("docs".to_string());
             state.apply_ignore_patterns();
             apply_filters(state);
         }),
@@ -460,7 +463,7 @@ fn prepared_lists_are_not_installed_into_a_state_that_has_changed() {
             state.set_filtered_file_list(state.full_file_list().to_vec());
         }),
         ("empty directories are removed now", |state| {
-            state.config.remove_empty_directories = true;
+            state.config_mut().remove_empty_directories = true;
             state.is_fully_scanned = true;
         }),
         (
@@ -658,7 +661,10 @@ fn a_level_of_another_file_list_is_not_added() {
     let prepared = staged.prepare();
 
     // New ignore patterns: the level was listed by the old ones.
-    state.config.ignore_patterns.insert("nothing".to_string());
+    state
+        .config_mut()
+        .ignore_patterns
+        .insert("nothing".to_string());
     state.apply_ignore_patterns();
     let revisions = (state.file_list_revision(), state.filtered_revision());
     let is_current = commit_directory_level(&mut state, &lazy_load, prepared).done();
@@ -747,7 +753,7 @@ fn the_list_is_completed_in_steps() {
 
     // Empty directories are removed once the list is complete.
     let (mut state, token) = state_with_a_walking_scan();
-    state.config.remove_empty_directories = true;
+    state.config_mut().remove_empty_directories = true;
     assert!(add_in_steps(&mut state, &token, first_batch()));
     assert_eq!(state.filtered_file_list().len(), 4);
     generate_ui_state(&state);
@@ -930,7 +936,7 @@ struct Side {
 impl Side {
     fn new() -> Self {
         let mut state = AppState::default();
-        state.config.ignore_patterns.clear();
+        state.config_mut().ignore_patterns.clear();
         state.current_path = "/p".to_string();
         Self {
             state,
@@ -1006,12 +1012,12 @@ fn run(side: &mut Side, command: &Command) {
         Command::Expand(path) => state.expand_directories([path]),
         Command::Collapse(path) => state.collapse_directories([path]),
         Command::AddIgnorePattern(pattern) => {
-            state.config.ignore_patterns.insert(pattern);
+            state.config_mut().ignore_patterns.insert(pattern);
             state.apply_ignore_patterns();
             apply_filters(state);
         }
         Command::ToggleRemoveEmptyDirectories => {
-            state.config.remove_empty_directories ^= true;
+            state.config_mut().remove_empty_directories ^= true;
             apply_filters(state);
         }
         Command::LoadLevel { directory, items } => {
@@ -1072,7 +1078,7 @@ fn run(side: &mut Side, command: &Command) {
             }
         }
         Command::SetCurrentPath(path) => state.current_path = path,
-        Command::ToggleCaseSensitivity => state.config.case_sensitive_search ^= true,
+        Command::ToggleCaseSensitivity => state.config_mut().case_sensitive_search ^= true,
         Command::ReplaceAnItem(position) => {
             if !state.full_file_list().is_empty() {
                 let position = position % state.full_file_list().len();

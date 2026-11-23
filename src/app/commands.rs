@@ -58,9 +58,10 @@ pub fn open_dropped_path<P: EventProxy>(path: PathBuf, proxy: P, state: SharedSt
 pub fn clear_directory<P: EventProxy>(proxy: P, state: SharedState) {
     with_state_and_notify(&state, &proxy, |s| {
         s.reset_directory_state();
-        s.config.last_directory = None;
         // The file is written in the background; neither the lock nor the lane waits.
-        tasks::save_config_in_background(s.config_snapshot());
+        if let Some(snapshot) = s.edit_config(|config| config.last_directory = None) {
+            tasks::save_config_in_background(snapshot);
+        }
     });
 }
 
@@ -244,9 +245,9 @@ fn apply_config_change<P: EventProxy>(
 ) -> ContentSearchFollowUp {
     let mut state_guard = state.lock();
 
-    let previous = state_guard.config.clone();
-    change(&mut state_guard.config);
-    let config = &state_guard.config;
+    let previous = state_guard.config().clone();
+    let changed = state_guard.edit_config(change);
+    let config = state_guard.config();
 
     let patterns_added: HashSet<String> = config
         .ignore_patterns
@@ -262,8 +263,8 @@ fn apply_config_change<P: EventProxy>(
     let needs_refilter = case_sensitivity_changed
         || previous.remove_empty_directories != config.remove_empty_directories;
 
-    if *config != previous {
-        tasks::save_config_in_background(state_guard.config_snapshot());
+    if let Some(snapshot) = changed {
+        tasks::save_config_in_background(snapshot);
     }
 
     // Without a loaded directory there is nothing the change could apply to.
@@ -870,13 +871,16 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: SharedState) {
     state_guard.clear_preview();
 
     // A timestamped name gets the time of this generation; any other name is kept.
-    if is_timestamped_output_filename(&state_guard.config.output_filename) {
+    if is_timestamped_output_filename(&state_guard.config().output_filename) {
         let new_filename = format!(
             "cfc_output_{}.txt",
             chrono::Local::now().format("%Y%m%d_%H%M%S")
         );
-        state_guard.config.output_filename = new_filename;
-        tasks::save_config_in_background(state_guard.config_snapshot());
+        if let Some(snapshot) =
+            state_guard.edit_config(|config| config.output_filename = new_filename)
+        {
+            tasks::save_config_in_background(snapshot);
+        }
     }
 
     // Send an immediate state update to the UI to show the 'generating' state.
@@ -890,7 +894,7 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: SharedState) {
 
     let real_generator = tasks::RealContentGenerator {
         cancel_flag: token.cancel_flag(),
-        max_file_size: state_guard.config.max_file_size_bytes(),
+        max_file_size: state_guard.config().max_file_size_bytes(),
         max_output_size: tasks::MAX_OUTPUT_SIZE,
         expected_output_size: plan.estimated_size,
     };
@@ -984,7 +988,7 @@ pub(crate) fn save_file<P: EventProxy, D: DialogService + ?Sized>(
                 .map(SaveContent::Generated),
             SaveFilePayload::Edited { content } => Some(SaveContent::Edited(content)),
         };
-        (content, state_guard.config.clone())
+        (content, state_guard.config().clone())
     };
 
     let result = match content {
@@ -1019,9 +1023,8 @@ pub fn pick_output_directory<P: EventProxy, D: DialogService + ?Sized>(
 ) {
     if let Some(path) = dialog.pick_directory() {
         with_state_and_notify(&state, &proxy, |s| {
-            if s.config.output_directory.as_ref() != Some(&path) {
-                s.config.output_directory = Some(path);
-                tasks::save_config_in_background(s.config_snapshot());
+            if let Some(snapshot) = s.edit_config(|config| config.output_directory = Some(path)) {
+                tasks::save_config_in_background(snapshot);
             }
         });
     }
@@ -1062,10 +1065,12 @@ pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
     // The reset, the new settings and the start of the scan happen under one lock.
     let mut state_guard = state.lock();
     state_guard.reset_directory_state();
-    state_guard.config.adopt_user_settings(imported);
+    let changed = state_guard.edit_config(|config| config.adopt_user_settings(imported));
     state_guard.current_config_filename =
         path.file_name().and_then(|n| n.to_str()).map(String::from);
-    tasks::save_config_in_background(state_guard.config_snapshot());
+    if let Some(snapshot) = changed {
+        tasks::save_config_in_background(snapshot);
+    }
 
     // The UI is wiped clean before the scan (if any) announces itself.
     send_snapshot(&proxy, &state_guard);
@@ -1099,7 +1104,7 @@ fn export_config_with<P: EventProxy, D: DialogService + ?Sized>(
     if let Some(path) = dialog.export_config_path() {
         // The guard is a temporary of this statement: the lock is released before
         // the file is written.
-        let settings = config::SharedConfig::from(&state.lock().config);
+        let settings = config::SharedConfig::from(state.lock().config());
         let result = write(&settings, &path).is_ok();
         proxy.send_event(UserEvent::ConfigExported(result));
     }

@@ -157,7 +157,7 @@ async fn lazy_load_scanner_is_cancelled_when_file_list_is_replaced() {
     let mut state = harness.state.lock();
 
     let token = state.begin_lazy_load();
-    let scanner = lazy_load_scanner(&state.config, &token);
+    let scanner = lazy_load_scanner(state.config(), &token);
     assert!(!scanner.cancel_flag.load(Ordering::SeqCst));
     let scan = state.begin_scan();
     assert!(
@@ -167,7 +167,7 @@ async fn lazy_load_scanner_is_cancelled_when_file_list_is_replaced() {
     state.finish_scan(&scan);
 
     let token = state.begin_lazy_load();
-    let scanner = lazy_load_scanner(&state.config, &token);
+    let scanner = lazy_load_scanner(state.config(), &token);
     assert!(!scanner.cancel_flag.load(Ordering::SeqCst));
     state.reset_directory_state();
     assert!(
@@ -272,7 +272,7 @@ async fn lazy_load_of_subdirectory_applies_project_ignore_rules() {
     {
         // The state after a scan that was cancelled in its deep phase.
         let mut state = harness.state.lock();
-        state.config.ignore_patterns = HashSet::from(["/src/generated/".to_string()]);
+        state.config_mut().ignore_patterns = HashSet::from(["/src/generated/".to_string()]);
         state.replace_with_shallow_file_list(&root, vec![dir_item(&src, 1)]);
         filtering::apply_filters(&mut state);
     }
@@ -391,7 +391,7 @@ async fn lazy_load_result_is_discarded_after_ignore_patterns_were_applied() {
     {
         let mut state = harness.state.lock();
         state
-            .config
+            .config_mut()
             .ignore_patterns
             .insert("/src/generated/".to_string());
         state.apply_ignore_patterns();

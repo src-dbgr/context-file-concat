@@ -32,7 +32,7 @@ async fn a_clear_sent_right_after_a_rescan_leaves_no_directory_loaded() {
         assert_eq!(state.current_path, "", "round {round}");
         assert!(!state.is_scanning(), "round {round}");
         assert!(state.full_file_list().is_empty(), "round {round}");
-        assert_eq!(state.config.last_directory, None, "round {round}");
+        assert_eq!(state.config().last_directory, None, "round {round}");
     }
 }
 
@@ -61,7 +61,7 @@ async fn of_two_drops_the_second_one_is_loaded() {
             "round {round}"
         );
         assert_eq!(
-            state.config.last_directory.as_deref(),
+            state.config().last_directory.as_deref(),
             Some(second.path()),
             "round {round}"
         );
@@ -361,7 +361,7 @@ async fn a_clear_sent_right_after_a_drop_leaves_no_directory_loaded() {
         assert_eq!(state.current_path, "", "round {round}");
         assert!(!state.is_scanning(), "round {round}");
         assert!(state.full_file_list().is_empty(), "round {round}");
-        assert_eq!(state.config.last_directory, None, "round {round}");
+        assert_eq!(state.config().last_directory, None, "round {round}");
     }
 }
 

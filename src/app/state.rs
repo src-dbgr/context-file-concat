@@ -426,10 +426,11 @@ pub(crate) fn directories_of(list: &[FileItem]) -> HashSet<PathBuf> {
 pub struct AppState {
     /// The application's configuration settings.
     ///
-    /// Whoever changes them takes a snapshot right away ([`Self::config_snapshot`])
-    /// and has it saved: the last save of a session writes the most recent snapshot
-    /// and does not look at this field.
-    pub config: AppConfig,
+    /// Private: they are read through [`Self::config`] and changed through
+    /// [`Self::edit_config`] only, which hands out the snapshot to save. So every
+    /// change takes a snapshot, which is what the last save of a session relies on:
+    /// it writes the most recent snapshot and does not look at this field.
+    config: AppConfig,
     /// The absolute path to the currently loaded directory.
     pub current_path: String,
     /// The complete, unfiltered list of all files and directories found in the scan.
@@ -1070,6 +1071,30 @@ impl AppState {
     pub fn clear_preview(&mut self) {
         self.preview.cancel();
         self.previewed_file_path = None;
+    }
+
+    /// The application's configuration settings.
+    pub fn config(&self) -> &AppConfig {
+        &self.config
+    }
+
+    /// Changes the configuration. This is the only way to do so.
+    ///
+    /// Returns the snapshot of the changed configuration, which the caller has saved
+    /// (normally with `tasks::save_config_in_background`, after or while it still
+    /// holds the state lock); `None` if `edit` left the configuration as it was, in
+    /// which case there is nothing to save.
+    #[must_use = "a changed configuration has to be saved: pass the snapshot on"]
+    pub fn edit_config(&mut self, edit: impl FnOnce(&mut AppConfig)) -> Option<ConfigSnapshot> {
+        let previous = self.config.clone();
+        edit(&mut self.config);
+        (self.config != previous).then(|| self.config_snapshot())
+    }
+
+    /// The configuration, to set up the state of a test. Nothing is saved.
+    #[cfg(test)]
+    pub(crate) fn config_mut(&mut self) -> &mut AppConfig {
+        &mut self.config
     }
 
     /// Captures the configuration for saving it outside the state lock.

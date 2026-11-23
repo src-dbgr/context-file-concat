@@ -294,7 +294,7 @@ pub struct GenerationPlan {
 impl GenerationPlan {
     /// The plan of a generation of what is selected in `state` right now.
     pub fn of(state: &AppState) -> Self {
-        let config = &state.config;
+        let config = &state.config();
         let items = state.full_file_list();
         let include_tree = config.include_tree_by_default;
 
@@ -1040,13 +1040,14 @@ async fn locate_scan_root<P: EventProxy>(
                 state_guard.current_path = shown_path;
                 send_snapshot(proxy, &state_guard);
             }
-            if state_guard.config.last_directory.as_ref() != Some(&directory) {
-                state_guard.config.last_directory = Some(directory.clone());
-                save_config_in_background(state_guard.config_snapshot());
+            if let Some(snapshot) =
+                state_guard.edit_config(|config| config.last_directory = Some(directory.clone()))
+            {
+                save_config_in_background(snapshot);
             }
             let scanner = RealScanner {
-                ignore_patterns: state_guard.config.ignore_patterns.clone(),
-                max_file_size: state_guard.config.max_file_size_bytes(),
+                ignore_patterns: state_guard.config().ignore_patterns.clone(),
+                max_file_size: state_guard.config().max_file_size_bytes(),
                 cancel_flag: token.cancel_flag(),
             };
             Some((directory, scanner))
@@ -1186,7 +1187,7 @@ pub fn start_lazy_load_scan<P: EventProxy>(
         let token = state_guard.begin_lazy_load();
         state_guard.expand_directories([path]);
         send_snapshot(&proxy, &state_guard);
-        let scanner = lazy_load_scanner(&state_guard.config, &token);
+        let scanner = lazy_load_scanner(state_guard.config(), &token);
         (scanner, token, request)
     };
     tracing::debug!("Starting lazy load for {:?}.", request.start_dir());
@@ -1463,8 +1464,8 @@ async fn run_content_search<P: EventProxy, S: FileSearcher>(
         }
         let request = ContentSearchRequest {
             query: state_guard.content_search_query.clone(),
-            case_sensitive: state_guard.config.case_sensitive_search,
-            max_file_size: state_guard.config.max_file_size_bytes(),
+            case_sensitive: state_guard.config().case_sensitive_search,
+            max_file_size: state_guard.config().max_file_size_bytes(),
             // Superseding or clearing the search raises the flag, so the searcher
             // stops reading files nobody is waiting for.
             cancel_flag: token.cancel_flag(),

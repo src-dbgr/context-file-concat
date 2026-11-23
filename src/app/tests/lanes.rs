@@ -37,8 +37,8 @@ async fn quick_config_intents_are_all_applied() {
     let mut harness = Harness::new().await;
     {
         let mut state = harness.state.lock();
-        state.config.ignore_patterns.clear();
-        state.config.max_file_size_mb = 7;
+        state.config_mut().ignore_patterns.clear();
+        state.config_mut().max_file_size_mb = 7;
     }
 
     harness.send("addIgnorePattern", serde_json::json!({ "pattern": "a" }));
@@ -56,11 +56,11 @@ async fn quick_config_intents_are_all_applied() {
     };
     assert_eq!(last.config.ignore_patterns, ["b", "c"]);
     assert!(!last.config.use_relative_paths);
-    assert_eq!(harness.state.lock().config.max_file_size_mb, 7);
+    assert_eq!(harness.state.lock().config().max_file_size_mb, 7);
 
     harness.send("clearIgnorePatterns", serde_json::Value::Null);
     harness.events(1).await;
-    assert!(harness.state.lock().config.ignore_patterns.is_empty());
+    assert!(harness.state.lock().config().ignore_patterns.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

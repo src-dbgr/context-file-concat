@@ -619,7 +619,7 @@ fn the_last_saves_of_a_session_do_not_wait_for_the_application_state() {
     // A change whose background save has not had its turn, and a busy worker.
     let queued = {
         let mut guard = state.lock();
-        guard.config.output_filename = "changed.txt".into();
+        guard.config_mut().output_filename = "changed.txt".into();
         guard.config_snapshot()
     };
     let busy = state.lock();
@@ -630,7 +630,7 @@ fn the_last_saves_of_a_session_do_not_wait_for_the_application_state() {
 
     let saved = settings::load_config(&config_path).unwrap();
     assert_eq!(saved.output_filename, "changed.txt");
-    assert_eq!(saved, state.lock().config);
+    assert_eq!(saved, *state.lock().config());
     assert_eq!(GeometryStore::open(&config_path, 1.0).1, FINAL_GEOMETRY);
 }
 
@@ -644,12 +644,12 @@ fn the_last_config_save_cannot_be_overtaken_by_one_that_is_still_queued() {
     let state = SharedState::new(AppState::new(config, config_store.clone()));
     let queued = {
         let mut guard = state.lock();
-        guard.config.output_filename = "first-change.txt".into();
+        guard.config_mut().output_filename = "first-change.txt".into();
         guard.config_snapshot()
     };
     let also_queued = {
         let mut guard = state.lock();
-        guard.config.output_filename = "second-change.txt".into();
+        guard.config_mut().output_filename = "second-change.txt".into();
         guard.config_snapshot()
     };
 

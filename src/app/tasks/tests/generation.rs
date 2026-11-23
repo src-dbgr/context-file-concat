@@ -231,8 +231,8 @@ async fn generation_task_prunes_empty_directories_from_tree() {
     {
         let mut state = harness.state.lock();
         state.is_fully_scanned = true; // Required for pruning
-        state.config.remove_empty_directories = true; // Enable feature
-        state.config.include_tree_by_default = true;
+        state.config_mut().remove_empty_directories = true; // Enable feature
+        state.config_mut().include_tree_by_default = true;
         state.selected_files.insert(file_path.clone());
         state.set_full_file_list(vec![
             FileItem {
@@ -359,10 +359,10 @@ async fn generation_hands_the_generator_the_tree_without_empty_directories() {
     {
         let mut state = harness.state.lock();
         state.is_fully_scanned = true;
-        state.config.remove_empty_directories = true;
-        state.config.include_tree_by_default = true;
-        state.config.tree_ignore_patterns = HashSet::from(["*.lock".to_string()]);
-        state.config.use_relative_paths = false;
+        state.config_mut().remove_empty_directories = true;
+        state.config_mut().include_tree_by_default = true;
+        state.config_mut().tree_ignore_patterns = HashSet::from(["*.lock".to_string()]);
+        state.config_mut().use_relative_paths = false;
         state.selected_files = HashSet::from([readme.clone(), main.clone()]).into();
     }
 
@@ -386,7 +386,7 @@ async fn generation_hands_the_generator_the_tree_without_empty_directories() {
     for (remove_empty_directories, is_fully_scanned) in [(false, true), (true, false)] {
         {
             let mut state = harness.state.lock();
-            state.config.remove_empty_directories = remove_empty_directories;
+            state.config_mut().remove_empty_directories = remove_empty_directories;
             state.is_fully_scanned = is_fully_scanned;
         }
         let recorded = run_recorded_generation(&harness).await;
@@ -403,7 +403,7 @@ async fn generation_without_a_tree_does_not_copy_the_file_list() {
     let (_, main, _, _) = load_small_project(&harness);
     {
         let mut state = harness.state.lock();
-        state.config.include_tree_by_default = false;
+        state.config_mut().include_tree_by_default = false;
         state.selected_files.insert(main.clone());
     }
 
@@ -448,7 +448,7 @@ async fn plan_estimates_the_output_from_the_sizes_of_the_scan() {
     let harness = TestHarness::new();
     let (_, main, _, readme) = load_small_project(&harness);
     let estimate = |harness: &TestHarness| harness.plan().estimated_size;
-    harness.state.lock().config.include_tree_by_default = false;
+    harness.state.lock().config_mut().include_tree_by_default = false;
 
     let nothing = estimate(&harness);
     harness.state.lock().selected_files.insert(main);
@@ -464,13 +464,13 @@ async fn plan_estimates_the_output_from_the_sizes_of_the_scan() {
     );
 
     // The tree adds to it; a file above the size limit is not embedded.
-    harness.state.lock().config.include_tree_by_default = true;
+    harness.state.lock().config_mut().include_tree_by_default = true;
     assert!(estimate(&harness) > two_files);
     {
         let mut state = harness.state.lock();
-        state.config.include_tree_by_default = false;
+        state.config_mut().include_tree_by_default = false;
         state.edit_full_file_list(|list| list[3].size = 3 * 1024 * 1024);
-        state.config.max_file_size_mb = 1;
+        state.config_mut().max_file_size_mb = 1;
     }
     assert!(estimate(&harness) < two_files);
 

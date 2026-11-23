@@ -124,7 +124,7 @@ async fn search_in_files_with_real_searcher_covers_edge_cases() {
     // --- SCENARIO 1: Case-sensitive search (no match) ---
     {
         let mut state = harness.state.lock();
-        state.config.case_sensitive_search = true;
+        state.config_mut().case_sensitive_search = true;
         state.content_search_query = "magicword".to_string(); // Lowercase
     }
     // Pass 'searcher' by value (it's Copy)
@@ -140,7 +140,7 @@ async fn search_in_files_with_real_searcher_covers_edge_cases() {
     // --- SCENARIO 2: Case-sensitive search (exact match) ---
     {
         let mut state = harness.state.lock();
-        state.config.case_sensitive_search = true;
+        state.config_mut().case_sensitive_search = true;
         state.content_search_query = "MagicWord".to_string(); // Exact case
     }
     search_in_files(harness.proxy.clone(), harness.state.clone(), searcher).await;
@@ -266,8 +266,8 @@ async fn search_in_files_passes_the_request_to_the_searcher() {
     {
         let mut state = harness.state.lock();
         // More generous than the default of the core: must arrive uncapped.
-        state.config.max_file_size_mb = 64;
-        state.config.case_sensitive_search = true;
+        state.config_mut().max_file_size_mb = 64;
+        state.config_mut().case_sensitive_search = true;
         state.content_search_query = " Needle ".to_string();
     }
     let recorder = RequestRecorder::default();
@@ -335,7 +335,7 @@ async fn refresh_content_search_passes_the_request_to_the_searcher() {
     let harness = TestHarness::new();
     {
         let mut state = harness.state.lock();
-        state.config.max_file_size_mb = 3;
+        state.config_mut().max_file_size_mb = 3;
         state.content_search_query = "needle".to_string();
     }
     let recorder = RequestRecorder::default();

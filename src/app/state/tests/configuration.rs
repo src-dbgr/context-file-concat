@@ -28,3 +28,33 @@ fn test_config_snapshots_are_taken_from_the_store_of_the_state() {
     assert_eq!(saved.output_filename, "newer.txt");
     assert_eq!(state.config_store().latest(), state.config);
 }
+
+/// The one way the configuration is changed hands out the snapshot to save, so no
+/// change can be made without one.
+#[test]
+fn test_edit_config_hands_out_a_snapshot_of_the_change() {
+    let mut state = AppState::default();
+
+    let snapshot = state
+        .edit_config(|config| config.output_filename = "changed.txt".to_string())
+        .expect("a change is to be saved");
+
+    assert_eq!(state.config().output_filename, "changed.txt");
+    assert_eq!(snapshot.config(), state.config());
+    assert_eq!(state.config_store().latest(), *state.config());
+}
+
+/// An edit that leaves the configuration as it is has nothing to save.
+#[test]
+fn test_edit_config_without_a_change_hands_out_nothing() {
+    let mut state = AppState::default();
+    let before = state.config().clone();
+
+    assert!(state.edit_config(|_| {}).is_none());
+    let same = before.output_filename.clone();
+    assert!(state
+        .edit_config(|config| config.output_filename = same)
+        .is_none());
+
+    assert_eq!(*state.config(), before);
+}

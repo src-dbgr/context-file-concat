@@ -221,7 +221,7 @@ impl TempProject {
 /// directory; nothing is listed yet.
 pub(crate) fn state_in(root: &Path) -> AppState {
     let mut state = AppState::default();
-    state.config = AppConfig::default();
+    *state.config_mut() = AppConfig::default();
     state.current_path = root.to_string_lossy().to_string();
     state
 }

@@ -362,11 +362,11 @@ fn test_save_file_payload_is_strict() {
 #[tokio::test]
 async fn test_generate_preview_persists_the_filename_it_assigns() {
     let (harness, store) = TestHarness::with_config_file();
-    harness.state.lock().config.output_filename = "cfc_output_19990101_000000.txt".into();
+    harness.state.lock().config_mut().output_filename = "cfc_output_19990101_000000.txt".into();
 
     generate_preview(harness.proxy.clone(), harness.state.clone());
 
-    let assigned = harness.state.lock().config.output_filename.clone();
+    let assigned = harness.state.lock().config().output_filename.clone();
     assert_ne!(assigned, "cfc_output_19990101_000000.txt");
     let saved = config_on_disk(&store, |saved| saved.output_filename == assigned).await;
     assert_eq!(saved.output_filename, assigned);
@@ -409,14 +409,14 @@ async fn test_generate_preview_preserves_custom_filename() {
     // 1. Set a custom filename in the state.
     {
         let mut state = harness.state.lock();
-        state.config.output_filename = custom_filename.clone();
+        state.config_mut().output_filename = custom_filename.clone();
     }
 
     // 2. Run the generate_preview command.
     generate_preview(harness.proxy.clone(), harness.state.clone());
 
     // 3. Verify the filename in the state has NOT been changed.
-    let final_filename = harness.state.lock().config.output_filename.clone();
+    let final_filename = harness.state.lock().config().output_filename.clone();
     assert_eq!(final_filename, custom_filename);
 
     // Consume events to avoid panics on drop
@@ -451,12 +451,12 @@ async fn test_generate_preview_creates_timestamped_filename_from_default() {
 
     {
         let mut state = harness.state.lock();
-        state.config.output_filename = old_default_filename.clone();
+        state.config_mut().output_filename = old_default_filename.clone();
     }
 
     generate_preview(harness.proxy.clone(), harness.state.clone());
 
-    let final_filename = harness.state.lock().config.output_filename.clone();
+    let final_filename = harness.state.lock().config().output_filename.clone();
 
     assert_ne!(
         final_filename, old_default_filename,
@@ -474,11 +474,11 @@ async fn test_generate_preview_creates_timestamped_filename_from_default() {
 /// configured afterwards, which is also the one the UI is told.
 async fn output_filename_after_generating(filename: &str) -> String {
     let mut harness = TestHarness::new();
-    harness.state.lock().config.output_filename = filename.to_string();
+    harness.state.lock().config_mut().output_filename = filename.to_string();
 
     generate_preview(harness.proxy.clone(), harness.state.clone());
 
-    let configured = harness.state.lock().config.output_filename.clone();
+    let configured = harness.state.lock().config().output_filename.clone();
     match harness.get_next_event().await {
         Some(UserEvent::StateUpdate(ui_state)) => {
             assert_eq!(ui_state.config.output_filename, configured)
@@ -545,7 +545,7 @@ async fn test_generate_preview_applies_configured_file_size_limit() {
     {
         let mut state = harness.state.lock();
         state.selected_files.insert(file);
-        state.config.max_file_size_mb = 0;
+        state.config_mut().max_file_size_mb = 0;
     }
 
     generate_preview(harness.proxy.clone(), harness.state.clone());
@@ -567,7 +567,7 @@ async fn test_generate_preview_applies_configured_file_size_limit() {
 fn select_files_of_sizes(harness: &TestHarness, sizes: &[u64]) {
     let mut state = harness.state.lock();
     // Large enough for every file of these tests to count with its full size.
-    state.config.max_file_size_mb = 1024;
+    state.config_mut().max_file_size_mb = 1024;
     let items: Vec<FileItem> = sizes
         .iter()
         .enumerate()
@@ -594,7 +594,7 @@ async fn test_generate_preview_refuses_an_output_above_the_limit() {
     select_files_of_sizes(&harness, &[90 * MIB, 90 * MIB, 30 * MIB]);
     let filename = "cfc_output_20200101_000000.txt".to_string();
     let shown = generated_document(&harness, "the output that is shown");
-    harness.state.lock().config.output_filename = filename.clone();
+    harness.state.lock().config_mut().output_filename = filename.clone();
 
     generate_preview(harness.proxy.clone(), harness.state.clone());
 
@@ -622,7 +622,7 @@ async fn test_generate_preview_refuses_an_output_above_the_limit() {
 
     let state = harness.state.lock();
     assert!(!state.is_generating());
-    assert_eq!(state.config.output_filename, filename);
+    assert_eq!(state.config().output_filename, filename);
     assert_eq!(state.generated_document(shown.id()), Some(shown));
 }
 

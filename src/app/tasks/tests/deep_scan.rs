@@ -270,7 +270,7 @@ fn an_event_that_meets_a_changed_state_is_prepared_again_without_the_lock() {
     let src = root.join("src");
     for changes in 0..=3usize {
         let mut state = AppState::default();
-        state.config.ignore_patterns.clear();
+        state.config_mut().ignore_patterns.clear();
         state.current_path = root.to_string_lossy().to_string();
         let token = state.begin_scan();
         state.begin_scan_walk(&token);
@@ -524,7 +524,7 @@ fn perf_lock_hold_of_list_events() {
         match scenario {
             Scenario::Plain => {}
             Scenario::NameFilter => state.search_query = "file_0".to_string(),
-            Scenario::RemoveEmpty => state.config.remove_empty_directories = true,
+            Scenario::RemoveEmpty => state.config_mut().remove_empty_directories = true,
             Scenario::WorkedIn => {
                 let (dirs, files): (Vec<_>, Vec<_>) =
                     walk.iter().partition(|item| item.is_directory);
