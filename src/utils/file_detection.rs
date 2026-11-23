@@ -27,9 +27,21 @@ use std::path::Path;
 /// looks like.
 ///
 /// Only formats belong here whose files are never text. Extensions that are merely
-/// often binary (`dat`, `tmp`, `bak`, `cache`, ...) or that are shared with text
-/// formats (`d`: D sources and dependency files of Make; `snap`: snapshot tests;
-/// `raw`: camera images, but also plain dumps and text) are left to the content.
+/// often binary (`dat`, `bin`, `tmp`, `bak`, `cache`, ...) or that are shared with
+/// text formats are left to the content:
+///
+/// - `obj`: compiler output, but also Wavefront 3D models (text)
+/// - `pdb`: debug symbols, but also Protein Data Bank files (text)
+/// - `db`: databases, but also plain-text data and zone files
+/// - `lib`: static libraries, but also text libraries of EDA tools
+/// - `bin`: by convention binary, in practice whatever a tool wrote
+/// - `d`: D sources and dependency files of Make; `snap`: snapshot tests;
+///   `raw`: camera images, but also plain dumps and text
+///
+/// The binary files among them are still recognised, by their content (NUL bytes
+/// within the first [`SAMPLE_SIZE`] bytes: object files, PDBs and SQLite databases
+/// have them in their headers). The price is one read of the sample for a file with
+/// such an extension, the same any file without a listed extension costs.
 const BINARY_EXTENSIONS: &[&str] = &[
     // Images (SVG is text and is not listed)
     "jpg", "jpeg", "jfif", "png", "gif", "bmp", "ico", "icns", "webp", "tiff", "tif", "cr2", "nef",
@@ -39,9 +51,9 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "zip", "tar", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "jar", "war", "crate", "gem", "whl",
     "egg", "deb", "rpm", "msi", "dmg", "iso", "flatpak",
     // Executables, libraries and other compiler output
-    "exe", "dll", "so", "dylib", "bin", "o", "obj", "a", "lib", "rlib", "rmeta", "pdb", "ilk",
-    "class", "pyc", "pyo", "wasm", // Documents and databases
-    "pdf", "docx", "xlsx", "pptx", "db", "sqlite", "sqlite3", // Fonts
+    "exe", "dll", "so", "dylib", "o", "a", "rlib", "rmeta", "ilk", "class", "pyc", "pyo", "wasm",
+    // Documents and databases
+    "pdf", "docx", "xlsx", "pptx", "sqlite", "sqlite3", // Fonts
     "ttf", "otf", "woff", "woff2", "eot",
 ];
 
@@ -187,6 +199,65 @@ mod tests {
         }
     }
 
+    /// Extensions that text formats share with binary ones do not settle the
+    /// question: the content does, for the scan (`is_text_file`) and for the bytes
+    /// that are embedded, previewed and searched (`is_binary`) alike.
+    #[test]
+    fn test_ambiguous_extensions_are_decided_by_the_content() {
+        let dir = TempDir::new().unwrap();
+        let cases: [(&str, &[u8], bool); 12] = [
+            ("model.obj", b"# Wavefront\nv 0.0 1.0 0.0\nf 1 2 3\n", true),
+            ("model.OBJ", b"v 0.0 1.0 0.0\n", true),
+            ("main.obj", b"\x64\x86\x03\x00\x00\x00\x00\x00", false),
+            (
+                "1abc.pdb",
+                b"HEADER    HYDROLASE\nATOM      1  N   MET A   1\n",
+                true,
+            ),
+            (
+                "app.pdb",
+                b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\x00\x00\x00",
+                false,
+            ),
+            ("notes.bin", b"plain text in a .bin file\n", true),
+            ("firmware.bin", b"\x7fELF\x02\x01\x01\x00\x00\x00", false),
+            (
+                "zone.db",
+                b"$TTL 3600\n@ IN SOA ns.example. admin.example. 1\n",
+                true,
+            ),
+            ("app.db", b"SQLite format 3\x00\x10\x00\x01\x01", false),
+            ("values.dat", b"1.0 2.0 3.0\n", true),
+            ("symbols.lib", b"EESchema-LIBRARY Version 2.4\n", true),
+            (
+                "static.lib",
+                b"!<arch>\n/               0           0     0\x00\x00",
+                false,
+            ),
+        ];
+        for (name, content, is_text) in cases {
+            let path = create_test_file(&dir, name, content);
+            assert!(!has_binary_extension(&path), "{name}");
+            assert_eq!(is_text_file(&path).unwrap(), is_text, "{name} (scan)");
+            assert_eq!(is_binary(&path, content), !is_text, "{name} (content)");
+        }
+    }
+
+    /// The formats that are never text stay binary by their extension alone, even
+    /// with content that reads like text.
+    #[test]
+    fn test_never_text_formats_are_binary_whatever_the_content() {
+        for name in [
+            "a.png", "a.jpg", "a.mp3", "a.mp4", "a.zip", "a.gz", "a.7z", "a.exe", "a.dll", "a.so",
+            "a.dylib", "a.o", "a.a", "a.class", "a.wasm", "a.ttf", "a.woff2", "a.pdf", "a.docx",
+            "a.xlsx", "a.sqlite",
+        ] {
+            let path = Path::new(name);
+            assert!(has_binary_extension(path), "{name}");
+            assert!(is_binary(path, b"looks like text\n"), "{name}");
+        }
+    }
+
     #[test]
     fn test_is_not_text_by_known_image_extension() {
         let dir = TempDir::new().unwrap();
@@ -320,7 +391,7 @@ mod tests {
             ("manual.pdf", b"%PDF-1.7\n1 0 obj\n", true),
             ("data.sqlite", TEXT, true),
             ("font.woff2", TEXT, true),
-            ("firmware.bin", TEXT, true),
+            ("object.o", TEXT, true),
             // An image format that is text.
             ("vector.svg", b"<svg/>", false),
             ("module.wat", b"(module)", false),
@@ -333,6 +404,15 @@ mod tests {
             ("old.backup", TEXT, false),
             ("build.cache", TEXT, false),
             ("values.dat", b"1;2;3\n", false),
+            ("firmware.bin", TEXT, false),
+            ("model.obj", b"v 0.0 1.0 0.0\n", false),
+            ("protein.pdb", b"HEADER    HYDROLASE\n", false),
+            ("zone.db", TEXT, false),
+            ("symbols.lib", TEXT, false),
+            ("firmware.bin", NUL, true),
+            ("main.obj", NUL, true),
+            ("app.pdb", NUL, true),
+            ("app.db", NUL, true),
             ("dump.raw", b"0 1 2 3\n", false),
             ("photo.raw", NUL, true),
             ("symbols.exp", TEXT, false),

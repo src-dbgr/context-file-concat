@@ -218,9 +218,11 @@ enum ContentSearchFollowUp {
 ///   based on the old ones. (A scan that is still opening its path has not read the
 ///   patterns yet and needs no restart.)
 /// - Ignore patterns added otherwise: they are applied to the loaded file list.
-/// - Ignore patterns removed otherwise: the user is told that a re-scan is needed.
-/// - Case sensitivity: the filters are re-applied and an active content search is
-///   repeated, as its matches depend on it.
+/// - Ignore patterns removed otherwise, and negations (`!pattern`) added: the user is
+///   told that a re-scan is needed, as the loaded list cannot show what comes back.
+/// - Case sensitivity: the filters are re-applied as after a changed filter text
+///   (the directories of the new matches are expanded) and an active content search
+///   is repeated, as its matches depend on it.
 /// - Removal of empty directories: the filters are re-applied.
 ///
 /// Every call is answered with a state update, also when nothing has changed: the UI
@@ -282,13 +284,16 @@ fn apply_config_change<P: EventProxy>(
         if !patterns_added.is_empty() {
             apply_added_patterns_locally(&mut state_guard, &patterns_added);
         }
-        filtering::apply_filters(&mut state_guard);
+        refilter(&mut state_guard, case_sensitivity_changed);
         state_guard.patterns_need_rescan = false;
         // Announces the new scan with a state update of its own.
         tasks::restart_scan(&mut state_guard, proxy.clone(), state.clone());
     } else {
-        if patterns_removed {
-            tracing::info!("Ignore patterns removed. Re-scan recommended.");
+        // What is applied to the loaded list can only take entries away. A removed
+        // pattern, and an added negation (`!keep.log`, which brings entries back), show
+        // their effect with the next scan only.
+        if patterns_removed || patterns_added.iter().any(|p| is_negation(p)) {
+            tracing::info!("Ignore patterns removed or negated. Re-scan recommended.");
             state_guard.patterns_need_rescan = true;
         }
         if !patterns_added.is_empty() {
@@ -296,7 +301,7 @@ fn apply_config_change<P: EventProxy>(
             apply_added_patterns_locally(&mut state_guard, &patterns_added);
         }
         if !patterns_added.is_empty() || needs_refilter {
-            filtering::apply_filters(&mut state_guard);
+            refilter(&mut state_guard, case_sensitivity_changed);
         }
         send_snapshot(proxy, &state_guard);
     }
@@ -306,6 +311,23 @@ fn apply_config_change<P: EventProxy>(
     } else {
         ContentSearchFollowUp::None
     }
+}
+
+/// Applies the filters after a configuration change. A change of the case sensitivity
+/// changes what the file name and extension filters match, so it goes the way a
+/// changed filter text goes ([`filtering::apply_filter_texts`]): the directories of the
+/// new matches are expanded, except for those the user collapsed while filtering.
+fn refilter(state: &mut AppState, case_sensitivity_changed: bool) {
+    if case_sensitivity_changed {
+        filtering::apply_filter_texts(state);
+    } else {
+        filtering::apply_filters(state);
+    }
+}
+
+/// `true` for a pattern that re-includes what another pattern ignores (`!keep.log`).
+fn is_negation(pattern: &str) -> bool {
+    pattern.trim_start().starts_with('!')
 }
 
 /// Removes the entries matching the newly added ignore patterns from the loaded file
@@ -972,8 +994,9 @@ impl SaveContent {
 ///
 /// What is saved is decided when the command starts, before the dialog opens: a
 /// generation that ends while the user is choosing the file does not change it. The
-/// command is answered with a [`SaveResult`]. A document the host does not hold (any
-/// more) is a failed save; the dialog is not opened for it.
+/// command is answered with a [`SaveResult`]. For a document the host does not hold
+/// (any more) the dialog is not opened: the UI is told
+/// ([`SaveResult::DocumentUnavailable`]) and saves the text it has shown instead.
 pub(crate) fn save_file<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
     payload: SaveFilePayload,
@@ -985,21 +1008,19 @@ pub(crate) fn save_file<P: EventProxy, D: DialogService + ?Sized>(
         let content = match payload {
             SaveFilePayload::Generated { document_id } => state_guard
                 .generated_document(document_id)
-                .map(SaveContent::Generated),
-            SaveFilePayload::Edited { content } => Some(SaveContent::Edited(content)),
+                .map(SaveContent::Generated)
+                .ok_or(document_id),
+            SaveFilePayload::Edited { content } => Ok(SaveContent::Edited(content)),
         };
         (content, state_guard.config().clone())
     };
 
     let result = match content {
-        None => {
-            tracing::warn!("A generated output that is not available was to be saved.");
-            SaveResult::Failed {
-                error: "The generated output is no longer available. Generate it again."
-                    .to_string(),
-            }
+        Err(document_id) => {
+            tracing::info!("The generated output {document_id} to be saved is not held.");
+            SaveResult::DocumentUnavailable { document_id }
         }
-        Some(content) => match dialog.save_output_file_path(&config) {
+        Ok(content) => match dialog.save_output_file_path(&config) {
             None => SaveResult::Cancelled,
             Some(path) => match std::fs::write(&path, content.text()) {
                 Ok(()) => SaveResult::Saved {
@@ -1037,11 +1058,18 @@ pub fn pick_output_directory<P: EventProxy, D: DialogService + ?Sized>(
 /// A window geometry the file may hold is ignored: it describes the display of whoever
 /// exported it, possibly in another unit.
 ///
-/// The import is treated as a "hard reset" of the application's context: the current
-/// state (file lists, selections, filters, previews) is cleared and the UI is told.
-/// If the file names a `last_directory` and that directory exists, it is then opened
-/// like any other path (see [`start_scan_on_path`]), which also records it as the last
-/// directory of this installation. Otherwise nothing is scanned and the UI stays clean.
+/// What becomes of the loaded directory depends on whether the file names one:
+///
+/// - It names a `last_directory` that exists (a complete configuration file, as
+///   versions up to 0.3.1 exported it): the import is a "hard reset". The current state
+///   (file lists, selections, filters, previews) is cleared, the UI is told, and the
+///   directory is opened like any other path (see [`start_scan_on_path`]), which also
+///   records it as the last directory of this installation.
+/// - It names none, or one that does not exist here (an exported file never names
+///   one): the loaded directory stays loaded and is scanned again with the imported
+///   settings, like any re-scan: selection and expansion are kept. A path that is just
+///   being opened reads the settings when its scan starts and needs no restart. Without
+///   a loaded directory only the settings change.
 pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
     proxy: P,
@@ -1062,9 +1090,11 @@ pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
     // Looked at before the state is locked; this command runs on the blocking lane.
     let directory_to_open = imported.last_directory.clone().filter(|dir| dir.exists());
 
-    // The reset, the new settings and the start of the scan happen under one lock.
+    // The new settings and the start of the scan happen under one lock.
     let mut state_guard = state.lock();
-    state_guard.reset_directory_state();
+    if directory_to_open.is_some() {
+        state_guard.reset_directory_state();
+    }
     let changed = state_guard.edit_config(|config| config.adopt_user_settings(imported));
     state_guard.current_config_filename =
         path.file_name().and_then(|n| n.to_str()).map(String::from);
@@ -1072,10 +1102,30 @@ pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
         tasks::save_config_in_background(snapshot);
     }
 
-    // The UI is wiped clean before the scan (if any) announces itself.
-    send_snapshot(&proxy, &state_guard);
-    if let Some(directory) = directory_to_open {
-        tasks::open_path(&mut state_guard, directory, proxy, state.clone());
+    match directory_to_open {
+        Some(directory) => {
+            // The UI is wiped clean before the scan announces itself.
+            send_snapshot(&proxy, &state_guard);
+            tasks::open_path(&mut state_guard, directory, proxy, state.clone());
+        }
+        None if state_guard.current_path.is_empty() => {
+            send_snapshot(&proxy, &state_guard);
+        }
+        None if state_guard.is_opening() => {
+            // Should the path turn out not to exist, the loaded directory stays, listed
+            // according to the previous settings.
+            state_guard.patterns_need_rescan = true;
+            send_snapshot(&proxy, &state_guard);
+        }
+        None => {
+            // What is shown until the scan delivers follows the imported settings as
+            // far as the loaded list can; the scan then lists the directory according
+            // to the imported patterns and size limit. It announces itself with a
+            // state update of its own.
+            filtering::apply_filter_texts(&mut state_guard);
+            state_guard.patterns_need_rescan = false;
+            tasks::restart_scan(&mut state_guard, proxy, state.clone());
+        }
     }
 }
 

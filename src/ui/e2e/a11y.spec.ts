@@ -415,6 +415,63 @@ for (const theme of THEMES) {
       await expectAccessible(page);
     });
 
+    test("while a scan goes on below the rows it has listed", async ({
+      page,
+    }) => {
+      await page.evaluate(() => {
+        const w = window as unknown as {
+          __posted: string[];
+          ipc: { postMessage: (message: string) => void };
+        };
+        w.__posted = [];
+        w.ipc = { postMessage: (message) => w.__posted.push(message) };
+      });
+      const state = withRepo();
+      state.is_scanning = true;
+      state.is_fully_scanned = false;
+      await setAppState(page, state);
+      await page.evaluate(() => {
+        (
+          window as unknown as { updateScanProgress: (p: unknown) => void }
+        ).updateScanProgress({
+          files_scanned: 1234,
+          large_files_skipped: 0,
+          current_scanning_path:
+            "/repo/src/a/very/long/path/that/does/not/fit/into/the/bar/of/a/narrow/panel/file.ts",
+        });
+      });
+
+      // The scan is shown and can be cancelled, the rows stay where they are.
+      const bar = page.getByRole("group", { name: "Scan progress" });
+      const cancel = bar.getByRole("button", { name: "Cancel the scan" });
+      await expect(bar).toContainText("Files scanned: 1234");
+      await expect(cancel).toBeVisible();
+      const tree = page.getByRole("tree");
+      await expect(tree.getByRole("treeitem").first()).toBeVisible();
+      const barBox = (await bar.boundingBox())!;
+      const treeBox = (await tree.boundingBox())!;
+      expect(barBox.y + barBox.height).toBeLessThanOrEqual(treeBox.y + 0.5);
+      // One line, however long the path is.
+      expect(barBox.height).toBeLessThan(48);
+      await expectAccessible(page);
+
+      // Reachable with the keyboard, and it cancels.
+      await cancel.focus();
+      await page.keyboard.press("Enter");
+      const posted = await page.evaluate(() =>
+        (window as unknown as { __posted: string[] }).__posted.map(
+          (message) => (JSON.parse(message) as { command: string }).command,
+        ),
+      );
+      expect(posted).toContain("cancelScan");
+
+      // The scan has ended: the bar is gone.
+      state.is_scanning = false;
+      state.is_fully_scanned = true;
+      await setAppState(page, state);
+      await expect(bar).toHaveCount(0);
+    });
+
     test("while the output is generated", async ({ page }) => {
       const state = withRepo();
       state.is_generating = true;

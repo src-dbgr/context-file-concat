@@ -73,6 +73,42 @@ describe("ScanProgress", () => {
     ).toBeInTheDocument();
   });
 
+  describe("compact (above the tree, for the rest of the scan)", () => {
+    it("shows the progress and cancels the scan", async () => {
+      render(ScanProgress, { compact: true });
+      scanProgress.report({
+        files_scanned: 1234,
+        large_files_skipped: 0,
+        current_scanning_path: "/repo/src/main.rs",
+      });
+      await tick();
+
+      const bar = screen.getByRole("group", { name: "Scan progress" });
+      expect(bar).toHaveTextContent("Scanning directory...");
+      expect(bar).toHaveTextContent("Files scanned: 1234");
+      expect(bar).toHaveTextContent("/repo/src/main.rs");
+      // The numbers change many times a second: they are not a live region.
+      expect(screen.getByRole("status")).not.toHaveTextContent("1234");
+
+      await fireEvent.click(
+        screen.getByRole("button", { name: "Cancel the scan" }),
+      );
+      expect(post).toHaveBeenCalledWith("cancelScan");
+    });
+
+    it("is translated", () => {
+      setLocale("de");
+      render(ScanProgress, { compact: true });
+
+      expect(
+        screen.getByRole("button", { name: "Scan abbrechen" }),
+      ).toHaveTextContent("Abbrechen");
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Verzeichnis wird gescannt...",
+      );
+    });
+  });
+
   it("cancels the scan", async () => {
     render(ScanProgress);
 

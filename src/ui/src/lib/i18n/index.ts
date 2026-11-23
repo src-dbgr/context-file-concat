@@ -194,6 +194,21 @@ register("en", {
   "toast.paste_empty": "Clipboard is empty",
   "toast.cut_ok": "Cut to clipboard",
   "toast.cut_failed": "Cut failed",
+  "toast.pasted_editor": "Pasted into editor",
+  "toast.paste_unsupported": "Paste not supported here",
+  "clipboard.copiedInput": "✓ Copied text from input field.",
+  "clipboard.copiedEditorAll": "✓ Copied entire editor content.",
+  "clipboard.copiedEditorSelection": "✓ Copied selected text from editor.",
+  "clipboard.copyFailed": "✗ Failed to copy to clipboard.",
+  "clipboard.pasted": "✓ Content pasted.",
+  "clipboard.pasteFailed": "✗ Paste failed or clipboard empty.",
+  "clipboard.pasteCancelled": "Status: Paste cancelled.",
+  "clipboard.pasteEmpty": "Status: Clipboard is empty.",
+  "clipboard.pasteUnsupported": "✗ Paste not supported here.",
+  "clipboard.cutOk": "✓ Text cut to clipboard.",
+  "clipboard.cutFailed": "✗ Cut failed.",
+  "clipboard.pastePrompt":
+    "Could not access clipboard. Please paste your text here:",
   "status.ready": "Status: Ready.",
   "status.save_cancelled": "Status: Save cancelled.",
   "status.saved_to": "Status: Saved to {path}",
@@ -213,6 +228,11 @@ register("en", {
   "toast.fileSaved": "File saved",
   "toast.saveCancelled": "Save cancelled",
   "toast.saveFailed": "Failed to save file",
+  "toast.outputUnavailable":
+    "The generated output is no longer available. Generate it again.",
+  "toast.editorLoadFailed":
+    "The editor could not be loaded, so the content cannot be shown. Try again.",
+  "scan.cancelTitle": "Cancel the scan",
   "toast.outputLargeTitle": "Large output",
   "toast.outputLarge":
     "About {size} are being generated (more than {limit}). Showing the output will take a moment.",
@@ -356,6 +376,23 @@ register("de", {
   "toast.paste_empty": "Zwischenablage ist leer",
   "toast.cut_ok": "Inhalt ausgeschnitten",
   "toast.cut_failed": "Ausschneiden fehlgeschlagen",
+  "toast.pasted_editor": "In den Editor eingefügt",
+  "toast.paste_unsupported": "Einfügen ist hier nicht möglich",
+  "clipboard.copiedInput": "✓ Text aus dem Eingabefeld kopiert.",
+  "clipboard.copiedEditorAll": "✓ Gesamten Editorinhalt kopiert.",
+  "clipboard.copiedEditorSelection":
+    "✓ Markierten Text aus dem Editor kopiert.",
+  "clipboard.copyFailed": "✗ Kopieren in die Zwischenablage fehlgeschlagen.",
+  "clipboard.pasted": "✓ Inhalt eingefügt.",
+  "clipboard.pasteFailed":
+    "✗ Einfügen fehlgeschlagen oder Zwischenablage leer.",
+  "clipboard.pasteCancelled": "Status: Einfügen abgebrochen.",
+  "clipboard.pasteEmpty": "Status: Zwischenablage ist leer.",
+  "clipboard.pasteUnsupported": "✗ Einfügen ist hier nicht möglich.",
+  "clipboard.cutOk": "✓ Text in die Zwischenablage ausgeschnitten.",
+  "clipboard.cutFailed": "✗ Ausschneiden fehlgeschlagen.",
+  "clipboard.pastePrompt":
+    "Kein Zugriff auf die Zwischenablage. Bitte den Text hier einfügen:",
   "status.ready": "Status: Bereit.",
   "status.save_cancelled": "Status: Speichern abgebrochen.",
   "status.saved_to": "Status: Gespeichert unter {path}",
@@ -375,6 +412,11 @@ register("de", {
   "toast.fileSaved": "Datei gespeichert",
   "toast.saveCancelled": "Speichern abgebrochen",
   "toast.saveFailed": "Datei konnte nicht gespeichert werden",
+  "toast.outputUnavailable":
+    "Die erzeugte Ausgabe ist nicht mehr verfügbar. Bitte erneut erzeugen.",
+  "toast.editorLoadFailed":
+    "Der Editor konnte nicht geladen werden, der Inhalt kann nicht angezeigt werden. Bitte erneut versuchen.",
+  "scan.cancelTitle": "Scan abbrechen",
   "toast.outputLargeTitle": "Große Ausgabe",
   "toast.outputLarge":
     "Es werden etwa {size} erzeugt (mehr als {limit}). Die Anzeige der Ausgabe dauert einen Moment.",

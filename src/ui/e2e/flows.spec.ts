@@ -325,7 +325,8 @@ test.describe("Saving the generated output", () => {
   type SaveResult =
     | { status: "saved"; path: string }
     | { status: "cancelled" }
-    | { status: "failed"; error: string };
+    | { status: "failed"; error: string }
+    | { status: "document_unavailable"; document_id: number };
 
   const GENERATED = "// generated output\nline two\n";
 
@@ -561,6 +562,95 @@ test.describe("Saving the generated output", () => {
       kind: "edited",
       content: copied,
     });
+  });
+
+  /** What the UI has posted since the last `save()`, without the numbers. */
+  async function postedSince(
+    page: import("@playwright/test").Page,
+  ): Promise<Posted[]> {
+    return page.evaluate(() =>
+      (window as unknown as { __posted: string[] }).__posted.map((message) => {
+        const { command, payload } = JSON.parse(message) as Posted;
+        return { command, payload };
+      }),
+    );
+  }
+
+  test("a save that names a document the host has just replaced saves what was shown", async ({
+    page,
+  }) => {
+    // Save is pressed on output 7 ...
+    expect((await save(page)).payload).toEqual({
+      kind: "generated",
+      documentId: 7,
+    });
+    // ... while the host had finished the next generation already: its output
+    // arrives first, then the answer to the save.
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          showGeneratedContent: (c: string, t: number, id: number) => void;
+        }
+      ).showGeneratedContent("// second output\n", 3, 8);
+    });
+    await expect(page.locator("#editor-container .view-lines")).toContainText(
+      "second output",
+    );
+    await answer(page, { status: "document_unavailable", document_id: 7 });
+
+    // The text the user pressed Save on is sent, once; nothing is reported.
+    expect(await postedSince(page)).toEqual([
+      { command: "saveFile", payload: { kind: "generated", documentId: 7 } },
+      { command: "saveFile", payload: { kind: "edited", content: GENERATED } },
+    ]);
+    await expect(page.locator(".toast-list .toast")).toHaveCount(0);
+
+    await answer(page, { status: "saved", path: "/tmp/out.txt" });
+    await expect(page.locator(".toast-list .toast").last()).toContainText(
+      "File saved",
+    );
+  });
+
+  test("a save that names a document a file preview has just replaced saves what was shown", async ({
+    page,
+  }) => {
+    await save(page);
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          showPreviewContent: (
+            c: string,
+            l: string,
+            s: string | null,
+            p: string,
+          ) => void;
+        }
+      ).showPreviewContent("file content\n", "plaintext", null, "/repo/a.txt");
+    });
+    await expect(page.locator("#editor-container .view-lines")).toContainText(
+      "file content",
+    );
+    await answer(page, { status: "document_unavailable", document_id: 7 });
+
+    expect((await postedSince(page)).at(-1)).toEqual({
+      command: "saveFile",
+      payload: { kind: "edited", content: GENERATED },
+    });
+    await expect(page.locator(".toast-list .toast")).toHaveCount(0);
+  });
+
+  test("a document nobody has any more is a failed save, said in the UI's language", async ({
+    page,
+  }) => {
+    // Not the answer to a save of this UI: there is nothing to repeat.
+    await answer(page, { status: "document_unavailable", document_id: 99 });
+
+    const toast = page.locator(".toast-list .toast").last();
+    await expect(toast).toHaveClass(/error/);
+    await expect(toast).toContainText("no longer available");
+    expect(
+      (await postedSince(page)).filter((p) => p.command === "saveFile"),
+    ).toEqual([]);
   });
 
   test("each result of a save has its own toast", async ({ page }) => {

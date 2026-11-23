@@ -323,6 +323,31 @@ describe("FileTree", () => {
     ]);
   });
 
+  it("a scan can be cancelled for as long as it runs, beside the rows it has listed", async () => {
+    seedState([file("/repo/a.txt")], {
+      is_scanning: true,
+      is_fully_scanned: false,
+    });
+
+    const { container } = render(FileTree);
+    await screen.findByRole("tree");
+
+    // The rows are there and usable, the scan is shown above them.
+    expect(rowPaths(container)).toEqual(["/repo/a.txt"]);
+    await fireEvent.click(
+      screen.getByRole("button", { name: "Cancel the scan" }),
+    );
+    expect(post).toHaveBeenCalledWith("cancelScan");
+
+    // The scan is over: the bar goes away.
+    seedState([file("/repo/a.txt")]);
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Cancel the scan" }),
+      ).toBeNull(),
+    );
+  });
+
   it("follows the backend's expansion state in both directions", async () => {
     const collapsed = () => [collapsedDir("/repo/src"), file("/repo/z.txt")];
     const expanded = () => [

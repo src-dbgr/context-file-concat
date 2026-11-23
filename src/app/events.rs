@@ -56,8 +56,21 @@ pub enum SaveResult {
     /// The user dismissed the save dialog. Nothing was written.
     Cancelled,
     /// Nothing was saved, for the reason `error` gives: the message of the operating
-    /// system, or the host's own if it had nothing to write.
+    /// system.
     Failed { error: String },
+    /// Nothing was saved and nobody was asked for a file: the host does not hold the
+    /// generated document `document_id` (any more).
+    ///
+    /// This is the answer to a save that lost a race, and the UI recovers from it. A
+    /// save names the document the UI shows *when the button is pressed*, and the host
+    /// may have given that document up a moment before: a later generation has
+    /// finished and replaced it, or a file preview has taken its place in the editor,
+    /// and the event that tells the UI so is still on its way. The UI still has the
+    /// text it showed and saves that instead, once, as an edited text (see `saveFile`
+    /// in `src/ui/src/lib/modules/editor.ts`). The text of an output crosses the IPC
+    /// boundary a second time only then; the host does not have to keep documents
+    /// around until the UI has confirmed their successors.
+    DocumentUnavailable { document_id: u64 },
 }
 
 /// What the size of the output means for a generation that was asked for. The sizes

@@ -667,7 +667,7 @@ mod tests {
             [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
         )
         .unwrap();
-        fs::write(root.join("assets/data.bin"), [0xFF, 0xFE, 0xFD]).unwrap();
+        fs::write(root.join("assets/data.bin"), [0x00, 0xFF, 0xFE, 0xFD]).unwrap();
         let large_file_path = root.join("huge_file.log");
         let mut large_file = File::create(&large_file_path).unwrap();
         let chunk = vec![0u8; 1024];
@@ -969,8 +969,12 @@ mod tests {
 
         assert_eq!(decode("a.txt", "héllo".as_bytes()), "héllo");
         assert_eq!(decode("no_extension", b"caf\xe9"), "café");
-        // Known binary extensions stay binary even without NUL bytes.
-        assert_eq!(decode("a.bin", b"caf\xe9"), BINARY_CONTENT_MARKER);
+        // The extension of a format that is never text settles it, without NUL bytes.
+        assert_eq!(decode("a.png", b"caf\xe9"), BINARY_CONTENT_MARKER);
+        // An extension text formats share with binary ones does not: the content does.
+        assert_eq!(decode("model.obj", b"v 0 1 0\n"), "v 0 1 0\n");
+        assert_eq!(decode("a.bin", b"caf\xe9"), "café");
+        assert_eq!(decode("a.bin", b"\x7fELF\x00"), BINARY_CONTENT_MARKER);
         assert_eq!(decode("a.txt", b"\x00\xff"), BINARY_CONTENT_MARKER);
     }
 

@@ -9,6 +9,8 @@ vi.mock("$lib/modules/editor", () => ({
   showPreviewContent: vi.fn(),
   showGeneratedContent: vi.fn(),
   clearPreview: vi.fn(),
+  retrySaveOfUnavailableDocument: vi.fn(() => false),
+  saveSettled: vi.fn(),
 }));
 
 // Import after mocks are set up

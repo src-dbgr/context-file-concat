@@ -478,6 +478,9 @@ pub struct AppState {
     /// then there is nothing the content filter could work with, see
     /// [`AppState::content_filter_matches`].
     content_search_answered: bool,
+    /// `true` if the search that ended last has failed. Matters only as long as no
+    /// search has delivered: there are no matches then, and none to fall back on.
+    content_search_failed: bool,
     /// The filename of the currently loaded configuration file, if any.
     pub current_config_filename: Option<String>,
     /// The progress of the directory scan as it was last reported by the scan that is
@@ -571,6 +574,7 @@ impl AppState {
             content_search_query: String::new(),
             content_search_results: Arc::default(),
             content_search_answered: false,
+            content_search_failed: false,
             current_config_filename: None,
             scan_progress: no_scan_progress(),
             status: StatusNotice::Ready,
@@ -868,7 +872,11 @@ impl AppState {
     /// Gives up the generated document, so that its memory is released. To be called
     /// exactly where the UI stops showing it: a file preview takes its place
     /// (`showPreviewContent`) or the preview is cleared (`clearPreviewState`).
-    /// Anything else would leave the UI with an output it can no longer save.
+    /// Anything else would leave the UI with an output it can no longer name in a
+    /// save. A save that names the document in the moment between this call and the
+    /// arrival of the event at the UI is answered with
+    /// [`SaveResult::DocumentUnavailable`](crate::app::events::SaveResult), from which
+    /// the UI recovers.
     pub fn discard_generated_document(&mut self) {
         self.generated_document = None;
     }
@@ -910,6 +918,7 @@ impl AppState {
         }
         self.content_search_results = matches;
         self.content_search_answered = true;
+        self.content_search_failed = false;
         true
     }
 
@@ -930,12 +939,18 @@ impl AppState {
     }
 
     /// Ends the search identified by `token` without a result (the search failed). The
-    /// matches of the search before it stay in place.
+    /// matches of the search before it stay in place; if there was none before it,
+    /// there is no content filter until a search delivers
+    /// ([`AppState::content_filter_matches`]).
     ///
     /// Does nothing for a stale token. Returns `true` if this call ended the running
     /// search, i.e. if the failure is the caller's to report.
     pub fn abandon_content_search(&mut self, token: &ContentSearchToken) -> bool {
-        self.content_search.finish(&token.0)
+        let ended = self.content_search.finish(&token.0);
+        if ended {
+            self.content_search_failed = true;
+        }
+        ended
     }
 
     /// Drops the matches of the content search and supersedes a search that is still
@@ -944,21 +959,23 @@ impl AppState {
         self.content_search.cancel();
         self.set_content_search_results(HashSet::new());
         self.content_search_answered = false;
+        self.content_search_failed = false;
     }
 
     /// The matches the content filter works with, or `None` if there is no content
     /// filter to apply: the query is [blank](is_blank), or the first search for it is
-    /// still running. In the latter case the list stays as it is without the content
-    /// filter until the matches arrive, instead of being empty in the meantime. Once a
-    /// search has delivered, its matches apply until the next one delivers (also
-    /// while that next one is running).
+    /// still running, or it has failed. In the latter cases the list stays as it is
+    /// without the content filter, instead of being empty: neither "still searching"
+    /// nor "the search failed" may look like "nothing matches". Once a search has
+    /// delivered, its matches apply until the next one delivers (also while that next
+    /// one is running, and if it fails).
     pub fn content_filter_matches(&self) -> Option<&HashSet<PathBuf>> {
         if is_blank(&self.content_search_query) {
             return None;
         }
-        let awaiting_first_matches =
-            self.content_search.is_active() && !self.content_search_answered;
-        (!awaiting_first_matches).then_some(&*self.content_search_results)
+        let no_matches_yet = (self.content_search.is_active() || self.content_search_failed)
+            && !self.content_search_answered;
+        (!no_matches_yet).then_some(&*self.content_search_results)
     }
 
     /// [`AppState::content_filter_matches`] as a handle that can be kept after the

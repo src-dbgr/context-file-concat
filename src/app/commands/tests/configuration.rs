@@ -127,30 +127,48 @@ async fn test_import_config_resets_and_opens_the_imported_last_directory() {
     assert_no_geometry_was_imported(&store);
 }
 
-/// The imported file names no directory: the state is clean and nothing is
-/// scanned, whatever was loaded before. The geometry of the file is ignored.
+/// The imported file names no directory (what an exported file looks like): the
+/// loaded directory stays loaded and is scanned again with the imported settings.
+/// Selection and expansion are kept, as with any re-scan. The geometry of the file
+/// is ignored.
 #[tokio::test]
-async fn test_import_config_without_a_last_directory_leaves_a_clean_state() {
+async fn test_import_config_without_a_last_directory_rescans_the_loaded_directory() {
     let (mut harness, store) = TestHarness::with_config_file();
-    harness.create_file("kept.txt", "");
-    harness.set_initial_files(&["kept.txt"]);
+    let kept = harness.create_file("src/kept.txt", "");
+    harness.create_file("src/debug.log", "");
+    harness.set_initial_files(&["src", "src/kept.txt", "src/debug.log"]);
     let last_directory = Some(harness.root_path.clone());
-    harness.state.lock().config_mut().last_directory = last_directory.clone();
+    {
+        let mut state = harness.state.lock();
+        state.config_mut().last_directory = last_directory.clone();
+        state.selected_files.insert(kept.clone());
+        state.expanded_dirs.insert(harness.root_path.join("src"));
+        state.patterns_need_rescan = true;
+    }
     let imported = foreign_config(None);
 
     import_file(&harness, &imported);
 
+    // No clean slate in between: the first answer announces the re-scan of the
+    // directory that is still loaded.
     match harness.get_next_event().await {
-        Some(UserEvent::StateUpdate(clean)) => {
-            assert!(!clean.is_scanning);
-            assert_eq!(clean.current_path, "");
-            assert!(clean.rows.is_empty());
+        Some(UserEvent::StateUpdate(first)) => {
+            assert!(first.is_scanning);
+            assert_eq!(first.current_path, harness.root_path.to_string_lossy());
+            assert!(first.config.case_sensitive_search);
+            assert_eq!(
+                first.current_config_filename.as_deref(),
+                Some("imported_config.json")
+            );
         }
-        other => panic!("Expected the clean state, got {other:?}"),
+        other => panic!("Expected the announcement of the re-scan, got {other:?}"),
     }
-    harness
-        .expect_no_event_within(QUIET_PERIOD, "No scan should start without a directory")
-        .await;
+    let final_state = harness.wait_for_scan_completion().await.unwrap();
+    assert_eq!(
+        final_state.current_path,
+        harness.root_path.to_string_lossy()
+    );
+    assert!(!final_state.patterns_need_rescan);
 
     let expected = AppConfig {
         last_directory,
@@ -158,8 +176,18 @@ async fn test_import_config_without_a_last_directory_leaves_a_clean_state() {
     };
     {
         let state = harness.state.lock();
-        assert_eq!(state.current_path, "");
-        assert!(state.full_file_list().is_empty() && !state.is_scanning());
+        let listed: Vec<_> = state
+            .full_file_list()
+            .iter()
+            .filter_map(|item| item.path.file_name()?.to_str().map(String::from))
+            .collect();
+        assert!(listed.contains(&"kept.txt".to_string()), "{listed:?}");
+        assert!(
+            !listed.contains(&"debug.log".to_string()),
+            "the imported pattern *.log applies: {listed:?}"
+        );
+        assert!(state.selected_files.contains(&kept));
+        assert!(state.expanded_dirs.contains(&harness.root_path.join("src")));
         assert_eq!(*state.config(), expected);
     }
     assert_eq!(
@@ -167,6 +195,28 @@ async fn test_import_config_without_a_last_directory_leaves_a_clean_state() {
         expected
     );
     assert_no_geometry_was_imported(&store);
+}
+
+/// Without a loaded directory an import that names none changes the settings only.
+#[tokio::test]
+async fn test_import_config_without_any_directory_scans_nothing() {
+    let mut harness = TestHarness::new();
+    harness.state.lock().current_path = String::new();
+
+    import_file(&harness, &foreign_config(None));
+
+    match harness.get_next_event().await {
+        Some(UserEvent::StateUpdate(update)) => {
+            assert!(!update.is_scanning);
+            assert_eq!(update.current_path, "");
+            assert!(update.config.case_sensitive_search);
+        }
+        other => panic!("Expected a state update, got {other:?}"),
+    }
+    harness
+        .expect_no_event_within(QUIET_PERIOD, "No scan should start without a directory")
+        .await;
+    assert!(!harness.state.lock().is_scanning());
 }
 
 /// Without a directory there is nothing to filter or scan, but the change is
@@ -267,35 +317,33 @@ async fn test_add_ignore_pattern_hides_matching_files() {
     );
 }
 
-/// The imported file names a directory that does not exist: as without one, the
-/// state is clean, nothing is scanned and no error is shown.
+/// The imported file names a directory that does not exist here (somebody else's
+/// complete configuration file): as without one, the loaded directory stays and is
+/// scanned again with the imported settings.
 #[tokio::test]
-async fn test_import_config_with_a_nonexistent_last_directory_leaves_a_clean_state() {
+async fn test_import_config_with_a_nonexistent_last_directory_keeps_the_loaded_directory() {
     let mut harness = TestHarness::new();
     harness.create_file("kept.txt", "");
-    harness.set_initial_files(&["kept.txt"]);
+    harness.create_file("debug.log", "");
+    harness.set_initial_files(&["kept.txt", "debug.log"]);
     let nonexistent = harness.root_path.join("nonexistent_dir");
 
     import_file(&harness, &foreign_config(Some(nonexistent)));
 
-    match harness.get_next_event().await {
-        Some(UserEvent::StateUpdate(clean)) => {
-            assert!(!clean.is_scanning);
-            assert_eq!(clean.current_path, "");
-            assert!(clean.rows.is_empty());
-            assert!(clean.config.case_sensitive_search);
-        }
-        other => panic!("Expected the clean state, got {other:?}"),
-    }
-    harness
-        .expect_no_event_within(
-            QUIET_PERIOD,
-            "No scan should start for a nonexistent directory",
-        )
-        .await;
+    let final_state = harness.wait_for_scan_completion().await.unwrap();
+    assert_eq!(
+        final_state.current_path,
+        harness.root_path.to_string_lossy()
+    );
+    assert!(final_state.config.case_sensitive_search);
     let state = harness.state.lock();
-    assert_eq!(state.current_path, "");
-    assert!(!state.is_scanning());
+    let listed: Vec<_> = state
+        .full_file_list()
+        .iter()
+        .filter_map(|item| item.path.file_name()?.to_str().map(String::from))
+        .collect();
+    assert!(listed.contains(&"kept.txt".to_string()), "{listed:?}");
+    assert!(!listed.contains(&"debug.log".to_string()), "{listed:?}");
 }
 
 #[tokio::test]
@@ -451,7 +499,8 @@ async fn test_exported_config_can_be_imported() {
     {
         let mut state = importer.state.lock();
         state.config_mut().output_directory = Some(PathBuf::from("/home/bob/out"));
-        state.config_mut().last_directory = Some(PathBuf::from("/home/bob/project"));
+        // The directory that is loaded, as in a running installation.
+        state.config_mut().last_directory = Some(importer.root_path.clone());
     }
     importer.dialog.set_pick_file(Some(exported_path));
     import_config(
@@ -460,13 +509,9 @@ async fn test_exported_config_can_be_imported() {
         importer.state.clone(),
     );
 
-    assert!(matches!(
-        importer.get_next_event().await,
-        Some(UserEvent::StateUpdate(_))
-    ));
-    importer
-        .expect_no_event_within(QUIET_PERIOD, "An export names no directory to open")
-        .await;
+    // An export names no directory to open: the loaded one stays, scanned again.
+    let rescanned = importer.wait_for_scan_completion().await.unwrap();
+    assert_eq!(rescanned.current_path, importer.root_path.to_string_lossy());
     let config = importer.state.lock().config().clone();
     assert_eq!(
         config::SharedConfig::from(&config),
@@ -476,10 +521,7 @@ async fn test_exported_config_can_be_imported() {
         config.output_directory,
         Some(PathBuf::from("/home/bob/out"))
     );
-    assert_eq!(
-        config.last_directory,
-        Some(PathBuf::from("/home/bob/project"))
-    );
+    assert_eq!(config.last_directory, Some(importer.root_path.clone()));
 }
 
 /// The file is written without the state lock: while the export writes, the state
@@ -1182,4 +1224,64 @@ async fn test_case_sensitivity_change_without_content_query_only_refilters() {
         UserEvent::StateUpdate(ui_state) => assert_eq!(ui_state.visible_files_count, 0),
         other => panic!("Expected a state update, got {other:?}"),
     }
+}
+
+/// A change of the case sensitivity changes what a file name filter matches: the
+/// directories of the new matches are expanded, as after a changed filter text,
+/// except for those the user collapsed while filtering.
+#[tokio::test]
+async fn test_case_sensitivity_change_expands_the_directories_of_new_matches() {
+    let harness = TestHarness::new();
+    harness.create_file("src/Main.rs", "");
+    harness.create_file("docs/MAIN.md", "");
+    harness.set_initial_files(&["src", "src/Main.rs", "docs", "docs/MAIN.md"]);
+    let (src, docs) = (
+        harness.root_path.join("src"),
+        harness.root_path.join("docs"),
+    );
+    {
+        let mut state = harness.state.lock();
+        state.config_mut().case_sensitive_search = true;
+        state.search_query = "main".to_string();
+        filtering::apply_filter_texts(&mut state);
+        assert!(state.expanded_dirs.is_empty(), "nothing matches yet");
+        // The user expands `docs` and collapses it again while the filter is active.
+        state.expand_directories([docs.clone()]);
+        state.collapse_directories([docs.clone()]);
+    }
+
+    set_option(&harness, ConfigOption::CaseSensitiveSearch(false)).await;
+
+    let state = harness.state.lock();
+    assert_eq!(state.filtered_file_list().len(), 4);
+    assert!(
+        state.expanded_dirs.contains(&src),
+        "the new match is revealed"
+    );
+    assert!(
+        !state.expanded_dirs.contains(&docs),
+        "collapsed by the user"
+    );
+}
+
+/// A negation pattern re-includes entries. Applied to the loaded list a pattern can
+/// only take entries away, so the user is told that a re-scan is needed.
+#[tokio::test]
+async fn test_adding_a_negation_pattern_asks_for_a_rescan() {
+    let mut harness = TestHarness::new();
+    harness.create_file("keep.log", "");
+    harness.set_initial_files(&["main.rs"]);
+    harness.state.lock().config_mut().ignore_patterns = HashSet::from(["*.log".to_string()]);
+
+    add_pattern(&harness, "*.tmp").await;
+    assert!(!harness.last_state_update().unwrap().patterns_need_rescan);
+
+    add_pattern(&harness, "!keep.log").await;
+    let update = harness.last_state_update().unwrap();
+    assert!(update.patterns_need_rescan);
+    assert!(update
+        .config
+        .ignore_patterns
+        .iter()
+        .any(|p| p == "!keep.log"));
 }

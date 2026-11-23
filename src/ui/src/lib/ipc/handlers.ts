@@ -31,6 +31,8 @@ import {
   showPreviewContent as showPreviewContentImpl,
   showGeneratedContent as showGeneratedContentImpl,
   clearPreview,
+  retrySaveOfUnavailableDocument,
+  saveSettled,
 } from "$lib/modules/editor";
 
 import type { AppState } from "$lib/types";
@@ -68,6 +70,24 @@ declare global {
 const HOST_ERROR_TOAST_MS = 10_000;
 /** Upper bound for the host text shown in a toast. */
 const HOST_ERROR_MAX_CHARS = 300;
+
+/**
+ * The editor could not show what the host sent: Monaco is loaded on first use,
+ * and that load (or the creation of the editor) can fail. Without a word the
+ * click on a file or on Generate would simply do nothing.
+ */
+async function showInEditor(show: () => Promise<void>): Promise<void> {
+  try {
+    await show();
+  } catch (err) {
+    console.error("[editor] Failed to show content:", err);
+    const tr = get(tStore);
+    toast.error(tr("toast.editorLoadFailed"), {
+      title: tr("toast.errorTitle"),
+      duration: HOST_ERROR_TOAST_MS,
+    });
+  }
+}
 
 /** Install window.* handlers exactly once (re-install is harmless but avoided). */
 export function installWindowIPCHandlers(): void {
@@ -164,7 +184,7 @@ export function installWindowIPCHandlers(): void {
       return;
     }
     const [c, l, s, p] = parsed.data;
-    showPreviewContentImpl(c, l, s ?? "", p);
+    void showInEditor(() => showPreviewContentImpl(c, l, s ?? "", p));
   };
 
   window.showGeneratedContent = (
@@ -185,7 +205,7 @@ export function installWindowIPCHandlers(): void {
       return;
     }
     const [c, t, id] = parsed.data;
-    showGeneratedContentImpl(c, t, id);
+    void showInEditor(() => showGeneratedContentImpl(c, t, id));
   };
 
   window.outputSizeNotice = (notice: OutputSizeNotice) => {
@@ -292,6 +312,19 @@ export function installWindowIPCHandlers(): void {
         s.status_message = message;
         return s;
       });
+
+    if (outcome.status === "document_unavailable") {
+      // The save lost a race against the host giving the document up; it is
+      // repeated once with the text that was shown, and answered again.
+      if (retrySaveOfUnavailableDocument(outcome.document_id)) return;
+      setStatus("Error: Failed to save file.");
+      toast.error(tr("toast.outputUnavailable"), {
+        title: tr("toast.saveFailed"),
+        duration: HOST_ERROR_TOAST_MS,
+      });
+      return;
+    }
+    saveSettled();
 
     switch (outcome.status) {
       case "saved":

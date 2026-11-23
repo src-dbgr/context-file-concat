@@ -37,10 +37,14 @@ fn example_events() -> Vec<UserEvent> {
         SaveResult::Failed {
             error: "Permission denied (os error 13)".to_string(),
         },
+        SaveResult::DocumentUnavailable { document_id: 7 },
     ];
     for result in &save_results {
         match result {
-            SaveResult::Saved { .. } | SaveResult::Cancelled | SaveResult::Failed { .. } => {}
+            SaveResult::Saved { .. }
+            | SaveResult::Cancelled
+            | SaveResult::Failed { .. }
+            | SaveResult::DocumentUnavailable { .. } => {}
         }
     }
 

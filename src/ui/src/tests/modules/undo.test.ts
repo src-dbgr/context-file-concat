@@ -69,6 +69,73 @@ describe("UndoManager (text inputs)", () => {
     expect(el.value).toBe("final");
   });
 
+  it("keeps the redo history after an undo, however long the user waits", () => {
+    const el = makeInput("a");
+    const manager = getUndoManagerForElement(el);
+    // The app records on every input event, also on the one a restore fires;
+    // and a field that is re-rendered in between loses its caret position.
+    el.addEventListener("input", () => {
+      el.setSelectionRange(0, 0);
+      manager.recordState();
+    });
+
+    el.value = "ab";
+    el.setSelectionRange(2, 2);
+    manager.recordState();
+    vi.advanceTimersByTime(600);
+    el.value = "abc";
+    el.setSelectionRange(3, 3);
+    manager.recordState();
+    vi.advanceTimersByTime(600);
+
+    manager.undo();
+    expect(el.value).toBe("ab");
+    vi.advanceTimersByTime(2_000);
+
+    manager.redo();
+    expect(el.value).toBe("abc");
+    vi.advanceTimersByTime(2_000);
+
+    manager.undo();
+    manager.undo();
+    expect(el.value).toBe("a");
+    vi.advanceTimersByTime(2_000);
+    manager.redo();
+    manager.redo();
+    expect(el.value).toBe("abc");
+  });
+
+  it("a real edit after an undo still drops the redo history", () => {
+    const el = makeInput("a");
+    const manager = getUndoManagerForElement(el);
+
+    el.value = "ab";
+    manager.recordState();
+    vi.advanceTimersByTime(600);
+    manager.undo();
+
+    el.value = "ax";
+    manager.recordState();
+    vi.advanceTimersByTime(600);
+
+    manager.redo();
+    expect(el.value).toBe("ax");
+  });
+
+  it("undo right after typing takes back what was typed", () => {
+    const el = makeInput("a");
+    const manager = getUndoManagerForElement(el);
+
+    el.value = "ab";
+    manager.recordState();
+    // No pause: the typing has not been recorded yet.
+    manager.undo();
+    expect(el.value).toBe("a");
+
+    manager.redo();
+    expect(el.value).toBe("ab");
+  });
+
   it("separate elements get separate histories", () => {
     const a = makeInput("x");
     const b = makeInput("1");

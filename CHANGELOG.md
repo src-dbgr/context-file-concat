@@ -16,6 +16,7 @@
 - Typed save result (saved / cancelled / failed) and error toasts with the host's message.
 - `Delete` on a tree row ignores it (macOS: `fn+⌫`); a notice when an entry cannot be ignored.
 - `CFC_CONFIG_DIR` to use another configuration directory.
+- A scan can be cancelled until it ends: once the first rows are listed, a compact bar above the tree shows the progress and the Cancel button.
 - CI on Linux, macOS and Windows, MSRV check (Rust 1.88), dependency audits, WebKit E2E, initial-load bundle budget.
 
 ### Changed
@@ -24,6 +25,7 @@
 - Content search, preview, generation and scan share one binary/text rule and one decoding rule (UTF-8, else Windows-1252 for legacy text).
 - Expansion is owned by the host; expand/collapse is idempotent; "Expand all" only affects the directories the filters show.
 - An unedited generated output is saved and copied from the host's bytes; save no longer sends the content back.
+- Importing a configuration that names no directory (every exported file) keeps the loaded project and re-scans it with the imported settings; a file that names an existing directory opens it as before.
 - Window geometry is stored in its own `window.json` (migrated once from `config.json`), in logical units.
 - Monaco is loaded with the first preview and only its base editor worker is shipped (dist 12.6 MB → 4.6 MB).
 - Upgraded wry 0.57, tao 0.37; the macOS menu uses objc2.
@@ -36,6 +38,13 @@
 - The window grew on every restart on HiDPI displays; geometry was not saved on Cmd+Q.
 - `cargo test` wrote the developer's real configuration file.
 - Path traversal through `loadDirectoryLevel`; unlisted paths could be selected or expanded.
+- Text files with an extension that binary formats share (`.obj` Wavefront models, `.pdb`, `.bin`, `.db`, `.dat`, `.lib`) are embedded, previewed and searched again; their content decides.
+- Adding a negation pattern (`!keep.log`) now asks for a re-scan instead of silently showing nothing.
+- "Save to File" pressed in the moment a new output or a file preview replaced the shown output reported "no longer available"; the shown output is saved.
+- Redo in text fields was lost half a second after an undo.
+- A directory expanded while an ignore pattern was added stayed empty until it was collapsed and expanded again.
+- A content search that failed on its first run looked like "no matches"; the list now stays unfiltered and the error is shown.
+- A failed load of the editor is reported with a toast; clipboard feedback is translated.
 
 ## [0.3.1] - 2025-09-28
 

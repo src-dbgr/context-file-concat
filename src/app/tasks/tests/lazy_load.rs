@@ -415,3 +415,95 @@ async fn lazy_load_result_is_discarded_after_ignore_patterns_were_applied() {
         "The directory stays loadable with the new patterns"
     );
 }
+
+/// An ignore pattern is added while a directory is being loaded: the load is
+/// outdated (it ran with the previous patterns) and its outcome is discarded. The
+/// directory is expanded all the same, so the level is loaded again, with the new
+/// patterns, instead of staying empty until the user collapses and expands it.
+#[tokio::test]
+async fn a_lazy_load_outdated_by_an_added_pattern_is_repeated() {
+    let mut harness = TestHarness::new();
+    let src = harness.create_dir("src");
+    let kept = harness.create_file("src/main.rs", "fn main() {}");
+    let ignored = harness.create_file("src/debug.log", "");
+    harness.set_initial_files(&["src"]);
+
+    // The load as `start_lazy_load_scan` begins it ...
+    let token = {
+        let mut state = harness.state.lock();
+        let token = state.begin_lazy_load();
+        state.expand_directories([src.clone()]);
+        token
+    };
+    // ... and the pattern that is added while it runs.
+    {
+        let mut state = harness.state.lock();
+        state
+            .config_mut()
+            .ignore_patterns
+            .insert("*.log".to_string());
+        state.apply_ignore_patterns();
+        assert!(!state.is_current_lazy_load(&token));
+    }
+    let mut outdated = MockScanner::new();
+    outdated.set_results(vec![file_item(&kept, 1), file_item(&ignored, 1)], vec![]);
+
+    lazy_load_task(
+        ScanRequest::directory_level(&harness.root_path, &src).unwrap(),
+        harness.proxy.clone(),
+        harness.state.clone(),
+        outdated,
+        MockFileSearcher::default(),
+        token,
+    )
+    .await;
+
+    harness.wait_for_state(|s| s.visible_files_count == 2).await;
+    let state = harness.state.lock();
+    assert!(state.loaded_dirs.contains(&src));
+    let listed: Vec<_> = state
+        .full_file_list()
+        .iter()
+        .map(|item| item.path.clone())
+        .collect();
+    assert_eq!(listed, [src.clone(), kept]);
+}
+
+/// Nothing is loaded again for a directory nobody waits for: one the user has
+/// collapsed in the meantime, or one of a list that another scan is replacing.
+#[tokio::test]
+async fn an_outdated_lazy_load_is_not_repeated_where_nobody_waits_for_it() {
+    let mut harness = TestHarness::new();
+    let src = harness.create_dir("src");
+    harness.create_file("src/main.rs", "");
+    harness.set_initial_files(&["src"]);
+    let request = ScanRequest::directory_level(&harness.root_path, &src).unwrap();
+    let outdated_load = |harness: &TestHarness| {
+        let mut state = harness.state.lock();
+        let token = state.begin_lazy_load();
+        state.expand_directories([src.clone()]);
+        state
+            .config_mut()
+            .ignore_patterns
+            .insert("*.log".to_string());
+        state.apply_ignore_patterns();
+        token
+    };
+
+    // Still wanted as long as the directory is expanded and not loaded ...
+    let token = outdated_load(&harness);
+    assert!(level_is_still_wanted(&harness.state, &token, &request));
+    // ... but not for a load that is not outdated (its outcome is merged or reported),
+    let current = harness.state.lock().begin_lazy_load();
+    assert!(!level_is_still_wanted(&harness.state, &current, &request));
+    // not once the user has collapsed the directory,
+    harness.state.lock().collapse_directories([src.clone()]);
+    assert!(!level_is_still_wanted(&harness.state, &token, &request));
+    // and not while a scan walks the project: it delivers the level itself.
+    let token = outdated_load(&harness);
+    let scan = harness.state.lock().begin_scan();
+    assert!(!level_is_still_wanted(&harness.state, &token, &request));
+    harness.state.lock().finish_scan(&scan);
+
+    harness.drain_events();
+}

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { post } from "$lib/services/backend";
-  import { outputToSave } from "$lib/modules/editor";
+  import { saveOutput } from "$lib/modules/editor";
   import { canGenerate, canSave, isGenerating } from "$lib/stores/uiStores";
   import LogoMark from "$lib/components/LogoMark.svelte";
   import { t } from "$lib/i18n";
@@ -30,8 +30,7 @@
   }
 
   function onSaveClick() {
-    const output = outputToSave();
-    if (output) post("saveFile", output);
+    saveOutput();
   }
 </script>
 
