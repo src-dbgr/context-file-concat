@@ -525,13 +525,21 @@ fn ignore_pattern_for_path(state: &AppState, path: &Path) -> Option<String> {
 ///   character after it), so the pattern is put together from the components of the
 ///   path, not from its text: on Windows that text is `src\gen`.
 /// * Every character of a name that means something in a pattern is escaped with a
-///   backslash ([`escape_pattern_characters`]), and so are the spaces at the end of a
-///   file name, which would be dropped otherwise (the slash at the end of a
-///   directory pattern protects those of a directory).
+///   backslash ([`escape_pattern_characters`]).
+/// * The matcher drops the whitespace a pattern ends with, any kind of it (the
+///   pattern of `tab<TAB>` would hide `tab` and not the file it was made for). A
+///   file name that ends with whitespace therefore gets its last character written
+///   as a character class, `/tab[<TAB>]`, which ends the pattern with a bracket
+///   and keeps whatever whitespace stands before it. This goes for the ASCII
+///   whitespace: space, tab, line feed, vertical tab, form feed, carriage return.
+///   (The slash at the end of a directory pattern protects the name of a directory.)
 ///
 /// `None` for a path that has no such pattern: the root itself, a path with anything
-/// but names in it (`..`, a drive), or a name that is not valid Unicode (a pattern is
-/// text; a lossy conversion would name some other entry, or none).
+/// but names in it (`..`, a drive), a name that is not valid Unicode (a pattern is
+/// text; a lossy conversion would name some other entry, or none), or a file name
+/// that ends with whitespace outside ASCII (a no-break space, an ideographic space):
+/// the matcher drops it like any other, and its character classes are not a way to
+/// write it that this function vouches for.
 fn gitignore_pattern(relative_path: &Path, is_directory: bool) -> Option<String> {
     let names = relative_path
         .components()
@@ -552,11 +560,12 @@ fn gitignore_pattern(relative_path: &Path, is_directory: bool) -> Option<String>
             pattern = format!("{without_backslash}[\\\\]");
         }
         pattern.push('/');
-    } else {
-        let name_end = pattern.trim_end_matches(' ').len();
-        let trailing_spaces = pattern.len() - name_end;
-        pattern.truncate(name_end);
-        pattern.push_str(&"\\ ".repeat(trailing_spaces));
+    } else if let Some(last) = pattern.chars().next_back().filter(|c| c.is_whitespace()) {
+        if !last.is_ascii() {
+            return None;
+        }
+        pattern.pop();
+        pattern.extend(['[', last, ']']);
     }
     Some(pattern)
 }
@@ -2086,8 +2095,104 @@ mod tests {
         assert_pattern_hides_only((" lead", FILE), &[("lead", FILE)]);
         assert_eq!(
             gitignore_pattern(Path::new("trail  "), false).as_deref(),
-            Some(r"/trail\ \ ")
+            Some("/trail [ ]")
         );
+    }
+
+    /// So does every other kind of ASCII whitespace: the matcher would drop it from
+    /// the end of a pattern, and the pattern would hide the name without it instead.
+    #[test]
+    fn test_pattern_of_a_name_that_ends_with_ascii_whitespace_hides_only_that_name() {
+        assert_eq!(
+            gitignore_pattern(Path::new("tab\t"), false).as_deref(),
+            Some("/tab[\t]")
+        );
+        assert_pattern_hides_only(
+            ("tab\t", FILE),
+            &[
+                ("tab", FILE),
+                ("tab ", FILE),
+                ("tab\t\t", FILE),
+                ("tabX", FILE),
+            ],
+        );
+        for whitespace in ['\t', '\n', '\u{b}', '\u{c}', '\r', ' '] {
+            assert!(whitespace.is_ascii() && whitespace.is_whitespace());
+            let name: &'static str = format!("name{whitespace}").leak();
+            assert_pattern_hides_only((name, FILE), &[("name", FILE), ("name_", FILE)]);
+            let nested: &'static str = format!("src/name{whitespace}").leak();
+            assert_pattern_hides_only((nested, FILE), &[("src/name", FILE), (name, FILE)]);
+            let directory: &'static str = format!("dir{whitespace}").leak();
+            assert_pattern_hides_only((directory, DIR), &[("dir", DIR), ("dir/f.txt", FILE)]);
+        }
+        // Only the last character is written differently; the whitespace before it,
+        // of whatever kind, is kept by it.
+        assert_pattern_hides_only(
+            ("mixed \t", FILE),
+            &[("mixed", FILE), ("mixed ", FILE), ("mixed\t", FILE)],
+        );
+        assert_pattern_hides_only(
+            ("mixed\t ", FILE),
+            &[("mixed", FILE), ("mixed\t", FILE), ("mixed ", FILE)],
+        );
+        assert_pattern_hides_only(
+            ("nbsp\u{a0} ", FILE),
+            &[("nbsp", FILE), ("nbsp\u{a0}", FILE)],
+        );
+        // Whitespace that is not at the end is nothing special.
+        assert_pattern_hides_only(("a\tb", FILE), &[("ab", FILE), ("a b", FILE)]);
+        // A name that would close the class, or escape its closing bracket.
+        assert_pattern_hides_only(("a] ", FILE), &[("a]", FILE), ("a", FILE)]);
+        #[cfg(unix)]
+        assert_pattern_hides_only((r"a\ ", FILE), &[(r"a\", FILE), ("a ", FILE)]);
+    }
+
+    /// A file name that ends with whitespace outside ASCII has no pattern: the
+    /// matcher would drop that whitespace and hide the name without it.
+    #[test]
+    fn test_gitignore_pattern_of_a_file_that_ends_with_other_whitespace_is_none() {
+        for whitespace in ['\u{a0}', '\u{3000}', '\u{85}', '\u{2028}', '\u{2003}'] {
+            assert!(!whitespace.is_ascii() && whitespace.is_whitespace());
+            let name = format!("name{whitespace}");
+            assert_eq!(gitignore_pattern(Path::new(&name), false), None, "{name:?}");
+            assert_eq!(
+                gitignore_pattern(&Path::new("src").join(&name), false),
+                None,
+                "{name:?}"
+            );
+            // ASCII whitespace before it does not change that.
+            let name = format!("name {whitespace}");
+            assert_eq!(gitignore_pattern(Path::new(&name), false), None, "{name:?}");
+
+            // Elsewhere in a path it is a character like any other: the slash of a
+            // directory pattern stands behind it, and so does the rest of a name.
+            let directory: &'static str = format!("dir{whitespace}").leak();
+            assert_pattern_hides_only((directory, DIR), &[("dir", DIR), ("dir/f.txt", FILE)]);
+            let inside: &'static str = format!("dir{whitespace}/f.txt").leak();
+            assert_pattern_hides_only((inside, FILE), &[("dir/f.txt", FILE)]);
+            let middle: &'static str = format!("a{whitespace}b").leak();
+            assert_pattern_hides_only((middle, FILE), &[("ab", FILE), ("a", FILE)]);
+        }
+    }
+
+    /// The ignore button on a file whose name has no pattern adds nothing, and what
+    /// its pattern would have been (the name without the whitespace) stays visible.
+    #[tokio::test]
+    async fn test_add_ignore_path_for_a_name_that_ends_with_other_whitespace_adds_nothing() {
+        let harness = TestHarness::new();
+        harness.set_initial_files(&["name\u{a0}", "name"]);
+        let patterns = harness.state.lock().config.ignore_patterns.clone();
+
+        add_ignore_path(
+            json!(harness.root_path.join("name\u{a0}")),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+
+        let state = harness.state.lock();
+        assert_eq!(state.config.ignore_patterns, patterns);
+        assert_eq!(state.full_file_list.len(), 2);
     }
 
     /// A backslash in a name (not a separator on Unix) is that character, not an
