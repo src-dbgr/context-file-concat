@@ -797,39 +797,24 @@ impl AppState {
             return;
         }
         self.invalidate_file_list();
-        let patterns = &self.config.ignore_patterns;
+        let rules = crate::core::IgnoreRules::new(&self.current_path, &self.config.ignore_patterns);
 
-        let root_path = PathBuf::from(&self.current_path);
-        let mut builder = ignore::gitignore::GitignoreBuilder::new(&root_path);
+        let path_info: std::collections::HashMap<_, _> = self
+            .full_file_list
+            .iter()
+            .map(|item| (item.path.clone(), item.is_directory))
+            .collect();
 
-        // CHANGED: Iterate over all configured patterns.
-        for pattern in patterns {
-            builder.add_line(None, pattern).ok();
-        }
+        self.full_file_list
+            .retain(|item| !rules.is_ignored(&item.path, item.is_directory));
 
-        if let Ok(matcher) = builder.build() {
-            let path_info: std::collections::HashMap<_, _> = self
-                .full_file_list
-                .iter()
-                .map(|item| (item.path.clone(), item.is_directory))
-                .collect();
+        self.selected_files.retain(|path| {
+            let is_dir = path_info.get(path).copied().unwrap_or(false);
+            !rules.is_ignored(path, is_dir)
+        });
 
-            self.full_file_list.retain(|item| {
-                !matcher
-                    .matched_path_or_any_parents(&item.path, item.is_directory)
-                    .is_ignore()
-            });
-
-            self.selected_files.retain(|path| {
-                let is_dir = path_info.get(path).copied().unwrap_or(false);
-                !matcher
-                    .matched_path_or_any_parents(path, is_dir)
-                    .is_ignore()
-            });
-
-            // Note: active_ignore_patterns are typically recalculated during a full scan
-            // or could be updated here if needed, but for local filtering this is sufficient.
-        }
+        // Note: active_ignore_patterns are typically recalculated during a full scan
+        // or could be updated here if needed, but for local filtering this is sufficient.
     }
 }
 

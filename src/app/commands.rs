@@ -317,21 +317,14 @@ fn send_state<P: EventProxy>(proxy: &P, state: &AppState) {
 /// Removes the entries matching the newly added ignore patterns from the loaded file
 /// list and records which of these patterns matched something.
 fn apply_added_patterns_locally(state: &mut AppState, patterns_added: &HashSet<String>) {
-    let root_path = PathBuf::from(&state.current_path);
     for pattern in patterns_added {
-        let mut builder = ignore::gitignore::GitignoreBuilder::new(&root_path);
-        if builder.add_line(None, pattern).is_ok() {
-            if let Ok(matcher) = builder.build() {
-                let has_match = state.full_file_list.iter().any(|item| {
-                    matcher
-                        .matched_path_or_any_parents(&item.path, item.is_directory)
-                        .is_ignore()
-                });
-
-                if has_match {
-                    state.active_ignore_patterns.insert(pattern.clone());
-                }
-            }
+        let rules = crate::core::IgnoreRules::new(&state.current_path, [pattern]);
+        let has_match = state
+            .full_file_list
+            .iter()
+            .any(|item| rules.is_ignored(&item.path, item.is_directory));
+        if has_match {
+            state.active_ignore_patterns.insert(pattern.clone());
         }
     }
 

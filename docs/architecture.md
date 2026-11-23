@@ -7,7 +7,7 @@
 This system is designed around several key principles:
 
 - **Separation of Concerns:** The Rust backend is split into two distinct layers:
-  1.  **Core Services (`src/core`):** A stateless, pure logic layer responsible for computations like filesystem scanning, search, and content generation. It has no knowledge of the application's state or the UI.
+  1.  **Core Services (`src/core`):** A stateless layer holding the domain rules and the work on the file system: scanning, ignore rules, search, reading and decoding files, content generation. It reads the file system (it never writes to it) and has no knowledge of the application's state or the UI.
   2.  **Application Layer (`src/app`):** Orchestrates core services, manages the central `AppState`, handles asynchronous tasks, and communicates with the UI.
 - **Unidirectional Data Flow:** User interactions in the UI trigger commands to the Rust host. The host mutates its state and then pushes a new, complete `UiState` snapshot back to the UI. The snapshot is self-contained but pruned: the tree only contains the children of expanded directories, and the host owns the expansion state (see [IPC Contracts](./ipc.md)). The UI is a reactive reflection of the backend state, preventing inconsistencies.
 - **Performance by Design:** Heavy lifting (I/O, search) is offloaded to background threads in Rust to keep the UI responsive. The frontend employs virtualization to efficiently render large file trees, with performance budgets enforced by CI.
@@ -87,13 +87,14 @@ The backend is written in Rust and is responsible for all business logic and sys
 
 - **`src/core/*` (Core Services Layer)**
 
-  - **Responsibilities:** Provides pure, stateless functions for core operations.
+  - **Responsibilities:** Provides stateless services for the core operations. "Stateless" does not mean free of IO: scanning, the content search, the preview and the generation read the file system (blocking; callers run them off the async runtime). The rules themselves (which path is ignored, how bytes become text, how the output is laid out) are pure functions and types inside these modules, tested without IO where possible.
   - **Key Modules:**
     - `scanner.rs`: High-performance, cancellable directory traversal using the `ignore` crate.
-    - `file_handler.rs`: File I/O, content reading, and final output concatenation.
-    - `search.rs`: In-memory filtering of file lists.
+    - `ignore_rules.rs`: `IgnoreRules`, the one definition of what the ignore patterns hide (gitignore syntax including negation, see [IPC Contracts](./ipc.md#ignore-pattern-semantics)). Used by the scanner, by the application layer when a pattern is added to a loaded list, and by the tree generator.
+    - `file_handler.rs`: Reads files for the preview (a bounded prefix only) and the generated output, decodes them (`decode_text`: UTF-8, else Windows-1252, see [IPC Contracts](./ipc.md#file-content)) and formats the output document, including the markers for files that cannot be embedded.
+    - `search.rs`: `SearchEngine` / `FileNameMatcher` filter the file list in memory (name, extension); `ContentSearch` reads the files to search their content, decoded by the same rule and within the configured size limit.
     - `tree_generator.rs`: Generation of ASCII directory trees.
-  - **Characteristics:** Fully decoupled from the application. It receives data, processes it, and returns a result or an error (`CoreError`). It has no concept of application state.
+  - **Characteristics:** Fully decoupled from the application. It receives its input as parameters (paths, patterns, limits such as the configured file size limit), and returns a result or an error (`CoreError`). It has no concept of application state and keeps none of its own.
 
 - **`src/app/*` (Application Layer)**
 
@@ -111,8 +112,8 @@ The backend is written in Rust and is responsible for all business logic and sys
 
 - **`src/config/*` (Configuration)**
 
-  - `mod.rs`: `AppConfig`, the persisted settings.
-  - `settings.rs`: Reading and writing a configuration file at a given path, import/export, and `default_config_path()`, the one function that decides where the application's own file lies (called by `main.rs` only).
+  - `mod.rs`: `AppConfig`, the persisted settings, and the rules a stored value has to meet when it is read (the file size limit is at least 1 MiB).
+  - `settings.rs`: Reading and writing a configuration file at a given path (written atomically: temporary file, then rename), import/export, and `default_config_path()`, the one function that decides where the application's own file lies (called by `main.rs` only).
   - `store.rs`: `ConfigStore`, the one way the configuration file is written while the application runs, see [Configuration persistence](#configuration-persistence).
 
 ---
@@ -168,7 +169,7 @@ The frontend is a Single Page Application (SPA) responsible for all rendering an
 
 Adding a new feature typically follows this sequence:
 
-1.  **Core Logic:** Add or extend a function in a `src/core` module if new, pure business logic is required.
+1.  **Core Logic:** Add or extend a function in a `src/core` module if new domain logic is required. A rule that more than one place needs (as the ignore rules or the text decoding) is defined there once.
 2.  **Host Command:** Expose a new command in `src/app/commands.rs` that calls the core logic and mutates the `AppState`.
 3.  **IPC Contract:** Describe the command's name and payload shape in `$lib/ipc/schema.ts`.
 4.  **UI Action:** Call the new command from the UI using the `post()` service in `$lib/services/backend.ts`.

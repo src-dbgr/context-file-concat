@@ -1,6 +1,6 @@
 //! Provides the functionality for recursively scanning directories.
 
-use super::{CoreError, FileItem, MAX_FILE_SIZE};
+use super::{CoreError, FileItem, IgnoreRules, MAX_FILE_SIZE};
 use crate::utils::file_detection::is_text_file;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -235,8 +235,9 @@ impl DirectoryScanner {
     ///
     /// This function performs the scan in a blocking thread to avoid blocking the async runtime,
     /// while allowing for cancellation and progress reporting. It uses the `ignore` crate
-    /// for high-performance, gitignore-aware directory traversal. It also manually checks
-    /// custom ignore patterns to report which ones were actively used.
+    /// for high-performance, gitignore-aware directory traversal. The custom ignore
+    /// patterns are applied through [`IgnoreRules`], which also reports which of them
+    /// were active (the second value of the result).
     ///
     /// The walk always begins at the project root, even when only a subdirectory is
     /// requested: on its way down it visits nothing but the directories leading to the
@@ -262,20 +263,10 @@ impl DirectoryScanner {
         let blocking_task_handle = tokio::task::spawn_blocking(move || {
             let mut walker_builder = ignore::WalkBuilder::new(request.project_root());
 
-            let active_patterns =
-                std::sync::Arc::new(std::sync::Mutex::new(HashSet::<String>::new()));
-
-            // Create a list of individual matchers for each user-defined pattern.
-            let custom_matchers: Vec<(String, ignore::gitignore::Gitignore)> =
-                ignore_patterns_clone
-                    .iter()
-                    .filter_map(|pattern| {
-                        let mut builder =
-                            ignore::gitignore::GitignoreBuilder::new(request.project_root());
-                        builder.add_line(None, pattern).ok()?;
-                        builder.build().ok().map(|m| (pattern.clone(), m))
-                    })
-                    .collect();
+            let rules = Arc::new(IgnoreRules::new(
+                request.project_root(),
+                &ignore_patterns_clone,
+            ));
 
             walker_builder
                 .max_depth(request.max_depth_from_project_root())
@@ -287,8 +278,10 @@ impl DirectoryScanner {
                 .require_git(false) // CRITICAL: Don't require a .git repo to exist.
                 .follow_links(false);
 
-            // Add a filter to check our custom patterns and collect the active ones.
-            let active_patterns_clone = active_patterns.clone();
+            // The walk is top-down and does not descend into excluded directories, so
+            // asking the rules about each entry on its own is the complete answer. The
+            // rules remember which patterns decided, which is the report of active ones.
+            let walk_rules = Arc::clone(&rules);
             let start_depth = request.start_depth;
             walker_builder.filter_entry(move |entry| {
                 // Stay on the route to the start directory. Entries beside it are not
@@ -297,16 +290,7 @@ impl DirectoryScanner {
                     return false;
                 }
                 let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-                for (pattern, matcher) in &custom_matchers {
-                    if matcher.matched(entry.path(), is_dir).is_ignore() {
-                        active_patterns_clone
-                            .lock()
-                            .unwrap()
-                            .insert(pattern.clone());
-                        return false; // Exclude this entry.
-                    }
-                }
-                true // Keep this entry.
+                !walk_rules.ignores_entry(entry.path(), is_dir)
             });
 
             let walker = walker_builder.build();
@@ -320,8 +304,7 @@ impl DirectoryScanner {
                 throttle,
             );
 
-            let final_active_patterns = active_patterns.lock().unwrap().clone();
-            (final_files, final_active_patterns)
+            (final_files, rules.matched_patterns())
         });
 
         // Await the result. If the task panicked, spawn_blocking returns a JoinError,
@@ -585,6 +568,70 @@ mod tests {
         // 2. Check that the file matching the active pattern was actually excluded.
         let paths: HashSet<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
         assert!(!paths.contains(&root.join("src/main.rs")));
+    }
+
+    /// A negated pattern re-includes what another custom pattern excludes, and both
+    /// are reported as active. The scan agrees with [`IgnoreRules::is_ignored`] about
+    /// every path, which is what keeps the scan and the local filtering in step.
+    #[tokio::test]
+    async fn test_negated_custom_pattern_reincludes_entries() {
+        setup_test_logging();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().to_path_buf();
+        fs::create_dir_all(root.join("docs/drafts")).unwrap();
+        fs::create_dir_all(root.join("out")).unwrap();
+        let all = [
+            "docs/a.md",
+            "docs/keep.md",
+            "docs/drafts/keep.md",
+            "notes.md",
+            "main.rs",
+            "out/keep.md",
+        ];
+        for path in all {
+            fs::write(root.join(path), b"text").unwrap();
+        }
+        let patterns: HashSet<String> = ["*.md", "!keep.md", "out", "*.unused"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let (files, active_patterns) = DirectoryScanner::new(patterns.clone())
+            .scan(
+                &ScanRequest::project(&root, None),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
+            .await
+            .expect("Scan should succeed");
+
+        let listed: HashSet<PathBuf> = files
+            .iter()
+            .filter(|item| !item.is_directory)
+            .map(|item| item.path.clone())
+            .collect();
+        let expected: HashSet<PathBuf> = ["docs/keep.md", "docs/drafts/keep.md", "main.rs"]
+            .into_iter()
+            .map(|path| root.join(path))
+            .collect();
+        assert_eq!(listed, expected);
+        assert_eq!(
+            active_patterns,
+            ["*.md", "!keep.md", "out"]
+                .into_iter()
+                .map(String::from)
+                .collect::<HashSet<_>>()
+        );
+
+        let rules = IgnoreRules::new(&root, &patterns);
+        for path in all {
+            let path = root.join(path);
+            assert_eq!(
+                rules.is_ignored(&path, false),
+                !listed.contains(&path),
+                "{path:?}"
+            );
+        }
     }
 
     /// Verifies that paths with special characters are handled correctly.

@@ -533,6 +533,24 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    /// One stray byte does not make a UTF-8 file a legacy-encoded one: its umlauts
+    /// are still found.
+    #[test]
+    fn test_content_search_finds_umlauts_in_utf8_file_with_a_stray_byte() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mixed.txt");
+        std::fs::write(&path, b"Die Gr\xC3\xB6\xC3\x9Fe z\xC3\xA4hlt. \x99\n").unwrap();
+        let files = vec![FileItem {
+            path: path.clone(),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            ContentSearch::new("Größe zählt", true).matching_paths(&files),
+            HashSet::from([path])
+        );
+    }
+
     #[test]
     fn test_content_search_finds_text_in_latin1_file() {
         let dir = tempdir().unwrap();

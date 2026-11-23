@@ -336,8 +336,6 @@ fn get_image_ext_set() -> &'static std::collections::HashSet<&'static str> {
     IMAGE_EXT_SET.get_or_init(|| IMAGE_EXTENSIONS.iter().copied().collect())
 }
 
-const MAX_CONTENT_CHECK_SIZE: u64 = 20 * 1024 * 1024;
-
 const CONTENT_CHECK_BUFFER_SIZE: usize = 1024;
 
 /// Classifies a path by its extension alone, without touching the file system.
@@ -358,22 +356,24 @@ pub fn classify_by_extension(path: &Path) -> Option<bool> {
 }
 
 /// Determines if a file is likely to be a text file.
+///
+/// The verdict depends on the extension and, where that is unknown, on the first
+/// `CONTENT_CHECK_BUFFER_SIZE` bytes of the content. It does not depend on the size
+/// of the file: which files are too large to be listed, searched or embedded is the
+/// business of the configured size limit alone.
+///
+/// A file that does not exist is not text; one that exists but cannot be read is an
+/// error.
 pub fn is_text_file(path: &Path) -> Result<bool> {
     if let Some(is_text) = classify_by_extension(path) {
         return Ok(is_text);
     }
     match std::fs::metadata(path) {
-        Ok(metadata) => {
-            if metadata.len() > MAX_CONTENT_CHECK_SIZE {
-                return Ok(false);
-            }
-            if metadata.len() == 0 {
-                return Ok(true);
-            }
-        }
-        Err(_) => return Ok(false),
+        // Nothing to look at, and nothing that would need to be opened.
+        Ok(metadata) if metadata.len() == 0 => Ok(true),
+        Ok(_) => check_file_content_optimized(path),
+        Err(_) => Ok(false),
     }
-    check_file_content_optimized(path)
 }
 
 /// Checks the initial bytes of a file to guess if it's text.
@@ -542,5 +542,32 @@ mod tests {
         assert!(!is_text_file(&upper_case_image).unwrap());
         assert!(!is_text_file(&archive).unwrap());
         assert!(is_text_file(&vector).unwrap());
+    }
+
+    /// The size of a file says nothing about whether it is text: only the leading
+    /// bytes are looked at. (The file is sparse, so the test writes almost nothing.)
+    #[test]
+    fn test_size_does_not_decide_whether_a_file_is_text() {
+        let dir = TempDir::new().unwrap();
+        let size = 64 * 1024 * 1024;
+
+        let grow = |path: &Path| {
+            let file = fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.set_len(size).unwrap();
+        };
+
+        // The sparse rest reads as NUL bytes, but lies beyond the sniffed prefix.
+        let text = create_test_file(
+            &dir,
+            "huge_text.unknown",
+            &vec![b'a'; CONTENT_CHECK_BUFFER_SIZE],
+        );
+        grow(&text);
+        let binary = create_test_file(&dir, "huge_binary.unknown", b"\x00\x01\x02");
+        grow(&binary);
+
+        assert_eq!(fs::metadata(&text).unwrap().len(), size);
+        assert!(is_text_file(&text).unwrap());
+        assert!(!is_text_file(&binary).unwrap());
     }
 }

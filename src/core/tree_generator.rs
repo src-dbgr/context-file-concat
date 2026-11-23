@@ -1,6 +1,6 @@
 //! Generates an ASCII representation of a directory tree.
 
-use super::FileItem;
+use super::{FileItem, IgnoreRules};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -18,20 +18,14 @@ impl TreeGenerator {
         root_path: &Path,
         ignore_patterns: &HashSet<String>,
     ) -> String {
-        // 1. Build a Matcher from the tree-specific ignore patterns.
-        let mut ignore_builder = ignore::gitignore::GitignoreBuilder::new(root_path);
-        for pattern in ignore_patterns {
-            ignore_builder.add_line(None, pattern).ok();
-        }
-        let matcher = match ignore_builder.build() {
-            Ok(m) => m,
-            Err(_) => return String::from("Error building tree ignore patterns."),
-        };
+        // 1. The tree-specific ignore patterns follow the same rules as the scan's.
+        let rules = IgnoreRules::new(root_path, ignore_patterns);
 
-        // 2. Filter the provided files to get the final list of items to render.
+        // 2. Filter the provided files to get the final list of items to render. An
+        //    excluded directory is not rendered, which hides everything below it.
         let filtered_files: Vec<&FileItem> = files
             .iter()
-            .filter(|file| !matcher.matched(&file.path, file.is_directory).is_ignore())
+            .filter(|file| !rules.ignores_entry(&file.path, file.is_directory))
             .collect();
 
         // 3. Create a map from parent directory paths to their children.
