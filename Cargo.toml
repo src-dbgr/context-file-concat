@@ -34,7 +34,6 @@ tree_magic_mini = "3.2"
 camino = "1.1"
 regex = "1.1"
 thiserror = "2.0"
-tempfile = "3.20"
 tiktoken-rs = "0.12"
 rust-embed = { version = "8", features = ["compression", "include-exclude"] }
 mime_guess = "2.0"
@@ -67,7 +66,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# Panics unwind, in release as in debug: the application isolates a panicking command
+# or background task (catch_unwind in app/dispatch.rs, Tokio's task boundary, the
+# guards in app/tasks.rs, poison recovery in app/shared_state.rs) and keeps running.
+# With "abort" all of that would be dead code and any panic would end the application.
+panic = "unwind"
 strip = true  # Remove debug symbols for smaller binaries
 
 # BUNDLE INFORMATION

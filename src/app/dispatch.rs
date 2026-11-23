@@ -33,7 +33,13 @@
 //!   while a dialog is open are executed immediately, and whatever the dialog command
 //!   does after the dialog closes happens after them.
 //!
-//! A panicking command is logged and dropped; the lanes keep running.
+//! # Panics
+//!
+//! A panicking command is logged and dropped; the lanes keep running. This holds in
+//! every build: the release profile unwinds too (`panic = "unwind"` in `Cargo.toml`),
+//! which is what `catch_unwind` below needs to have any effect. A command that
+//! panicked while it held the state lock does not take the application down with it
+//! either, see [`SharedState`](super::shared_state::SharedState).
 
 use std::any::Any;
 use std::future::Future;

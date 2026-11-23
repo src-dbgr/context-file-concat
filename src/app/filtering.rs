@@ -1,8 +1,10 @@
 //! This module is responsible for mutating the application state by applying filters.
 //!
 //! It takes the `AppState` and modifies the `filtered_file_list` based on various
-//! criteria like search queries, extension filters, and content search results.
-//! This cleanly separates the logic of state mutation from the logic of state presentation.
+//! criteria like search queries, extension filters, and content search results, and it
+//! expands the directories of the matches ([`auto_expand_for_matches`]).
+//! This cleanly separates the logic of state mutation from the logic of state
+//! presentation (`view_model`), which only reads the state.
 
 use crate::app::state::AppState;
 use crate::config::AppConfig;
@@ -20,31 +22,55 @@ pub fn apply_filters(state: &mut AppState) {
         .map(|i| i.path.clone())
         .collect();
 
+    // A directory whose content has not been loaded is not known to be empty.
     let unloaded_dirs: HashSet<PathBuf> = all_dirs_in_full_list
         .difference(&state.loaded_dirs)
         .cloned()
         .collect();
 
-    let mut dirs_to_preserve = unloaded_dirs;
-    if !state.config.remove_empty_directories {
-        dirs_to_preserve.extend(state.expanded_dirs.clone());
-    }
-
     let filtered = apply_filters_on_data(
         &state.full_file_list,
         &PathBuf::from(&state.current_path),
         &state.config,
-        &FileNameMatcher::new(
-            &state.search_query,
-            &state.extension_filter,
-            state.config.case_sensitive_search,
-        ),
+        &state.file_name_matcher(),
         &state.content_search_query,
         &state.content_search_results,
-        &dirs_to_preserve,
+        &unloaded_dirs,
         state.is_fully_scanned,
     );
     state.set_filtered_file_list(filtered);
+}
+
+/// Expands the parent directories of files that match the current search criteria.
+///
+/// This function iterates through all filtered files that match the current search,
+/// extension, or content filters and adds their parent directories to the `expanded_dirs` set,
+/// ensuring that search results are visible in the file tree.
+pub fn auto_expand_for_matches(state: &mut AppState) {
+    let root_path = PathBuf::from(&state.current_path);
+    let name_matcher = state.file_name_matcher();
+    let matches: Vec<PathBuf> = state
+        .filtered_file_list()
+        .iter()
+        .filter(|item| {
+            !item.is_directory
+                && (name_matcher.matches_any(&item.path)
+                    || state.content_search_results.contains(&item.path))
+        })
+        .map(|item| item.path.clone())
+        .collect();
+
+    for path in matches {
+        let mut current = path.parent();
+        while let Some(parent) = current {
+            if parent.starts_with(&root_path) && parent != root_path {
+                state.expanded_dirs.insert(parent.to_path_buf());
+            } else {
+                break;
+            }
+            current = parent.parent();
+        }
+    }
 }
 
 /// Collects all parent directories for a given set of file paths.
@@ -295,6 +321,71 @@ mod tests {
         apply_filters(&mut state);
         assert_eq!(visible_paths(&state).len(), 2);
         assert_eq!(generate_ui_state(&state).tree.len(), 2);
+    }
+
+    /// Filtering, highlighting and auto-expansion share one matching rule, so a filter
+    /// spelled in a way the file list accepts also highlights and expands its matches.
+    #[test]
+    fn test_filter_highlight_and_auto_expand_agree_on_matches() {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            create_test_file_item("/project/build", true),
+            create_test_file_item("/project/build/Makefile", false),
+            create_test_file_item("/project/build/main.rs", false),
+        ];
+        state.extension_filter = "No Extension".to_string();
+
+        apply_filters(&mut state);
+        auto_expand_for_matches(&mut state);
+        let ui_state = generate_ui_state(&state);
+
+        let build = &ui_state.tree[0];
+        assert!(build.is_expanded, "The directory of the match is expanded");
+        assert_eq!(build.children.len(), 1, "Only the match is listed");
+        assert_eq!(build.children[0].name, "Makefile");
+        assert!(build.children[0].is_match, "The match is highlighted");
+    }
+
+    #[test]
+    fn test_auto_expand_expands_the_ancestors_of_matches_only() {
+        let mut state = AppState::default();
+        state.config = create_test_config();
+        state.current_path = "/project".to_string();
+        state.full_file_list = vec![
+            create_test_file_item("/project/src", true),
+            create_test_file_item("/project/src/deep", true),
+            create_test_file_item("/project/src/deep/needle.rs", false),
+            create_test_file_item("/project/docs", true),
+            create_test_file_item("/project/docs/guide.md", false),
+            create_test_file_item("/project/found_by_content.txt", false),
+            create_test_file_item("/project/other", true),
+            create_test_file_item("/project/other/hit.txt", false),
+        ];
+        state.search_query = "needle".to_string();
+        apply_filters(&mut state);
+        auto_expand_for_matches(&mut state);
+        assert_eq!(
+            state.expanded_dirs,
+            HashSet::from([
+                PathBuf::from("/project/src"),
+                PathBuf::from("/project/src/deep"),
+            ]),
+            "the root itself and directories without a match are not expanded"
+        );
+
+        // A content match expands its ancestors as well.
+        state.search_query.clear();
+        state.expanded_dirs.clear();
+        state.content_search_query = "hit".to_string();
+        state.content_search_results = HashSet::from([PathBuf::from("/project/other/hit.txt")]);
+        apply_filters(&mut state);
+        auto_expand_for_matches(&mut state);
+        assert_eq!(
+            state.expanded_dirs,
+            HashSet::from([PathBuf::from("/project/other")])
+        );
     }
 
     #[test]

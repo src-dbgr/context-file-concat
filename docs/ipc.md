@@ -38,7 +38,7 @@ The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on
 | Command                         | Payload                                                 | Effect                                                                          |
 | ------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `initialize`                    | `null`                                                  | Sends the current snapshot                                                      |
-| `selectDirectory`               | `null`                                                  | Opens the directory dialog and scans the choice                                 |
+| `selectDirectory`               | `null`                                                  | Opens the directory dialog and [opens](#opening-a-path) the choice              |
 | `rescanDirectory`               | `null`                                                  | Rescans the current directory, keeping selection and expansion                  |
 | `clearDirectory`                | `null`                                                  | Resets all directory-related state                                              |
 | `cancelScan`                    | `null`                                                  | Cancels the running scan                                                        |
@@ -54,12 +54,12 @@ The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on
 | `generatePreview`               | `null`                                                  | Concatenates the selection; answers with `showGeneratedContent`                 |
 | `cancelGeneration`              | `null`                                                  | Cancels the running generation                                                  |
 | `saveFile`                      | `string` (content)                                      | Opens the save dialog; answers with `fileSaveStatus`                            |
-| `pickOutputDirectory`           | `null`                                                  | Opens the dialog and stores the choice as output directory                      |
+| `pickOutputDirectory`           | `null`                                                  | Opens the dialog, stores the choice as output directory and persists it         |
 | `addIgnorePattern`              | `{ pattern: string }` (not blank, no other fields)      | Adds one ignore pattern, see [Config changes](#config-changes)                  |
 | `removeIgnorePattern`           | `{ pattern: string }` (not blank, no other fields)      | Removes one ignore pattern                                                      |
 | `clearIgnorePatterns`           | `null`                                                  | Removes all ignore patterns                                                     |
 | `setConfigOption`               | `{ option, value }` (no other fields), see below        | Sets one user-editable option                                                   |
-| `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog                                                 |
+| `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog, see [Config import](#config-import)            |
 | `addIgnorePath`                 | `string` (path)                                         | Adds the ignore pattern for a path of the loaded tree (relative to the root)    |
 
 ### Filter texts
@@ -81,18 +81,28 @@ One rule decides whether a filter text is set, for `searchQuery`, `extensionFilt
 | `output_filename`          | `string`         | Suggested by the save dialog.                                                                            |
 | `output_directory`         | `string \| null` | Suggested by the save dialog. `null` or `""`: no preset.                                                 |
 
-Everything else in the persisted configuration (`AppConfig`: `window_size`, `window_position`, `last_directory`, `max_file_size_mb`, `tree_ignore_patterns`) is not part of the snapshot and cannot be set through IPC. Unknown options, extra fields and wrong value types are rejected.
+Everything else in the persisted configuration (`AppConfig`: `window_size`, `window_position`, `geometry_units`, `last_directory`, `max_file_size_mb`, `tree_ignore_patterns`) is not part of the snapshot and cannot be set through IPC. Unknown options, extra fields and wrong value types are rejected.
 
 What a change of the ignore patterns does (`addIgnorePattern`, `removeIgnorePattern`, `clearIgnorePatterns`, `addIgnorePath`):
 
-| Change                                            | Effect                                                                                                                                                                                        |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Ignore pattern added or removed **during a scan** | The scan is restarted with the new patterns (selection and expansion are kept). A scan works with the patterns it was started with, so its result would otherwise bring ignored entries back. |
-| Ignore pattern added, no scan running             | Applied to the loaded file list right away; no rescan.                                                                                                                                        |
-| Ignore pattern removed, no scan running           | Sets `patterns_need_rescan`; the UI offers `rescanDirectory`.                                                                                                                                 |
-| No directory loaded                               | The configuration is changed; there is nothing to apply it to.                                                                                                                                |
+| Change                                            | Effect                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ignore pattern added or removed **during a scan** | The scan is restarted with the new patterns (selection and expansion are kept). A scan works with the patterns it was started with, so its result would otherwise bring ignored entries back. A scan that is still [opening its path](#opening-a-path) has not read the patterns yet; it is left alone and the change is applied to the directory that is still loaded, as in the rows below. |
+| Ignore pattern added, no scan running             | Applied to the loaded file list right away; no rescan.                                                                                                                                                                                                                                                                                                                                        |
+| Ignore pattern removed, no scan running           | Sets `patterns_need_rescan`; the UI offers `rescanDirectory`.                                                                                                                                                                                                                                                                                                                                 |
+| No directory loaded                               | The configuration is changed; there is nothing to apply it to.                                                                                                                                                                                                                                                                                                                                |
 
 The commands are idempotent (adding a pattern that is set, removing one that is not, and setting an option to its current value change nothing), a changed configuration is persisted, and **every config command is answered with a snapshot**, also when nothing changed. The UI relies on that: controls show the host's `config` and do not write to the store.
+
+#### Config import
+
+`importConfig` takes the settings a user edits and shares from the chosen file: ignore patterns (also those of the generated tree), search and output options, the size limit. The window geometry of the file is **not** imported; the current values stay. The import is a hard reset of the loaded directory: selection, expansion, filters and preview are cleared and no directory is loaded (answered with a snapshot). If the file names a `last_directory` and that directory exists, it is then [opened](#opening-a-path) like a dropped path, which also records it as `last_directory`. If the file names none, or one that does not exist, nothing is scanned: the UI stays clean, no error is shown and `last_directory` keeps its value. The imported settings are persisted.
+
+#### Persistence
+
+A changed configuration is written to the config file in the background. Every writer goes the same way: a numbered snapshot of the configuration is taken under the state lock, and of several saves under way the most recent snapshot is the one that ends up on disk (`ConfigStore` in `src/config/store.rs`). The window geometry is written with the last save of a session, at exit, which also goes that way and cannot be overtaken by a save that is still queued.
+
+`window_size` and `window_position` are logical units, marked by `geometry_units: "logical"`. A config file without that mark was written by a version that stored physical pixels (up to 0.3.1); its geometry is converted once at startup, with the scale factor of the primary monitor.
 
 `max_file_size_mb` is the size limit in MiB (default 20): larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search does not read larger files either. The value is not capped: a limit above the default is honoured by all of them. It is not exposed in the UI; set it in the config file.
 
@@ -128,12 +138,12 @@ post("setExpansion", { path: "/repo/src", expanded: true }); // payload is type-
 What follows from that:
 
 - Two commands on the ordered lane never race. `setExpansion(true)` followed by `setExpansion(false)` ends collapsed, two `toggleSelection` cancel out, and of two `updateFilters` the later one determines the filters.
-- **A command that starts background work does its bookkeeping itself, before it returns.** Opening a directory (`rescanDirectory`, a drop, the scan after a dialog) resets or cancels what was there, registers the new scan and sends the snapshot with `is_scanning: true` synchronously; `loadDirectoryLevel` marks the directory as expanded; `loadFilePreview` records the previewed file; `generatePreview` registers the generation. Only the IO runs in a task. The command that follows therefore always acts on the result: `rescanDirectory` → `cancelScan` ends cancelled, `rescanDirectory` → `clearDirectory` ends with no directory loaded, `loadDirectoryLevel` → `setExpansion(false)` ends collapsed (the load still delivers the children).
+- **A command that starts background work does its bookkeeping itself, before it returns.** Starting a scan (`rescanDirectory`, a drop, the scan after a dialog) supersedes the scan that was running, registers the new one and sends the snapshot with `is_scanning: true` synchronously; `loadDirectoryLevel` marks the directory as expanded; `loadFilePreview` records the previewed file; `generatePreview` registers the generation. Only the IO runs in a task. The command that follows therefore always acts on the result: `rescanDirectory` → `cancelScan` ends cancelled, `rescanDirectory` → `clearDirectory` ends with no directory loaded, a drop → `cancelScan` ends cancelled with the previous directory still loaded, a drop → `rescanDirectory` ends with the dropped directory loaded, `loadDirectoryLevel` → `setExpansion(false)` ends collapsed (the load still delivers the children).
 - **Results of background work carry a token and are dropped when they are outdated.** A scan that was cancelled or replaced, a lazy load whose file list was replaced, a file preview that was followed by another one or closed, a content search that was followed by a newer one: none of them changes the state or sends anything any more. For previews this means `showPreviewContent` calls arrive in the order of the requests and an older file never replaces a newer one.
 - **A dropped path is a command.** The drag & drop handler queues the drop on the ordered lane (`dispatch_dropped_path`), so drops are ordered among themselves and with the IPC commands: of two drops in quick succession the second one is loaded.
-- Long-running work and file IO do not occupy the ordered lane. Scans and generations are started as tasks of their own by their commands; so are the read of a previewed file and the look at a path that is to be scanned (on a slow network drive even checking that it exists can take long). The config file is written in the background as well, from a numbered snapshot, so that an older save can never overwrite a newer one. A content search suspends `updateFilters`; the part up to the suspension (storing the new filters) has run in order, the rest (applying the search result) moves to the continuation lane. Results are applied in posting order, so an older search cannot overwrite a newer one, and commands posted meanwhile are executed immediately.
+- Long-running work and file IO do not occupy the ordered lane. Scans and generations are started as tasks of their own by their commands; so are the read of a previewed file and the look at a path that is to be scanned (on a slow network drive even checking that it exists can take long). The config file is written in the background as well, from a numbered snapshot, so that an older save can never overwrite a newer one (see [Persistence](#persistence)). A content search suspends `updateFilters`; the part up to the suspension (storing the new filters) has run in order, the rest (applying the search result) moves to the continuation lane. Results are applied in posting order, so an older search cannot overwrite a newer one, and commands posted meanwhile are executed immediately.
 - A native dialog blocks its thread for as long as the user takes. Dialog commands therefore run **outside** the ordered lane: a command that arrives while a dialog is open is executed right away, and what the dialog command does after the dialog has been closed (start the scan, store the output directory, import the config) happens after it. Dialog commands are ordered among themselves, so only one dialog is open at a time; a second one opens after the first has been closed.
-- A panicking command is logged and dropped; the lanes keep running.
+- A panicking command is logged and dropped; the lanes keep running. This holds in release builds too (the release profile unwinds), and also for a command that panics while it holds the state lock: the lock is taken over by the next command (`SharedState` in `src/app/shared_state.rs`), which works on the state as it was left.
 
 ## Host calls (Host → UI)
 
@@ -152,13 +162,21 @@ Each `UserEvent` is turned into exactly one call of a `window.*` function instal
 
 Errors are reported as plain strings through `showError`; there is no error-code protocol.
 
+### Scan progress
+
+While a scan walks the directory it reports its progress at most every 100 ms. Each report is sent as `ScanProgress` (the live display of the scan panel) and stored in the host's state, so the snapshots sent during a scan carry the progress as of that moment in `scan_progress` and in `status_message` ("Scanning... 40 files processed. 2 large files skipped (/repo/src/main.rs)"). A scan that has not reported anything yet reads "Scanning... 0 files processed. 0 large files skipped."; when a scan has ended, the status is its outcome and `scan_progress` keeps the last counters. Reports of a scan that was cancelled or replaced are neither stored nor sent.
+
 ### Opening a path
 
-A scan is announced before anything is known about the path: the first snapshot has `is_scanning: true` and `current_path` as the path was given. The scan task then looks at the path:
+Opening a path (a drop, the choice of the directory dialog, the `last_directory` of an imported config) replaces the loaded directory. Whether the path exists is not known when the command runs, and finding out is IO that does not belong on the command lane. The command therefore only **announces** the scan: the first snapshot has `is_scanning: true`, and everything else is still the directory that was loaded before (`current_path`, tree, selection, filters). The scan task then looks at the path:
 
-- A directory is scanned as is.
-- For a file (a dropped file), `current_path` changes to the directory the file lies in, with another snapshot, and that directory is scanned.
-- A path that does not exist ends the scan: `showError("Path does not exist: …")` followed by a snapshot with `is_scanning: false`. A rescan keeps the list it had; opening a new path has already reset the previous directory at that point.
+- A directory is entered: the previous directory is reset at that moment and `current_path` changes, with a snapshot (`is_scanning: true`, empty tree). Then the directory is scanned.
+- For a file (a dropped file) the same happens with the directory the file lies in.
+- A path that does not exist ends the scan: `showError("Path does not exist: …")`. **The directory that was loaded stays exactly as it was**, with its list, selection, expansion and filters. Whatever the attempt had superseded when it was announced is taken up again: a scan of the loaded directory that was still running is restarted (announced with a snapshot of its own), and so is the opening of another path that had not been looked at yet (of a drop of an existing directory followed by a drop of a missing path, the directory is loaded). Otherwise a snapshot with `is_scanning: false` follows the error.
+
+Until the path has been looked at, commands act on the directory that is still loaded, and the announced scan is the current one: `cancelScan` cancels it (the loaded directory stays), `clearDirectory` ends with no directory loaded, another drop replaces it. `rescanDirectory` does nothing in that phase (the opening delivers a fresh listing anyway) and is answered with the unchanged snapshot.
+
+`rescanDirectory` itself keeps the loaded directory by definition; if the directory has vanished, the scan ends with the same error and the list stays.
 
 The scan is reported as complete (`is_scanning: false`, status "Indexing complete …") as its very last step. With an active content query that is after the search has been repeated on the complete file list, so the number of visible items in the status is the one of the final list. Until then the snapshot can show `is_fully_scanned: true` together with `is_scanning: true`.
 
@@ -177,7 +195,7 @@ Produced by `generate_ui_state` (`src/app/view_model/mod.rs`), validated by `UiS
 | `tree_dirs_count`                                          | Directories in the complete filtered tree, including the ones not sent |
 | `selected_files_count`                                     | Selected files                                                         |
 | `is_scanning`, `is_generating`, `is_fully_scanned`         | Activity flags                                                         |
-| `status_message`, `scan_progress`                          | Status line and scan progress                                          |
+| `status_message`, `scan_progress`                          | Status line and scan progress, see [Scan progress](#scan-progress)     |
 | `search_query`, `extension_filter`, `content_search_query` | Active filters                                                         |
 | `current_config_filename`                                  | Name of the imported config, or `null`                                 |
 | `active_ignore_patterns`, `patterns_need_rescan`           | Ignore pattern bookkeeping                                             |

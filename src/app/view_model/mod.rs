@@ -3,7 +3,9 @@
 //! This module acts as a presentation layer, preparing data specifically for consumption
 //! by the UI. It builds the file tree structure and computes various
 //! display-related properties. It is purely for data transformation and does not
-//! mutate the application state.
+//! mutate the application state: every function here takes the state by shared
+//! reference. (State changes that go with filtering, such as expanding the directories
+//! of matches, live in `app::filtering`.)
 //!
 //! Every `UiState` is a complete, self-contained snapshot of what the UI shows. The
 //! tree is pruned to the visible part: children are only sent for expanded directories
@@ -26,7 +28,7 @@ mod reference;
 use crate::app::selection::SelectionState;
 use crate::app::state::AppState;
 use crate::app::tree_index::TreeCounts;
-use crate::core::{is_blank, FileItem, FileNameMatcher};
+use crate::core::{is_blank, FileItem};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -141,53 +143,12 @@ fn build_tree_snapshot(state: &AppState) -> TreeSnapshot {
         expanded: &state.expanded_dirs,
         loaded_dirs: &state.loaded_dirs,
         content_search_matches: &state.content_search_results,
-        name_matcher: &name_matcher(state),
+        name_matcher: &state.file_name_matcher(),
         previewed_path: state.previewed_file_path.as_deref(),
     };
     TreeSnapshot {
         nodes: build_tree_nodes(items, &index, &view),
         counts: index.counts(),
-    }
-}
-
-/// The matcher for the filename query and the extension filter of the state.
-fn name_matcher(state: &AppState) -> FileNameMatcher {
-    FileNameMatcher::new(
-        &state.search_query,
-        &state.extension_filter,
-        state.config.case_sensitive_search,
-    )
-}
-
-/// Expands the parent directories of files that match the current search criteria.
-///
-/// This function iterates through all filtered files that match the current search,
-/// extension, or content filters and adds their parent directories to the `expanded_dirs` set,
-/// ensuring that search results are visible in the file tree.
-pub fn auto_expand_for_matches(state: &mut AppState) {
-    let root_path = PathBuf::from(&state.current_path);
-    let name_matcher = name_matcher(state);
-    let matches: Vec<PathBuf> = state
-        .filtered_file_list()
-        .iter()
-        .filter(|item| {
-            !item.is_directory
-                && (name_matcher.matches_any(&item.path)
-                    || state.content_search_results.contains(&item.path))
-        })
-        .map(|item| item.path.clone())
-        .collect();
-
-    for path in matches {
-        let mut current = path.parent();
-        while let Some(parent) = current {
-            if parent.starts_with(&root_path) && parent != root_path {
-                state.expanded_dirs.insert(parent.to_path_buf());
-            } else {
-                break;
-            }
-            current = parent.parent();
-        }
     }
 }
 
@@ -298,31 +259,6 @@ mod tests {
         let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
         assert_eq!(src_node.children.len(), 1);
         assert_eq!(src_node.children[0].name, "main.rs");
-    }
-
-    /// Filtering, highlighting and auto-expansion share one matching rule, so a filter
-    /// spelled in a way the file list accepts also highlights and expands its matches.
-    #[test]
-    fn test_filter_highlight_and_auto_expand_agree_on_matches() {
-        let mut state = AppState::default();
-        state.config = create_test_config();
-        state.current_path = "/project".to_string();
-        state.full_file_list = vec![
-            create_test_file_item("/project/build", true),
-            create_test_file_item("/project/build/Makefile", false),
-            create_test_file_item("/project/build/main.rs", false),
-        ];
-        state.extension_filter = "No Extension".to_string();
-
-        crate::app::filtering::apply_filters(&mut state);
-        auto_expand_for_matches(&mut state);
-        let ui_state = generate_ui_state(&state);
-
-        let build = &ui_state.tree[0];
-        assert!(build.is_expanded, "The directory of the match is expanded");
-        assert_eq!(build.children.len(), 1, "Only the match is listed");
-        assert_eq!(build.children[0].name, "Makefile");
-        assert!(build.children[0].is_match, "The match is highlighted");
     }
 
     #[test]

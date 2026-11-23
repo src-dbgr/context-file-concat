@@ -6,25 +6,26 @@
 //! logic, and for sending `UserEvent`s back to the UI.
 
 use super::events::UserEvent;
-use super::filtering; // SRP: Use the new filtering module
+use super::filtering::{self, auto_expand_for_matches};
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
+use super::shared_state::SharedState;
 use super::state::{AppState, StatusNotice};
 use super::tasks::{
     self, refresh_content_search, search_in_files, start_lazy_load_scan, start_scan_on_path,
 };
-use super::view_model::{auto_expand_for_matches, generate_ui_state};
+use super::view_model::generate_ui_state;
 use crate::app::file_dialog::DialogService;
-use crate::config::{self, AppConfig}; // Import AppConfig for explicit deserialization
+use crate::config::{self, AppConfig};
 use crate::core::is_blank;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 /// Opens a file dialog for the user to select a directory to scan.
 ///
-/// Triggers a new proactive, two-phase scan on the selected path.
-/// This always performs a hard reset of the application state.
+/// Triggers a new proactive, two-phase scan on the selected path, which replaces the
+/// loaded directory (a hard reset of everything that belongs to it) as soon as the
+/// path has been found, see [`start_scan_on_path`].
 ///
 /// Dismissing the dialog changes nothing: in particular, a scan that is running in the
 /// background keeps running and keeps owning the scanning state. The UI is still sent
@@ -32,10 +33,9 @@ use std::sync::{Arc, Mutex};
 pub fn select_directory<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     if let Some(path) = dialog.pick_directory() {
-        // A new directory selection should always reset the state.
         start_scan_on_path(path, proxy, state, false);
     } else {
         tracing::debug!("Directory selection cancelled by the user.");
@@ -44,13 +44,14 @@ pub fn select_directory<P: EventProxy, D: DialogService + ?Sized>(
 }
 
 /// Opens a path that was dropped onto the window, replacing the loaded directory.
-/// A dropped file opens the directory it lies in.
-pub fn open_dropped_path<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<Mutex<AppState>>) {
+/// A dropped file opens the directory it lies in. A path that does not exist is
+/// reported and leaves the loaded directory as it is.
+pub fn open_dropped_path<P: EventProxy>(path: PathBuf, proxy: P, state: SharedState) {
     start_scan_on_path(path, proxy, state, false);
 }
 
 /// Clears the currently loaded directory and resets the application state.
-pub fn clear_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+pub fn clear_directory<P: EventProxy>(proxy: P, state: SharedState) {
     with_state_and_notify(&state, &proxy, |s| {
         s.reset_directory_state();
         s.config.last_directory = None;
@@ -63,11 +64,18 @@ pub fn clear_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 ///
 /// This preserves the current UI state (selections, expansions) while refreshing
 /// the file list from the filesystem. Does nothing if no directory is loaded.
-pub fn rescan_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+///
+/// While another path is being opened (see [`AppState::begin_open`]) there is nothing
+/// to refresh: the opening replaces the loaded directory with a fresh scan anyway, and
+/// a re-scan of the directory that is about to be replaced would supersede it. The
+/// request is answered with the unchanged state.
+pub fn rescan_directory<P: EventProxy>(proxy: P, state: SharedState) {
     let current_path = {
-        let mut state_guard = state
-            .lock()
-            .expect("Mutex was poisoned. This should not happen.");
+        let mut state_guard = state.lock();
+        if state_guard.is_opening() {
+            send_state(&proxy, &state_guard);
+            return;
+        }
         state_guard.patterns_need_rescan = false;
         state_guard.current_path.clone()
     };
@@ -79,7 +87,7 @@ pub fn rescan_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 }
 
 /// Cancels the ongoing directory scan.
-pub fn cancel_scan<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+pub fn cancel_scan<P: EventProxy>(proxy: P, state: SharedState) {
     with_state_and_notify(&state, &proxy, |s| {
         tracing::debug!("Scan cancellation requested.");
         s.cancel_current_scan();
@@ -146,7 +154,7 @@ fn parse_payload<T: serde::de::DeserializeOwned>(
 pub async fn add_ignore_pattern<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     let Some(IgnorePatternPayload { pattern }) = parse_payload("addIgnorePattern", payload) else {
         return;
@@ -165,7 +173,7 @@ pub async fn add_ignore_pattern<P: EventProxy>(
 pub async fn remove_ignore_pattern<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     let Some(IgnorePatternPayload { pattern }) = parse_payload("removeIgnorePattern", payload)
     else {
@@ -178,7 +186,7 @@ pub async fn remove_ignore_pattern<P: EventProxy>(
 }
 
 /// Removes all ignore patterns.
-pub async fn clear_ignore_patterns<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+pub async fn clear_ignore_patterns<P: EventProxy>(proxy: P, state: SharedState) {
     change_config(&proxy, &state, |config| config.ignore_patterns.clear()).await;
 }
 
@@ -186,7 +194,7 @@ pub async fn clear_ignore_patterns<P: EventProxy>(proxy: P, state: Arc<Mutex<App
 pub async fn set_config_option<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     let Some(option) = parse_payload::<ConfigOption>("setConfigOption", payload) else {
         return;
@@ -205,11 +213,14 @@ enum ContentSearchFollowUp {
 ///
 /// `change` is applied to the configuration of the host while the state is locked, so
 /// an edit is always based on the current configuration and never on a copy that
-/// another command has outdated in the meantime. A changed configuration is persisted.
+/// another command has outdated in the meantime. A changed configuration is persisted
+/// (in the background, see [`tasks::save_config_in_background`]).
 ///
 /// What else happens depends on what `change` has changed:
-/// - Ignore patterns while a scan is running: the scan is restarted, so that it works
-///   with the new patterns instead of delivering a result based on the old ones.
+/// - Ignore patterns while a scan is walking the loaded directory: the scan is
+///   restarted, so that it works with the new patterns instead of delivering a result
+///   based on the old ones. (A scan that is still opening its path has not read the
+///   patterns yet and needs no restart.)
 /// - Ignore patterns added otherwise: they are applied to the loaded file list.
 /// - Ignore patterns removed otherwise: the user is told that a re-scan is needed.
 /// - Case sensitivity: the filters are re-applied and an active content search is
@@ -220,7 +231,7 @@ enum ContentSearchFollowUp {
 /// does not edit its copy of the configuration, it shows what the host reports.
 async fn change_config<P: EventProxy>(
     proxy: &P,
-    state: &Arc<Mutex<AppState>>,
+    state: &SharedState,
     change: impl FnOnce(&mut AppConfig),
 ) {
     if apply_config_change(proxy, state, change) == ContentSearchFollowUp::Repeat {
@@ -231,12 +242,10 @@ async fn change_config<P: EventProxy>(
 /// The synchronous part of [`change_config`]: everything up to the repeated search.
 fn apply_config_change<P: EventProxy>(
     proxy: &P,
-    state: &Arc<Mutex<AppState>>,
+    state: &SharedState,
     change: impl FnOnce(&mut AppConfig),
 ) -> ContentSearchFollowUp {
-    let mut state_guard = state
-        .lock()
-        .expect("Mutex was poisoned. This should not happen.");
+    let mut state_guard = state.lock();
 
     let previous = state_guard.config.clone();
     change(&mut state_guard.config);
@@ -257,9 +266,7 @@ fn apply_config_change<P: EventProxy>(
         || previous.remove_empty_directories != config.remove_empty_directories;
 
     if *config != previous {
-        if let Err(e) = config::settings::save_config(config, None) {
-            tracing::warn!("Failed to save config on update: {}", e);
-        }
+        tasks::save_config_in_background(state_guard.config_snapshot());
     }
 
     // Without a loaded directory there is nothing the change could apply to.
@@ -270,7 +277,7 @@ fn apply_config_change<P: EventProxy>(
 
     let patterns_changed = !patterns_added.is_empty() || patterns_removed;
 
-    if patterns_changed && state_guard.is_scanning() {
+    if patterns_changed && state_guard.is_scanning() && !state_guard.is_opening() {
         tracing::info!("Ignore patterns changed during a scan. Restarting the scan.");
         // The entries that are ignored now disappear at once; the restarted scan then
         // delivers the list that matches the new patterns.
@@ -332,10 +339,8 @@ fn apply_added_patterns_locally(state: &mut AppState, patterns_added: &HashSet<S
 }
 
 /// Handles the initial request for state from the frontend when it loads.
-pub fn initialize<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
-    let state_guard = state
-        .lock()
-        .expect("Mutex was poisoned. This should not happen.");
+pub fn initialize<P: EventProxy>(proxy: P, state: SharedState) {
+    let state_guard = state.lock();
     let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
     proxy.send_event(event);
 }
@@ -347,13 +352,11 @@ pub fn initialize<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 pub async fn update_filters<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     if let Ok(filters) = serde_json::from_value::<HashMap<String, String>>(payload.clone()) {
         let should_search_content = {
-            let mut state_guard = state
-                .lock()
-                .expect("Mutex was poisoned. This should not happen.");
+            let mut state_guard = state.lock();
 
             state_guard.search_query = filters.get("searchQuery").cloned().unwrap_or_default();
             state_guard.extension_filter =
@@ -393,11 +396,7 @@ pub async fn update_filters<P: EventProxy>(
 /// The state update (highlighting in the tree) is sent right away. The content follows
 /// with `ShowFilePreview` once the file has been read in the background, unless another
 /// preview was requested or the preview was closed in the meantime.
-pub fn load_file_preview<P: EventProxy>(
-    payload: serde_json::Value,
-    proxy: P,
-    state: Arc<Mutex<AppState>>,
-) {
+pub fn load_file_preview<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
         tasks::start_file_preview(PathBuf::from(path_str), proxy, state);
     } else {
@@ -415,7 +414,7 @@ pub fn load_file_preview<P: EventProxy>(
 pub fn load_directory_level<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
         let path = PathBuf::from(path_str);
@@ -437,16 +436,14 @@ pub fn load_directory_level<P: EventProxy>(
 pub async fn add_ignore_path<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     let Some(path_to_ignore) = parse_payload::<PathBuf>("addIgnorePath", payload) else {
         return;
     };
     // The lock is not held while the file system is asked about the path.
     let root_path = {
-        let state_guard = state
-            .lock()
-            .expect("Mutex was poisoned. This should not happen.");
+        let state_guard = state.lock();
         if state_guard.current_path.is_empty() {
             return;
         }
@@ -468,11 +465,7 @@ pub async fn add_ignore_path<P: EventProxy>(
 }
 
 /// Toggles the selection state of a single file.
-pub fn toggle_selection<P: EventProxy>(
-    payload: serde_json::Value,
-    proxy: P,
-    state: Arc<Mutex<AppState>>,
-) {
+pub fn toggle_selection<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
         with_state_and_notify(&state, &proxy, |s| {
             let path = PathBuf::from(path_str);
@@ -494,7 +487,7 @@ pub fn toggle_selection<P: EventProxy>(
 pub fn toggle_directory_selection<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
         with_state_and_notify(&state, &proxy, |s| {
@@ -546,11 +539,7 @@ pub(crate) struct SetExpansionPayload {
 /// a gesture that is delivered twice (key repeat, double click) before the UI has
 /// rendered the answer to the first one still ends in the state the user asked for.
 /// The state is always sent, also when nothing changed, so every request is answered.
-pub fn set_expansion<P: EventProxy>(
-    payload: serde_json::Value,
-    proxy: P,
-    state: Arc<Mutex<AppState>>,
-) {
+pub fn set_expansion<P: EventProxy>(payload: serde_json::Value, proxy: P, state: SharedState) {
     match serde_json::from_value::<SetExpansionPayload>(payload) {
         Ok(SetExpansionPayload { path, expanded }) => {
             with_state_and_notify(&state, &proxy, |s| {
@@ -569,7 +558,7 @@ pub fn set_expansion<P: EventProxy>(
 pub fn expand_collapse_all<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     if let Ok(expand) = serde_json::from_value::<bool>(payload.clone()) {
         with_state_and_notify(&state, &proxy, |s| {
@@ -590,7 +579,7 @@ pub fn expand_collapse_all<P: EventProxy>(
 }
 
 /// Selects all *currently visible* files in the file tree.
-pub fn select_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+pub fn select_all<P: EventProxy>(proxy: P, state: SharedState) {
     with_state_and_notify(&state, &proxy, |s| {
         let paths_to_select: Vec<PathBuf> = s
             .filtered_file_list()
@@ -603,17 +592,15 @@ pub fn select_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 }
 
 /// Deselects all files.
-pub fn deselect_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+pub fn deselect_all<P: EventProxy>(proxy: P, state: SharedState) {
     with_state_and_notify(&state, &proxy, |s| {
         s.selected_files.clear();
     });
 }
 
 /// Generates the final concatenated output from selected files by spawning a cancellable task.
-pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
-    let mut state_guard = state
-        .lock()
-        .expect("Mutex was poisoned. This should not happen.");
+pub fn generate_preview<P: EventProxy>(proxy: P, state: SharedState) {
+    let mut state_guard = state.lock();
 
     // Supersedes a generation that is still running; only the new one may publish.
     let token = state_guard.begin_generation();
@@ -630,6 +617,7 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
             chrono::Local::now().format("%Y%m%d_%H%M%S")
         );
         state_guard.config.output_filename = new_filename;
+        tasks::save_config_in_background(state_guard.config_snapshot());
     }
 
     // Send an immediate state update to the UI to show the 'generating' state.
@@ -658,7 +646,7 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 ///
 /// The "cancelled" notice is the answer to the user's request, so it is set here and
 /// only if a generation was actually running; the aborted task itself stays silent.
-pub fn cancel_generation<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+pub fn cancel_generation<P: EventProxy>(proxy: P, state: SharedState) {
     with_state_and_notify(&state, &proxy, |s| {
         if s.is_generating() {
             s.status = StatusNotice::GenerationCancelled;
@@ -668,7 +656,7 @@ pub fn cancel_generation<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 }
 
 /// Resets the preview state in the UI.
-pub fn clear_preview_state<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
+pub fn clear_preview_state<P: EventProxy>(proxy: P, state: SharedState) {
     with_state_and_notify(&state, &proxy, |s| s.clear_preview());
 }
 
@@ -677,14 +665,12 @@ pub fn save_file<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
     payload: serde_json::Value,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     if let Some(content) = payload.as_str() {
         let content_clone = content.to_string();
         let config = {
-            let state_guard = state
-                .lock()
-                .expect("Mutex was poisoned. This should not happen.");
+            let state_guard = state.lock();
             state_guard.config.clone()
         };
 
@@ -711,72 +697,67 @@ pub fn save_file<P: EventProxy, D: DialogService + ?Sized>(
     }
 }
 
-/// Opens a file dialog for the user to select a default output directory.
+/// Opens a file dialog for the user to select a default output directory. The choice
+/// is stored in the configuration and persisted.
 pub fn pick_output_directory<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     if let Some(path) = dialog.pick_directory() {
         with_state_and_notify(&state, &proxy, |s| {
-            s.config.output_directory = Some(path);
+            if s.config.output_directory.as_ref() != Some(&path) {
+                s.config.output_directory = Some(path);
+                tasks::save_config_in_background(s.config_snapshot());
+            }
         });
     }
 }
 
-/// Imports an application configuration from a JSON file.
+/// Imports a configuration file.
 ///
-/// This action is treated as a "hard reset" of the application's context.
-/// It first completely clears the current state (file lists, selections, previews),
-/// sends an immediate UI update to reflect this clean state, and then applies
-/// the new configuration. If the imported config specifies a directory, a new
-/// scan is initiated on that path from a clean slate.
-pub async fn import_config<P: EventProxy, D: DialogService + ?Sized>(
+/// The settings a user edits and shares are taken from the file (ignore patterns,
+/// search and output options, the size limit, see [`AppConfig::adopt_user_settings`]).
+/// The window geometry of the file is ignored: it describes the display of whoever
+/// exported it, possibly in another unit.
+///
+/// The import is treated as a "hard reset" of the application's context: the current
+/// state (file lists, selections, filters, previews) is cleared and the UI is told.
+/// If the file names a `last_directory` and that directory exists, it is then opened
+/// like any other path (see [`start_scan_on_path`]), which also records it as the last
+/// directory of this installation. Otherwise nothing is scanned and the UI stays clean.
+pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
-    if let Some(path) = dialog.pick_config_to_import() {
-        match config::settings::import_config(&path) {
-            Ok(new_config) => {
-                let filename = path.file_name().and_then(|n| n.to_str()).map(String::from);
-                let dir_to_scan = new_config.last_directory.clone();
-
-                // Lock the state to perform the reset and config update atomically.
-                let mut state_guard = state
-                    .lock()
-                    .expect("Mutex was poisoned. This should not happen.");
-
-                // 1. Reset the entire directory-related state to a clean slate.
-                state_guard.reset_directory_state();
-
-                // 2. Apply the new configuration.
-                state_guard.config = new_config;
-                state_guard.current_config_filename = filename;
-                if let Err(e) = config::settings::save_config(&state_guard.config, None) {
-                    tracing::warn!("Failed to save imported config: {}", e);
-                }
-
-                // 3. IMPORTANT: Immediately send a UI update to reflect the clean state.
-                //    This ensures the GUI is wiped clean *before* any new scan begins.
-                let clean_ui_state = generate_ui_state(&state_guard);
-                proxy.send_event(UserEvent::StateUpdate(Box::new(clean_ui_state)));
-
-                // 4. Release the lock before potentially starting a new scan task.
-                drop(state_guard);
-
-                // 5. If a directory is specified, start scanning it. The UI is already clean.
-                if let Some(dir) = dir_to_scan {
-                    if dir.exists() {
-                        start_scan_on_path(dir, proxy, state, false);
-                    }
-                }
-            }
-            Err(e) => {
-                let event = UserEvent::ShowError(format!("Failed to import config: {e}"));
-                proxy.send_event(event);
-            }
+    let Some(path) = dialog.pick_config_to_import() else {
+        return;
+    };
+    let imported = match config::settings::import_config(&path) {
+        Ok(imported) => imported,
+        Err(e) => {
+            proxy.send_event(UserEvent::ShowError(format!(
+                "Failed to import config: {e}"
+            )));
+            return;
         }
+    };
+    // Looked at before the state is locked; this command runs on the blocking lane.
+    let directory_to_open = imported.last_directory.clone().filter(|dir| dir.exists());
+
+    // The reset, the new settings and the start of the scan happen under one lock.
+    let mut state_guard = state.lock();
+    state_guard.reset_directory_state();
+    state_guard.config.adopt_user_settings(imported);
+    state_guard.current_config_filename =
+        path.file_name().and_then(|n| n.to_str()).map(String::from);
+    tasks::save_config_in_background(state_guard.config_snapshot());
+
+    // The UI is wiped clean before the scan (if any) announces itself.
+    send_state(&proxy, &state_guard);
+    if let Some(directory) = directory_to_open {
+        tasks::open_path(&mut state_guard, directory, proxy, state.clone());
     }
 }
 
@@ -784,12 +765,10 @@ pub async fn import_config<P: EventProxy, D: DialogService + ?Sized>(
 pub fn export_config<P: EventProxy, D: DialogService + ?Sized>(
     dialog: &D,
     proxy: P,
-    state: Arc<Mutex<AppState>>,
+    state: SharedState,
 ) {
     if let Some(path) = dialog.export_config_path() {
-        let state_guard = state
-            .lock()
-            .expect("Mutex was poisoned. This should not happen.");
+        let state_guard = state.lock();
         let result = config::settings::export_config(&state_guard.config, &path).is_ok();
         proxy.send_event(UserEvent::ConfigExported(result));
     }
@@ -801,12 +780,13 @@ mod tests {
     use crate::app::file_dialog::DialogService;
     use crate::app::state::AppState;
     use crate::app::view_model::UiState;
+    use crate::config::{ConfigStore, GeometryUnits};
     use crate::core::FileItem;
     use crate::utils::test_helpers::setup_test_logging;
     use serde_json::json;
     use std::fs as std_fs;
     use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use tempfile::{tempdir, TempDir};
     use tokio::sync::mpsc;
 
@@ -870,11 +850,12 @@ mod tests {
     }
 
     struct TestHarness {
-        state: Arc<Mutex<AppState>>,
+        state: SharedState,
         proxy: TestEventProxy,
         event_rx: mpsc::UnboundedReceiver<UserEvent>,
         dialog: Arc<MockDialogService>,
         _temp_dir: TempDir,
+        _config_dir: Option<TempDir>,
         root_path: PathBuf,
     }
 
@@ -891,13 +872,35 @@ mod tests {
             state.current_path = root_path.to_string_lossy().to_string();
 
             Self {
-                state: Arc::new(Mutex::new(state)),
+                state: SharedState::new(state),
                 proxy,
                 event_rx: rx,
                 dialog,
                 _temp_dir: temp_dir,
+                _config_dir: None,
                 root_path,
             }
+        }
+
+        /// A harness whose configuration is kept in a file (in a directory of its own
+        /// next to the project), for tests of what ends up on disk.
+        fn with_config_file() -> (Self, ConfigStore) {
+            let harness = Self::new();
+            let config_dir = tempdir().expect("Failed to create the config dir");
+            let (store, config) = ConfigStore::open(config_dir.path().join("config.json"));
+            {
+                let mut state = harness.state.lock();
+                let mut with_file = AppState::new(config, store.clone());
+                with_file.current_path = state.current_path.clone();
+                *state = with_file;
+            }
+            (
+                Self {
+                    _config_dir: Some(config_dir),
+                    ..harness
+                },
+                store,
+            )
         }
 
         fn create_file(&self, relative_path: &str, content: &str) -> PathBuf {
@@ -916,7 +919,7 @@ mod tests {
         }
 
         fn set_initial_files(&self, paths: &[&str]) {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             let mut items = Vec::new();
             for p_str in paths {
                 let path = self.root_path.join(p_str);
@@ -1002,6 +1005,27 @@ mod tests {
     /// reached by a failing test, so it does not slow the suite down.
     const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+    /// Waits until the configuration file of `store` satisfies `predicate` and returns
+    /// its content. Commands save in the background, so the file follows the state
+    /// with a delay.
+    async fn config_on_disk(
+        store: &ConfigStore,
+        predicate: impl Fn(&AppConfig) -> bool,
+    ) -> AppConfig {
+        let path = store.path().expect("the store is bound to a file");
+        tokio::time::timeout(EVENT_TIMEOUT, async {
+            loop {
+                let saved = config::settings::load_config(path).unwrap();
+                if predicate(&saved) {
+                    return saved;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("the expected configuration was not saved")
+    }
+
     /// How long a test listens for events that must not be sent.
     const QUIET_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -1059,7 +1083,7 @@ mod tests {
         let mut harness = TestHarness::new();
         harness.dialog.set_pick_folder(None);
         let token = {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             let token = state.begin_scan();
             state.attach_scan_task(&token, tokio::spawn(std::future::pending()));
             token
@@ -1073,7 +1097,7 @@ mod tests {
 
         let ui_state = harness.last_state_update().unwrap();
         assert!(ui_state.is_scanning, "UI must still show the running scan");
-        let mut state = harness.state.lock().unwrap();
+        let mut state = harness.state.lock();
         assert!(state.is_scanning());
         assert!(state.is_current_scan(&token));
         assert!(state.has_scan_task(), "Scan must stay cancellable");
@@ -1095,14 +1119,14 @@ mod tests {
         generate_preview(harness.proxy.clone(), harness.state.clone());
 
         {
-            let state = harness.state.lock().unwrap();
+            let state = harness.state.lock();
             assert!(state.is_generating());
             assert!(state.has_generation_task());
         }
         cancel_generation(harness.proxy.clone(), harness.state.clone());
         let ui_state = harness.last_state_update().unwrap();
         assert!(!ui_state.is_generating);
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(!state.is_generating());
         assert!(!state.has_generation_task());
     }
@@ -1111,7 +1135,7 @@ mod tests {
     async fn test_rescan_directory_on_empty_path_does_nothing() {
         let mut harness = TestHarness::new();
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.current_path = String::new();
         }
 
@@ -1133,7 +1157,7 @@ mod tests {
 
         harness.set_initial_files(&["src", "src/main.rs", "src/empty_dir"]);
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.is_fully_scanned = true;
             state.loaded_dirs.insert(harness.root_path.join("src"));
             state
@@ -1187,40 +1211,167 @@ mod tests {
         assert!(!final_state.is_scanning, "No scan must have been started");
         assert_eq!(final_state.visible_files_count, 2);
         assert!(!final_state.tree.iter().any(|n| n.name == "docs"));
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(!state.is_scanning() && !state.is_fully_scanned);
         assert!(state.config.ignore_patterns.contains("docs/"));
     }
 
-    #[tokio::test]
-    async fn test_import_config_resets_and_starts_scan() {
-        let mut harness = TestHarness::new();
-        harness.create_file("initial.txt", "");
-        let new_config_path = harness.root_path.join("new_config.json");
-        let project_to_scan = harness.create_dir("new_project_dir");
-        harness.create_file("new_project_dir/file.rs", "");
-
-        let new_config = AppConfig {
-            last_directory: Some(project_to_scan.clone()),
+    /// A configuration as somebody else exported it: other settings, and the geometry
+    /// and last directory of *their* installation.
+    fn foreign_config(last_directory: Option<PathBuf>) -> AppConfig {
+        AppConfig {
+            ignore_patterns: HashSet::from(["*.log".to_string()]),
+            case_sensitive_search: true,
+            output_filename: "imported.txt".to_string(),
+            max_file_size_mb: 3,
+            window_size: (4000.0, 3000.0),
+            window_position: (-900.0, -900.0),
+            geometry_units: GeometryUnits::Physical,
+            last_directory,
             ..Default::default()
-        };
-        std_fs::write(
-            &new_config_path,
-            serde_json::to_string(&new_config).unwrap(),
-        )
-        .unwrap();
-        harness.dialog.set_pick_file(Some(new_config_path));
+        }
+    }
 
+    fn import_file(harness: &TestHarness, imported: &AppConfig) {
+        let path = harness.root_path.join("imported_config.json");
+        std_fs::write(&path, serde_json::to_string(imported).unwrap()).unwrap();
+        harness.dialog.set_pick_file(Some(path));
         import_config(
             harness.dialog.as_ref(),
             harness.proxy.clone(),
             harness.state.clone(),
-        )
-        .await;
+        );
+    }
 
-        let _ = harness.get_next_event().await.unwrap();
+    const KEPT_GEOMETRY: ((f64, f64), (f64, f64)) = ((1000.0, 700.0), (7.0, 8.0));
+
+    /// Gives the state a geometry of its own, to tell it from the imported one.
+    fn set_kept_geometry(harness: &TestHarness) {
+        let mut state = harness.state.lock();
+        state.config.window_size = KEPT_GEOMETRY.0;
+        state.config.window_position = KEPT_GEOMETRY.1;
+        state.config.geometry_units = GeometryUnits::Logical;
+    }
+
+    #[track_caller]
+    fn assert_geometry_is_kept(config: &AppConfig) {
+        assert_eq!((config.window_size, config.window_position), KEPT_GEOMETRY);
+        assert_eq!(config.geometry_units, GeometryUnits::Logical);
+    }
+
+    /// The import is a hard reset: selection and filters of the loaded directory are
+    /// gone, and the directory the imported file names is opened, listed according to
+    /// the imported settings, and recorded as the last directory.
+    #[tokio::test]
+    async fn test_import_config_resets_and_opens_the_imported_last_directory() {
+        let (mut harness, store) = TestHarness::with_config_file();
+        let kept = harness.create_file("kept.txt", "");
+        harness.set_initial_files(&["kept.txt"]);
+        {
+            let mut state = harness.state.lock();
+            state.selected_files.insert(kept.clone());
+            state.search_query = "kept".to_string();
+        }
+        set_kept_geometry(&harness);
+        let project_to_open = harness.create_dir("new_project_dir");
+        harness.create_file("new_project_dir/file.rs", "");
+        harness.create_file("new_project_dir/debug.log", "");
+        let imported = foreign_config(Some(project_to_open.clone()));
+
+        import_file(&harness, &imported);
+
+        // First the clean slate, then the scan.
+        match harness.get_next_event().await.unwrap() {
+            UserEvent::StateUpdate(clean) => {
+                assert!(!clean.is_scanning);
+                assert_eq!(clean.current_path, "");
+                assert_eq!(clean.selected_files_count, 0);
+                assert!(clean.tree.is_empty());
+                assert!(clean.config.case_sensitive_search);
+                assert_eq!(
+                    clean.current_config_filename.as_deref(),
+                    Some("imported_config.json")
+                );
+            }
+            other => panic!("Expected the clean state first, got {other:?}"),
+        }
         let final_state = harness.wait_for_scan_completion().await.unwrap();
-        assert_eq!(final_state.current_path, project_to_scan.to_string_lossy());
+        assert_eq!(final_state.current_path, project_to_open.to_string_lossy());
+        assert!(final_state.is_fully_scanned);
+
+        let expected = AppConfig {
+            window_size: KEPT_GEOMETRY.0,
+            window_position: KEPT_GEOMETRY.1,
+            geometry_units: GeometryUnits::Logical,
+            ..imported
+        };
+        {
+            let state = harness.state.lock();
+            assert!(state.selected_files.is_empty() && state.search_query.is_empty());
+            let listed: Vec<_> = state
+                .full_file_list
+                .iter()
+                .filter_map(|item| item.path.file_name()?.to_str())
+                .collect();
+            assert_eq!(
+                listed,
+                ["file.rs"],
+                "the imported ignore pattern applies to the opened directory"
+            );
+            assert_eq!(state.config, expected);
+            assert_geometry_is_kept(&state.config);
+        }
+        let saved = config_on_disk(&store, |saved| {
+            saved.last_directory.as_ref() == Some(&project_to_open)
+        })
+        .await;
+        assert_eq!(saved, expected);
+    }
+
+    /// The imported file names no directory: the state is clean and nothing is
+    /// scanned, whatever was loaded before. The geometry of the file is ignored.
+    #[tokio::test]
+    async fn test_import_config_without_a_last_directory_leaves_a_clean_state() {
+        let (mut harness, store) = TestHarness::with_config_file();
+        harness.create_file("kept.txt", "");
+        harness.set_initial_files(&["kept.txt"]);
+        set_kept_geometry(&harness);
+        let last_directory = Some(harness.root_path.clone());
+        harness.state.lock().config.last_directory = last_directory.clone();
+        let imported = foreign_config(None);
+
+        import_file(&harness, &imported);
+
+        match harness.get_next_event().await {
+            Some(UserEvent::StateUpdate(clean)) => {
+                assert!(!clean.is_scanning);
+                assert_eq!(clean.current_path, "");
+                assert!(clean.tree.is_empty());
+            }
+            other => panic!("Expected the clean state, got {other:?}"),
+        }
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No scan should start without a directory")
+            .await;
+
+        let expected = AppConfig {
+            window_size: KEPT_GEOMETRY.0,
+            window_position: KEPT_GEOMETRY.1,
+            geometry_units: GeometryUnits::Logical,
+            last_directory,
+            ..imported
+        };
+        {
+            let state = harness.state.lock();
+            assert_eq!(state.current_path, "");
+            assert!(state.full_file_list.is_empty() && !state.is_scanning());
+            assert_eq!(state.config, expected);
+            assert_geometry_is_kept(&state.config);
+        }
+        assert_eq!(
+            config_on_disk(&store, |saved| saved.output_filename == "imported.txt").await,
+            expected
+        );
     }
 
     /// Without a directory there is nothing to filter or scan, but the change is
@@ -1228,7 +1379,7 @@ mod tests {
     #[tokio::test]
     async fn test_config_change_without_a_directory_is_stored_and_answered() {
         let mut harness = TestHarness::new();
-        harness.state.lock().unwrap().current_path = String::new();
+        harness.state.lock().current_path = String::new();
 
         set_option(&harness, ConfigOption::RemoveEmptyDirectories(true)).await;
         let ui_state = harness.last_state_update().expect("the change is answered");
@@ -1248,7 +1399,7 @@ mod tests {
             !ui_state.patterns_need_rescan,
             "Nothing is loaded that a re-scan could refresh"
         );
-        assert!(!harness.state.lock().unwrap().is_scanning());
+        assert!(!harness.state.lock().is_scanning());
     }
 
     #[tokio::test]
@@ -1256,7 +1407,7 @@ mod tests {
         let mut harness = TestHarness::new();
         let initial_patterns_count;
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.current_path = String::new();
             initial_patterns_count = state.config.ignore_patterns.len();
         }
@@ -1265,7 +1416,7 @@ mod tests {
         add_ignore_path(payload, harness.proxy.clone(), harness.state.clone()).await;
 
         {
-            let final_patterns_count = harness.state.lock().unwrap().config.ignore_patterns.len();
+            let final_patterns_count = harness.state.lock().config.ignore_patterns.len();
             assert_eq!(
                 initial_patterns_count, final_patterns_count,
                 "Ignore patterns should not change"
@@ -1290,8 +1441,7 @@ mod tests {
             harness.dialog.as_ref(),
             harness.proxy.clone(),
             harness.state.clone(),
-        )
-        .await;
+        );
 
         match harness.get_next_event().await.unwrap() {
             UserEvent::ShowError(msg) => {
@@ -1310,7 +1460,7 @@ mod tests {
     #[tokio::test]
     async fn test_config_commands_reject_malformed_payloads() {
         let mut harness = TestHarness::new();
-        let initial_config = harness.state.lock().unwrap().config.clone();
+        let initial_config = harness.state.lock().config.clone();
         let whole_config = serde_json::to_value(AppConfig {
             output_filename: "smuggled.txt".to_string(),
             ..initial_config.clone()
@@ -1347,7 +1497,7 @@ mod tests {
         // A blank text is not a pattern.
         add_pattern(&harness, "   ").await;
 
-        assert_eq!(harness.state.lock().unwrap().config, initial_config);
+        assert_eq!(harness.state.lock().config, initial_config);
         harness
             .expect_no_event_within(QUIET_PERIOD, "No event expected")
             .await;
@@ -1374,7 +1524,7 @@ mod tests {
         harness.set_initial_files(&["file1.txt"]);
         harness.create_file("file1.txt", "hello world");
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.content_search_query = "initial".to_string();
         }
 
@@ -1396,7 +1546,7 @@ mod tests {
     async fn test_add_ignore_path_handles_path_outside_root() {
         let mut harness = TestHarness::new();
         harness.set_initial_files(&["src/main.rs"]);
-        let initial_patterns_count = harness.state.lock().unwrap().config.ignore_patterns.len();
+        let initial_patterns_count = harness.state.lock().config.ignore_patterns.len();
         let outside_path = json!("/etc/hosts");
 
         add_ignore_path(outside_path, harness.proxy.clone(), harness.state.clone()).await;
@@ -1404,7 +1554,7 @@ mod tests {
         harness
             .expect_no_event_within(QUIET_PERIOD, "No event expected")
             .await;
-        let final_patterns_count = harness.state.lock().unwrap().config.ignore_patterns.len();
+        let final_patterns_count = harness.state.lock().config.ignore_patterns.len();
         assert_eq!(initial_patterns_count, final_patterns_count);
     }
 
@@ -1426,7 +1576,7 @@ mod tests {
         assert!(harness.last_state_update().is_some());
 
         let _ = harness.last_state_update();
-        let patterns_before = harness.state.lock().unwrap().config.ignore_patterns.clone();
+        let patterns_before = harness.state.lock().config.ignore_patterns.clone();
 
         add_ignore_path(payload, harness.proxy.clone(), harness.state.clone()).await;
 
@@ -1436,44 +1586,42 @@ mod tests {
             .expect("the command is answered");
         assert!(!ui_state.is_scanning);
         assert!(!ui_state.patterns_need_rescan);
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(!state.is_scanning());
         assert_eq!(state.config.ignore_patterns, patterns_before);
     }
 
+    /// The imported file names a directory that does not exist: as without one, the
+    /// state is clean, nothing is scanned and no error is shown.
     #[tokio::test]
-    async fn test_import_config_handles_nonexistent_scan_directory() {
+    async fn test_import_config_with_a_nonexistent_last_directory_leaves_a_clean_state() {
         let mut harness = TestHarness::new();
-        let new_config_path = harness.root_path.join("new_config.json");
-        let nonexistent_project_dir = harness.root_path.join("nonexistent_dir");
+        harness.create_file("kept.txt", "");
+        harness.set_initial_files(&["kept.txt"]);
+        set_kept_geometry(&harness);
+        let nonexistent = harness.root_path.join("nonexistent_dir");
 
-        let new_config = AppConfig {
-            last_directory: Some(nonexistent_project_dir),
-            ..Default::default()
-        };
-        std_fs::write(
-            &new_config_path,
-            serde_json::to_string(&new_config).unwrap(),
-        )
-        .unwrap();
-        harness.dialog.set_pick_file(Some(new_config_path));
+        import_file(&harness, &foreign_config(Some(nonexistent)));
 
-        import_config(
-            harness.dialog.as_ref(),
-            harness.proxy.clone(),
-            harness.state.clone(),
-        )
-        .await;
-
-        let event = harness.get_next_event().await;
-        assert!(matches!(event, Some(UserEvent::StateUpdate(_))));
-
+        match harness.get_next_event().await {
+            Some(UserEvent::StateUpdate(clean)) => {
+                assert!(!clean.is_scanning);
+                assert_eq!(clean.current_path, "");
+                assert!(clean.tree.is_empty());
+                assert!(clean.config.case_sensitive_search);
+            }
+            other => panic!("Expected the clean state, got {other:?}"),
+        }
         harness
             .expect_no_event_within(
                 QUIET_PERIOD,
                 "No scan should start for a nonexistent directory",
             )
             .await;
+        let state = harness.state.lock();
+        assert_eq!(state.current_path, "");
+        assert!(!state.is_scanning());
+        assert_geometry_is_kept(&state.config);
     }
 
     // =========================================================================================
@@ -1486,7 +1634,7 @@ mod tests {
         let file_path = harness.create_file("file.txt", "content");
         harness.set_initial_files(&["file.txt"]);
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.selected_files.insert(file_path);
             state.config.last_directory = Some(harness.root_path.clone());
         }
@@ -1496,7 +1644,7 @@ mod tests {
         let ui_state = harness.last_state_update().unwrap();
         assert!(ui_state.current_path.is_empty());
         assert_eq!(ui_state.visible_files_count, 0);
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(state.current_path.is_empty());
         assert!(state.full_file_list.is_empty());
         assert!(state.selected_files.is_empty());
@@ -1507,7 +1655,7 @@ mod tests {
     async fn test_cancel_scan_updates_state() {
         let mut harness = TestHarness::new();
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             let token = state.begin_scan();
             let handle = tokio::spawn(async {});
             state.attach_scan_task(&token, handle);
@@ -1534,7 +1682,7 @@ mod tests {
         let file_path = harness.create_file("preview.txt", "content with magic_word");
         let search_term = "magic_word";
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.content_search_query = search_term.to_string();
         }
         let payload = json!(file_path);
@@ -1546,7 +1694,7 @@ mod tests {
             panic!("Expected the synchronous state update");
         };
         assert_eq!(
-            harness.state.lock().unwrap().previewed_file_path,
+            harness.state.lock().previewed_file_path,
             Some(file_path.clone())
         );
         // ... and the content follows once the file has been read in the background.
@@ -1583,7 +1731,7 @@ mod tests {
         harness
             .expect_no_event_within(QUIET_PERIOD, "A closed preview must not show content")
             .await;
-        assert_eq!(harness.state.lock().unwrap().previewed_file_path, None);
+        assert_eq!(harness.state.lock().previewed_file_path, None);
     }
 
     #[tokio::test]
@@ -1597,7 +1745,6 @@ mod tests {
         harness
             .state
             .lock()
-            .unwrap()
             .expanded_dirs
             .insert(harness.root_path.join("src"));
 
@@ -1619,12 +1766,7 @@ mod tests {
             .expect("The command must answer synchronously");
         let components_node = components_of(&announced);
         assert!(components_node.is_expanded && !components_node.children_loaded);
-        assert!(harness
-            .state
-            .lock()
-            .unwrap()
-            .expanded_dirs
-            .contains(&sub_dir));
+        assert!(harness.state.lock().expanded_dirs.contains(&sub_dir));
 
         // The lazy load runs in the background and reports its result when it is done.
         let final_state = harness.get_next_event().await;
@@ -1650,7 +1792,7 @@ mod tests {
 
         load_directory_level(json!(src), harness.proxy.clone(), harness.state.clone());
         // On the single-threaded test runtime the load has not run yet.
-        assert!(harness.state.lock().unwrap().expanded_dirs.contains(&src));
+        assert!(harness.state.lock().expanded_dirs.contains(&src));
         set_expansion(
             json!({ "path": src, "expanded": false }),
             harness.proxy.clone(),
@@ -1665,7 +1807,7 @@ mod tests {
         let src_node = loaded.tree.iter().find(|n| n.name == "src").unwrap();
         assert!(src_node.has_children);
         assert!(!src_node.is_expanded, "Directory must stay collapsed");
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(state.loaded_dirs.contains(&src));
         assert!(!state.expanded_dirs.contains(&src));
     }
@@ -1726,14 +1868,14 @@ mod tests {
             let ui_state = harness.last_state_update().unwrap();
             assert!(ui_state.tree[0].is_expanded);
         }
-        assert_eq!(harness.state.lock().unwrap().expanded_dirs.len(), 1);
+        assert_eq!(harness.state.lock().expanded_dirs.len(), 1);
 
         for _ in 0..2 {
             set_expansion(set(false), harness.proxy.clone(), harness.state.clone());
             let ui_state = harness.last_state_update().unwrap();
             assert!(!ui_state.tree[0].is_expanded);
         }
-        assert!(harness.state.lock().unwrap().expanded_dirs.is_empty());
+        assert!(harness.state.lock().expanded_dirs.is_empty());
     }
 
     #[tokio::test]
@@ -1742,12 +1884,7 @@ mod tests {
         let src = harness.create_dir("src");
         let docs = harness.create_dir("docs");
         harness.set_initial_files(&["docs", "src"]);
-        harness
-            .state
-            .lock()
-            .unwrap()
-            .expanded_dirs
-            .insert(docs.clone());
+        harness.state.lock().expanded_dirs.insert(docs.clone());
 
         set_expansion(
             json!({ "path": src, "expanded": true }),
@@ -1761,7 +1898,7 @@ mod tests {
         );
         let _ = harness.last_state_update().unwrap();
 
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert_eq!(state.expanded_dirs.len(), 1);
         assert!(state.expanded_dirs.contains(&docs));
     }
@@ -1786,7 +1923,7 @@ mod tests {
         harness
             .expect_no_event_within(QUIET_PERIOD, "No event expected")
             .await;
-        assert!(harness.state.lock().unwrap().expanded_dirs.is_empty());
+        assert!(harness.state.lock().expanded_dirs.is_empty());
     }
 
     #[tokio::test]
@@ -1856,13 +1993,13 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_generation_without_running_generation_keeps_status() {
         let mut harness = TestHarness::new();
-        let status_before = harness.state.lock().unwrap().status.clone();
+        let status_before = harness.state.lock().status.clone();
 
         cancel_generation(harness.proxy.clone(), harness.state.clone());
 
         let ui_state = harness.last_state_update().unwrap();
         assert!(!ui_state.is_generating);
-        assert_eq!(harness.state.lock().unwrap().status, status_before);
+        assert_eq!(harness.state.lock().status, status_before);
     }
 
     #[tokio::test]
@@ -1870,11 +2007,11 @@ mod tests {
         let harness = TestHarness::new();
         let file_path = harness.create_file("file.txt", "content");
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.previewed_file_path = Some(file_path);
         }
         clear_preview_state(harness.proxy.clone(), harness.state.clone());
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(state.previewed_file_path.is_none());
     }
 
@@ -1916,8 +2053,101 @@ mod tests {
             harness.state.clone(),
         );
 
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert_eq!(state.config.output_directory, Some(new_dir));
+    }
+
+    // --- Every change of the configuration is persisted, through the ordered path ---
+
+    #[tokio::test]
+    async fn test_pick_output_directory_persists_the_choice() {
+        let (mut harness, store) = TestHarness::with_config_file();
+        let new_dir = harness.create_dir("output");
+        harness.dialog.set_pick_folder(Some(new_dir.clone()));
+
+        pick_output_directory(
+            harness.dialog.as_ref(),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+
+        let saved = config_on_disk(&store, |saved| {
+            saved.output_directory.as_ref() == Some(&new_dir)
+        })
+        .await;
+        assert_eq!(saved, harness.state.lock().config);
+        let answered = harness.last_state_update().expect("the choice is answered");
+        assert_eq!(answered.config.output_directory, Some(new_dir));
+    }
+
+    #[tokio::test]
+    async fn test_config_commands_persist_their_change() {
+        let (harness, store) = TestHarness::with_config_file();
+
+        set_option(&harness, ConfigOption::CaseSensitiveSearch(true)).await;
+        add_pattern(&harness, "generated/").await;
+        set_option(&harness, ConfigOption::OutputFilename("named.txt".into())).await;
+
+        let saved = config_on_disk(&store, |saved| saved.output_filename == "named.txt").await;
+        assert_eq!(saved, harness.state.lock().config);
+        assert!(saved.case_sensitive_search);
+        assert!(saved.ignore_patterns.contains("generated/"));
+    }
+
+    /// Many changes in a row, each saved in the background by a task of its own: the
+    /// saves get to run in any order, and what ends up on disk is still the last one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_rapid_config_changes_end_with_the_last_one_on_disk() {
+        for round in 0..10 {
+            let (harness, store) = TestHarness::with_config_file();
+            let last = 40;
+
+            for i in 0..=last {
+                let name = format!("round-{round}-change-{i}.txt");
+                set_option(&harness, ConfigOption::OutputFilename(name)).await;
+            }
+            // Wait for every background save, then look at what is there.
+            let expected = format!("round-{round}-change-{last}.txt");
+            let saved = config_on_disk(&store, |saved| saved.output_filename == expected).await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+            assert_eq!(saved, harness.state.lock().config);
+            let path = store.path().unwrap();
+            assert_eq!(
+                config::settings::load_config(path).unwrap().output_filename,
+                expected,
+                "round {round}: an older save must not have overwritten the last one"
+            );
+        }
+    }
+
+    /// The timestamped default name a generation assigns is a change like any other.
+    #[tokio::test]
+    async fn test_generate_preview_persists_the_filename_it_assigns() {
+        let (harness, store) = TestHarness::with_config_file();
+        harness.state.lock().config.output_filename = "cfc_output_19990101_000000.txt".into();
+
+        generate_preview(harness.proxy.clone(), harness.state.clone());
+
+        let assigned = harness.state.lock().config.output_filename.clone();
+        assert_ne!(assigned, "cfc_output_19990101_000000.txt");
+        let saved = config_on_disk(&store, |saved| saved.output_filename == assigned).await;
+        assert_eq!(saved.output_filename, assigned);
+    }
+
+    #[tokio::test]
+    async fn test_clear_directory_persists_the_forgotten_last_directory() {
+        let (harness, store) = TestHarness::with_config_file();
+        {
+            let mut state = harness.state.lock();
+            state.config.last_directory = Some(harness.root_path.clone());
+            state.config_snapshot().save().unwrap();
+        }
+
+        clear_directory(harness.proxy.clone(), harness.state.clone());
+
+        let saved = config_on_disk(&store, |saved| saved.last_directory.is_none()).await;
+        assert_eq!(saved, harness.state.lock().config);
     }
 
     #[tokio::test]
@@ -2039,7 +2269,7 @@ mod tests {
 
         // 1. Set a custom filename in the state.
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.config.output_filename = custom_filename.clone();
         }
 
@@ -2047,7 +2277,7 @@ mod tests {
         generate_preview(harness.proxy.clone(), harness.state.clone());
 
         // 3. Verify the filename in the state has NOT been changed.
-        let final_filename = harness.state.lock().unwrap().config.output_filename.clone();
+        let final_filename = harness.state.lock().config.output_filename.clone();
         assert_eq!(final_filename, custom_filename);
 
         // Consume events to avoid panics on drop
@@ -2143,13 +2373,13 @@ mod tests {
     async fn test_pick_output_directory_does_nothing_on_cancel() {
         let mut harness = TestHarness::new();
         harness.dialog.set_pick_folder(None);
-        let initial_config = harness.state.lock().unwrap().config.clone();
+        let initial_config = harness.state.lock().config.clone();
         pick_output_directory(
             harness.dialog.as_ref(),
             harness.proxy.clone(),
             harness.state.clone(),
         );
-        let final_config = harness.state.lock().unwrap().config.clone();
+        let final_config = harness.state.lock().config.clone();
         harness
             .expect_no_event_within(QUIET_PERIOD, "No event expected")
             .await;
@@ -2167,8 +2397,7 @@ mod tests {
             harness.dialog.as_ref(),
             harness.proxy.clone(),
             harness.state.clone(),
-        )
-        .await;
+        );
         harness
             .expect_no_event_within(QUIET_PERIOD, "No event expected")
             .await;
@@ -2227,7 +2456,7 @@ mod tests {
         let mut harness = TestHarness::new();
         harness.set_initial_files(&["src"]);
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.config.ignore_patterns = HashSet::from(["keep".to_string()]);
             state.config.window_size = (640.0, 480.0);
             state.config.last_directory = Some(PathBuf::from("/somewhere"));
@@ -2252,7 +2481,7 @@ mod tests {
             !ui_state.patterns_need_rescan,
             "Adding patterns must never look like a removal"
         );
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(state.config.case_sensitive_search);
         assert!(!state.config.use_relative_paths);
         // What the UI never edits cannot be touched by its commands.
@@ -2275,7 +2504,7 @@ mod tests {
         assert!(ui_state.patterns_need_rescan);
 
         // Nothing left to remove: answered, but no further recommendation is derived.
-        harness.state.lock().unwrap().patterns_need_rescan = false;
+        harness.state.lock().patterns_need_rescan = false;
         clear_ignore_patterns(harness.proxy.clone(), harness.state.clone()).await;
         let ui_state = harness.last_state_update().unwrap();
         assert!(!ui_state.patterns_need_rescan);
@@ -2286,7 +2515,7 @@ mod tests {
     async fn test_pattern_commands_are_idempotent() {
         let mut harness = TestHarness::new();
         harness.set_initial_files(&["src"]);
-        let before = harness.state.lock().unwrap().config.clone();
+        let before = harness.state.lock().config.clone();
         let existing = before.ignore_patterns.iter().next().unwrap().clone();
 
         remove_pattern(&harness, "never-added").await;
@@ -2296,7 +2525,7 @@ mod tests {
             .last_state_update()
             .expect("the commands are answered");
         assert!(!ui_state.patterns_need_rescan);
-        assert_eq!(harness.state.lock().unwrap().config, before);
+        assert_eq!(harness.state.lock().config, before);
     }
 
     #[tokio::test]
@@ -2327,7 +2556,7 @@ mod tests {
 
         // 1. Select one file to create a "partial" state
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.selected_files.insert(file1);
         }
 
@@ -2353,13 +2582,13 @@ mod tests {
         let old_default_filename = "cfc_output_20000101_120000.txt".to_string();
 
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.config.output_filename = old_default_filename.clone();
         }
 
         generate_preview(harness.proxy.clone(), harness.state.clone());
 
-        let final_filename = harness.state.lock().unwrap().config.output_filename.clone();
+        let final_filename = harness.state.lock().config.output_filename.clone();
 
         assert_ne!(
             final_filename, old_default_filename,
@@ -2373,9 +2602,11 @@ mod tests {
         let _ = harness.get_next_event().await;
     }
 
+    /// A file that names only some settings is completed with the defaults.
     #[tokio::test]
-    async fn test_import_config_with_no_last_directory() {
+    async fn test_import_config_with_a_partial_file() {
         let mut harness = TestHarness::new();
+        harness.state.lock().current_path = String::new();
         let new_config_path =
             harness.create_file("config_no_dir.json", r#"{ "ignore_patterns": [] }"#);
         harness.dialog.set_pick_file(Some(new_config_path));
@@ -2383,8 +2614,7 @@ mod tests {
             harness.dialog.as_ref(),
             harness.proxy.clone(),
             harness.state.clone(),
-        )
-        .await;
+        );
 
         // A StateUpdate event is sent immediately after reset.
         assert!(
@@ -2396,11 +2626,9 @@ mod tests {
         );
         // No *second* event should follow, as no scan is started.
         harness
-            .expect_no_event_within(
-                QUIET_PERIOD,
-                "No scan should start when last_directory is null",
-            )
+            .expect_no_event_within(QUIET_PERIOD, "No scan should start without a directory")
             .await;
+        assert!(harness.state.lock().config.ignore_patterns.is_empty());
     }
 
     #[tokio::test]
@@ -2428,13 +2656,13 @@ mod tests {
 
         // Ensure a clean state for the test run.
         {
-            harness.state.lock().unwrap().config.ignore_patterns.clear();
+            harness.state.lock().config.ignore_patterns.clear();
         }
 
         // The `current_path` is the root for the ignore matcher. All file paths
         // in the state MUST be children of this root path.
         let root = "/test/project";
-        harness.state.lock().unwrap().current_path = root.to_string();
+        harness.state.lock().current_path = root.to_string();
 
         // Create abstract files on the "filesystem".
         harness.create_file("src/main.rs", "fn main() {}");
@@ -2486,7 +2714,7 @@ mod tests {
 
         // Set initial patterns
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.config.ignore_patterns.insert("*.log".to_string());
             state
                 .config
@@ -2511,7 +2739,7 @@ mod tests {
         harness.create_file("test.txt", "content");
 
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.patterns_need_rescan = true;
             // Ensure we have a valid current_path for the rescan
             // (TestHarness::new() already sets this)
@@ -2556,7 +2784,7 @@ mod tests {
                 },
             ];
             s.set_filtered_file_list(s.full_file_list.clone());
-            Arc::new(Mutex::new(s))
+            SharedState::new(s)
         };
 
         // --- ACT ---
@@ -2574,7 +2802,7 @@ mod tests {
         assert_eq!(ui_state.visible_files_count, 1);
         assert!(!ui_state.patterns_need_rescan);
 
-        let final_state = state.lock().unwrap();
+        let final_state = state.lock();
         assert_eq!(final_state.full_file_list.len(), 1);
         assert!(final_state.config.ignore_patterns.contains("*.log"));
     }
@@ -2618,7 +2846,7 @@ mod tests {
         harness.create_file("README.md", "Project Readme");
 
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state
                 .config
                 .ignore_patterns
@@ -2690,7 +2918,7 @@ mod tests {
 
     /// Registers a scan whose task never finishes, as if a long scan were running.
     fn begin_parked_scan(harness: &TestHarness) -> crate::app::state::ScanToken {
-        let mut state = harness.state.lock().unwrap();
+        let mut state = harness.state.lock();
         let token = state.begin_scan();
         state.attach_scan_task(&token, tokio::spawn(std::future::pending()));
         token
@@ -2726,7 +2954,7 @@ mod tests {
         // The old scan is out of the game, a new one has taken over, and the ignored
         // directory has disappeared at once.
         {
-            let state = harness.state.lock().unwrap();
+            let state = harness.state.lock();
             assert!(old_scan.is_cancelled());
             assert!(!state.is_current_scan(&old_scan));
             assert!(state.is_scanning(), "A new scan must be running");
@@ -2739,7 +2967,7 @@ mod tests {
             .await;
         assert!(!final_state.tree.iter().any(|node| node.name == "docs"));
         assert!(!final_state.patterns_need_rescan);
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert_eq!(
             file_names(&state),
             HashSet::from(["src".to_string(), "main.rs".to_string()]),
@@ -2759,7 +2987,6 @@ mod tests {
         harness
             .state
             .lock()
-            .unwrap()
             .config
             .ignore_patterns
             .insert("docs/".to_string());
@@ -2773,7 +3000,7 @@ mod tests {
             .await;
         assert!(final_state.tree.iter().any(|node| node.name == "docs"));
         assert!(!final_state.patterns_need_rescan);
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(file_names(&state).contains("guide.md"));
     }
 
@@ -2793,7 +3020,7 @@ mod tests {
 
         let ui_state = harness.last_state_update().unwrap();
         assert!(ui_state.is_scanning);
-        let mut state = harness.state.lock().unwrap();
+        let mut state = harness.state.lock();
         assert!(state.is_current_scan(&scan));
         assert!(!scan.is_cancelled());
         state.cancel_current_scan(); // Stop the parked task.
@@ -2809,7 +3036,7 @@ mod tests {
         harness.set_initial_files(&["lower.txt", "upper.txt"]);
         {
             // The state a case-insensitive search for "needle" has left behind.
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.config.case_sensitive_search = false;
             state.content_search_query = "needle".to_string();
             state.content_search_results = HashSet::from([lower.clone(), upper.clone()]);
@@ -2820,7 +3047,7 @@ mod tests {
         let ui_state = harness.last_state_update().unwrap();
         assert_eq!(ui_state.visible_files_count, 1);
         assert_eq!(
-            harness.state.lock().unwrap().content_search_results,
+            harness.state.lock().content_search_results,
             HashSet::from([lower.clone()])
         );
 
@@ -2830,7 +3057,7 @@ mod tests {
         let ui_state = harness.last_state_update().unwrap();
         assert_eq!(ui_state.visible_files_count, 2);
         assert_eq!(
-            harness.state.lock().unwrap().content_search_results,
+            harness.state.lock().content_search_results,
             HashSet::from([lower, upper])
         );
     }
@@ -2842,7 +3069,7 @@ mod tests {
         let mut harness = TestHarness::new();
         harness.create_file("Main.rs", "");
         harness.set_initial_files(&["Main.rs"]);
-        harness.state.lock().unwrap().search_query = "main".to_string();
+        harness.state.lock().search_query = "main".to_string();
 
         set_option(&harness, ConfigOption::CaseSensitiveSearch(true)).await;
 
@@ -2864,7 +3091,7 @@ mod tests {
         let file = harness.create_file("file.txt", "some content");
         harness.set_initial_files(&["file.txt"]);
         {
-            let mut state = harness.state.lock().unwrap();
+            let mut state = harness.state.lock();
             state.selected_files.insert(file);
             state.config.max_file_size_mb = 0;
         }

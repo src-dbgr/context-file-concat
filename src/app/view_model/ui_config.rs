@@ -62,6 +62,7 @@ mod tests {
             remove_empty_directories: true,
             window_size: (1234.0, 567.0),
             window_position: (89.0, 10.0),
+            geometry_units: crate::config::GeometryUnits::Logical,
             max_file_size_mb: 42,
         }
     }

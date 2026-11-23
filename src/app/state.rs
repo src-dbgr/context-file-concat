@@ -1,12 +1,12 @@
 //! Defines the central, mutable state of the application.
 
 use crate::app::tree_index::{TreeIndex, TreeIndexCache};
-use crate::config::AppConfig;
-use crate::core::{FileItem, ScanProgress};
+use crate::config::{AppConfig, ConfigSnapshot, ConfigStore};
+use crate::core::{FileItem, FileNameMatcher, ScanProgress};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 /// Proof of identity of one background run, plus the means to tell it to stop.
@@ -180,48 +180,6 @@ impl ContentSearchToken {
 #[derive(Debug, Clone)]
 pub struct PreviewToken(RunTicket);
 
-/// The configuration as it was at one moment, to be written to disk outside the state
-/// lock (see [`AppState::config_snapshot`]).
-///
-/// Snapshots are numbered in the order they were taken. [`ConfigSnapshot::save`] skips
-/// a snapshot once a newer one has been written, so concurrent saves cannot leave an
-/// outdated configuration on disk, in whatever order they get to run.
-#[derive(Debug)]
-pub struct ConfigSnapshot {
-    config: AppConfig,
-    revision: u64,
-    /// The revision of the newest snapshot written so far; shared by all snapshots of
-    /// one `AppState`. Holding it serializes the writes.
-    last_written: Arc<Mutex<u64>>,
-}
-
-impl ConfigSnapshot {
-    /// Writes the snapshot to the configuration file, unless a newer snapshot has been
-    /// written already. Blocks on file IO: not to be called on the ordered command lane
-    /// or while holding the state lock.
-    pub fn save(self) -> anyhow::Result<()> {
-        self.write_with(|config| crate::config::settings::save_config(config, None))
-    }
-
-    /// [`ConfigSnapshot::save`] with the function that writes the file as a parameter.
-    fn write_with(
-        self,
-        write: impl FnOnce(&AppConfig) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        let mut last_written = self
-            .last_written
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.revision <= *last_written {
-            tracing::debug!("Skipping the save of a superseded config snapshot.");
-            return Ok(());
-        }
-        write(&self.config)?;
-        *last_written = self.revision;
-        Ok(())
-    }
-}
-
 /// The most recent noteworthy outcome, shown to the user while nothing is in progress.
 ///
 /// This is *what happened*, as data. How it is worded is decided by the view model.
@@ -280,10 +238,47 @@ impl LazyLoadToken {
     }
 }
 
+/// A path that is being opened and has not been looked at yet, see
+/// [`AppState::begin_open`].
+#[derive(Debug, Clone)]
+struct PendingOpen {
+    path: PathBuf,
+    /// What the opening superseded when it began.
+    superseded: Superseded,
+}
+
+/// What an opening superseded when it began, i.e. what has to be taken up again if
+/// the path turns out not to exist.
+#[derive(Debug, Clone)]
+enum Superseded {
+    Nothing,
+    /// A scan of the loaded directory.
+    ScanOfLoadedDirectory,
+    /// Another opening that had not found its path yet.
+    Opening(Box<PendingOpen>),
+}
+
+/// What is to be done after a scan has been abandoned ([`AppState::abandon_scan`]), so
+/// that an attempt to open a path that does not exist leaves nothing behind but its
+/// error message.
+#[derive(Debug)]
+pub enum AfterAbandonedScan {
+    /// Nothing: the scan had not superseded anything (or was not the current one).
+    Nothing,
+    /// The scan of the loaded directory that the abandoned scan had superseded has to
+    /// be started again: the file list it was building is incomplete.
+    RescanLoadedDirectory,
+    /// The opening of `path` that the abandoned scan had superseded has been
+    /// registered again, as the scan identified by `token`; its task has to be
+    /// started.
+    Reopen { path: PathBuf, token: ScanToken },
+}
+
 /// Holds the complete, mutable state of the application.
 ///
-/// This struct is wrapped in an `Arc<Mutex<...>>` to allow for safe, shared access
-/// from different threads (e.g., the main event loop, IPC handlers, and async tasks).
+/// It is shared between threads (the event loop, the command lanes and background
+/// tasks) as a [`SharedState`](super::shared_state::SharedState), the one place that
+/// locks it.
 pub struct AppState {
     /// The application's configuration settings.
     pub config: AppConfig,
@@ -310,8 +305,10 @@ pub struct AppState {
     pub content_search_results: HashSet<PathBuf>,
     /// The filename of the currently loaded configuration file, if any.
     pub current_config_filename: Option<String>,
-    /// The progress of the directory scan. `current_scanning_path` is the path the scan
-    /// is working on and empty while there is none; outcomes are kept in `status`.
+    /// The progress of the directory scan as it was last reported by the scan that is
+    /// running (see [`AppState::record_scan_progress`]). `current_scanning_path` is the
+    /// path the scan is working on and empty while there is none; the counters of a
+    /// scan that has ended stay until the next one begins. Outcomes are kept in `status`.
     pub scan_progress: ScanProgress,
     /// The most recent outcome worth telling the user about.
     pub status: StatusNotice,
@@ -334,16 +331,16 @@ pub struct AppState {
     lazy_load_cancel_flag: Arc<AtomicBool>,
     /// The directory scan that is currently in progress, if any.
     scan: RunSlot,
+    /// Set while the current scan has not yet found the path it is to open.
+    opening: Option<PendingOpen>,
     /// The content generation that is currently in progress, if any.
     generation: RunSlot,
     /// The content search that is currently in progress, if any.
     content_search: RunSlot,
     /// The file preview that is currently being read, if any.
     preview: RunSlot,
-    /// The number of configuration snapshots taken so far.
-    config_snapshots_taken: u64,
-    /// See [`ConfigSnapshot`].
-    config_snapshot_written: Arc<Mutex<u64>>,
+    /// Persists the configuration, see [`AppState::config_snapshot`].
+    config_store: ConfigStore,
     /// Incremented whenever `filtered_file_list` changes. Derived data (the tree index)
     /// is keyed by this revision.
     filtered_revision: u64,
@@ -352,10 +349,20 @@ pub struct AppState {
 }
 
 impl Default for AppState {
-    /// Creates a default `AppState` instance, loading the configuration from disk.
+    /// An empty state with the default configuration that is not bound to a
+    /// configuration file: nothing is read, and saving the configuration writes
+    /// nothing ([`ConfigStore::detached`]).
     fn default() -> Self {
+        Self::new(AppConfig::default(), ConfigStore::detached())
+    }
+}
+
+impl AppState {
+    /// An empty state (no directory loaded) with the given configuration, which is
+    /// persisted through `config_store`.
+    pub fn new(config: AppConfig, config_store: ConfigStore) -> Self {
         Self {
-            config: AppConfig::load().unwrap_or_default(),
+            config,
             current_path: String::new(),
             full_file_list: Vec::new(),
             filtered_file_list: Vec::new(),
@@ -376,18 +383,16 @@ impl Default for AppState {
             file_list_generation: 0,
             lazy_load_cancel_flag: Arc::new(AtomicBool::new(false)),
             scan: RunSlot::default(),
+            opening: None,
             generation: RunSlot::default(),
             content_search: RunSlot::default(),
             preview: RunSlot::default(),
-            config_snapshots_taken: 0,
-            config_snapshot_written: Arc::new(Mutex::new(0)),
+            config_store,
             filtered_revision: 0,
             tree_index_cache: TreeIndexCache::default(),
         }
     }
-}
 
-impl AppState {
     /// `true` if a directory scan is currently in progress.
     pub fn is_scanning(&self) -> bool {
         self.scan.is_active()
@@ -401,7 +406,95 @@ impl AppState {
     /// is going to replace the file list, pending lazy loads are cancelled as well.
     pub fn begin_scan(&mut self) -> ScanToken {
         self.invalidate_file_list();
+        self.opening = None;
+        self.scan_progress = no_scan_progress();
         ScanToken(self.scan.begin())
+    }
+
+    /// Starts the scan that is going to open another path, and returns its token.
+    ///
+    /// Like [`AppState::begin_scan`] this supersedes the scan that is running, and the
+    /// new scan is visible and cancellable at once. Unlike it, nothing else changes
+    /// yet: whether the path exists is only known once the scan task has looked at it,
+    /// and until then the loaded directory stays as it is, lazy loads included. The
+    /// task then either replaces it ([`AppState::enter_opened_directory`]) or gives up
+    /// and leaves it alone ([`AppState::abandon_scan`]). `path` is what is being
+    /// opened, as it was given.
+    pub fn begin_open(&mut self, path: &Path) -> ScanToken {
+        let superseded = match self.opening.take() {
+            Some(pending) => Superseded::Opening(Box::new(pending)),
+            None if self.scan.is_active() => Superseded::ScanOfLoadedDirectory,
+            None => Superseded::Nothing,
+        };
+        self.register_open(PendingOpen {
+            path: path.to_path_buf(),
+            superseded,
+        })
+    }
+
+    fn register_open(&mut self, pending: PendingOpen) -> ScanToken {
+        self.opening = Some(pending);
+        self.scan_progress = no_scan_progress();
+        ScanToken(self.scan.begin())
+    }
+
+    /// `true` while the current scan has not yet found the path it is to open, i.e.
+    /// while the directory in the state is still the one that was loaded before.
+    pub fn is_opening(&self) -> bool {
+        self.opening.is_some()
+    }
+
+    /// Makes `directory` the loaded one on behalf of the scan identified by `token`,
+    /// which has found the path it was to open: everything that belonged to the
+    /// previous directory is reset, the scan keeps running.
+    ///
+    /// Does nothing and returns `false` for a stale token and for a scan that is not
+    /// opening a path (a re-scan keeps the directory it has).
+    pub fn enter_opened_directory(&mut self, token: &ScanToken, directory: &Path) -> bool {
+        if !self.is_current_scan(token) || self.opening.take().is_none() {
+            return false;
+        }
+        self.clear_directory_data();
+        self.current_path = directory.to_string_lossy().to_string();
+        true
+    }
+
+    /// Ends the scan identified by `token` because there is nothing it could scan (its
+    /// path does not exist). The loaded directory stays as it is.
+    ///
+    /// A scan that was to open a path superseded whatever was running when it began: a
+    /// scan of the loaded directory, or another opening. That work would be lost for
+    /// an attempt that came to nothing, so it is taken up again; the return value says
+    /// what the caller has to do for it. Does nothing for a stale token.
+    pub fn abandon_scan(&mut self, token: &ScanToken) -> AfterAbandonedScan {
+        let pending = self.opening.take();
+        if !self.finish_scan(token) {
+            self.opening = pending;
+            return AfterAbandonedScan::Nothing;
+        }
+        match pending.map(|pending| pending.superseded) {
+            Some(Superseded::Opening(previous)) => AfterAbandonedScan::Reopen {
+                path: previous.path.clone(),
+                token: self.register_open(*previous),
+            },
+            Some(Superseded::ScanOfLoadedDirectory) if !self.current_path.is_empty() => {
+                AfterAbandonedScan::RescanLoadedDirectory
+            }
+            _ => AfterAbandonedScan::Nothing,
+        }
+    }
+
+    /// Stores the progress reported by the scan identified by `token`, so that the
+    /// next state update shows how far the scan has got. Progress of a scan that is
+    /// no longer the current one is ignored.
+    ///
+    /// Returns `true` if the progress was stored.
+    pub fn record_scan_progress(&mut self, token: &ScanToken, progress: ScanProgress) -> bool {
+        let is_current = self.is_current_scan(token);
+        if is_current {
+            self.scan_progress = progress;
+        }
+        is_current
     }
 
     /// `true` if `token` belongs to the scan that currently owns the scanning state.
@@ -423,7 +516,13 @@ impl AppState {
     /// Does nothing for a stale token. Returns `true` if this call ended the running
     /// scan, i.e. if the UI needs to be told about the change.
     pub fn finish_scan(&mut self, token: &ScanToken) -> bool {
-        self.scan.finish(&token.0)
+        if !self.scan.finish(&token.0) {
+            return false;
+        }
+        self.opening = None;
+        // The counters stay as the result of the scan; it works on no path any more.
+        self.scan_progress.current_scanning_path.clear();
+        true
     }
 
     /// Cancels the current scan, if any, and resets the scanning state.
@@ -436,6 +535,7 @@ impl AppState {
             return;
         }
 
+        self.opening = None;
         self.scan_progress = no_scan_progress();
         self.status = StatusNotice::ScanCancelled;
         tracing::info!("Scan cancelled.");
@@ -563,15 +663,26 @@ impl AppState {
     /// Captures the configuration for saving it outside the state lock.
     ///
     /// Take the snapshot while holding the lock, right after the change, and save it
-    /// afterwards: the snapshots are numbered here, which is what keeps a save that is
-    /// overtaken by a later one from overwriting it.
-    pub fn config_snapshot(&mut self) -> ConfigSnapshot {
-        self.config_snapshots_taken += 1;
-        ConfigSnapshot {
-            config: self.config.clone(),
-            revision: self.config_snapshots_taken,
-            last_written: self.config_snapshot_written.clone(),
-        }
+    /// afterwards: the snapshots are numbered in the order they are taken, which is
+    /// what keeps a save that is overtaken by a later one from overwriting it (see
+    /// [`ConfigStore`]). This is the only way the application saves its configuration.
+    pub fn config_snapshot(&self) -> ConfigSnapshot {
+        self.config_store.snapshot(&self.config)
+    }
+
+    /// The store the configuration is persisted through. It can be asked for the most
+    /// recent snapshot without locking the state.
+    pub fn config_store(&self) -> ConfigStore {
+        self.config_store.clone()
+    }
+
+    /// The matcher for the filename query and the extension filter as they are now.
+    pub fn file_name_matcher(&self) -> FileNameMatcher {
+        FileNameMatcher::new(
+            &self.search_query,
+            &self.extension_filter,
+            self.config.case_sensitive_search,
+        )
     }
 
     /// Makes `files` the result of the first, shallow phase of a scan of `root`.
@@ -644,9 +755,16 @@ impl AppState {
         self.tree_index_cache.build_count()
     }
 
-    /// Resets all state related to a loaded directory.
+    /// Resets all state related to a loaded directory, including the scan that is
+    /// running.
     pub fn reset_directory_state(&mut self) {
         self.cancel_current_scan();
+        self.clear_directory_data();
+    }
+
+    /// Forgets the loaded directory and everything derived from it. The scan slot is
+    /// left alone: the caller decides what becomes of the scan that is running.
+    fn clear_directory_data(&mut self) {
         self.cancel_current_generation();
         self.invalidate_file_list();
 
@@ -1393,64 +1511,259 @@ mod tests {
         assert!(!state.finish_preview(&token));
     }
 
-    // --- Config snapshots ---
+    // --- Opening a path ---
 
-    /// Collects what the snapshots write instead of touching the config file.
-    fn record_into(
-        written: &mut Vec<String>,
-    ) -> impl FnOnce(&AppConfig) -> anyhow::Result<()> + '_ {
-        |config| {
-            written.push(config.output_filename.clone());
-            Ok(())
+    fn state_with_loaded_directory() -> AppState {
+        let mut state = AppState {
+            current_path: "/old".to_string(),
+            full_file_list: vec![create_test_file_item("/old/a.rs", false)],
+            selected_files: HashSet::from([PathBuf::from("/old/a.rs")]),
+            is_fully_scanned: true,
+            ..AppState::default()
+        };
+        state.set_filtered_file_list(state.full_file_list.clone());
+        state
+    }
+
+    #[test]
+    fn test_begin_open_registers_the_scan_and_leaves_the_loaded_directory_alone() {
+        let mut state = state_with_loaded_directory();
+        let lazy_load = state.begin_lazy_load().unwrap();
+
+        let token = state.begin_open(Path::new("/new"));
+
+        assert!(state.is_scanning() && state.is_opening());
+        assert!(state.is_current_scan(&token));
+        assert_eq!(state.current_path, "/old");
+        assert_eq!(state.full_file_list.len(), 1);
+        assert_eq!(state.selected_files.len(), 1);
+        assert!(state.is_fully_scanned);
+        assert!(
+            state.is_current_lazy_load(&lazy_load) && !lazy_load.is_cancelled(),
+            "the file list is still the current one"
+        );
+    }
+
+    #[test]
+    fn test_entering_the_opened_directory_replaces_the_loaded_one_and_keeps_the_scan() {
+        let mut state = state_with_loaded_directory();
+        let lazy_load = state.begin_lazy_load().unwrap();
+        let token = state.begin_open(Path::new("/new"));
+
+        assert!(state.enter_opened_directory(&token, Path::new("/new")));
+
+        assert!(state.is_scanning() && !state.is_opening());
+        assert!(state.is_current_scan(&token) && !token.is_cancelled());
+        assert_eq!(state.current_path, "/new");
+        assert!(state.full_file_list.is_empty() && state.filtered_file_list().is_empty());
+        assert!(state.selected_files.is_empty());
+        assert!(!state.is_fully_scanned);
+        assert!(lazy_load.is_cancelled());
+        assert!(
+            !state.enter_opened_directory(&token, Path::new("/again")),
+            "a directory is entered once"
+        );
+        assert_eq!(state.current_path, "/new");
+    }
+
+    #[test]
+    fn test_only_the_scan_that_is_opening_enters_its_directory() {
+        let mut state = state_with_loaded_directory();
+        let superseded = state.begin_open(Path::new("/new"));
+        let current = state.begin_open(Path::new("/new"));
+        assert!(!state.enter_opened_directory(&superseded, Path::new("/stale")));
+        assert_eq!(state.current_path, "/old");
+        assert!(state.enter_opened_directory(&current, Path::new("/new")));
+
+        // A re-scan keeps the directory it has.
+        let mut state = state_with_loaded_directory();
+        let rescan = state.begin_scan();
+        assert!(!state.enter_opened_directory(&rescan, Path::new("/new")));
+        assert_eq!(state.current_path, "/old");
+    }
+
+    #[test]
+    fn test_abandoning_an_open_keeps_the_loaded_directory() {
+        let mut state = state_with_loaded_directory();
+        let token = state.begin_open(Path::new("/nonexistent"));
+
+        let todo = state.abandon_scan(&token);
+
+        assert!(
+            matches!(todo, AfterAbandonedScan::Nothing),
+            "nothing was running when the opening began, got {todo:?}"
+        );
+        assert!(!state.is_scanning() && !state.is_opening());
+        assert_eq!(state.current_path, "/old");
+        assert_eq!(state.selected_files.len(), 1);
+        assert!(state.is_fully_scanned);
+        assert_eq!(state.status, StatusNotice::Ready);
+    }
+
+    #[test]
+    fn test_abandoning_an_open_asks_for_the_scan_it_superseded() {
+        let mut state = state_with_loaded_directory();
+        let _superseded = state.begin_scan();
+        let token = state.begin_open(Path::new("/nonexistent"));
+
+        let todo = state.abandon_scan(&token);
+
+        assert!(matches!(todo, AfterAbandonedScan::RescanLoadedDirectory));
+        assert!(!state.is_scanning());
+
+        // Without a loaded directory there is nothing to scan again.
+        let mut state = AppState::default();
+        let _superseded = state.begin_scan();
+        let token = state.begin_open(Path::new("/nonexistent"));
+        assert!(matches!(
+            state.abandon_scan(&token),
+            AfterAbandonedScan::Nothing
+        ));
+
+        // A re-scan that finds its directory gone superseded nothing worth resuming.
+        let mut state = state_with_loaded_directory();
+        let rescan = state.begin_scan();
+        assert!(matches!(
+            state.abandon_scan(&rescan),
+            AfterAbandonedScan::Nothing
+        ));
+        assert!(!state.is_scanning());
+    }
+
+    /// Two paths are opened in a row and the second one does not exist: the first one
+    /// is opened after all, and it still knows what it had superseded itself.
+    #[test]
+    fn test_abandoning_an_open_registers_the_opening_it_superseded_again() {
+        let mut state = state_with_loaded_directory();
+        let _scan = state.begin_scan();
+        let first = state.begin_open(Path::new("/first"));
+        let second = state.begin_open(Path::new("/nonexistent"));
+
+        assert!(
+            matches!(state.abandon_scan(&first), AfterAbandonedScan::Nothing),
+            "a stale token changes nothing"
+        );
+        assert!(state.is_opening() && state.is_current_scan(&second));
+
+        let AfterAbandonedScan::Reopen { path, token } = state.abandon_scan(&second) else {
+            panic!("the superseded opening must be taken up again");
+        };
+        assert_eq!(path, Path::new("/first"));
+        assert!(state.is_scanning() && state.is_opening());
+        assert!(state.is_current_scan(&token) && !token.is_cancelled());
+        assert!(!state.is_current_scan(&first), "it is a run of its own");
+
+        // The first path does not exist either: back to the scan of the loaded directory.
+        assert!(matches!(
+            state.abandon_scan(&token),
+            AfterAbandonedScan::RescanLoadedDirectory
+        ));
+        assert!(!state.is_scanning() && !state.is_opening());
+    }
+
+    #[test]
+    fn test_cancelling_or_resetting_ends_the_opening() {
+        let mut state = state_with_loaded_directory();
+        let token = state.begin_open(Path::new("/new"));
+        state.cancel_current_scan();
+        assert!(!state.is_opening() && !state.is_scanning());
+        assert!(!state.enter_opened_directory(&token, Path::new("/new")));
+        assert_eq!(state.current_path, "/old");
+
+        let token = state.begin_open(Path::new("/new"));
+        state.reset_directory_state();
+        assert!(!state.is_opening() && !state.is_scanning());
+        assert!(!state.enter_opened_directory(&token, Path::new("/new")));
+        assert_eq!(state.current_path, "");
+
+        let _open = state.begin_open(Path::new("/new"));
+        let _rescan = state.begin_scan();
+        assert!(!state.is_opening(), "a re-scan is not an opening");
+    }
+
+    // --- Scan progress ---
+
+    fn progress(files_scanned: usize, path: &str) -> ScanProgress {
+        ScanProgress {
+            files_scanned,
+            large_files_skipped: 1,
+            current_scanning_path: path.to_string(),
         }
     }
 
-    fn snapshot_named(state: &mut AppState, output_filename: &str) -> ConfigSnapshot {
-        state.config.output_filename = output_filename.to_string();
-        state.config_snapshot()
+    #[test]
+    fn test_progress_of_the_current_scan_is_recorded() {
+        let mut state = AppState::default();
+        let token = state.begin_scan();
+
+        assert!(state.record_scan_progress(&token, progress(40, "/project/src")));
+
+        assert_eq!(state.scan_progress.files_scanned, 40);
+        assert_eq!(state.scan_progress.large_files_skipped, 1);
+        assert_eq!(state.scan_progress.current_scanning_path, "/project/src");
     }
 
     #[test]
-    fn test_config_snapshots_are_written_in_the_order_they_were_taken() {
+    fn test_progress_of_an_outdated_scan_is_ignored() {
         let mut state = AppState::default();
-        let mut written = Vec::new();
-        let older = snapshot_named(&mut state, "older");
-        let newer = snapshot_named(&mut state, "newer");
+        let superseded = state.begin_scan();
+        let current = state.begin_scan();
+        assert!(!state.record_scan_progress(&superseded, progress(40, "/old")));
+        assert_eq!(state.scan_progress.files_scanned, 0);
 
-        older.write_with(record_into(&mut written)).unwrap();
-        newer.write_with(record_into(&mut written)).unwrap();
-
-        assert_eq!(written, ["older", "newer"]);
+        state.cancel_current_scan();
+        state.record_scan_progress(&current, progress(50, "/cancelled"));
+        assert_eq!(state.scan_progress.files_scanned, 0);
+        assert!(state.scan_progress.current_scanning_path.is_empty());
     }
 
-    /// The saves run outside the state lock, so an older one can get its turn after a
-    /// newer one. It must not put the outdated configuration back on disk.
     #[test]
-    fn test_overtaken_config_snapshot_is_not_written() {
+    fn test_a_new_scan_starts_counting_from_zero_and_a_finished_one_keeps_its_counters() {
         let mut state = AppState::default();
-        let mut written = Vec::new();
-        let older = snapshot_named(&mut state, "older");
-        let newer = snapshot_named(&mut state, "newer");
+        let token = state.begin_scan();
+        state.record_scan_progress(&token, progress(40, "/project/src"));
 
-        newer.write_with(record_into(&mut written)).unwrap();
-        older.write_with(record_into(&mut written)).unwrap();
+        assert!(state.finish_scan(&token));
+        assert_eq!(state.scan_progress.files_scanned, 40);
+        assert!(
+            state.scan_progress.current_scanning_path.is_empty(),
+            "a finished scan works on no path"
+        );
 
-        assert_eq!(written, ["newer"]);
+        let _next = state.begin_scan();
+        assert_eq!(state.scan_progress.files_scanned, 0);
+        let token = state.begin_open(Path::new("/new"));
+        state.record_scan_progress(&token, progress(7, "/other"));
+        let _next = state.begin_open(Path::new("/new"));
+        assert_eq!(state.scan_progress.files_scanned, 0);
     }
 
-    /// A snapshot whose write failed has not been written: the one before it is still
-    /// the newest on disk, and a later one is written as usual.
+    // --- Configuration ---
+
     #[test]
-    fn test_failed_config_save_does_not_count_as_written() {
-        let mut state = AppState::default();
-        let mut written = Vec::new();
-        let failing = snapshot_named(&mut state, "failing");
-        let next = snapshot_named(&mut state, "next");
+    fn test_default_state_has_the_default_config_and_is_not_bound_to_a_file() {
+        let state = AppState::default();
 
-        let result = failing.write_with(|_| Err(anyhow::anyhow!("disk full")));
-        next.write_with(record_into(&mut written)).unwrap();
+        assert_eq!(state.config, AppConfig::default());
+        assert_eq!(state.config_store().path(), None);
+    }
 
-        assert!(result.is_err());
-        assert_eq!(written, ["next"]);
+    #[test]
+    fn test_config_snapshots_are_taken_from_the_store_of_the_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let (store, config) = ConfigStore::open(path.clone());
+        let mut state = AppState::new(config, store);
+
+        state.config.output_filename = "older.txt".to_string();
+        let older = state.config_snapshot();
+        state.config.output_filename = "newer.txt".to_string();
+        let newer = state.config_snapshot();
+        newer.save().unwrap();
+        older.save().unwrap();
+
+        let saved = crate::config::settings::load_config(&path).unwrap();
+        assert_eq!(saved.output_filename, "newer.txt");
+        assert_eq!(state.config_store().latest(), state.config);
     }
 }

@@ -1,8 +1,11 @@
 use context_file_concat::app;
 use context_file_concat::app::file_dialog::NativeDialogService;
 use context_file_concat::app::proxy::EventProxy;
+use context_file_concat::app::shared_state::SharedState;
+use context_file_concat::app::state::AppState;
 use context_file_concat::app::window_geometry::{self, Rect, WindowGeometry, MIN_WINDOW_SIZE};
-use std::sync::{Arc, Mutex};
+use context_file_concat::config::{settings, AppConfig, ConfigStore};
+use std::sync::Arc;
 use tao::{
     dpi::{LogicalPosition, LogicalSize},
     event::{Event, StartCause, WindowEvent},
@@ -29,11 +32,23 @@ async fn main() {
     // in the transport's outbox (see `app::transport`).
     let event_loop = EventLoopBuilder::<app::transport::Wake>::with_user_event().build();
 
-    // Load the persisted config exactly once; the window geometry is read from it and
+    // Load the persisted config exactly once. This is the only place that decides
+    // which file that is; from here on the store is the way the config gets saved.
+    let (config_store, mut config) = match settings::default_config_path() {
+        Some(path) => ConfigStore::open(path),
+        None => {
+            tracing::warn!("No config directory available. Settings will not be persisted.");
+            (ConfigStore::detached(), AppConfig::default())
+        }
+    };
+
+    // The window geometry is read from the config (converting what an older version
+    // stored in physical pixels), kept in the config in logical units from now on, and
     // pulled back onto a visible monitor if necessary.
-    let initial_state = app::state::AppState::default();
-    let mut geometry = WindowGeometry::from_config(&initial_state.config)
-        .clamped_to_visible(&logical_monitors(&event_loop));
+    let monitors = logical_monitors(&event_loop);
+    let mut geometry = WindowGeometry::from_config(&config, primary_scale_factor(&event_loop));
+    geometry.apply_to(&mut config);
+    geometry = geometry.clamped_to_visible(&monitors);
     let (min_width, min_height) = MIN_WINDOW_SIZE;
 
     let window = WindowBuilder::new()
@@ -55,7 +70,7 @@ async fn main() {
 
     // Create the shared application state and the coalescing transport to the UI thread
     let (proxy, ui_events) = app::transport::channel(event_loop.create_proxy());
-    let state = Arc::new(Mutex::new(initial_state));
+    let state = SharedState::new(AppState::new(config, config_store.clone()));
     let dialog_service = Arc::new(NativeDialogService {});
 
     // To avoid code duplication, we define the handlers first.
@@ -208,7 +223,8 @@ async fn main() {
             Event::LoopDestroyed if !geometry_saved => {
                 geometry_saved = true;
                 tracing::info!("Exiting. Saving final window state...");
-                if let Err(e) = window_geometry::persist(geometry, &state_for_events, None) {
+                if let Err(e) = window_geometry::persist(geometry, &state_for_events, &config_store)
+                {
                     tracing::error!("Failed to save config on exit: {}", e);
                 }
             }
@@ -221,6 +237,15 @@ async fn main() {
             _ => (),
         }
     });
+}
+
+/// The scale factor of the primary monitor (of any monitor if none is primary); `1.0`
+/// if the system reports no monitor at all.
+fn primary_scale_factor<T>(event_loop: &EventLoopWindowTarget<T>) -> f64 {
+    event_loop
+        .primary_monitor()
+        .or_else(|| event_loop.available_monitors().next())
+        .map_or(1.0, |monitor| monitor.scale_factor())
 }
 
 /// The available monitors in logical units, the primary one first.

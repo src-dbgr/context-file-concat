@@ -34,48 +34,35 @@ fn resolve_config_dir(
     }
 }
 
-/// The directory the configuration lives in. This is the only place deciding that.
+/// The file the configuration is kept in: `config.json` in the directory named by
+/// [`CONFIG_DIR_ENV`] if that is set, in the platform's standard location otherwise.
+/// `None` if no such directory can be determined.
 ///
-/// * Unit tests always get a per-process temporary directory, whatever the environment
-///   says, so no test can read or write the developer's real configuration.
-/// * Otherwise [`CONFIG_DIR_ENV`] is honoured if set.
-/// * Otherwise the platform's standard location is used.
-pub fn config_dir() -> Option<PathBuf> {
-    #[cfg(test)]
-    {
-        tests::test_config_dir()
-    }
-    #[cfg(not(test))]
-    {
-        resolve_config_dir(std::env::var_os(CONFIG_DIR_ENV), platform_config_dir)
-    }
+/// This is the only place deciding that, and the only function that looks at the
+/// environment. Everything else takes the path as a parameter, so the caller (the
+/// composition root in `main.rs`) decides which file is used.
+pub fn default_config_path() -> Option<PathBuf> {
+    resolve_config_dir(std::env::var_os(CONFIG_DIR_ENV), platform_config_dir)
+        .map(|dir| dir.join(CONFIG_FILE))
 }
 
-// This private helper function centralizes path resolution logic.
-fn get_path(path_override: Option<&Path>) -> Result<PathBuf> {
-    match path_override {
-        Some(path) => Ok(path.to_path_buf()),
-        None => config_dir()
-            .map(|dir| dir.join(CONFIG_FILE))
-            .ok_or_else(|| anyhow!("Could not determine config directory")),
-    }
-}
-
-/// Loads the application configuration.
-pub fn load_config(path_override: Option<&Path>) -> Result<AppConfig> {
-    let config_path = get_path(path_override)?;
-
+/// Loads the configuration from `config_path`.
+///
+/// A missing file is created with the default configuration. A file that is empty or
+/// cannot be read as a configuration (not even after migrating an older format) yields
+/// the default configuration and is left as it is.
+pub fn load_config(config_path: &Path) -> Result<AppConfig> {
     if !config_path.exists() {
         tracing::info!(
             "Config file not found, creating default config at {:?}",
             config_path
         );
         let default_config = AppConfig::default();
-        save_config(&default_config, Some(&config_path))?;
+        save_config(&default_config, config_path)?;
         return Ok(default_config);
     }
 
-    let config_content = fs::read_to_string(&config_path)?;
+    let config_content = fs::read_to_string(config_path)?;
     if config_content.trim().is_empty() {
         tracing::warn!(
             "Config file at {:?} is empty. Falling back to default config.",
@@ -106,23 +93,22 @@ pub fn load_config(path_override: Option<&Path>) -> Result<AppConfig> {
     }
 }
 
-/// Saves the provided configuration.
-pub fn save_config(config: &AppConfig, path_override: Option<&Path>) -> Result<()> {
-    let config_path = get_path(path_override)?;
+/// Writes the configuration to `config_path`, creating its directory if necessary.
+pub fn save_config(config: &AppConfig, config_path: &Path) -> Result<()> {
     if let Some(parent) = config_path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent)?;
         }
     }
     let config_json = serde_json::to_string_pretty(config)?;
-    fs::write(&config_path, config_json)?;
+    fs::write(config_path, config_json)?;
     tracing::info!("Saved config to {:?}", config_path);
     Ok(())
 }
 
 /// Exports the current configuration to a user-specified JSON file.
 pub fn export_config(config: &AppConfig, export_path: &Path) -> Result<()> {
-    save_config(config, Some(export_path))
+    save_config(config, export_path)
 }
 
 /// Imports an application configuration from a user-specified JSON file.
@@ -183,6 +169,12 @@ fn migrate_legacy_config(config_content: &str) -> Result<AppConfig> {
         "remove_empty_directories",
         defaults.remove_empty_directories,
     )?;
+    // The defaults are logical units. A file that brings a geometry of its own without
+    // naming its unit keeps the unit of such files (physical pixels, see
+    // `GeometryUnits`), which is what a missing `geometry_units` deserializes to.
+    if !obj.contains_key("window_size") && !obj.contains_key("window_position") {
+        ensure_field_from_default(obj, "geometry_units", defaults.geometry_units)?;
+    }
     ensure_field_from_default(obj, "window_size", defaults.window_size)?;
     ensure_field_from_default(obj, "window_position", defaults.window_position)?;
     ensure_field_from_default(obj, "max_file_size_mb", defaults.max_file_size_mb)?;
@@ -193,57 +185,13 @@ fn migrate_legacy_config(config_content: &str) -> Result<AppConfig> {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
     use crate::utils::test_helpers::running_as_root;
     use serde::ser::{Error, Serializer};
     use serde::Serialize;
     use serde_json::json;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::OnceLock;
     use tempfile::TempDir;
-
-    // A flag to simulate a platform without a resolvable config directory.
-    pub static MOCK_PROJECT_DIRS_FAILS: AtomicBool = AtomicBool::new(false);
-
-    /// The config directory of this test process: a temporary directory created on
-    /// first use. It is removed when the process exits (statics are never dropped, so
-    /// on Unix this is done by an `atexit` hook; elsewhere the OS temp cleanup has to).
-    static TEST_CONFIG_DIR: OnceLock<TempDir> = OnceLock::new();
-
-    #[cfg(unix)]
-    extern "C" fn remove_test_config_dir() {
-        if let Some(dir) = TEST_CONFIG_DIR.get() {
-            let _ = fs::remove_dir_all(dir.path());
-        }
-    }
-
-    /// The config directory every unit test of this process shares.
-    fn process_config_dir() -> PathBuf {
-        let dir = TEST_CONFIG_DIR.get_or_init(|| {
-            let dir = tempfile::Builder::new()
-                .prefix("cfc-test-config-")
-                .tempdir()
-                .expect("Failed to create the test config dir");
-            // SAFETY: the hook is a plain `extern "C" fn()` that only reads a
-            // process-lifetime static.
-            #[cfg(unix)]
-            unsafe {
-                libc::atexit(remove_test_config_dir);
-            }
-            dir
-        });
-        dir.path().to_path_buf()
-    }
-
-    /// What `config_dir()` resolves to under test.
-    pub fn test_config_dir() -> Option<PathBuf> {
-        if MOCK_PROJECT_DIRS_FAILS.load(Ordering::SeqCst) {
-            None
-        } else {
-            Some(process_config_dir())
-        }
-    }
 
     /// Test harness for creating isolated temporary directories and config files.
     struct TestHarness {
@@ -269,37 +217,8 @@ pub mod tests {
     }
 
     // =========================================================================
-    // SECTION: get_path Tests
+    // SECTION: Location of the config file
     // =========================================================================
-
-    #[test]
-    fn test_get_path_fails_when_no_dir_is_found() {
-        MOCK_PROJECT_DIRS_FAILS.store(true, Ordering::SeqCst);
-        let result = get_path(None);
-        MOCK_PROJECT_DIRS_FAILS.store(false, Ordering::SeqCst);
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Could not determine config directory"));
-    }
-
-    #[test]
-    fn test_default_path_is_isolated_from_the_real_config() {
-        // Resolve first so a concurrently toggled failure mock cannot interfere twice.
-        let dir = process_config_dir();
-        let path = dir.join(CONFIG_FILE);
-
-        let real_dir = platform_config_dir().expect("platform config dir");
-        assert!(
-            !path.starts_with(&real_dir),
-            "tests must not resolve into the real config dir {real_dir:?}, got {path:?}"
-        );
-        assert!(!real_dir.starts_with(&dir));
-        // Stable for the whole process, so state saved by one call is seen by the next.
-        assert_eq!(dir, process_config_dir());
-    }
 
     #[test]
     fn test_resolve_config_dir_prefers_a_non_empty_override() {
@@ -332,7 +251,7 @@ pub mod tests {
     fn test_load_config_creates_default_when_nonexistent() {
         let harness = TestHarness::new();
         assert!(!harness.config_path.exists());
-        let loaded_config = load_config(Some(&harness.config_path)).unwrap();
+        let loaded_config = load_config(&harness.config_path).unwrap();
         assert_eq!(loaded_config, AppConfig::default());
         assert!(harness.config_path.exists());
     }
@@ -341,7 +260,7 @@ pub mod tests {
     fn test_load_config_with_corrupt_json_returns_default() {
         let harness = TestHarness::new();
         harness.write_to_config_file("{ \"key\": \"value\", }");
-        let loaded_config = load_config(Some(&harness.config_path)).unwrap();
+        let loaded_config = load_config(&harness.config_path).unwrap();
         assert_eq!(loaded_config, AppConfig::default());
     }
 
@@ -349,7 +268,7 @@ pub mod tests {
     fn test_load_config_with_empty_file_returns_default() {
         let harness = TestHarness::new();
         harness.write_to_config_file("");
-        let loaded_config = load_config(Some(&harness.config_path)).unwrap();
+        let loaded_config = load_config(&harness.config_path).unwrap();
         assert_eq!(loaded_config, AppConfig::default());
     }
 
@@ -357,7 +276,7 @@ pub mod tests {
     fn test_load_config_with_unmigratable_file_returns_default() {
         let harness = TestHarness::new();
         harness.write_to_config_file("[1, 2, 3]");
-        let config = load_config(Some(&harness.config_path)).unwrap();
+        let config = load_config(&harness.config_path).unwrap();
         assert_eq!(config, AppConfig::default());
     }
 
@@ -375,8 +294,8 @@ pub mod tests {
         original_config
             .ignore_patterns
             .insert("test-pattern".to_string());
-        save_config(&original_config, Some(&harness.config_path)).unwrap();
-        let loaded_config = load_config(Some(&harness.config_path)).unwrap();
+        save_config(&original_config, &harness.config_path).unwrap();
+        let loaded_config = load_config(&harness.config_path).unwrap();
         assert_eq!(original_config, loaded_config);
     }
 
@@ -385,7 +304,7 @@ pub mod tests {
         let harness = TestHarness::new();
         let nested_path = harness.temp_path().join("new/nested/config.json");
         assert!(!nested_path.parent().unwrap().exists());
-        save_config(&AppConfig::default(), Some(&nested_path)).unwrap();
+        save_config(&AppConfig::default(), &nested_path).unwrap();
         assert!(nested_path.exists());
     }
 
@@ -451,7 +370,7 @@ pub mod tests {
         let (value, expected) = config_json_with_retired_field();
         harness.write_to_config_file(&value.to_string());
 
-        let config = load_config(Some(&harness.config_path)).unwrap();
+        let config = load_config(&harness.config_path).unwrap();
 
         assert_eq!(config, expected);
     }
@@ -488,7 +407,7 @@ pub mod tests {
         let harness = TestHarness::new();
         let export_path = harness.temp_path().join("export.json");
 
-        save_config(&AppConfig::default(), Some(&harness.config_path)).unwrap();
+        save_config(&AppConfig::default(), &harness.config_path).unwrap();
         export_config(&AppConfig::default(), &export_path).unwrap();
 
         for path in [&harness.config_path, &export_path] {
@@ -566,10 +485,10 @@ pub mod tests {
         let config_path = readonly_dir.join("config.json");
         let config = AppConfig::default();
 
-        let save_result = save_config(&config, Some(&config_path));
+        let save_result = save_config(&config, &config_path);
         let export_result = export_config(&config, &config_path);
         assert!(!config_path.exists());
-        let load_result = load_config(Some(&config_path));
+        let load_result = load_config(&config_path);
 
         if cfg!(unix) {
             assert!(save_result.is_err());

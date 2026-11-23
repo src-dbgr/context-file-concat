@@ -3,11 +3,12 @@
 //! These tests use an async-aware MPSC channel from `tokio::sync` to avoid
 //! deadlocks between the test thread and the application's async tasks.
 
-use context_file_concat::app::{self, events::UserEvent, proxy::EventProxy, state::AppState};
+use context_file_concat::app::{
+    self, events::UserEvent, proxy::EventProxy, shared_state::SharedState, state::AppState,
+};
 use context_file_concat::config::AppConfig;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -15,26 +16,7 @@ use tokio::sync::mpsc;
 /// Contains the test infrastructure.
 mod helpers {
     use super::*;
-    use context_file_concat::config::settings::CONFIG_DIR_ENV;
     use std::fs;
-    use std::sync::OnceLock;
-
-    /// Redirects the application's config directory into cargo's per-target temp dir.
-    ///
-    /// Integration tests link the library without `cfg(test)`, so without this the app
-    /// would load and save the developer's real configuration. Must run before anything
-    /// touches the config; `TestHarness::new` takes care of that.
-    pub fn isolated_config_dir() -> &'static PathBuf {
-        static DIR: OnceLock<PathBuf> = OnceLock::new();
-        DIR.get_or_init(|| {
-            let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cfc-integration-config");
-            // Start from a clean slate so earlier runs cannot influence this one.
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).expect("Failed to create the test config dir");
-            std::env::set_var(CONFIG_DIR_ENV, &dir);
-            dir
-        })
-    }
 
     /// A test double for the `EventLoopProxy` using a tokio MPSC channel.
     #[derive(Clone)]
@@ -53,7 +35,7 @@ mod helpers {
 
     /// `TestHarness` sets up a complete, isolated environment for each test case.
     pub struct TestHarness {
-        pub state: Arc<Mutex<AppState>>,
+        pub state: SharedState,
         pub proxy: TestEventProxy,
         pub event_rx: mpsc::UnboundedReceiver<UserEvent>,
         pub root_path: PathBuf,
@@ -62,8 +44,11 @@ mod helpers {
 
     impl TestHarness {
         /// Creates a new test harness with a clean configuration.
+        ///
+        /// The state is a default `AppState` with another configuration: it is not
+        /// bound to a config file, so the tests neither read nor write the developer's
+        /// real configuration (see `test_state_of_the_tests_is_not_bound_to_a_config_file`).
         pub fn new() -> Self {
-            isolated_config_dir();
             let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
             let root_path = temp_dir.path().to_path_buf();
             let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -74,7 +59,7 @@ mod helpers {
             // current_path is set by start_scan_on_path, so we leave it empty here.
 
             Self {
-                state: Arc::new(Mutex::new(state)),
+                state: SharedState::new(state),
                 proxy: TestEventProxy { sender: event_tx },
                 event_rx,
                 root_path,
@@ -145,26 +130,33 @@ mod helpers {
     }
 }
 
-/// No test may ever read or write the developer's real configuration.
+/// No test may ever read or write the developer's real configuration: the state the
+/// tests work with has no config file, so "saving" its configuration writes nothing.
 #[test]
-fn test_config_is_isolated_from_the_real_user_config() {
-    use context_file_concat::config::settings;
+fn test_state_of_the_tests_is_not_bound_to_a_config_file() {
+    let harness = helpers::TestHarness::new();
+    let state = harness.state.lock();
 
-    let isolated = helpers::isolated_config_dir();
-    assert_eq!(settings::config_dir().as_ref(), Some(isolated));
+    assert_eq!(state.config_store().path(), None);
+    state
+        .config_snapshot()
+        .save()
+        .expect("saving a detached snapshot is a no-op");
+}
 
-    let real_dir = directories::ProjectDirs::from("com", "contextfileconcat", "ContextFileConcat")
-        .expect("platform config dir")
-        .config_dir()
-        .to_path_buf();
-    assert!(
-        !isolated.starts_with(&real_dir),
-        "isolated config dir {isolated:?} is inside the real one {real_dir:?}"
-    );
+/// The location of the real configuration file can be redirected with an environment
+/// variable; the application resolves it in exactly one place.
+#[test]
+fn test_default_config_path_honours_the_environment_override() {
+    use context_file_concat::config::settings::{self, CONFIG_DIR_ENV};
 
-    // The default path (no explicit override) really ends up in the isolated dir.
-    settings::save_config(&AppConfig::default(), None).expect("save to the isolated dir");
-    assert!(isolated.join("config.json").is_file());
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cfc-integration-config");
+    // This is the only test of this binary that reads or writes the variable.
+    std::env::set_var(CONFIG_DIR_ENV, &dir);
+    let path = settings::default_config_path();
+    std::env::remove_var(CONFIG_DIR_ENV);
+
+    assert_eq!(path, Some(dir.join("config.json")));
 }
 
 #[tokio::test]
@@ -187,7 +179,7 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
 
     // --- ASSERT (Phase 1: Shallow Scan) ---
     {
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(
             state.is_scanning(),
             "Scanning should still be active in the background"
@@ -230,7 +222,7 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
 
     // --- ASSERT (Phase 2: Deep Scan) ---
     {
-        let state = harness.state.lock().unwrap();
+        let state = harness.state.lock();
         assert!(!state.is_scanning(), "Scanning should be finished");
         assert!(
             state.is_fully_scanned,
@@ -288,7 +280,7 @@ async fn test_expand_all_after_scan() {
     // The command is synchronous, so we can check the state immediately.
 
     // --- ASSERT ---
-    let state = harness.state.lock().unwrap();
+    let state = harness.state.lock();
     assert!(state.is_fully_scanned);
 
     // All directories ("src" and "docs") should be in the expanded set
