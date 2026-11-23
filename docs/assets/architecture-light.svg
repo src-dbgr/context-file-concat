@@ -99,7 +99,7 @@
 <text x="1536" y="461" class="t m" text-anchor="end"><tspan class="c">src/main.rs</tspan><tspan class="m">, </tspan><tspan class="c">platform</tspan></text>
 <rect x="64" y="478" width="432" height="124" class="box"/>
 <text x="80" y="506" class="t"><tspan class="n">IPC origin gate</tspan></text>
-<text x="80" y="532" class="t"><tspan class="c">ipc::accepted_message</tspan></text>
+<text x="80" y="532" class="t"><tspan class="c">platform::ipc::accepted_message</tspan></text>
 <text x="80" y="558" class="t"><tspan class="m">only the UI's origin may send; a message</tspan></text>
 <text x="80" y="584" class="t"><tspan class="m">from elsewhere is dropped unparsed</tspan></text>
 <rect x="584" y="478" width="432" height="124" class="box"/>
