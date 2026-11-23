@@ -1,0 +1,1438 @@
+{
+  "limits": {
+    "default_rows": 100,
+    "max_rows": 600
+  },
+  "lists": {
+    "collapsed": [
+      "0 d /project/alpha",
+      "1 f /project/alpha/a1.rs",
+      "1 f /project/alpha/a2.rs",
+      "1 f /project/alpha/notes.md",
+      "0 d /project/big",
+      "0 d /project/zoo",
+      "1 f /project/zoo/zebra.md",
+      "0 f /project/Makefile",
+      "0 f /project/readme.md",
+      "0 f /project/zeta.txt"
+    ],
+    "expanded": [
+      "0 d /project/alpha",
+      "1 f /project/alpha/a1.rs",
+      "1 f /project/alpha/a2.rs",
+      "1 f /project/alpha/notes.md",
+      "0 d /project/big",
+      "1 f /project/big/file-000.txt",
+      "1 f /project/big/file-001.txt",
+      "1 f /project/big/file-002.txt",
+      "1 f /project/big/file-003.txt",
+      "1 f /project/big/file-004.txt",
+      "1 f /project/big/file-005.txt",
+      "1 f /project/big/file-006.txt",
+      "1 f /project/big/file-007.txt",
+      "1 f /project/big/file-008.txt",
+      "1 f /project/big/file-009.txt",
+      "1 f /project/big/file-010.txt",
+      "1 f /project/big/file-011.txt",
+      "1 f /project/big/file-012.txt",
+      "1 f /project/big/file-013.txt",
+      "1 f /project/big/file-014.txt",
+      "1 f /project/big/file-015.txt",
+      "1 f /project/big/file-016.txt",
+      "1 f /project/big/file-017.txt",
+      "1 f /project/big/file-018.txt",
+      "1 f /project/big/file-019.txt",
+      "1 f /project/big/file-020.txt",
+      "1 f /project/big/file-021.txt",
+      "1 f /project/big/file-022.txt",
+      "1 f /project/big/file-023.txt",
+      "1 f /project/big/file-024.txt",
+      "1 f /project/big/file-025.txt",
+      "1 f /project/big/file-026.txt",
+      "1 f /project/big/file-027.txt",
+      "1 f /project/big/file-028.txt",
+      "1 f /project/big/file-029.txt",
+      "1 f /project/big/file-030.txt",
+      "1 f /project/big/file-031.txt",
+      "1 f /project/big/file-032.txt",
+      "1 f /project/big/file-033.txt",
+      "1 f /project/big/file-034.txt",
+      "1 f /project/big/file-035.txt",
+      "1 f /project/big/file-036.txt",
+      "1 f /project/big/file-037.txt",
+      "1 f /project/big/file-038.txt",
+      "1 f /project/big/file-039.txt",
+      "1 f /project/big/file-040.txt",
+      "1 f /project/big/file-041.txt",
+      "1 f /project/big/file-042.txt",
+      "1 f /project/big/file-043.txt",
+      "1 f /project/big/file-044.txt",
+      "1 f /project/big/file-045.txt",
+      "1 f /project/big/file-046.txt",
+      "1 f /project/big/file-047.txt",
+      "1 f /project/big/file-048.txt",
+      "1 f /project/big/file-049.txt",
+      "1 f /project/big/file-050.txt",
+      "1 f /project/big/file-051.txt",
+      "1 f /project/big/file-052.txt",
+      "1 f /project/big/file-053.txt",
+      "1 f /project/big/file-054.txt",
+      "1 f /project/big/file-055.txt",
+      "1 f /project/big/file-056.txt",
+      "1 f /project/big/file-057.txt",
+      "1 f /project/big/file-058.txt",
+      "1 f /project/big/file-059.txt",
+      "1 f /project/big/file-060.txt",
+      "1 f /project/big/file-061.txt",
+      "1 f /project/big/file-062.txt",
+      "1 f /project/big/file-063.txt",
+      "1 f /project/big/file-064.txt",
+      "1 f /project/big/file-065.txt",
+      "1 f /project/big/file-066.txt",
+      "1 f /project/big/file-067.txt",
+      "1 f /project/big/file-068.txt",
+      "1 f /project/big/file-069.txt",
+      "1 f /project/big/file-070.txt",
+      "1 f /project/big/file-071.txt",
+      "1 f /project/big/file-072.txt",
+      "1 f /project/big/file-073.txt",
+      "1 f /project/big/file-074.txt",
+      "1 f /project/big/file-075.txt",
+      "1 f /project/big/file-076.txt",
+      "1 f /project/big/file-077.txt",
+      "1 f /project/big/file-078.txt",
+      "1 f /project/big/file-079.txt",
+      "1 f /project/big/file-080.txt",
+      "1 f /project/big/file-081.txt",
+      "1 f /project/big/file-082.txt",
+      "1 f /project/big/file-083.txt",
+      "1 f /project/big/file-084.txt",
+      "1 f /project/big/file-085.txt",
+      "1 f /project/big/file-086.txt",
+      "1 f /project/big/file-087.txt",
+      "1 f /project/big/file-088.txt",
+      "1 f /project/big/file-089.txt",
+      "1 f /project/big/file-090.txt",
+      "1 f /project/big/file-091.txt",
+      "1 f /project/big/file-092.txt",
+      "1 f /project/big/file-093.txt",
+      "1 f /project/big/file-094.txt",
+      "1 f /project/big/file-095.txt",
+      "1 f /project/big/file-096.txt",
+      "1 f /project/big/file-097.txt",
+      "1 f /project/big/file-098.txt",
+      "1 f /project/big/file-099.txt",
+      "1 f /project/big/file-100.txt",
+      "1 f /project/big/file-101.txt",
+      "1 f /project/big/file-102.txt",
+      "1 f /project/big/file-103.txt",
+      "1 f /project/big/file-104.txt",
+      "1 f /project/big/file-105.txt",
+      "1 f /project/big/file-106.txt",
+      "1 f /project/big/file-107.txt",
+      "1 f /project/big/file-108.txt",
+      "1 f /project/big/file-109.txt",
+      "1 f /project/big/file-110.txt",
+      "1 f /project/big/file-111.txt",
+      "1 f /project/big/file-112.txt",
+      "1 f /project/big/file-113.txt",
+      "1 f /project/big/file-114.txt",
+      "1 f /project/big/file-115.txt",
+      "1 f /project/big/file-116.txt",
+      "1 f /project/big/file-117.txt",
+      "1 f /project/big/file-118.txt",
+      "1 f /project/big/file-119.txt",
+      "1 f /project/big/file-120.txt",
+      "1 f /project/big/file-121.txt",
+      "1 f /project/big/file-122.txt",
+      "1 f /project/big/file-123.txt",
+      "1 f /project/big/file-124.txt",
+      "1 f /project/big/file-125.txt",
+      "1 f /project/big/file-126.txt",
+      "1 f /project/big/file-127.txt",
+      "1 f /project/big/file-128.txt",
+      "1 f /project/big/file-129.txt",
+      "1 f /project/big/file-130.txt",
+      "1 f /project/big/file-131.txt",
+      "1 f /project/big/file-132.txt",
+      "1 f /project/big/file-133.txt",
+      "1 f /project/big/file-134.txt",
+      "1 f /project/big/file-135.txt",
+      "1 f /project/big/file-136.txt",
+      "1 f /project/big/file-137.txt",
+      "1 f /project/big/file-138.txt",
+      "1 f /project/big/file-139.txt",
+      "1 f /project/big/file-140.txt",
+      "1 f /project/big/file-141.txt",
+      "1 f /project/big/file-142.txt",
+      "1 f /project/big/file-143.txt",
+      "1 f /project/big/file-144.txt",
+      "1 f /project/big/file-145.txt",
+      "1 f /project/big/file-146.txt",
+      "1 f /project/big/file-147.txt",
+      "1 f /project/big/file-148.txt",
+      "1 f /project/big/file-149.txt",
+      "1 f /project/big/file-150.txt",
+      "1 f /project/big/file-151.txt",
+      "1 f /project/big/file-152.txt",
+      "1 f /project/big/file-153.txt",
+      "1 f /project/big/file-154.txt",
+      "1 f /project/big/file-155.txt",
+      "1 f /project/big/file-156.txt",
+      "1 f /project/big/file-157.txt",
+      "1 f /project/big/file-158.txt",
+      "1 f /project/big/file-159.txt",
+      "1 f /project/big/file-160.txt",
+      "1 f /project/big/file-161.txt",
+      "1 f /project/big/file-162.txt",
+      "1 f /project/big/file-163.txt",
+      "1 f /project/big/file-164.txt",
+      "1 f /project/big/file-165.txt",
+      "1 f /project/big/file-166.txt",
+      "1 f /project/big/file-167.txt",
+      "1 f /project/big/file-168.txt",
+      "1 f /project/big/file-169.txt",
+      "1 f /project/big/file-170.txt",
+      "1 f /project/big/file-171.txt",
+      "1 f /project/big/file-172.txt",
+      "1 f /project/big/file-173.txt",
+      "1 f /project/big/file-174.txt",
+      "1 f /project/big/file-175.txt",
+      "1 f /project/big/file-176.txt",
+      "1 f /project/big/file-177.txt",
+      "1 f /project/big/file-178.txt",
+      "1 f /project/big/file-179.txt",
+      "1 f /project/big/file-180.txt",
+      "1 f /project/big/file-181.txt",
+      "1 f /project/big/file-182.txt",
+      "1 f /project/big/file-183.txt",
+      "1 f /project/big/file-184.txt",
+      "1 f /project/big/file-185.txt",
+      "1 f /project/big/file-186.txt",
+      "1 f /project/big/file-187.txt",
+      "1 f /project/big/file-188.txt",
+      "1 f /project/big/file-189.txt",
+      "1 f /project/big/file-190.txt",
+      "1 f /project/big/file-191.txt",
+      "1 f /project/big/file-192.txt",
+      "1 f /project/big/file-193.txt",
+      "1 f /project/big/file-194.txt",
+      "1 f /project/big/file-195.txt",
+      "1 f /project/big/file-196.txt",
+      "1 f /project/big/file-197.txt",
+      "1 f /project/big/file-198.txt",
+      "1 f /project/big/file-199.txt",
+      "1 f /project/big/file-200.txt",
+      "1 f /project/big/file-201.txt",
+      "1 f /project/big/file-202.txt",
+      "1 f /project/big/file-203.txt",
+      "1 f /project/big/file-204.txt",
+      "1 f /project/big/file-205.txt",
+      "1 f /project/big/file-206.txt",
+      "1 f /project/big/file-207.txt",
+      "1 f /project/big/file-208.txt",
+      "1 f /project/big/file-209.txt",
+      "1 f /project/big/file-210.txt",
+      "1 f /project/big/file-211.txt",
+      "1 f /project/big/file-212.txt",
+      "1 f /project/big/file-213.txt",
+      "1 f /project/big/file-214.txt",
+      "1 f /project/big/file-215.txt",
+      "1 f /project/big/file-216.txt",
+      "1 f /project/big/file-217.txt",
+      "1 f /project/big/file-218.txt",
+      "1 f /project/big/file-219.txt",
+      "1 f /project/big/file-220.txt",
+      "1 f /project/big/file-221.txt",
+      "1 f /project/big/file-222.txt",
+      "1 f /project/big/file-223.txt",
+      "1 f /project/big/file-224.txt",
+      "1 f /project/big/file-225.txt",
+      "1 f /project/big/file-226.txt",
+      "1 f /project/big/file-227.txt",
+      "1 f /project/big/file-228.txt",
+      "1 f /project/big/file-229.txt",
+      "1 f /project/big/file-230.txt",
+      "1 f /project/big/file-231.txt",
+      "1 f /project/big/file-232.txt",
+      "1 f /project/big/file-233.txt",
+      "1 f /project/big/file-234.txt",
+      "1 f /project/big/file-235.txt",
+      "1 f /project/big/file-236.txt",
+      "1 f /project/big/file-237.txt",
+      "1 f /project/big/file-238.txt",
+      "1 f /project/big/file-239.txt",
+      "1 f /project/big/file-240.txt",
+      "1 f /project/big/file-241.txt",
+      "1 f /project/big/file-242.txt",
+      "1 f /project/big/file-243.txt",
+      "1 f /project/big/file-244.txt",
+      "1 f /project/big/file-245.txt",
+      "1 f /project/big/file-246.txt",
+      "1 f /project/big/file-247.txt",
+      "1 f /project/big/file-248.txt",
+      "1 f /project/big/file-249.txt",
+      "1 f /project/big/file-250.txt",
+      "1 f /project/big/file-251.txt",
+      "1 f /project/big/file-252.txt",
+      "1 f /project/big/file-253.txt",
+      "1 f /project/big/file-254.txt",
+      "1 f /project/big/file-255.txt",
+      "1 f /project/big/file-256.txt",
+      "1 f /project/big/file-257.txt",
+      "1 f /project/big/file-258.txt",
+      "1 f /project/big/file-259.txt",
+      "1 f /project/big/file-260.txt",
+      "1 f /project/big/file-261.txt",
+      "1 f /project/big/file-262.txt",
+      "1 f /project/big/file-263.txt",
+      "1 f /project/big/file-264.txt",
+      "1 f /project/big/file-265.txt",
+      "1 f /project/big/file-266.txt",
+      "1 f /project/big/file-267.txt",
+      "1 f /project/big/file-268.txt",
+      "1 f /project/big/file-269.txt",
+      "1 f /project/big/file-270.txt",
+      "1 f /project/big/file-271.txt",
+      "1 f /project/big/file-272.txt",
+      "1 f /project/big/file-273.txt",
+      "1 f /project/big/file-274.txt",
+      "1 f /project/big/file-275.txt",
+      "1 f /project/big/file-276.txt",
+      "1 f /project/big/file-277.txt",
+      "1 f /project/big/file-278.txt",
+      "1 f /project/big/file-279.txt",
+      "1 f /project/big/file-280.txt",
+      "1 f /project/big/file-281.txt",
+      "1 f /project/big/file-282.txt",
+      "1 f /project/big/file-283.txt",
+      "1 f /project/big/file-284.txt",
+      "1 f /project/big/file-285.txt",
+      "1 f /project/big/file-286.txt",
+      "1 f /project/big/file-287.txt",
+      "1 f /project/big/file-288.txt",
+      "1 f /project/big/file-289.txt",
+      "1 f /project/big/file-290.txt",
+      "1 f /project/big/file-291.txt",
+      "1 f /project/big/file-292.txt",
+      "1 f /project/big/file-293.txt",
+      "1 f /project/big/file-294.txt",
+      "1 f /project/big/file-295.txt",
+      "1 f /project/big/file-296.txt",
+      "1 f /project/big/file-297.txt",
+      "1 f /project/big/file-298.txt",
+      "1 f /project/big/file-299.txt",
+      "1 f /project/big/file-300.txt",
+      "1 f /project/big/file-301.txt",
+      "1 f /project/big/file-302.txt",
+      "1 f /project/big/file-303.txt",
+      "1 f /project/big/file-304.txt",
+      "1 f /project/big/file-305.txt",
+      "1 f /project/big/file-306.txt",
+      "1 f /project/big/file-307.txt",
+      "1 f /project/big/file-308.txt",
+      "1 f /project/big/file-309.txt",
+      "1 f /project/big/file-310.txt",
+      "1 f /project/big/file-311.txt",
+      "1 f /project/big/file-312.txt",
+      "1 f /project/big/file-313.txt",
+      "1 f /project/big/file-314.txt",
+      "1 f /project/big/file-315.txt",
+      "1 f /project/big/file-316.txt",
+      "1 f /project/big/file-317.txt",
+      "1 f /project/big/file-318.txt",
+      "1 f /project/big/file-319.txt",
+      "1 f /project/big/file-320.txt",
+      "1 f /project/big/file-321.txt",
+      "1 f /project/big/file-322.txt",
+      "1 f /project/big/file-323.txt",
+      "1 f /project/big/file-324.txt",
+      "1 f /project/big/file-325.txt",
+      "1 f /project/big/file-326.txt",
+      "1 f /project/big/file-327.txt",
+      "1 f /project/big/file-328.txt",
+      "1 f /project/big/file-329.txt",
+      "1 f /project/big/file-330.txt",
+      "1 f /project/big/file-331.txt",
+      "1 f /project/big/file-332.txt",
+      "1 f /project/big/file-333.txt",
+      "1 f /project/big/file-334.txt",
+      "1 f /project/big/file-335.txt",
+      "1 f /project/big/file-336.txt",
+      "1 f /project/big/file-337.txt",
+      "1 f /project/big/file-338.txt",
+      "1 f /project/big/file-339.txt",
+      "1 f /project/big/file-340.txt",
+      "1 f /project/big/file-341.txt",
+      "1 f /project/big/file-342.txt",
+      "1 f /project/big/file-343.txt",
+      "1 f /project/big/file-344.txt",
+      "1 f /project/big/file-345.txt",
+      "1 f /project/big/file-346.txt",
+      "1 f /project/big/file-347.txt",
+      "1 f /project/big/file-348.txt",
+      "1 f /project/big/file-349.txt",
+      "1 f /project/big/file-350.txt",
+      "1 f /project/big/file-351.txt",
+      "1 f /project/big/file-352.txt",
+      "1 f /project/big/file-353.txt",
+      "1 f /project/big/file-354.txt",
+      "1 f /project/big/file-355.txt",
+      "1 f /project/big/file-356.txt",
+      "1 f /project/big/file-357.txt",
+      "1 f /project/big/file-358.txt",
+      "1 f /project/big/file-359.txt",
+      "1 f /project/big/file-360.txt",
+      "1 f /project/big/file-361.txt",
+      "1 f /project/big/file-362.txt",
+      "1 f /project/big/file-363.txt",
+      "1 f /project/big/file-364.txt",
+      "1 f /project/big/file-365.txt",
+      "1 f /project/big/file-366.txt",
+      "1 f /project/big/file-367.txt",
+      "1 f /project/big/file-368.txt",
+      "1 f /project/big/file-369.txt",
+      "1 f /project/big/file-370.txt",
+      "1 f /project/big/file-371.txt",
+      "1 f /project/big/file-372.txt",
+      "1 f /project/big/file-373.txt",
+      "1 f /project/big/file-374.txt",
+      "1 f /project/big/file-375.txt",
+      "1 f /project/big/file-376.txt",
+      "1 f /project/big/file-377.txt",
+      "1 f /project/big/file-378.txt",
+      "1 f /project/big/file-379.txt",
+      "1 f /project/big/file-380.txt",
+      "1 f /project/big/file-381.txt",
+      "1 f /project/big/file-382.txt",
+      "1 f /project/big/file-383.txt",
+      "1 f /project/big/file-384.txt",
+      "1 f /project/big/file-385.txt",
+      "1 f /project/big/file-386.txt",
+      "1 f /project/big/file-387.txt",
+      "1 f /project/big/file-388.txt",
+      "1 f /project/big/file-389.txt",
+      "1 f /project/big/file-390.txt",
+      "1 f /project/big/file-391.txt",
+      "1 f /project/big/file-392.txt",
+      "1 f /project/big/file-393.txt",
+      "1 f /project/big/file-394.txt",
+      "1 f /project/big/file-395.txt",
+      "1 f /project/big/file-396.txt",
+      "1 f /project/big/file-397.txt",
+      "1 f /project/big/file-398.txt",
+      "1 f /project/big/file-399.txt",
+      "1 f /project/big/file-400.txt",
+      "1 f /project/big/file-401.txt",
+      "1 f /project/big/file-402.txt",
+      "1 f /project/big/file-403.txt",
+      "1 f /project/big/file-404.txt",
+      "1 f /project/big/file-405.txt",
+      "1 f /project/big/file-406.txt",
+      "1 f /project/big/file-407.txt",
+      "1 f /project/big/file-408.txt",
+      "1 f /project/big/file-409.txt",
+      "1 f /project/big/file-410.txt",
+      "1 f /project/big/file-411.txt",
+      "1 f /project/big/file-412.txt",
+      "1 f /project/big/file-413.txt",
+      "1 f /project/big/file-414.txt",
+      "1 f /project/big/file-415.txt",
+      "1 f /project/big/file-416.txt",
+      "1 f /project/big/file-417.txt",
+      "1 f /project/big/file-418.txt",
+      "1 f /project/big/file-419.txt",
+      "1 f /project/big/file-420.txt",
+      "1 f /project/big/file-421.txt",
+      "1 f /project/big/file-422.txt",
+      "1 f /project/big/file-423.txt",
+      "1 f /project/big/file-424.txt",
+      "1 f /project/big/file-425.txt",
+      "1 f /project/big/file-426.txt",
+      "1 f /project/big/file-427.txt",
+      "1 f /project/big/file-428.txt",
+      "1 f /project/big/file-429.txt",
+      "1 f /project/big/file-430.txt",
+      "1 f /project/big/file-431.txt",
+      "1 f /project/big/file-432.txt",
+      "1 f /project/big/file-433.txt",
+      "1 f /project/big/file-434.txt",
+      "1 f /project/big/file-435.txt",
+      "1 f /project/big/file-436.txt",
+      "1 f /project/big/file-437.txt",
+      "1 f /project/big/file-438.txt",
+      "1 f /project/big/file-439.txt",
+      "1 f /project/big/file-440.txt",
+      "1 f /project/big/file-441.txt",
+      "1 f /project/big/file-442.txt",
+      "1 f /project/big/file-443.txt",
+      "1 f /project/big/file-444.txt",
+      "1 f /project/big/file-445.txt",
+      "1 f /project/big/file-446.txt",
+      "1 f /project/big/file-447.txt",
+      "1 f /project/big/file-448.txt",
+      "1 f /project/big/file-449.txt",
+      "1 f /project/big/file-450.txt",
+      "1 f /project/big/file-451.txt",
+      "1 f /project/big/file-452.txt",
+      "1 f /project/big/file-453.txt",
+      "1 f /project/big/file-454.txt",
+      "1 f /project/big/file-455.txt",
+      "1 f /project/big/file-456.txt",
+      "1 f /project/big/file-457.txt",
+      "1 f /project/big/file-458.txt",
+      "1 f /project/big/file-459.txt",
+      "1 f /project/big/file-460.txt",
+      "1 f /project/big/file-461.txt",
+      "1 f /project/big/file-462.txt",
+      "1 f /project/big/file-463.txt",
+      "1 f /project/big/file-464.txt",
+      "1 f /project/big/file-465.txt",
+      "1 f /project/big/file-466.txt",
+      "1 f /project/big/file-467.txt",
+      "1 f /project/big/file-468.txt",
+      "1 f /project/big/file-469.txt",
+      "1 f /project/big/file-470.txt",
+      "1 f /project/big/file-471.txt",
+      "1 f /project/big/file-472.txt",
+      "1 f /project/big/file-473.txt",
+      "1 f /project/big/file-474.txt",
+      "1 f /project/big/file-475.txt",
+      "1 f /project/big/file-476.txt",
+      "1 f /project/big/file-477.txt",
+      "1 f /project/big/file-478.txt",
+      "1 f /project/big/file-479.txt",
+      "1 f /project/big/file-480.txt",
+      "1 f /project/big/file-481.txt",
+      "1 f /project/big/file-482.txt",
+      "1 f /project/big/file-483.txt",
+      "1 f /project/big/file-484.txt",
+      "1 f /project/big/file-485.txt",
+      "1 f /project/big/file-486.txt",
+      "1 f /project/big/file-487.txt",
+      "1 f /project/big/file-488.txt",
+      "1 f /project/big/file-489.txt",
+      "1 f /project/big/file-490.txt",
+      "1 f /project/big/file-491.txt",
+      "1 f /project/big/file-492.txt",
+      "1 f /project/big/file-493.txt",
+      "1 f /project/big/file-494.txt",
+      "1 f /project/big/file-495.txt",
+      "1 f /project/big/file-496.txt",
+      "1 f /project/big/file-497.txt",
+      "1 f /project/big/file-498.txt",
+      "1 f /project/big/file-499.txt",
+      "1 f /project/big/file-500.txt",
+      "1 f /project/big/file-501.txt",
+      "1 f /project/big/file-502.txt",
+      "1 f /project/big/file-503.txt",
+      "1 f /project/big/file-504.txt",
+      "1 f /project/big/file-505.txt",
+      "1 f /project/big/file-506.txt",
+      "1 f /project/big/file-507.txt",
+      "1 f /project/big/file-508.txt",
+      "1 f /project/big/file-509.txt",
+      "1 f /project/big/file-510.txt",
+      "1 f /project/big/file-511.txt",
+      "1 f /project/big/file-512.txt",
+      "1 f /project/big/file-513.txt",
+      "1 f /project/big/file-514.txt",
+      "1 f /project/big/file-515.txt",
+      "1 f /project/big/file-516.txt",
+      "1 f /project/big/file-517.txt",
+      "1 f /project/big/file-518.txt",
+      "1 f /project/big/file-519.txt",
+      "1 f /project/big/file-520.txt",
+      "1 f /project/big/file-521.txt",
+      "1 f /project/big/file-522.txt",
+      "1 f /project/big/file-523.txt",
+      "1 f /project/big/file-524.txt",
+      "1 f /project/big/file-525.txt",
+      "1 f /project/big/file-526.txt",
+      "1 f /project/big/file-527.txt",
+      "1 f /project/big/file-528.txt",
+      "1 f /project/big/file-529.txt",
+      "1 f /project/big/file-530.txt",
+      "1 f /project/big/file-531.txt",
+      "1 f /project/big/file-532.txt",
+      "1 f /project/big/file-533.txt",
+      "1 f /project/big/file-534.txt",
+      "1 f /project/big/file-535.txt",
+      "1 f /project/big/file-536.txt",
+      "1 f /project/big/file-537.txt",
+      "1 f /project/big/file-538.txt",
+      "1 f /project/big/file-539.txt",
+      "1 f /project/big/file-540.txt",
+      "1 f /project/big/file-541.txt",
+      "1 f /project/big/file-542.txt",
+      "1 f /project/big/file-543.txt",
+      "1 f /project/big/file-544.txt",
+      "1 f /project/big/file-545.txt",
+      "1 f /project/big/file-546.txt",
+      "1 f /project/big/file-547.txt",
+      "1 f /project/big/file-548.txt",
+      "1 f /project/big/file-549.txt",
+      "1 f /project/big/file-550.txt",
+      "1 f /project/big/file-551.txt",
+      "1 f /project/big/file-552.txt",
+      "1 f /project/big/file-553.txt",
+      "1 f /project/big/file-554.txt",
+      "1 f /project/big/file-555.txt",
+      "1 f /project/big/file-556.txt",
+      "1 f /project/big/file-557.txt",
+      "1 f /project/big/file-558.txt",
+      "1 f /project/big/file-559.txt",
+      "1 f /project/big/file-560.txt",
+      "1 f /project/big/file-561.txt",
+      "1 f /project/big/file-562.txt",
+      "1 f /project/big/file-563.txt",
+      "1 f /project/big/file-564.txt",
+      "1 f /project/big/file-565.txt",
+      "1 f /project/big/file-566.txt",
+      "1 f /project/big/file-567.txt",
+      "1 f /project/big/file-568.txt",
+      "1 f /project/big/file-569.txt",
+      "1 f /project/big/file-570.txt",
+      "1 f /project/big/file-571.txt",
+      "1 f /project/big/file-572.txt",
+      "1 f /project/big/file-573.txt",
+      "1 f /project/big/file-574.txt",
+      "1 f /project/big/file-575.txt",
+      "1 f /project/big/file-576.txt",
+      "1 f /project/big/file-577.txt",
+      "1 f /project/big/file-578.txt",
+      "1 f /project/big/file-579.txt",
+      "1 f /project/big/file-580.txt",
+      "1 f /project/big/file-581.txt",
+      "1 f /project/big/file-582.txt",
+      "1 f /project/big/file-583.txt",
+      "1 f /project/big/file-584.txt",
+      "1 f /project/big/file-585.txt",
+      "1 f /project/big/file-586.txt",
+      "1 f /project/big/file-587.txt",
+      "1 f /project/big/file-588.txt",
+      "1 f /project/big/file-589.txt",
+      "1 f /project/big/file-590.txt",
+      "1 f /project/big/file-591.txt",
+      "1 f /project/big/file-592.txt",
+      "1 f /project/big/file-593.txt",
+      "1 f /project/big/file-594.txt",
+      "1 f /project/big/file-595.txt",
+      "1 f /project/big/file-596.txt",
+      "1 f /project/big/file-597.txt",
+      "1 f /project/big/file-598.txt",
+      "1 f /project/big/file-599.txt",
+      "1 f /project/big/file-600.txt",
+      "1 f /project/big/file-601.txt",
+      "1 f /project/big/file-602.txt",
+      "1 f /project/big/file-603.txt",
+      "1 f /project/big/file-604.txt",
+      "1 f /project/big/file-605.txt",
+      "1 f /project/big/file-606.txt",
+      "1 f /project/big/file-607.txt",
+      "1 f /project/big/file-608.txt",
+      "1 f /project/big/file-609.txt",
+      "1 f /project/big/file-610.txt",
+      "1 f /project/big/file-611.txt",
+      "1 f /project/big/file-612.txt",
+      "1 f /project/big/file-613.txt",
+      "1 f /project/big/file-614.txt",
+      "1 f /project/big/file-615.txt",
+      "1 f /project/big/file-616.txt",
+      "1 f /project/big/file-617.txt",
+      "1 f /project/big/file-618.txt",
+      "1 f /project/big/file-619.txt",
+      "1 f /project/big/file-620.txt",
+      "1 f /project/big/file-621.txt",
+      "1 f /project/big/file-622.txt",
+      "1 f /project/big/file-623.txt",
+      "1 f /project/big/file-624.txt",
+      "1 f /project/big/file-625.txt",
+      "1 f /project/big/file-626.txt",
+      "1 f /project/big/file-627.txt",
+      "1 f /project/big/file-628.txt",
+      "1 f /project/big/file-629.txt",
+      "1 f /project/big/file-630.txt",
+      "1 f /project/big/file-631.txt",
+      "1 f /project/big/file-632.txt",
+      "1 f /project/big/file-633.txt",
+      "1 f /project/big/file-634.txt",
+      "1 f /project/big/file-635.txt",
+      "1 f /project/big/file-636.txt",
+      "1 f /project/big/file-637.txt",
+      "1 f /project/big/file-638.txt",
+      "1 f /project/big/file-639.txt",
+      "0 d /project/zoo",
+      "1 f /project/zoo/zebra.md",
+      "0 f /project/Makefile",
+      "0 f /project/readme.md",
+      "0 f /project/zeta.txt"
+    ],
+    "filtered": [
+      "0 d /project/big",
+      "1 f /project/big/file-100.txt",
+      "1 f /project/big/file-101.txt",
+      "1 f /project/big/file-102.txt",
+      "1 f /project/big/file-103.txt",
+      "1 f /project/big/file-104.txt",
+      "1 f /project/big/file-105.txt",
+      "1 f /project/big/file-106.txt",
+      "1 f /project/big/file-107.txt",
+      "1 f /project/big/file-108.txt",
+      "1 f /project/big/file-109.txt",
+      "1 f /project/big/file-110.txt",
+      "1 f /project/big/file-111.txt",
+      "1 f /project/big/file-112.txt",
+      "1 f /project/big/file-113.txt",
+      "1 f /project/big/file-114.txt",
+      "1 f /project/big/file-115.txt",
+      "1 f /project/big/file-116.txt",
+      "1 f /project/big/file-117.txt",
+      "1 f /project/big/file-118.txt",
+      "1 f /project/big/file-119.txt",
+      "1 f /project/big/file-120.txt",
+      "1 f /project/big/file-121.txt",
+      "1 f /project/big/file-122.txt",
+      "1 f /project/big/file-123.txt",
+      "1 f /project/big/file-124.txt",
+      "1 f /project/big/file-125.txt",
+      "1 f /project/big/file-126.txt",
+      "1 f /project/big/file-127.txt",
+      "1 f /project/big/file-128.txt",
+      "1 f /project/big/file-129.txt",
+      "1 f /project/big/file-130.txt",
+      "1 f /project/big/file-131.txt",
+      "1 f /project/big/file-132.txt",
+      "1 f /project/big/file-133.txt",
+      "1 f /project/big/file-134.txt",
+      "1 f /project/big/file-135.txt",
+      "1 f /project/big/file-136.txt",
+      "1 f /project/big/file-137.txt",
+      "1 f /project/big/file-138.txt",
+      "1 f /project/big/file-139.txt",
+      "1 f /project/big/file-140.txt",
+      "1 f /project/big/file-141.txt",
+      "1 f /project/big/file-142.txt",
+      "1 f /project/big/file-143.txt",
+      "1 f /project/big/file-144.txt",
+      "1 f /project/big/file-145.txt",
+      "1 f /project/big/file-146.txt",
+      "1 f /project/big/file-147.txt",
+      "1 f /project/big/file-148.txt",
+      "1 f /project/big/file-149.txt",
+      "1 f /project/big/file-150.txt",
+      "1 f /project/big/file-151.txt",
+      "1 f /project/big/file-152.txt",
+      "1 f /project/big/file-153.txt",
+      "1 f /project/big/file-154.txt",
+      "1 f /project/big/file-155.txt",
+      "1 f /project/big/file-156.txt",
+      "1 f /project/big/file-157.txt",
+      "1 f /project/big/file-158.txt",
+      "1 f /project/big/file-159.txt",
+      "1 f /project/big/file-160.txt",
+      "1 f /project/big/file-161.txt",
+      "1 f /project/big/file-162.txt",
+      "1 f /project/big/file-163.txt",
+      "1 f /project/big/file-164.txt",
+      "1 f /project/big/file-165.txt",
+      "1 f /project/big/file-166.txt",
+      "1 f /project/big/file-167.txt",
+      "1 f /project/big/file-168.txt",
+      "1 f /project/big/file-169.txt",
+      "1 f /project/big/file-170.txt",
+      "1 f /project/big/file-171.txt",
+      "1 f /project/big/file-172.txt",
+      "1 f /project/big/file-173.txt",
+      "1 f /project/big/file-174.txt",
+      "1 f /project/big/file-175.txt",
+      "1 f /project/big/file-176.txt",
+      "1 f /project/big/file-177.txt",
+      "1 f /project/big/file-178.txt",
+      "1 f /project/big/file-179.txt",
+      "1 f /project/big/file-180.txt",
+      "1 f /project/big/file-181.txt",
+      "1 f /project/big/file-182.txt",
+      "1 f /project/big/file-183.txt",
+      "1 f /project/big/file-184.txt",
+      "1 f /project/big/file-185.txt",
+      "1 f /project/big/file-186.txt",
+      "1 f /project/big/file-187.txt",
+      "1 f /project/big/file-188.txt",
+      "1 f /project/big/file-189.txt",
+      "1 f /project/big/file-190.txt",
+      "1 f /project/big/file-191.txt",
+      "1 f /project/big/file-192.txt",
+      "1 f /project/big/file-193.txt",
+      "1 f /project/big/file-194.txt",
+      "1 f /project/big/file-195.txt",
+      "1 f /project/big/file-196.txt",
+      "1 f /project/big/file-197.txt",
+      "1 f /project/big/file-198.txt",
+      "1 f /project/big/file-199.txt"
+    ]
+  },
+  "steps": [
+    {
+      "action": {
+        "current_path": "/project",
+        "kind": "shows",
+        "list": "expanded",
+        "search_query": ""
+      },
+      "expect": {
+        "first_path": "/project/alpha",
+        "last_path": "/project/big/file-094.txt",
+        "located": null,
+        "rows_count": 100,
+        "rows_revision_changed": true,
+        "rows_start": 0,
+        "rows_total": 650
+      },
+      "name": "a tree is shown: the default window"
+    },
+    {
+      "action": {
+        "command": "setViewport",
+        "kind": "command",
+        "payload": {
+          "count": 80,
+          "start": 200
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-195.txt",
+        "last_path": "/project/big/file-274.txt",
+        "located": null,
+        "rows_count": 80,
+        "rows_revision_changed": false,
+        "rows_start": 200,
+        "rows_total": 650
+      },
+      "name": "a window in the middle"
+    },
+    {
+      "action": {
+        "command": "setViewport",
+        "kind": "command",
+        "payload": {
+          "count": 5000,
+          "start": 10
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-005.txt",
+        "last_path": "/project/big/file-604.txt",
+        "located": null,
+        "rows_count": 600,
+        "rows_revision_changed": false,
+        "rows_start": 10,
+        "rows_total": 650
+      },
+      "name": "a window larger than the host sends"
+    },
+    {
+      "action": {
+        "command": "setViewport",
+        "kind": "command",
+        "payload": {
+          "count": 50,
+          "start": 100000
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": null,
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "a window behind the end is moved up to the end"
+    },
+    {
+      "action": {
+        "command": "setViewport",
+        "kind": "command",
+        "payload": {
+          "count": 50,
+          "start": 630
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": null,
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "a window that reaches over the end"
+    },
+    {
+      "action": {
+        "command": "setViewport",
+        "kind": "command",
+        "payload": {
+          "start": 5
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": null,
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "a malformed viewport changes nothing"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 1,
+          "target": {
+            "kind": "path",
+            "path": "/project/big/file-320.txt"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 1,
+          "row": 325
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "the row of a path"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 2,
+          "target": {
+            "kind": "parent_of",
+            "path": "/project/big/file-320.txt"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 2,
+          "row": 4
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "the row of the parent, far above the window"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 3,
+          "target": {
+            "kind": "parent_of",
+            "path": "/project/big"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 3,
+          "row": null
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "a row at the top level has no parent row"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 4,
+          "target": {
+            "from": 0,
+            "kind": "typeahead",
+            "prefix": "ze"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 4,
+          "row": 646
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "type-ahead finds the first row from `from` on"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 5,
+          "target": {
+            "from": 647,
+            "kind": "typeahead",
+            "prefix": "ZE"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 5,
+          "row": 649
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "type-ahead continues behind the row it found, ignoring case"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 6,
+          "target": {
+            "from": 600,
+            "kind": "typeahead",
+            "prefix": "a"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 6,
+          "row": 0
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "type-ahead wraps around at the end of the list"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 7,
+          "target": {
+            "from": 9999,
+            "kind": "typeahead",
+            "prefix": "ze"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 7,
+          "row": 646
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "type-ahead from behind the list starts at the top"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 8,
+          "target": {
+            "from": 3,
+            "kind": "typeahead",
+            "prefix": "qq"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 8,
+          "row": null
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "type-ahead without a match"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 9,
+          "target": {
+            "kind": "path",
+            "path": "/project/nope.txt"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 9,
+          "row": null
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "a path that is not listed"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 10,
+          "target": {
+            "kind": "sideways",
+            "path": "/project/big/file-320.txt"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 9,
+          "row": null
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "a malformed lookup changes nothing"
+    },
+    {
+      "action": {
+        "command": "setViewport",
+        "kind": "command",
+        "payload": {
+          "count": 60,
+          "start": 300
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-295.txt",
+        "last_path": "/project/big/file-354.txt",
+        "located": {
+          "request": 9,
+          "row": null
+        },
+        "rows_count": 60,
+        "rows_revision_changed": false,
+        "rows_start": 300,
+        "rows_total": 650
+      },
+      "name": "a window in the long directory"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 11,
+          "target": {
+            "kind": "path",
+            "path": "/project/big/file-320.txt"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-295.txt",
+        "last_path": "/project/big/file-354.txt",
+        "located": {
+          "request": 11,
+          "row": 325
+        },
+        "rows_count": 60,
+        "rows_revision_changed": false,
+        "rows_start": 300,
+        "rows_total": 650
+      },
+      "name": "the row of a file in it"
+    },
+    {
+      "action": {
+        "current_path": "/project",
+        "kind": "shows",
+        "list": "collapsed",
+        "search_query": ""
+      },
+      "expect": {
+        "first_path": "/project/alpha",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 11,
+          "row": null
+        },
+        "rows_count": 10,
+        "rows_revision_changed": true,
+        "rows_start": 0,
+        "rows_total": 10
+      },
+      "name": "the directory is collapsed: a shorter list, the window at its end, the file no row"
+    },
+    {
+      "action": {
+        "current_path": "/project",
+        "kind": "shows",
+        "list": "expanded",
+        "search_query": ""
+      },
+      "expect": {
+        "first_path": "/project/big/file-295.txt",
+        "last_path": "/project/big/file-354.txt",
+        "located": {
+          "request": 11,
+          "row": 325
+        },
+        "rows_count": 60,
+        "rows_revision_changed": true,
+        "rows_start": 300,
+        "rows_total": 650
+      },
+      "name": "the directory is expanded again: the window and the row are back"
+    },
+    {
+      "action": {
+        "current_path": "/project",
+        "kind": "shows",
+        "list": "expanded",
+        "search_query": ""
+      },
+      "expect": {
+        "first_path": "/project/big/file-295.txt",
+        "last_path": "/project/big/file-354.txt",
+        "located": {
+          "request": 11,
+          "row": 325
+        },
+        "rows_count": 60,
+        "rows_revision_changed": false,
+        "rows_start": 300,
+        "rows_total": 650
+      },
+      "name": "a change of the selection leaves the list alone"
+    },
+    {
+      "action": {
+        "current_path": "/project",
+        "kind": "shows",
+        "list": "filtered",
+        "search_query": "file-1"
+      },
+      "expect": {
+        "first_path": "/project/big",
+        "last_path": "/project/big/file-158.txt",
+        "located": null,
+        "rows_count": 60,
+        "rows_revision_changed": true,
+        "rows_start": 0,
+        "rows_total": 101
+      },
+      "name": "a filter: another list, shown from the top, the lookup void"
+    },
+    {
+      "action": {
+        "command": "setViewport",
+        "kind": "command",
+        "payload": {
+          "count": 30,
+          "start": 40
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-139.txt",
+        "last_path": "/project/big/file-168.txt",
+        "located": null,
+        "rows_count": 30,
+        "rows_revision_changed": false,
+        "rows_start": 40,
+        "rows_total": 101
+      },
+      "name": "a window of the filtered list"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 12,
+          "target": {
+            "from": 0,
+            "kind": "typeahead",
+            "prefix": "file-15"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-139.txt",
+        "last_path": "/project/big/file-168.txt",
+        "located": {
+          "request": 12,
+          "row": 51
+        },
+        "rows_count": 30,
+        "rows_revision_changed": false,
+        "rows_start": 40,
+        "rows_total": 101
+      },
+      "name": "a lookup in the filtered list"
+    },
+    {
+      "action": {
+        "current_path": "/project",
+        "kind": "shows",
+        "list": "filtered",
+        "search_query": "file-1"
+      },
+      "expect": {
+        "first_path": "/project/big/file-139.txt",
+        "last_path": "/project/big/file-168.txt",
+        "located": {
+          "request": 12,
+          "row": 51
+        },
+        "rows_count": 30,
+        "rows_revision_changed": null,
+        "rows_start": 40,
+        "rows_total": 101
+      },
+      "name": "the same filter again changes nothing about the window"
+    },
+    {
+      "action": {
+        "current_path": "/project",
+        "kind": "shows",
+        "list": "expanded",
+        "search_query": ""
+      },
+      "expect": {
+        "first_path": "/project/alpha",
+        "last_path": "/project/big/file-024.txt",
+        "located": null,
+        "rows_count": 30,
+        "rows_revision_changed": true,
+        "rows_start": 0,
+        "rows_total": 650
+      },
+      "name": "the filter is cleared: from the top again"
+    },
+    {
+      "action": {
+        "command": "setViewport",
+        "kind": "command",
+        "payload": {
+          "count": 70,
+          "start": 500
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-495.txt",
+        "last_path": "/project/big/file-564.txt",
+        "located": null,
+        "rows_count": 70,
+        "rows_revision_changed": false,
+        "rows_start": 500,
+        "rows_total": 650
+      },
+      "name": "a window further down"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 13,
+          "target": {
+            "kind": "path",
+            "path": "/project/big/file-320.txt"
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-495.txt",
+        "last_path": "/project/big/file-564.txt",
+        "located": {
+          "request": 13,
+          "row": 325
+        },
+        "rows_count": 70,
+        "rows_revision_changed": false,
+        "rows_start": 500,
+        "rows_total": 650
+      },
+      "name": "and a lookup"
+    },
+    {
+      "action": {
+        "command": "initialize",
+        "kind": "command",
+        "payload": null
+      },
+      "expect": {
+        "first_path": "/project/alpha",
+        "last_path": "/project/big/file-064.txt",
+        "located": null,
+        "rows_count": 70,
+        "rows_revision_changed": false,
+        "rows_start": 0,
+        "rows_total": 650
+      },
+      "name": "a UI that starts gets the top of the list and no answer"
+    }
+  ]
+}

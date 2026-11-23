@@ -28,9 +28,10 @@ fn next_revision() -> u64 {
 
 /// How many single changes [`SelectedFiles`] remembers. A click changes one file, a
 /// click on a small directory a few; whatever changes more than this at once is
-/// cheaper to count again than to replay. Of more single changes than this, the
-/// oldest are forgotten.
-const JOURNAL_CAPACITY: usize = 1024;
+/// cheaper to count again than to replay (following one change costs a few lookups,
+/// counting again a hash lookup per selected or per listed file, whichever are
+/// fewer). Of more single changes than this, the oldest are forgotten.
+const JOURNAL_CAPACITY: usize = 16_384;
 
 /// One file that was selected or deselected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +70,11 @@ impl SelectedFiles {
         true
     }
 
+    /// `true` if changing `count` paths at once is not worth a journal entry each.
+    fn is_wholesale(count: usize) -> bool {
+        count > JOURNAL_CAPACITY
+    }
+
     /// Deselects `path`. Returns `true` if it was selected.
     pub fn remove(&mut self, path: &Path) -> bool {
         if !self.files.remove(path) {
@@ -79,11 +85,10 @@ impl SelectedFiles {
     }
 
     /// Selects every path of `paths`.
-    pub fn extend(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        let paths = paths.into_iter();
-        if paths.size_hint().0 > JOURNAL_CAPACITY {
-            // More than the journal holds: not worth a journal entry each.
+    pub fn extend(&mut self, paths: Vec<PathBuf>) {
+        if Self::is_wholesale(paths.len()) {
             let before = self.files.len();
+            self.files.reserve(paths.len());
             self.files.extend(paths);
             if self.files.len() != before {
                 self.changed_wholesale();
@@ -96,9 +101,8 @@ impl SelectedFiles {
     }
 
     /// Deselects every path of `paths`.
-    pub fn remove_all<'a>(&mut self, paths: impl IntoIterator<Item = &'a PathBuf>) {
-        let paths = paths.into_iter();
-        if paths.size_hint().0 > JOURNAL_CAPACITY {
+    pub fn remove_all(&mut self, paths: &[PathBuf]) {
+        if Self::is_wholesale(paths.len()) {
             let before = self.files.len();
             for path in paths {
                 self.files.remove(path);
@@ -388,8 +392,35 @@ pub(crate) struct DirectorySelection {
 }
 
 impl DirectorySelection {
-    /// Counts the whole list: one pass over the tree.
+    /// Counts the whole list, whichever way looks at fewer paths.
     fn count(items: &[FileItem], index: &TreeIndex, selected: &HashSet<PathBuf>) -> Self {
+        // Following a selected file up the tree costs a few lookups; asking for
+        // every listed file whether it is selected costs one.
+        if selected.len().saturating_mul(4) < items.len() {
+            Self::count_from_selection(items, index, selected)
+        } else {
+            Self::count_from_tree(items, index, selected)
+        }
+    }
+
+    /// Starts from nothing and adds every selected file: for a selection that is
+    /// small compared to the list.
+    fn count_from_selection(
+        items: &[FileItem],
+        index: &TreeIndex,
+        selected: &HashSet<PathBuf>,
+    ) -> Self {
+        let mut counts = Self {
+            selected_below: vec![0; items.len()],
+        };
+        for path in selected {
+            counts.add(items, index, path, true);
+        }
+        counts
+    }
+
+    /// One pass over the tree, asking for every listed file whether it is selected.
+    fn count_from_tree(items: &[FileItem], index: &TreeIndex, selected: &HashSet<PathBuf>) -> Self {
         let mut summary = SelectionSummary::new(items, index, selected);
         let selected_below = items
             .iter()
@@ -408,7 +439,12 @@ impl DirectorySelection {
     /// Follows one file that was selected or deselected: only the directories above
     /// it change.
     fn apply(&mut self, items: &[FileItem], index: &TreeIndex, change: &SelectionChange) {
-        let Some(file) = index.position(items, &change.path) else {
+        self.add(items, index, &change.path, change.selected);
+    }
+
+    /// Counts the file at `path` in (`selected`) or out of the directories above it.
+    fn add(&mut self, items: &[FileItem], index: &TreeIndex, path: &Path, selected: bool) {
+        let Some(file) = index.position(items, path) else {
             return;
         };
         if items[file].is_directory {
@@ -419,9 +455,9 @@ impl DirectorySelection {
         let mut weight = 1usize;
         let mut child = file;
         while let Some(parent) = index.parent_directory(items, child) {
-            weight = weight.saturating_mul(index.occurrences_below(parent, child));
+            weight = weight.saturating_mul(index.occurrences(child));
             let count = &mut self.selected_below[parent];
-            *count = if change.selected {
+            *count = if selected {
                 count.saturating_add(weight as u32)
             } else {
                 count.saturating_sub(weight as u32)
@@ -704,7 +740,7 @@ mod tests {
         );
         assert_eq!(files.changes_since(files.revision()), Some(&[][..]));
 
-        files.extend([path("/r/b"), path("/r/a"), path("/r/c")]);
+        files.extend(vec![path("/r/b"), path("/r/a"), path("/r/c")]);
         assert!(files.remove(Path::new("/r/a")));
         let order: Vec<(&str, bool)> = files
             .changes_since(initial)
@@ -840,6 +876,12 @@ mod tests {
             assert_eq!(
                 *counts,
                 DirectorySelection::count(&items, &index, &files),
+                "after {click}"
+            );
+            // Both ways of counting from scratch agree.
+            assert_eq!(
+                DirectorySelection::count_from_selection(&items, &index, &files),
+                DirectorySelection::count_from_tree(&items, &index, &files),
                 "after {click}"
             );
         }

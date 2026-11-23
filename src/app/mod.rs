@@ -20,6 +20,8 @@ pub mod tracked;
 pub mod transport;
 pub mod tree_index;
 pub mod view_model;
+#[cfg(test)]
+mod window_contract_tests;
 pub mod window_geometry;
 
 use crate::app::file_dialog::DialogService;

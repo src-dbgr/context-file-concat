@@ -2,6 +2,7 @@
 // Keep this file framework-agnostic; only data shapes + type utilities live here.
 
 import { z } from "zod";
+import { MAX_WINDOW_ROWS } from "../modules/treeWindow";
 
 // Zod probes with `new Function` whether it may compile its parsers. Under the
 // CSP of the app (no `unsafe-eval`) that probe is reported as a violation, so
@@ -88,8 +89,11 @@ export const ScanProgressSchema = z
 const UiStateObject = z.object({
   config: UiConfigSchema,
   current_path: z.string(),
-  /** The rows of the window the UI asked for (`setViewport`), in order. */
-  rows: z.array(TreeRowSchema),
+  /**
+   * The rows of the window the UI asked for (`setViewport`), in order. The
+   * host never sends more than its largest window.
+   */
+  rows: z.array(TreeRowSchema).max(MAX_WINDOW_ROWS),
   /** The position of `rows[0]` in the list of all rows. */
   rows_start: RowIndex,
   /** The number of rows of the tree: what the scrollbar spans. */

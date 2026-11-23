@@ -123,6 +123,21 @@ export async function waitForBridge(page: Page): Promise<void> {
   });
 }
 
+/**
+ * The fields of a snapshot no spec cares about. With them a seeded state is a
+ * complete snapshot: `setTree` delivers it through `window.render`, which
+ * validates it like a snapshot of the host.
+ */
+const SNAPSHOT_DEFAULTS = {
+  total_files_found: 0,
+  visible_files_count: 0,
+  scan_progress: {
+    files_scanned: 0,
+    large_files_skipped: 0,
+    current_scanning_path: "",
+  },
+};
+
 let revisions = 0;
 
 /** Replaces the state of the UI with a snapshot that holds every row. */
@@ -130,6 +145,7 @@ export async function setAppState(page: Page, state: AppState): Promise<void> {
   const { tree, ...rest } = state;
   const rows = rowsOf(tree);
   const snapshot = {
+    ...SNAPSHOT_DEFAULTS,
     ...rest,
     rows,
     rows_start: 0,
@@ -160,6 +176,24 @@ export async function setTree(page: Page, state: AppState): Promise<void> {
         }
       ).__e2e.host.setTree(base, rows);
     },
-    [rest, rowsOf(tree)] as const,
+    [{ ...SNAPSHOT_DEFAULTS, ...rest }, rowsOf(tree)] as const,
   );
+}
+
+/**
+ * Makes the stand-in host take `milliseconds` to answer a command, like a
+ * host that is busy. What the UI does in the meantime is what a test of this
+ * is about.
+ */
+export async function setHostLatency(
+  page: Page,
+  milliseconds: number,
+): Promise<void> {
+  await page.evaluate((ms) => {
+    (
+      window as unknown as {
+        __e2e: { host: { setLatency: (ms: number) => void } };
+      }
+    ).__e2e.host.setLatency(ms);
+  }, milliseconds);
 }

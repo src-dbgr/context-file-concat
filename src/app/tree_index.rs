@@ -34,6 +34,9 @@ pub(crate) struct TreeIndex {
     /// The number of files below each item, parallel to the item list: what
     /// [`TreeIndex::files_in_subtree`] would list for a directory (0 for files).
     files_below: Vec<u32>,
+    /// How often each item is listed as a child of its parent, parallel to the item
+    /// list, see [`TreeIndex::occurrences`].
+    occurrences: Vec<u32>,
     /// Finds an item by its path without a second copy of every path.
     paths: PathLookup,
 }
@@ -55,6 +58,7 @@ impl TreeIndex {
         let (paths, representatives) = PathLookup::build(items);
 
         let mut children: Vec<Vec<usize>> = vec![Vec::new(); items.len()];
+        let mut occurrences = vec![0u32; items.len()];
         let mut roots: Vec<usize> = Vec::new();
         for (item, &index) in items.iter().zip(&representatives) {
             let Some(parent) = item.path.parent() else {
@@ -62,6 +66,7 @@ impl TreeIndex {
             };
             if let Some(parent_index) = paths.position(items, parent) {
                 children[parent_index].push(index);
+                occurrences[index] = occurrences[index].saturating_add(1);
             }
             if parent == root_path {
                 roots.push(index);
@@ -83,6 +88,7 @@ impl TreeIndex {
             roots,
             counts,
             files_below,
+            occurrences,
             paths,
         }
     }
@@ -118,8 +124,9 @@ impl TreeIndex {
 
     /// The position of the item that represents `path` in `items`, if it is listed.
     ///
-    /// `items` must be the list the index was built from. The lookup takes
-    /// O(log n): a click on one row must not cost a pass over the whole list.
+    /// `items` must be the list the index was built from. The lookup is a hash
+    /// lookup (constant time on average): a click on one row must not cost a pass
+    /// over the whole list.
     pub(crate) fn position(&self, items: &[FileItem], path: &Path) -> Option<usize> {
         debug_assert_eq!(self.len(), items.len());
         self.paths.position(items, path)
@@ -141,14 +148,13 @@ impl TreeIndex {
         items[parent].is_directory.then_some(parent)
     }
 
-    /// How often the item at `child` is listed below `parent`. This is 1, except for
-    /// a list that names a path more than once: every occurrence is a child of its
-    /// own, all of them represented by the same item.
-    pub(crate) fn occurrences_below(&self, parent: usize, child: usize) -> usize {
-        self.children[parent]
-            .iter()
-            .filter(|&&listed| listed == child)
-            .count()
+    /// How often the item at `index` is listed among the children of its parent
+    /// (all occurrences of a path have the same parent). This is 1 for an item with
+    /// a listed parent, except in a list that names a path more than once: every
+    /// occurrence is a child of its own, all of them represented by the same item.
+    /// 0 for an item whose parent is not listed.
+    pub(crate) fn occurrences(&self, index: usize) -> usize {
+        self.occurrences[index] as usize
     }
 
     /// The files at or below the given item, in display order.
@@ -559,8 +565,26 @@ mod tests {
             None,
             "a file is no parent"
         );
-        assert_eq!(index.occurrences_below(4, 1), 1);
-        assert_eq!(index.occurrences_below(4, 3), 0);
+        assert_eq!(index.occurrences(1), 1);
+        assert_eq!(index.occurrences(3), 0, "its parent is not listed");
+        assert_eq!(index.occurrences(4), 0, "below the root");
+    }
+
+    #[test]
+    fn occurrences_count_how_often_a_path_is_listed_below_its_parent() {
+        let items = vec![
+            item("/r/a", true),
+            item("/r/a/f.rs", false),
+            item("/r/a/g.rs", false),
+            item("/r/a/f.rs", false),
+        ];
+        let index = TreeIndex::build(&items, Path::new("/r"));
+
+        // The last occurrence represents the path, and is a child twice.
+        assert_eq!(index.children(0), [3, 3, 2]);
+        assert_eq!(index.occurrences(3), 2);
+        assert_eq!(index.occurrences(2), 1);
+        assert_eq!(index.occurrences(1), 0, "represented by the item at 3");
     }
 
     #[test]

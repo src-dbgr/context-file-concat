@@ -41,22 +41,27 @@
   // Total virtual height
   const totalHeight = $derived(totalRows * ITEM_HEIGHT);
 
-  // The rows to render: the visible ones (plus overscan) that have arrived.
-  // A row the host has not sent yet leaves its place empty until it has.
-  type RenderedRow = { row: TreeRow; index: number };
+  // The rows to render: the visible ones plus overscan. A row the host has
+  // not sent yet (right after a jump) is rendered as a placeholder of the same
+  // height (`row: null`), so the place is not blank and nothing moves when the
+  // row arrives.
+  type RenderedRow = { row: TreeRow | null; index: number };
   const visibleSlice = $derived(
     (() => {
       const state = $appState;
       const range = renderRange(scrollTop, viewportHeight, state.rows_total);
-      const from = Math.max(range.start, state.rows_start);
-      const to = Math.min(range.end, state.rows_start + state.rows.length);
       const rendered: RenderedRow[] = [];
-      for (let index = from; index < to; index++) {
-        rendered.push({ row: state.rows[index - state.rows_start], index });
+      for (let index = range.start; index < range.end; index++) {
+        rendered.push({
+          row: state.rows[index - state.rows_start] ?? null,
+          index,
+        });
       }
       return rendered;
     })()
   );
+  // Rows are on their way from the host.
+  const awaitingRows = $derived(visibleSlice.some((item) => !item.row));
 
   // Tell the host which rows the viewport needs. The answer is the next
   // snapshot; until then the request is not repeated.
@@ -118,7 +123,8 @@
     );
     if (node) {
       domFocusWanted = null;
-      node.focus();
+      focusParked = false;
+      node.focus({ preventScroll: true });
     } else if (rowAt(wanted.index)) {
       // The row is here but not on screen: the user has scrolled on.
       domFocusWanted = null;
@@ -150,10 +156,44 @@
     requestAnimationFrame(applyDomFocus);
   }
 
-  // A row that was to be focused before the host had sent it gets the focus
-  // when it has been rendered.
+  // The element of a row exists only while the row is rendered. When the row
+  // that has the DOM focus is about to leave the DOM (it was scrolled away, or
+  // the focus has moved to a row the host has not sent yet), the focus would
+  // fall to the body and the next keys would be lost. It is parked on the tree
+  // itself instead, whose key handler works with `focusedIndex` anyway, and
+  // goes back to the focused row as soon as that is rendered.
+  let focusParked = false;
+  $effect.pre(() => {
+    const slice = visibleSlice;
+    untrack(() => {
+      const tree = scrollEl;
+      const active = document.activeElement;
+      if (!tree || !active || active === tree || !tree.contains(active)) return;
+      const path = active
+        .closest<HTMLElement>(".tree-item-container")
+        ?.getAttribute("data-path");
+      if (!slice.some((item) => item.row && item.row.path === path)) {
+        tree.focus({ preventScroll: true });
+        focusParked = true;
+      }
+    });
+  });
+
+  // A row that was to be focused before the host had sent it, or whose focus
+  // was parked on the tree, gets the focus when it has been rendered.
   $effect(() => {
     void visibleSlice;
+    if (
+      !domFocusWanted &&
+      focusParked &&
+      document.activeElement === scrollEl &&
+      // The row at the focused position is the focused item (not another
+      // one that took its place when the list changed).
+      focusedPath !== null &&
+      rowAt(focusedIndex)?.path === focusedPath
+    ) {
+      domFocusWanted = { index: focusedIndex, onlyIfUnfocused: false };
+    }
     if (domFocusWanted) void tick().then(applyDomFocus);
   });
 
@@ -220,6 +260,7 @@
       focusedPath = null;
       awaitedLocate = null;
       domFocusWanted = null;
+      queuedKeys = [];
     }
 
     // If the list goes from 0 → >0 rows (e.g., filters cleared), scroll to start
@@ -228,6 +269,8 @@
 
     const listChanged = state.rows_revision !== lastRowsRevision;
     lastRowsRevision = state.rows_revision;
+    // A position means another row in another list.
+    if (listChanged) queuedKeys = [];
 
     takeLocateAnswer(state);
 
@@ -271,7 +314,10 @@
 
   $effect(() => {
     const state = $appState;
-    untrack(() => followSnapshot(state));
+    untrack(() => {
+      followSnapshot(state);
+      runQueuedKeys();
+    });
   });
 
   // Typeahead search within the tree. It covers all rows, so the host looks.
@@ -490,6 +536,7 @@
       if (Number.isFinite(idx)) {
         focusedIndex = idx;
         focusedPath = rowAt(idx)?.path ?? null;
+        focusParked = false;
         // The user has put the focus somewhere; a pending one gives way.
         if (domFocusWanted && domFocusWanted.index !== idx) {
           domFocusWanted = null;
@@ -564,14 +611,36 @@
     // The remaining keys act on the focused row itself.
     e.preventDefault();
     const node = rowAt(focusedIndex);
-    if (!node) {
-      // It is outside the window (scrolled far away): bring it back first.
+    if (node) {
+      actOnRow(e.key, node, focusedIndex);
+    } else {
+      // The row has not arrived yet (the focus has just moved there), or it
+      // was scrolled far away: the key is kept and acts on the row as soon as
+      // it is here.
+      if (queuedKeys.length < 8) {
+        queuedKeys.push({ key: e.key, index: focusedIndex });
+      }
       setFocusByIndex(focusedIndex);
-      return;
     }
+  }
 
+  /** Keys that were pressed on a row before the host had sent it. */
+  let queuedKeys: { key: string; index: number }[] = [];
+
+  function runQueuedKeys() {
+    while (queuedKeys.length) {
+      const { key, index } = queuedKeys[0];
+      const node = rowAt(index);
+      if (!node) return;
+      queuedKeys.shift();
+      actOnRow(key, node, index);
+    }
+  }
+
+  /** ArrowRight, ArrowLeft, Enter or Space on the row at `index`. */
+  function actOnRow(key: string, node: TreeRow, index: number) {
     // Expand/Collapse per WAI-ARIA Tree pattern
-    if (e.key === "ArrowRight") {
+    if (key === "ArrowRight") {
       if (node.is_directory) {
         if (!node.is_expanded) {
           expandDirectory(node);
@@ -579,11 +648,11 @@
           // Move to the first child: the row right below an expanded
           // directory, one level deeper. If that row is outside the window,
           // the directory's own flag says whether it exists.
-          const below = rowAt(focusedIndex + 1);
+          const below = rowAt(index + 1);
           const hasChildRow = below
             ? below.depth === node.depth + 1
-            : node.has_children && focusedIndex + 1 < totalRows;
-          if (hasChildRow) setFocusByIndex(focusedIndex + 1);
+            : node.has_children && index + 1 < totalRows;
+          if (hasChildRow) setFocusByIndex(index + 1);
         }
       } else {
         post("loadFilePreview", node.path);
@@ -591,17 +660,17 @@
       return;
     }
 
-    if (e.key === "ArrowLeft") {
+    if (key === "ArrowLeft") {
       if (node.is_directory && node.is_expanded) {
         collapseDirectory(node);
       } else {
-        focusParentOf(focusedIndex, node);
+        focusParentOf(index, node);
       }
       return;
     }
 
     // Activate / select
-    if (e.key === "Enter") {
+    if (key === "Enter") {
       if (node.is_directory) {
         toggleDirectory(node);
       } else {
@@ -672,23 +741,32 @@
         role="tree"
         aria-label="Project files"
         aria-multiselectable="true"
+        aria-busy={awaitingRows ? "true" : "false"}
         tabindex="0"
       >
         <div
           class="virtual-scroll-sizer"
           style="height:{totalHeight}px; position:relative;"
         >
-          {#each visibleSlice as item (item.row.path)}
+          {#each visibleSlice as item (item.row ? item.row.path : `pending:${item.index}`)}
             <div
               class="virtual-scroll-item"
+              class:pending={!item.row}
               style="position:absolute; left:0; right:0; top:{item.index *
                 ITEM_HEIGHT}px; height:{ITEM_HEIGHT}px;"
             >
-              <TreeItem
-                node={item.row}
-                index={item.index}
-                focused={item.index === focusedIndex}
-              />
+              {#if item.row}
+                <TreeItem
+                  node={item.row}
+                  index={item.index}
+                  focused={item.index === focusedIndex}
+                />
+              {:else}
+                <!-- Not a tree item: the row is on its way (see aria-busy). -->
+                <div class="row-placeholder" aria-hidden="true">
+                  <span class="row-placeholder-bar"></span>
+                </div>
+              {/if}
             </div>
           {/each}
         </div>
@@ -742,6 +820,21 @@
   }
   .virtual-scroll-item {
     will-change: transform;
+  }
+  /* A row the host has not sent yet: same height, a faint bar for the name. */
+  .row-placeholder {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    padding-left: 40px;
+  }
+  .row-placeholder-bar {
+    width: 38%;
+    max-width: 260px;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--color-border);
+    opacity: 0.55;
   }
 
   .file-tree-root {

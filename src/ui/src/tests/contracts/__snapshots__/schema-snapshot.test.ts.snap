@@ -964,6 +964,7 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
         ],
         "type": "object",
       },
+      "maxItems": 600,
       "type": "array",
     },
     "rows_revision": {

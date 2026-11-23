@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import {
   fileNode,
+  setHostLatency,
   setTree,
   waitForBridge,
   type AppState,
@@ -189,6 +190,108 @@ test("keyboard navigation crosses the edge of the window", async ({ page }) => {
 
   await page.keyboard.press("Home");
   await expect(rowAt(page, 0)).toBeFocused();
+});
+
+test.describe("with a host that takes its time to answer", () => {
+  const LATENCY_MS = 120;
+
+  test.beforeEach(async ({ page }) => {
+    await setHostLatency(page, LATENCY_MS);
+    await rowAt(page, 0).focus();
+    await expect(rowAt(page, 0)).toBeFocused();
+  });
+
+  /** `true` if the focus is on the tree or inside it (not lost to the body). */
+  const focusIsInTree = (page: Page) =>
+    page.evaluate(() => {
+      const tree = document.querySelector(".tree");
+      return !!tree && tree.contains(document.activeElement);
+    });
+
+  test("40 times PageDown lands on the right row", async ({ page }) => {
+    const rowsPerPage = await page
+      .locator(".tree")
+      .evaluate(
+        (el, height) => Math.floor(el.clientHeight / height),
+        ROW_HEIGHT,
+      );
+    expect(rowsPerPage).toBeGreaterThan(3);
+
+    // Far faster than the host answers: most rows the focus passes never
+    // arrive, and the focused row is not in the DOM for most of the keys.
+    for (let i = 0; i < 40; i++) {
+      await page.keyboard.press("PageDown");
+      expect(await focusIsInTree(page), `after ${i + 1} keys`).toBe(true);
+    }
+
+    const target = 40 * rowsPerPage;
+    await expect(rowAt(page, target)).toBeFocused();
+    await expect(rowAt(page, target)).toBeInViewport();
+    await expect(rowAt(page, target)).toHaveAttribute(
+      "data-path",
+      `/repo/src/file-${String(target - 1).padStart(4, "0")}.txt`,
+    );
+  });
+
+  test("End, then ArrowUp: the key after the jump is not lost", async ({
+    page,
+  }) => {
+    await page.keyboard.press("End");
+    await page.keyboard.press("ArrowUp");
+    expect(await focusIsInTree(page)).toBe(true);
+
+    await expect(rowAt(page, LAST_ROW - 1)).toBeFocused();
+  });
+
+  test("End, then Space: the key acts on the row once it is there", async ({
+    page,
+  }) => {
+    await page.keyboard.press("End");
+    // The rows at the end are still placeholders.
+    await expect(page.locator(".tree")).toHaveAttribute("aria-busy", "true");
+    await expect(
+      page.locator(".tree .virtual-scroll-item.pending").first(),
+    ).toBeVisible();
+    await page.keyboard.press("Space");
+    expect(await posted(page, "toggleSelection")).toEqual([]);
+
+    await expect(rowAt(page, LAST_ROW)).toBeFocused();
+    await expect(page.locator(".tree")).toHaveAttribute("aria-busy", "false");
+    await expect(
+      page.locator(".tree .virtual-scroll-item.pending"),
+    ).toHaveCount(0);
+    expect(await posted(page, "toggleSelection")).toEqual([
+      { command: "toggleSelection", payload: "/repo/zebra.md" },
+    ]);
+  });
+
+  test("placeholders take exactly the place of the rows", async ({ page }) => {
+    const tree = page.locator(".tree");
+    await tree.evaluate((el, top) => (el.scrollTop = top), 3_000 * ROW_HEIGHT);
+
+    const placeholder = page
+      .locator(".tree .virtual-scroll-item.pending")
+      .first();
+    await expect(placeholder).toBeVisible();
+    const before = await placeholder.evaluate((el) => ({
+      top: (el as HTMLElement).style.top,
+      height: el.getBoundingClientRect().height,
+    }));
+    expect(before.height).toBe(ROW_HEIGHT);
+    const scrollTop = await tree.evaluate((el) => el.scrollTop);
+
+    await expect(rowAt(page, 3_005)).toBeVisible();
+    // Nothing has moved: same scroll position, the row where its placeholder was.
+    expect(await tree.evaluate((el) => el.scrollTop)).toBe(scrollTop);
+    const index = parseInt(before.top, 10) / ROW_HEIGHT;
+    const row = rowAt(page, index);
+    await expect(row).toBeVisible();
+    expect(
+      await row.evaluate(
+        (el) => el.parentElement!.getBoundingClientRect().height,
+      ),
+    ).toBe(ROW_HEIGHT);
+  });
 });
 
 test("typing finds a row the UI does not hold", async ({ page }) => {

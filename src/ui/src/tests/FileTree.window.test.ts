@@ -175,13 +175,34 @@ describe("FileTree – the window of rows", () => {
     expect(host.received).toHaveLength(1);
   });
 
-  it("leaves the place of rows that have not arrived empty until they have", async () => {
+  it("shows placeholders for rows that have not arrived, without moving anything", async () => {
     const { host, tree, container } = await mount(manyRows(1000));
+    const placeholders = () =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(".virtual-scroll-item.pending"),
+      );
+    expect(placeholders()).toEqual([]);
+    expect(tree).toHaveAttribute("aria-busy", "false");
 
     await scrollToRow(tree, 900);
 
     expect(host.posted("setViewport")).toEqual([{ start: 870, count: 71 }]);
+    // No row of the window is on screen: every place holds a placeholder of
+    // the height of a row, where the row will be.
     expect(renderedIndices(container)).toEqual([]);
+    expect(placeholders().map((el) => el.style.top)).toEqual(
+      Array.from({ length: 20 }, (_, i) => `${(895 + i) * ITEM_HEIGHT}px`),
+    );
+    for (const placeholder of placeholders()) {
+      expect(placeholder.style.height).toBe(`${ITEM_HEIGHT}px`);
+      // Nothing for assistive technology to read; the tree says it is busy.
+      expect(placeholder.querySelector("[role]")).toBeNull();
+      expect(placeholder.firstElementChild).toHaveAttribute(
+        "aria-hidden",
+        "true",
+      );
+    }
+    expect(tree).toHaveAttribute("aria-busy", "true");
     // The scroller keeps its height: the scrollbar does not jump.
     expect(
       container.querySelector<HTMLElement>(".virtual-scroll-sizer")!.style
@@ -191,14 +212,38 @@ describe("FileTree – the window of rows", () => {
     host.answer();
     await settle();
 
+    expect(placeholders()).toEqual([]);
+    expect(tree).toHaveAttribute("aria-busy", "false");
     expect(renderedIndices(container)).toEqual(
       Array.from({ length: 20 }, (_, i) => 895 + i),
     );
+    expect(
+      rowEl(container, 900).closest<HTMLElement>(".virtual-scroll-item")!.style
+        .top,
+    ).toBe(`${900 * ITEM_HEIGHT}px`);
     expect(rowEl(container, 900)).toHaveAttribute(
       "data-path",
       "/repo/file-00900.txt",
     );
     expect(host.received).toHaveLength(1);
+  });
+
+  it("shows placeholders only for the part of the screen the window lacks", async () => {
+    const { host, tree, container } = await mount(manyRows(1000));
+
+    // The window holds rows 0..99: the last rows of this screen are missing.
+    await scrollToRow(tree, 92);
+
+    expect(renderedIndices(container)).toEqual([
+      87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+    ]);
+    expect(
+      container.querySelectorAll(".virtual-scroll-item.pending"),
+    ).toHaveLength(7);
+    await answerAll(host);
+    expect(
+      container.querySelectorAll(".virtual-scroll-item.pending"),
+    ).toHaveLength(0);
   });
 
   it("asks once per position, also when other snapshots arrive in between", async () => {
@@ -252,8 +297,8 @@ describe("FileTree – the window of rows", () => {
     await scrollToRow(tree, 900);
     await answerAll(host);
 
+    // The host shows another directory from the top by itself.
     host.setRows(manyRows(400), { current_path: "/other" });
-    host.receive("setViewport", { start: 0, count: 71 }); // the host's reset
     host.received.length = 0;
     host.answer();
     await settle();
@@ -300,6 +345,75 @@ describe("FileTree – keyboard across the edge of the window", () => {
 
     expect(focusedRow(container)).toBe(0);
     expect(document.activeElement).toBe(rowEl(container, 0));
+  });
+
+  it("keeps the focus in the tree while the focused row is not rendered", async () => {
+    const { host, tree, container } = await mountFocused(manyRows(1000));
+
+    await fireEvent.keyDown(rowEl(container, 0), { key: "End" });
+    await settle();
+
+    // The row that had the focus is gone and the new one has not arrived:
+    // the tree itself holds the focus, so the next keys reach its handler.
+    expect(focusedRow(container)).toBeNull();
+    expect(document.activeElement).toBe(tree);
+
+    await answerAll(host);
+    expect(document.activeElement).toBe(rowEl(container, 999));
+  });
+
+  it("does not lose keys pressed before the rows have arrived", async () => {
+    const { host, tree, container } = await mountFocused(manyRows(1000));
+
+    // End, ArrowUp, Space in quick succession: the host has answered nothing.
+    await fireEvent.keyDown(rowEl(container, 0), { key: "End" });
+    await tick();
+    await fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
+    await tick();
+    await fireEvent.keyDown(document.activeElement!, { key: " " });
+    await settle();
+    expect(host.posted("toggleSelection")).toEqual([]);
+    expect(document.activeElement).toBe(tree);
+
+    await answerAll(host);
+
+    // ArrowUp moved the focus by position; Space acted on the row it was
+    // pressed on, once that row was here.
+    expect(focusedRow(container)).toBe(998);
+    expect(document.activeElement).toBe(rowEl(container, 998));
+    expect(host.posted("toggleSelection")).toEqual(["/repo/file-00998.txt"]);
+
+    // Nothing is left over: a later snapshot does not act again.
+    host.answer();
+    await settle();
+    expect(host.posted("toggleSelection")).toHaveLength(1);
+  });
+
+  it("acts on the row a key was pressed on, also when the focus has moved on", async () => {
+    const { host, container } = await mountFocused(manyRows(1000));
+
+    await fireEvent.keyDown(rowEl(container, 0), { key: "End" });
+    await tick();
+    await fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+    await fireEvent.keyDown(document.activeElement!, { key: "Home" });
+    await answerAll(host);
+
+    expect(host.posted("loadFilePreview")).toEqual(["/repo/file-00999.txt"]);
+    expect(focusedRow(container)).toBe(0);
+  });
+
+  it("drops keys kept for a row when the list changes before it arrives", async () => {
+    const { host, container } = await mountFocused(manyRows(1000));
+
+    await fireEvent.keyDown(rowEl(container, 0), { key: "End" });
+    await tick();
+    await fireEvent.keyDown(document.activeElement!, { key: " " });
+    // Before the rows arrive, the list becomes another one: position 999
+    // is not the row the key was pressed on any more.
+    host.setRows(manyRows(1200));
+    await answerAll(host);
+
+    expect(host.posted("toggleSelection")).toEqual([]);
   });
 
   it("PageDown and PageUp move by a viewport, also out of the window", async () => {
@@ -563,6 +677,23 @@ describe("FileTree – the focused row when the list changes", () => {
     host.answer();
     await settle();
     expect(host.posted("locateRow")).toHaveLength(1);
+  });
+
+  it("gives the focus back to its row when that is scrolled into view again", async () => {
+    const { host, tree, container } = await mountFocusedOnRow(
+      manyRows(1000),
+      5,
+    );
+    expect(document.activeElement).toBe(rowEl(container, 5));
+
+    await scrollToRow(tree, 700);
+    await answerAll(host);
+    // Its element is gone; the focus waits on the tree, not on the body.
+    expect(document.activeElement).toBe(tree);
+
+    await scrollToRow(tree, 0);
+    await answerAll(host);
+    expect(document.activeElement).toBe(rowEl(container, 5));
   });
 
   it("does not ask while the list is the same and the item is just out of sight", async () => {

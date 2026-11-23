@@ -51,7 +51,7 @@ Scrolling is therefore a round trip: the UI reports the viewport, the host answe
 - DOM rows carry the stable class `.virtual-scroll-item` (asserted in tests) and `data-index`, the index in the list.
 - `TreeItem.svelte` is a pure row: it receives a row and posts commands, nothing else. The indentation comes from the row's `depth`.
 - Rows are keyed by `path` (no index keys).
-- A row that is inside the viewport but has not arrived yet (right after a jump) leaves its place empty for the round trip; the sizer keeps its height, so the scrollbar does not move.
+- A row that is inside the viewport but has not arrived yet (right after a jump) is rendered as a **placeholder** of the height of a row at the position of the row (`.virtual-scroll-item.pending`, hidden from assistive technology; the tree is `aria-busy` meanwhile). Nothing moves when the row arrives, and the sizer keeps its height, so the scrollbar does not move either.
 - If the viewport is at least as tall as the list, all rows are rendered.
 
 There is no flatten step and no tree in the UI: the rows arrive in order, with their level.
@@ -71,6 +71,7 @@ Consequences for UI code:
 The focused row is known by its **index in the list** and, once the row has arrived, by its **path**.
 
 - `ArrowUp`/`ArrowDown`, `PageUp`/`PageDown`, `Home`/`End` compute the new index (`rows_total` is known), scroll it into view and focus the row when it is rendered. If the row is outside the window, the scroll reports the viewport and the focus follows as soon as the row has arrived.
+- **No key is lost while a row is under way.** The element of a row exists only while the row is rendered. When the row that has the DOM focus is about to leave the DOM (scrolled away, or the focus has moved to a row that has not arrived), the focus is parked on the tree element itself instead of falling to the body; the key handler lives there and works with the focused index, so `End` followed by `ArrowUp` ends one row above the last. The focus returns to the row as soon as it is rendered. A key that acts on a row (`Space`, `Enter`, `ArrowLeft`/`ArrowRight`) and is pressed before that row has arrived is kept and carried out on that row when it is there (`End`, `Space` selects the last file); kept keys are dropped if the list changes first, because the position then means another row.
 - `ArrowRight` on an expanded directory moves to the next row (its first child); `ArrowLeft` moves to the nearest row above that is less deep. If the window does not reach that far up, the UI asks the host: `locateRow { target: { kind: "parent_of", path } }`.
 - Typing a name (type-ahead) is a search over all rows, so the host does it: `locateRow { target: { kind: "typeahead", prefix, from } }`.
 - When the list changes (`rows_revision`), the focus stays on its item: if its path is in the window, the index is taken from there; if not, the UI asks where it went (`{ kind: "path", path }`). An item that is no row any more leaves the focus at its position.
@@ -126,7 +127,7 @@ We ship three benches in `src/ui/e2e/benchmarks.spec.ts`:
 - **Filter (\~1k subset)** — apply a representative filter under `BMARK_FILTER_MS` (default 600 ms).
 - **Scroll jump to end** — a programmatic jump to the end, including the round trip for the window, under `BMARK_SCROLL_MS` (default 300 ms).
 
-There is no host in E2E tests. The benches and `e2e/tree-window.spec.ts` (scrolling, keyboard and type-ahead across the edge of the window, in Chromium and WebKit) hand the rows to the stand-in host of the E2E bridge (`window.__e2e.host.setTree`), which answers `setViewport` and `locateRow` asynchronously with windows, as the real host does. Run via `npm run bench` (or the VS Code test runner); `npm run bench:strict` uses 1500/500/200 ms. Thresholds are env-driven.
+There is no host in E2E tests. The benches and `e2e/tree-window.spec.ts` (scrolling, keyboard and type-ahead across the edge of the window, in Chromium and WebKit) hand the rows to the stand-in host of the E2E bridge (`window.__e2e.host.setTree`), which answers `setViewport` and `locateRow` asynchronously with windows, as the real host does: it is the model in `$lib/dev/treeHostModel.ts`, which a contract test replays against a scenario recorded from the host (see [IPC Contracts](./ipc.md#contract-tests)), and it delivers its snapshots through `window.render`. `tree-window.spec.ts` also runs with a host that answers late (`host.setLatency`): 40 times `PageDown`, `End` + `ArrowUp`, `End` + `Space`. Run via `npm run bench` (or the VS Code test runner); `npm run bench:strict` uses 1500/500/200 ms. Thresholds are env-driven.
 
 ## Anti-Patterns
 

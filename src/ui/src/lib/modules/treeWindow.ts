@@ -20,8 +20,15 @@ export const MIN_BUFFER_ROWS = 30;
 /**
  * The largest window the host sends (`Viewport::MAX_ROWS` in
  * `src/app/view_model/rows.rs`). Asking for more would be answered with less.
+ * The host states its limits in the scenario fixture of the contract tests,
+ * and `tree-window-scenario.test.ts` compares these constants with them.
  */
 export const MAX_WINDOW_ROWS = 600;
+/**
+ * The window the host sends before the UI has reported its viewport
+ * (`Viewport::DEFAULT_ROWS`).
+ */
+export const DEFAULT_WINDOW_ROWS = 100;
 
 /** Rows `start` (inclusive) to `end` (exclusive) of the list of all rows. */
 export type RowRange = { start: number; end: number };

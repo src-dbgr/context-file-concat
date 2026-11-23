@@ -5,12 +5,7 @@
 
 import { appState, getState } from "$lib/stores/app";
 import type { AppState, TreeRow } from "$lib/types";
-
-/** A state without the fields that describe the window of rows. */
-type TreeLessState = Omit<
-  AppState,
-  "rows" | "rows_start" | "rows_total" | "rows_revision" | "located"
->;
+import { TreeHostModel, type TreeLessState } from "./treeHostModel";
 
 type E2EStoreAPI = {
   /**
@@ -26,8 +21,14 @@ type E2EHostAPI = {
    * tests, so the bridge stands in for the one part of it the tree cannot do
    * without: it keeps the list of all rows and answers `setViewport` and
    * `locateRow` with a snapshot, like `src/app/view_model/rows.rs` does.
+   * The snapshot is delivered through `window.render`, validation included.
    */
   setTree: (state: TreeLessState, rows: TreeRow[]) => void;
+  /**
+   * How long the stand-in host takes to answer a command, in ms (0 by
+   * default: the next task). For tests of what the UI does in the meantime.
+   */
+  setLatency: (milliseconds: number) => void;
 };
 
 type E2EDebugAPI = {
@@ -64,91 +65,35 @@ function listVisibleFileNames(): string[] {
     .filter((t) => t.length > 0);
 }
 
-/** The window of a UI that has not reported its viewport (as on the host). */
-const DEFAULT_WINDOW_ROWS = 100;
-/** The largest window the host sends. */
-const MAX_WINDOW_ROWS = 600;
-
-type Located = AppState["located"];
-type HostCommand = { command?: unknown; payload?: unknown };
-type LocateTarget =
-  | { kind: "path"; path: string }
-  | { kind: "parent_of"; path: string }
-  | { kind: "typeahead"; prefix: string; from: number };
-
 /**
- * The stand-in for the host's row windowing. It answers asynchronously, as the
+ * The stand-in for the host's row windowing: the shared model of it
+ * (`treeHostModel.ts`, held against the real host by a contract test), wired
+ * to the two channels of the IPC. It listens to what the UI posts and
+ * delivers its snapshots through `window.render`, so they pass the same
+ * validation as the snapshots of the host. It answers asynchronously, as the
  * host does: a command never changes the state while it is being posted.
  */
-function createTreeHost() {
-  let base: TreeLessState | null = null;
-  let rows: TreeRow[] = [];
-  let viewport = { start: 0, count: DEFAULT_WINDOW_ROWS };
-  let revision = 0;
-  let located: Located = null;
+function createTreeHost(): E2EHostAPI {
+  const model = new TreeHostModel();
+  let latencyMs = 0;
   let intercepting = false;
 
-  function send() {
-    if (!base) return;
-    const count = Math.min(viewport.count, rows.length);
-    const start = Math.min(viewport.start, rows.length - count);
-    appState.set({
-      ...base,
-      rows: rows.slice(start, start + count),
-      rows_start: start,
-      rows_total: rows.length,
-      rows_revision: revision,
-      located,
-    });
-  }
-
-  function rowOf(target: LocateTarget): number | null {
-    const found = (index: number) => (index === -1 ? null : index);
-    if (target.kind === "path") {
-      return found(rows.findIndex((row) => row.path === target.path));
-    }
-    if (target.kind === "parent_of") {
-      const child = rows.findIndex((row) => row.path === target.path);
-      if (child === -1) return null;
-      for (let index = child - 1; index >= 0; index--) {
-        if (rows[index].depth < rows[child].depth) return index;
-      }
-      return null;
-    }
-    const prefix = target.prefix.toLowerCase();
-    const from = Math.min(target.from, rows.length);
-    const matches = (row: TreeRow) => row.name.toLowerCase().startsWith(prefix);
-    const after = rows.findIndex((row, index) => index >= from && matches(row));
-    return found(after !== -1 ? after : rows.findIndex(matches));
+  function deliver() {
+    const snapshot = model.snapshot();
+    if (snapshot) window.render(snapshot);
   }
 
   function handle(message: string) {
-    if (!base) return;
-    let parsed: HostCommand;
+    let posted: { command?: unknown; payload?: unknown };
     try {
-      parsed = JSON.parse(message) as HostCommand;
+      posted = JSON.parse(message) as typeof posted;
     } catch {
       return;
     }
-    if (parsed.command === "setViewport") {
-      const { start, count } = parsed.payload as {
-        start: number;
-        count: number;
-      };
-      viewport = {
-        start,
-        count: Math.max(1, Math.min(count, MAX_WINDOW_ROWS)),
-      };
-    } else if (parsed.command === "locateRow") {
-      const { request, target } = parsed.payload as {
-        request: number;
-        target: LocateTarget;
-      };
-      located = { request, row: rowOf(target) };
-    } else {
-      return;
+    if (typeof posted.command !== "string") return;
+    if (model.receive(posted.command, posted.payload ?? null)) {
+      setTimeout(deliver, latencyMs);
     }
-    setTimeout(send, 0);
   }
 
   /** Listen to what the UI posts; whoever listened before still does. */
@@ -165,14 +110,13 @@ function createTreeHost() {
   }
 
   return {
-    setTree(state: TreeLessState, allRows: TreeRow[]) {
+    setTree(state: TreeLessState, rows: TreeRow[]) {
       intercept();
-      base = state;
-      rows = allRows;
-      revision += 1;
-      viewport = { start: 0, count: viewport.count };
-      located = null;
-      send();
+      model.show(state, rows);
+      deliver();
+    },
+    setLatency(milliseconds: number) {
+      latencyMs = Math.max(0, milliseconds);
     },
   };
 }
