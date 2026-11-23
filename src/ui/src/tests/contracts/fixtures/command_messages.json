@@ -1,0 +1,300 @@
+[
+  {
+    "command": "initialize",
+    "payload": null,
+    "seq": 1,
+    "session": 1234567
+  },
+  {
+    "command": "selectDirectory",
+    "payload": null,
+    "seq": 2,
+    "session": 1234567
+  },
+  {
+    "command": "rescanDirectory",
+    "payload": null,
+    "seq": 3,
+    "session": 1234567
+  },
+  {
+    "command": "clearDirectory",
+    "payload": null,
+    "seq": 4,
+    "session": 1234567
+  },
+  {
+    "command": "cancelScan",
+    "payload": null,
+    "seq": 5,
+    "session": 1234567
+  },
+  {
+    "command": "loadDirectoryLevel",
+    "payload": "/project/src",
+    "seq": 6,
+    "session": 1234567
+  },
+  {
+    "command": "setExpansion",
+    "payload": {
+      "expanded": true,
+      "path": "/project/src"
+    },
+    "seq": 7,
+    "session": 1234567
+  },
+  {
+    "command": "expandCollapseAll",
+    "payload": true,
+    "seq": 8,
+    "session": 1234567
+  },
+  {
+    "command": "expandCollapseAll",
+    "payload": false,
+    "seq": 9,
+    "session": 1234567
+  },
+  {
+    "command": "setViewport",
+    "payload": {
+      "count": 90,
+      "start": 120
+    },
+    "seq": 10,
+    "session": 1234567
+  },
+  {
+    "command": "toggleSelection",
+    "payload": "/project/src",
+    "seq": 11,
+    "session": 1234567
+  },
+  {
+    "command": "toggleDirectorySelection",
+    "payload": "/project/src",
+    "seq": 12,
+    "session": 1234567
+  },
+  {
+    "command": "selectAll",
+    "payload": null,
+    "seq": 13,
+    "session": 1234567
+  },
+  {
+    "command": "deselectAll",
+    "payload": null,
+    "seq": 14,
+    "session": 1234567
+  },
+  {
+    "command": "updateFilters",
+    "payload": {
+      "contentSearchQuery": "needle",
+      "extensionFilter": "rs",
+      "searchQuery": "main"
+    },
+    "seq": 15,
+    "session": 1234567
+  },
+  {
+    "command": "updateFilters",
+    "payload": {
+      "contentSearchQuery": "",
+      "extensionFilter": "",
+      "searchQuery": ""
+    },
+    "seq": 16,
+    "session": 1234567
+  },
+  {
+    "command": "loadFilePreview",
+    "payload": "/project/src",
+    "seq": 17,
+    "session": 1234567
+  },
+  {
+    "command": "clearPreviewState",
+    "payload": null,
+    "seq": 18,
+    "session": 1234567
+  },
+  {
+    "command": "generatePreview",
+    "payload": null,
+    "seq": 19,
+    "session": 1234567
+  },
+  {
+    "command": "cancelGeneration",
+    "payload": null,
+    "seq": 20,
+    "session": 1234567
+  },
+  {
+    "command": "pickOutputDirectory",
+    "payload": null,
+    "seq": 21,
+    "session": 1234567
+  },
+  {
+    "command": "addIgnorePattern",
+    "payload": {
+      "pattern": "*.log"
+    },
+    "seq": 22,
+    "session": 1234567
+  },
+  {
+    "command": "removeIgnorePattern",
+    "payload": {
+      "pattern": "*.log"
+    },
+    "seq": 23,
+    "session": 1234567
+  },
+  {
+    "command": "clearIgnorePatterns",
+    "payload": null,
+    "seq": 24,
+    "session": 1234567
+  },
+  {
+    "command": "addIgnorePath",
+    "payload": "/project/src",
+    "seq": 25,
+    "session": 1234567
+  },
+  {
+    "command": "importConfig",
+    "payload": null,
+    "seq": 26,
+    "session": 1234567
+  },
+  {
+    "command": "exportConfig",
+    "payload": null,
+    "seq": 27,
+    "session": 1234567
+  },
+  {
+    "command": "locateRow",
+    "payload": {
+      "request": 1,
+      "target": {
+        "kind": "path",
+        "path": "/project/src/main.rs"
+      }
+    },
+    "seq": 28,
+    "session": 1234567
+  },
+  {
+    "command": "locateRow",
+    "payload": {
+      "request": 2,
+      "target": {
+        "kind": "parent_of",
+        "path": "/project/src/main.rs"
+      }
+    },
+    "seq": 29,
+    "session": 1234567
+  },
+  {
+    "command": "locateRow",
+    "payload": {
+      "request": 3,
+      "target": {
+        "from": 3,
+        "kind": "typeahead",
+        "prefix": "ma"
+      }
+    },
+    "seq": 30,
+    "session": 1234567
+  },
+  {
+    "command": "saveFile",
+    "payload": {
+      "documentId": 7,
+      "kind": "generated"
+    },
+    "seq": 31,
+    "session": 1234567
+  },
+  {
+    "command": "saveFile",
+    "payload": {
+      "content": "generated content, edited",
+      "kind": "edited"
+    },
+    "seq": 32,
+    "session": 1234567
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "case_sensitive_search",
+      "value": true
+    },
+    "seq": 33,
+    "session": 1234567
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "remove_empty_directories",
+      "value": true
+    },
+    "seq": 34,
+    "session": 1234567
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "include_tree_by_default",
+      "value": false
+    },
+    "seq": 35,
+    "session": 1234567
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "use_relative_paths",
+      "value": false
+    },
+    "seq": 36,
+    "session": 1234567
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "output_filename",
+      "value": "context.txt"
+    },
+    "seq": 37,
+    "session": 1234567
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "output_directory",
+      "value": "/home/user/out"
+    },
+    "seq": 38,
+    "session": 1234567
+  },
+  {
+    "command": "setConfigOption",
+    "payload": {
+      "option": "output_directory",
+      "value": null
+    },
+    "seq": 39,
+    "session": 1234567
+  }
+]

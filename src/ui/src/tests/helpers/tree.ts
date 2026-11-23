@@ -121,6 +121,8 @@ export function baseAppState(overrides: Partial<AppState> = {}): AppState {
     is_fully_scanned: true,
     patterns_need_rescan: false,
     ...treeFields([], { revision: 0 }),
+    last_processed_session: 0,
+    last_processed_seq: 0,
     current_path: "/repo",
     current_config_filename: null,
     status_message: "Status: Ready.",

@@ -10,7 +10,7 @@
 //
 // Regenerate after an intended change: `UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture`
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
@@ -25,6 +25,7 @@ import {
   UiConfigSchema,
   UiStateSchema,
   TreeRowSchema,
+  type CommandId,
   type CommandName,
 } from "$lib/ipc/schema";
 import type { z } from "zod";
@@ -220,6 +221,17 @@ describe("[IPC Contracts] commands routed by the Rust backend", () => {
     }
   });
 
+  it("refuses more than a command in a message, like the host", () => {
+    const message = { command: "selectAll", payload: null };
+    expect(AnyCommandMessageSchema.safeParse(message).success).toBe(true);
+    for (const extra of [{ extra: 1 }, { seq: 1 }, { session: 1 }]) {
+      expect(
+        AnyCommandMessageSchema.safeParse({ ...message, ...extra }).success,
+        JSON.stringify(extra),
+      ).toBe(false);
+    }
+  });
+
   it("covers every kind of row lookup on both sides", () => {
     const kindsOf = (targets: { kind: string }[]) =>
       new Set(targets.map((target) => target.kind));
@@ -338,4 +350,93 @@ describe("[IPC Contracts] host calls of the generated output", () => {
       new Set(IgnorePathRefusalSchema.options.map((o) => o.shape.reason.value)),
     );
   });
+});
+
+// The envelope: `fixtures/command_messages.json` holds the same examples as
+// complete messages, exactly as the host reads them (it checks that itself:
+// each one is read back as the command it was written from): posted by one
+// session, numbered from 1 in the order they are listed. Here `post()` has to
+// write these messages; the session is its own, another one for every load.
+const messageFixture = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("./fixtures/command_messages.json", import.meta.url)),
+    "utf8",
+  ),
+) as {
+  session: number;
+  seq: number;
+  command: CommandName;
+  payload: unknown;
+}[];
+
+describe("[IPC Contracts] messages read by the Rust backend", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  /** Posts every example with a `post()` that has not posted anything yet. */
+  async function postExamples() {
+    const posted: string[] = [];
+    vi.resetModules();
+    vi.stubGlobal("window", {
+      ipc: { postMessage: (message: string) => posted.push(message) },
+    });
+    const { post } = await import("$lib/services/backend");
+    const send = post as (
+      command: CommandName,
+      payload: unknown,
+    ) => CommandId | null;
+    const returned = messageFixture.map(({ command, payload }) =>
+      send(command, payload),
+    );
+    return { posted, returned };
+  }
+
+  it("covers every command", () => {
+    expect(new Set(messageFixture.map((message) => message.command))).toEqual(
+      new Set(Object.keys(CommandSchemas)),
+    );
+    expect(messageFixture.map((message) => message.seq)).toEqual(
+      messageFixture.map((_, index) => index + 1),
+    );
+    expect(new Set(messageFixture.map((message) => message.session)).size).toBe(
+      1,
+    );
+  });
+
+  for (const [build, dev] of [
+    ["a development build (validated)", true],
+    ["a production build", false],
+  ] as const) {
+    it(`are what post() writes in ${build}`, async () => {
+      vi.stubEnv("DEV", dev);
+      const { posted, returned } = await postExamples();
+
+      const messages = posted.map(
+        (message) => JSON.parse(message) as (typeof messageFixture)[number],
+      );
+      // One session, a number the host reads: a non-negative integer.
+      const session = messages[0].session;
+      expect(Number.isSafeInteger(session) && session > 0).toBe(true);
+      // Apart from who posts, the messages are those of the fixture.
+      expect(messages).toEqual(
+        messageFixture.map((message) => ({ ...message, session })),
+      );
+      // The name of a command is what `post()` returns for it.
+      expect(returned).toEqual(
+        messageFixture.map(({ seq }) => ({ session, seq })),
+      );
+      // An envelope is that name, a command and its payload, nothing else.
+      for (const message of messages) {
+        expect(Object.keys(message).sort()).toEqual([
+          "command",
+          "payload",
+          "seq",
+          "session",
+        ]);
+      }
+    });
+  }
 });

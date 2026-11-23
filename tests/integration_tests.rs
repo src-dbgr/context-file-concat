@@ -272,11 +272,7 @@ async fn test_expand_all_after_scan() {
 
     // --- ACT ---
     // Now that the scan is complete, expand everything it has found
-    app::commands::expand_collapse_all(
-        serde_json::json!(true),
-        harness.proxy.clone(),
-        harness.state.clone(),
-    );
+    app::commands::expand_collapse_all(true, harness.proxy.clone(), harness.state.clone());
 
     // The command is synchronous, so we can check the state immediately.
 

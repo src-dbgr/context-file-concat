@@ -6,6 +6,7 @@
 #[cfg(test)]
 mod command_contract_tests;
 pub mod commands;
+pub mod correlation;
 pub mod dispatch;
 #[cfg(test)]
 mod event_contract_tests;
@@ -13,9 +14,11 @@ pub mod events;
 pub mod file_dialog;
 pub mod filtering;
 mod helpers;
+pub(crate) mod ipc;
 pub mod proxy;
 pub mod selection;
 pub mod shared_state;
+pub mod snapshot;
 mod staged;
 pub mod state;
 pub mod tasks;
@@ -28,16 +31,20 @@ mod window_contract_tests;
 pub mod window_geometry;
 
 use crate::app::file_dialog::DialogService;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use wry::WebView;
 
 use crate::app::proxy::EventProxy;
+use correlation::Correlated;
 use dispatch::CommandDispatcher;
-use events::{IpcMessage, UserEvent};
+use events::UserEvent;
+use ipc::{excerpt, Command, IpcMessage};
 use shared_state::SharedState;
 
-/// The main handler for IPC messages from the WebView: parses the message and queues
+/// The main handler for IPC messages from the WebView: reads the message and queues
 /// its command on the matching lane of `dispatcher`, which executes commands in arrival
 /// order (see [`dispatch`]). Returns immediately, so the event loop is never blocked.
 ///
@@ -49,6 +56,12 @@ use shared_state::SharedState;
 ///   they neither hold up nor are ordered relative to the commands that arrive later,
 ///   while the dialog is open.
 /// - Every other command runs on the ordered lane, in arrival order.
+/// - A message that is no command is refused: it is logged and answered with the
+///   unchanged snapshot, at its place in the order (see [`ipc`]).
+///
+/// The name of the message is handed to the dispatcher, and the events of the
+/// command are sent through a proxy that writes into every snapshot how far the
+/// commands have got (see [`correlation`]). The commands know nothing of either.
 pub fn dispatch_ipc_message<P: EventProxy, D: DialogService + 'static>(
     dispatcher: &CommandDispatcher,
     message: String,
@@ -56,19 +69,35 @@ pub fn dispatch_ipc_message<P: EventProxy, D: DialogService + 'static>(
     proxy: P,
     state: SharedState,
 ) {
-    let Ok(msg) = serde_json::from_str::<IpcMessage>(&message) else {
-        tracing::error!("Failed to parse IPC message: {}", message);
-        return;
+    let proxy = Correlated::new(proxy, dispatcher.progress().clone());
+
+    // What is logged of a message is short, whatever its size (see [`ipc`]).
+    let (id, command) = match IpcMessage::parse(&message) {
+        IpcMessage::Command { id, command } => (Some(id), Some(command)),
+        IpcMessage::Refused { id, reason } => {
+            tracing::warn!(
+                "Refused IPC message {} of UI {}: {reason}",
+                id.seq,
+                id.session
+            );
+            (Some(id), None)
+        }
+        IpcMessage::Unreadable { reason } => {
+            tracing::error!(
+                "Refused an IPC message that cannot be read ({reason}): {}",
+                excerpt(&message)
+            );
+            (None, None)
+        }
     };
 
-    match Command::from_name(&msg.command) {
-        Some(Command::Dialog(command)) => dispatcher.dispatch_blocking(move || {
-            run_dialog_command(command, msg.payload, dialog_service.as_ref(), proxy, state);
-        }),
-        Some(Command::Ordered(command)) => {
-            dispatcher.dispatch(run_command(command, msg.payload, proxy, state))
-        }
-        None => tracing::warn!("Unknown IPC command: {}", msg.command),
+    let work = match command {
+        Some(command) => command.into_work(dialog_service, proxy, state),
+        None => at_once(move || commands::answer_unchanged(&proxy, &state)),
+    };
+    match work {
+        Work::Ordered(command) => dispatcher.dispatch(id, command),
+        Work::Blocking(command) => dispatcher.dispatch_blocking(id, command),
     }
 }
 
@@ -76,200 +105,118 @@ pub fn dispatch_ipc_message<P: EventProxy, D: DialogService + 'static>(
 ///
 /// A drop is a command like any other: it replaces the loaded directory, so it has to
 /// be ordered relative to the IPC commands (and to other drops). It therefore runs on
-/// the ordered lane of the same `dispatcher`.
+/// the ordered lane of the same `dispatcher`. It has no number (the UI did not post
+/// it); the snapshots it leads to carry the number of the last command of the UI.
 pub fn dispatch_dropped_path<P: EventProxy>(
     dispatcher: &CommandDispatcher,
     path: PathBuf,
     proxy: P,
     state: SharedState,
 ) {
-    dispatcher.dispatch(async move { commands::open_dropped_path(path, proxy, state) });
+    let proxy = Correlated::new(proxy, dispatcher.progress().clone());
+    dispatcher.dispatch(None, async move {
+        commands::open_dropped_path(path, proxy, state)
+    });
 }
 
-/// A command of the IPC contract together with the lane it runs on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Command {
-    /// Waits for a native dialog; runs on the blocking lane.
-    Dialog(DialogCommand),
+/// What a command does, on the lane it is done on.
+enum Work {
     /// Runs on the ordered lane.
-    Ordered(OrderedCommand),
+    Ordered(Pin<Box<dyn Future<Output = ()> + Send>>),
+    /// Waits for a native dialog; runs on the blocking lane.
+    Blocking(Box<dyn FnOnce() + Send>),
 }
 
-/// The commands that wait for the user to answer a native dialog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DialogCommand {
-    SelectDirectory,
-    SaveFile,
-    PickOutputDirectory,
-    ImportConfig,
-    ExportConfig,
+/// A command of the ordered lane that can suspend.
+fn ordered(command: impl Future<Output = ()> + Send + 'static) -> Work {
+    Work::Ordered(Box::pin(command))
 }
 
-/// The commands of the ordered lane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OrderedCommand {
-    Initialize,
-    RescanDirectory,
-    ClearDirectory,
-    CancelScan,
-    LoadDirectoryLevel,
-    SetExpansion,
-    ExpandCollapseAll,
-    SetViewport,
-    LocateRow,
-    ToggleSelection,
-    ToggleDirectorySelection,
-    SelectAll,
-    DeselectAll,
-    UpdateFilters,
-    LoadFilePreview,
-    ClearPreviewState,
-    GeneratePreview,
-    CancelGeneration,
-    AddIgnorePattern,
-    RemoveIgnorePattern,
-    ClearIgnorePatterns,
-    AddIgnorePath,
-    SetConfigOption,
+/// A command of the ordered lane that runs to its end at once.
+fn at_once(command: impl FnOnce() + Send + 'static) -> Work {
+    ordered(async move { command() })
 }
 
-/// The routing table: every command of the IPC contract by its wire name.
-///
-/// This is the one list of command names on the host. The router resolves names with
-/// it, and the contract test writes it into the fixture that the UI compares with its
-/// `CommandSchemas`, so the two sides cannot drift apart unnoticed.
-pub(crate) const COMMANDS: &[(&str, Command)] = {
-    use Command::{Dialog, Ordered};
-    &[
-        ("selectDirectory", Dialog(DialogCommand::SelectDirectory)),
-        ("saveFile", Dialog(DialogCommand::SaveFile)),
-        (
-            "pickOutputDirectory",
-            Dialog(DialogCommand::PickOutputDirectory),
-        ),
-        ("importConfig", Dialog(DialogCommand::ImportConfig)),
-        ("exportConfig", Dialog(DialogCommand::ExportConfig)),
-        ("initialize", Ordered(OrderedCommand::Initialize)),
-        ("rescanDirectory", Ordered(OrderedCommand::RescanDirectory)),
-        ("clearDirectory", Ordered(OrderedCommand::ClearDirectory)),
-        ("cancelScan", Ordered(OrderedCommand::CancelScan)),
-        (
-            "loadDirectoryLevel",
-            Ordered(OrderedCommand::LoadDirectoryLevel),
-        ),
-        ("setExpansion", Ordered(OrderedCommand::SetExpansion)),
-        (
-            "expandCollapseAll",
-            Ordered(OrderedCommand::ExpandCollapseAll),
-        ),
-        ("setViewport", Ordered(OrderedCommand::SetViewport)),
-        ("locateRow", Ordered(OrderedCommand::LocateRow)),
-        ("toggleSelection", Ordered(OrderedCommand::ToggleSelection)),
-        (
-            "toggleDirectorySelection",
-            Ordered(OrderedCommand::ToggleDirectorySelection),
-        ),
-        ("selectAll", Ordered(OrderedCommand::SelectAll)),
-        ("deselectAll", Ordered(OrderedCommand::DeselectAll)),
-        ("updateFilters", Ordered(OrderedCommand::UpdateFilters)),
-        ("loadFilePreview", Ordered(OrderedCommand::LoadFilePreview)),
-        (
-            "clearPreviewState",
-            Ordered(OrderedCommand::ClearPreviewState),
-        ),
-        ("generatePreview", Ordered(OrderedCommand::GeneratePreview)),
-        (
-            "cancelGeneration",
-            Ordered(OrderedCommand::CancelGeneration),
-        ),
-        (
-            "addIgnorePattern",
-            Ordered(OrderedCommand::AddIgnorePattern),
-        ),
-        (
-            "removeIgnorePattern",
-            Ordered(OrderedCommand::RemoveIgnorePattern),
-        ),
-        (
-            "clearIgnorePatterns",
-            Ordered(OrderedCommand::ClearIgnorePatterns),
-        ),
-        ("addIgnorePath", Ordered(OrderedCommand::AddIgnorePath)),
-        ("setConfigOption", Ordered(OrderedCommand::SetConfigOption)),
-    ]
-};
+/// A command that blocks its thread while a dialog is open, so it must run on a
+/// thread that is allowed to block (the dispatcher's blocking lane).
+fn blocking(command: impl FnOnce() + Send + 'static) -> Work {
+    Work::Blocking(Box::new(command))
+}
 
 impl Command {
-    fn from_name(name: &str) -> Option<Self> {
-        COMMANDS
-            .iter()
-            .find(|(command_name, _)| *command_name == name)
-            .map(|(_, command)| *command)
-    }
-}
+    /// The handler of the command, bound to its payload, on the lane it belongs to.
+    ///
+    /// This is the one place that says what a command runs and where. A command that
+    /// is added to [`Command`] does not compile until it is listed here.
+    ///
+    /// Most commands are synchronous: they mutate the state, possibly launch a
+    /// background task (scan, lazy load, generation, file preview) and return.
+    /// Whatever such a command means for the state (the scan is registered, the
+    /// directory is expanded, the file is the previewed one) is done by the command
+    /// itself, not by the task, so that the next command finds it done. The commands
+    /// that are awaited can suspend while they wait for a content search
+    /// (`updateFilters`, and a change of the case sensitivity while a content search
+    /// is active); the dispatcher then completes them on its continuation lane.
+    fn into_work<P: EventProxy, D: DialogService + 'static>(
+        self,
+        dialog: Arc<D>,
+        proxy: P,
+        state: SharedState,
+    ) -> Work {
+        use commands as c;
+        match self {
+            // --- Commands that wait for a native dialog ---
+            Self::SelectDirectory => {
+                blocking(move || c::select_directory(dialog.as_ref(), proxy, state))
+            }
+            Self::SaveFile(payload) => {
+                blocking(move || c::save_file(dialog.as_ref(), payload, proxy, state))
+            }
+            Self::PickOutputDirectory => {
+                blocking(move || c::pick_output_directory(dialog.as_ref(), proxy, state))
+            }
+            Self::ImportConfig => blocking(move || c::import_config(dialog.as_ref(), proxy, state)),
+            Self::ExportConfig => blocking(move || c::export_config(dialog.as_ref(), proxy, state)),
 
-/// Executes a dialog command. Blocks the calling thread while the dialog is open, so
-/// it must run on a thread that is allowed to block (the dispatcher's blocking lane).
-fn run_dialog_command<P: EventProxy, D: DialogService + ?Sized>(
-    command: DialogCommand,
-    payload: serde_json::Value,
-    dialog: &D,
-    proxy: P,
-    state: SharedState,
-) {
-    match command {
-        DialogCommand::SelectDirectory => commands::select_directory(dialog, proxy, state),
-        DialogCommand::SaveFile => commands::save_file(dialog, payload, proxy, state),
-        DialogCommand::PickOutputDirectory => commands::pick_output_directory(dialog, proxy, state),
-        DialogCommand::ExportConfig => commands::export_config(dialog, proxy, state),
-        DialogCommand::ImportConfig => commands::import_config(dialog, proxy, state),
-    }
-}
+            // --- Commands that can suspend ---
+            Self::UpdateFilters(filters) => ordered(c::update_filters(filters, proxy, state)),
+            Self::AddIgnorePattern(pattern) => {
+                ordered(c::add_ignore_pattern(pattern, proxy, state))
+            }
+            Self::RemoveIgnorePattern(pattern) => {
+                ordered(c::remove_ignore_pattern(pattern, proxy, state))
+            }
+            Self::ClearIgnorePatterns => ordered(c::clear_ignore_patterns(proxy, state)),
+            Self::AddIgnorePath(path) => ordered(c::add_ignore_path(path, proxy, state)),
+            Self::SetConfigOption(option) => ordered(c::set_config_option(option, proxy, state)),
 
-/// Executes a command of the ordered lane.
-///
-/// Most commands are synchronous: they mutate the state, possibly launch a background
-/// task (scan, lazy load, generation, file preview) and return. Whatever such a command
-/// means for the state (the scan is registered, the directory is expanded, the file is
-/// the previewed one) is done by the command itself, not by the task, so that the next
-/// command finds it done. The commands that are awaited can suspend while they wait for
-/// a content search (`updateFilters`, and a change of the case sensitivity while a
-/// content search is active); the dispatcher then completes them on its continuation
-/// lane.
-async fn run_command<P: EventProxy>(
-    command: OrderedCommand,
-    payload: serde_json::Value,
-    proxy: P,
-    state: SharedState,
-) {
-    use OrderedCommand as C;
-    match command {
-        // --- Asynchronous commands (must be awaited) ---
-        C::UpdateFilters => commands::update_filters(payload, proxy, state).await,
-        C::AddIgnorePattern => commands::add_ignore_pattern(payload, proxy, state).await,
-        C::RemoveIgnorePattern => commands::remove_ignore_pattern(payload, proxy, state).await,
-        C::ClearIgnorePatterns => commands::clear_ignore_patterns(proxy, state).await,
-        C::AddIgnorePath => commands::add_ignore_path(payload, proxy, state).await,
-        C::SetConfigOption => commands::set_config_option(payload, proxy, state).await,
-
-        // --- Synchronous commands & task launchers ---
-        C::RescanDirectory => commands::rescan_directory(proxy, state),
-        C::LoadDirectoryLevel => commands::load_directory_level(payload, proxy, state),
-        C::GeneratePreview => commands::generate_preview(proxy, state),
-        C::ClearDirectory => commands::clear_directory(proxy, state),
-        C::CancelScan => commands::cancel_scan(proxy, state),
-        C::Initialize => commands::initialize(proxy, state),
-        C::LoadFilePreview => commands::load_file_preview(payload, proxy, state),
-        C::ToggleSelection => commands::toggle_selection(payload, proxy, state),
-        C::ToggleDirectorySelection => commands::toggle_directory_selection(payload, proxy, state),
-        C::SetExpansion => commands::set_expansion(payload, proxy, state),
-        C::ExpandCollapseAll => commands::expand_collapse_all(payload, proxy, state),
-        C::SetViewport => commands::set_viewport(payload, proxy, state),
-        C::LocateRow => commands::locate_row(payload, proxy, state),
-        C::SelectAll => commands::select_all(proxy, state),
-        C::DeselectAll => commands::deselect_all(proxy, state),
-        C::CancelGeneration => commands::cancel_generation(proxy, state),
-        C::ClearPreviewState => commands::clear_preview_state(proxy, state),
+            // --- Synchronous commands & task launchers ---
+            Self::Initialize => at_once(move || c::initialize(proxy, state)),
+            Self::RescanDirectory => at_once(move || c::rescan_directory(proxy, state)),
+            Self::ClearDirectory => at_once(move || c::clear_directory(proxy, state)),
+            Self::CancelScan => at_once(move || c::cancel_scan(proxy, state)),
+            Self::LoadDirectoryLevel(path) => {
+                at_once(move || c::load_directory_level(path, proxy, state))
+            }
+            Self::SetExpansion(payload) => at_once(move || c::set_expansion(payload, proxy, state)),
+            Self::ExpandCollapseAll(expand) => {
+                at_once(move || c::expand_collapse_all(expand, proxy, state))
+            }
+            Self::SetViewport(viewport) => at_once(move || c::set_viewport(viewport, proxy, state)),
+            Self::LocateRow(lookup) => at_once(move || c::locate_row(lookup, proxy, state)),
+            Self::ToggleSelection(path) => at_once(move || c::toggle_selection(path, proxy, state)),
+            Self::ToggleDirectorySelection(path) => {
+                at_once(move || c::toggle_directory_selection(path, proxy, state))
+            }
+            Self::SelectAll => at_once(move || c::select_all(proxy, state)),
+            Self::DeselectAll => at_once(move || c::deselect_all(proxy, state)),
+            Self::LoadFilePreview(path) => {
+                at_once(move || c::load_file_preview(path, proxy, state))
+            }
+            Self::ClearPreviewState => at_once(move || c::clear_preview_state(proxy, state)),
+            Self::GeneratePreview => at_once(move || c::generate_preview(proxy, state)),
+            Self::CancelGeneration => at_once(move || c::cancel_generation(proxy, state)),
+        }
     }
 }
 
@@ -384,10 +331,13 @@ fn event_name(event: &UserEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::correlation::{CommandId, CommandSeq, SessionId};
     use crate::app::events::{OutputSizeNotice, SaveResult};
+    use crate::app::snapshot::{send_snapshot, Snapshot};
     use crate::app::state::{AppState, GeneratedDocument, StatusNotice};
     use crate::config::AppConfig;
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc as std_mpsc;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -441,6 +391,32 @@ mod tests {
         events: mpsc::UnboundedReceiver<UserEvent>,
         state: SharedState,
         idle_tasks: usize,
+        /// The number of the last message sent, as the UI counts them.
+        last_seq: AtomicU64,
+    }
+
+    /// The UI of these tests: what it puts into the envelope of its messages.
+    const UI: SessionId = 31;
+
+    /// Command `seq` of the UI of these tests.
+    fn command_of_ui(seq: CommandSeq) -> CommandId {
+        CommandId { session: UI, seq }
+    }
+
+    /// The numbers of the commands the snapshots among `events` account for, in
+    /// order. They are commands of the UI of these tests.
+    fn seqs_of(events: &[UserEvent]) -> Vec<CommandSeq> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                UserEvent::StateUpdate(snapshot) => {
+                    let id = snapshot.accounts_for();
+                    assert_eq!(id.session, UI, "a snapshot for another UI");
+                    Some(id.seq)
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     impl Harness {
@@ -467,6 +443,19 @@ mod tests {
             let mut state = AppState::default();
             state.config = AppConfig::default();
             state.current_path = "/repo".to_string();
+            // What the tree shows: commands that act on a row act on one of these.
+            state.set_full_file_list(
+                [("/repo/src", true), ("/repo/src/main.rs", false)]
+                    .map(|(path, is_directory)| crate::core::FileItem {
+                        path: PathBuf::from(path),
+                        is_directory,
+                        parent: Path::new(path).parent().map(Path::to_path_buf),
+                        depth: path.matches('/').count() - 1,
+                        ..Default::default()
+                    })
+                    .to_vec(),
+            );
+            filtering::apply_filters(&mut state);
             let dispatcher = CommandDispatcher::new();
             Self {
                 // The lanes of the dispatcher are the only tasks of an idle harness.
@@ -481,14 +470,33 @@ mod tests {
                 proxy: TestEventProxy(tx),
                 events,
                 state: SharedState::new(state),
+                last_seq: AtomicU64::new(0),
             }
         }
 
         /// A harness whose loaded directory is `project` (not scanned yet).
         async fn with_project(project: &Path) -> Self {
             let harness = Self::new().await;
-            harness.state.lock().current_path = project.to_string_lossy().to_string();
+            {
+                let mut state = harness.state.lock();
+                state.current_path = project.to_string_lossy().to_string();
+                state.set_full_file_list(Vec::new());
+                filtering::apply_filters(&mut state);
+            }
             harness
+        }
+
+        /// Lists `directory` (not loaded yet), as the first level of a scan does.
+        fn list_directory(&self, directory: &Path) {
+            let mut state = self.state.lock();
+            state.set_full_file_list(vec![crate::core::FileItem {
+                path: directory.to_path_buf(),
+                is_directory: true,
+                parent: directory.parent().map(Path::to_path_buf),
+                depth: 1,
+                ..Default::default()
+            }]);
+            filtering::apply_filters(&mut state);
         }
 
         fn drop_path(&self, path: &Path) {
@@ -510,7 +518,7 @@ mod tests {
             // The marker suspends once, so it passes through the ordered lane and the
             // continuation lane behind everything that was sent before it.
             let (done, marker_ran) = tokio::sync::oneshot::channel();
-            self.dispatcher.dispatch(async move {
+            self.dispatcher.dispatch(None, async move {
                 tokio::task::yield_now().await;
                 let _ = done.send(());
             });
@@ -525,14 +533,50 @@ mod tests {
             .expect("the application did not come to rest");
         }
 
-        fn send(&self, command: &str, payload: serde_json::Value) {
+        /// Posts a command the way the UI does, numbered; returns its number.
+        fn send(&self, command: &str, payload: serde_json::Value) -> CommandSeq {
+            let seq = self.last_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            self.post(
+                serde_json::json!({
+                    "session": UI,
+                    "seq": seq,
+                    "command": command,
+                    "payload": payload,
+                })
+                .to_string(),
+            );
+            seq
+        }
+
+        /// Posts a message as it is.
+        fn post(&self, message: String) {
             dispatch_ipc_message(
                 &self.dispatcher,
-                serde_json::json!({ "command": command, "payload": payload }).to_string(),
+                message,
                 self.dialog.clone(),
                 self.proxy.clone(),
                 self.state.clone(),
             );
+        }
+
+        /// Everything about the state a command could change, for comparisons.
+        fn fingerprint(&self) -> String {
+            let state = self.state.lock();
+            format!(
+                "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                state.config,
+                state.current_path,
+                state.expanded_dirs,
+                state.selected_files,
+                (
+                    &state.search_query,
+                    &state.extension_filter,
+                    &state.content_search_query
+                ),
+                state.previewed_file_path,
+                (state.is_scanning(), state.is_generating()),
+                serde_json::to_string(&view_model::generate_ui_state(&state)).unwrap(),
+            )
         }
 
         /// Waits until `count` events have been sent to the UI.
@@ -556,31 +600,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn every_dialog_command_is_routed_to_the_blocking_lane() {
-        for name in [
-            "selectDirectory",
-            "saveFile",
-            "pickOutputDirectory",
-            "importConfig",
-            "exportConfig",
-        ] {
-            assert!(
-                matches!(Command::from_name(name), Some(Command::Dialog(_))),
-                "{name}"
+    /// The lane of a command is decided where its handler is bound
+    /// (`Command::into_work`): exactly the commands that open a dialog block.
+    #[tokio::test]
+    async fn every_dialog_command_is_routed_to_the_blocking_lane() {
+        let harness = Harness::new().await;
+        let mut blocking = std::collections::BTreeSet::new();
+        for command in super::command_contract_tests::example_commands() {
+            let name = command.wire_name();
+            let work = command.into_work(
+                harness.dialog.clone(),
+                harness.proxy.clone(),
+                harness.state.clone(),
             );
+            if matches!(work, Work::Blocking(_)) {
+                blocking.insert(name);
+            }
         }
-        for name in ["setExpansion", "updateFilters", "generatePreview"] {
-            assert!(
-                matches!(Command::from_name(name), Some(Command::Ordered(_))),
-                "{name}"
-            );
-        }
-        let dialog_commands = COMMANDS
-            .iter()
-            .filter(|(_, command)| matches!(command, Command::Dialog(_)))
-            .count();
-        assert_eq!(dialog_commands, 5);
+        assert_eq!(
+            blocking.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "exportConfig",
+                "importConfig",
+                "pickOutputDirectory",
+                "saveFile",
+                "selectDirectory",
+            ]
+        );
     }
 
     /// Two quick edits arrive before the UI has rendered the answer to the first one.
@@ -617,21 +663,6 @@ mod tests {
         assert!(harness.state.lock().config.ignore_patterns.is_empty());
     }
 
-    /// The former whole-config command is gone; a stale UI cannot replace the config.
-    #[tokio::test]
-    async fn update_config_is_not_a_command_anymore() {
-        let mut harness = Harness::new().await;
-        let before = harness.state.lock().config.clone();
-        let mut replaced = before.clone();
-        replaced.ignore_patterns.clear();
-
-        harness.send("updateConfig", serde_json::to_value(replaced).unwrap());
-        harness.send("initialize", serde_json::Value::Null);
-        harness.events(1).await;
-
-        assert_eq!(harness.state.lock().config, before);
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn commands_take_effect_in_the_order_they_were_sent() {
         let mut harness = Harness::new().await;
@@ -640,14 +671,16 @@ mod tests {
         // some rounds would end in the wrong state.
         for round in 0..200 {
             let ends_expanded = round % 2 == 0;
+            let mut sent = Vec::new();
             for step in 0..5 {
                 let expanded = (step % 2 == 0) == ends_expanded;
-                harness.send(
+                sent.push(harness.send(
                     "setExpansion",
                     serde_json::json!({ "path": "/repo/src", "expanded": expanded }),
-                );
+                ));
             }
-            harness.events(5).await;
+            // Each command is answered by a snapshot that carries its number.
+            assert_eq!(seqs_of(&harness.events(5).await), sent, "{round}");
             assert_eq!(harness.is_expanded("/repo/src"), ends_expanded, "{round}");
         }
     }
@@ -724,23 +757,706 @@ mod tests {
         harness.close_dialog.send(()).unwrap();
     }
 
+    // --- Messages that are refused -----------------------------------------------------
+
+    /// Whatever is wrong with a message, it is treated the same way: nothing changes,
+    /// and it is answered with one snapshot that accounts for its number. That
+    /// includes a whole configuration, the payload of the former `updateConfig`: no
+    /// command accepts one.
     #[tokio::test]
-    async fn malformed_and_unknown_messages_are_ignored() {
+    async fn a_refused_message_changes_nothing_and_is_answered_under_its_number() {
+        use serde_json::json;
+        let mut harness = Harness::new().await;
+        let whole_config = serde_json::to_value(AppConfig {
+            output_filename: "smuggled.txt".to_string(),
+            ..harness.state.lock().config.clone()
+        })
+        .unwrap();
+        let before = harness.fingerprint();
+
+        let refused = [
+            ("noSuchCommand", json!(null)),
+            ("updateConfig", whole_config.clone()),
+            ("selectAll", json!({ "all": true })),
+            (
+                "setConfigOption",
+                json!({ "some_random_key": "some_value" }),
+            ),
+            (
+                "setConfigOption",
+                json!({ "option": "window_size", "value": [1.0, 1.0] }),
+            ),
+            (
+                "setConfigOption",
+                json!({ "option": "last_directory", "value": "/elsewhere" }),
+            ),
+            (
+                "setConfigOption",
+                json!({ "option": "max_file_size_mb", "value": 1 }),
+            ),
+            (
+                "setConfigOption",
+                json!({ "option": "case_sensitive_search", "value": "yes" }),
+            ),
+            (
+                "setConfigOption",
+                json!({ "option": "case_sensitive_search", "value": true, "extra": 1 }),
+            ),
+            ("setConfigOption", json!({ "option": "output_filename" })),
+            ("setConfigOption", whole_config.clone()),
+            ("addIgnorePattern", json!("*.log")),
+            ("addIgnorePattern", json!({ "pattern": 7 })),
+            (
+                "addIgnorePattern",
+                json!({ "pattern": "*.log", "extra": true }),
+            ),
+            ("addIgnorePattern", whole_config.clone()),
+            ("removeIgnorePattern", json!("*.log")),
+            (
+                "removeIgnorePattern",
+                json!({ "pattern": "*.log", "extra": true }),
+            ),
+            ("addIgnorePath", json!({ "path": "src" })),
+            ("clearIgnorePatterns", json!(["all"])),
+            ("setViewport", json!(null)),
+            ("setViewport", json!({ "start": -1, "count": 10 })),
+            ("setViewport", json!({ "start": 1 })),
+            ("setViewport", json!({ "start": 1, "count": 0 })),
+            (
+                "setViewport",
+                json!({ "start": 1, "count": 2, "extra": true }),
+            ),
+            ("locateRow", json!(null)),
+            ("locateRow", json!({ "request": 1 })),
+            (
+                "locateRow",
+                json!({ "request": 1, "target": { "kind": "nope" } }),
+            ),
+            (
+                "locateRow",
+                json!({ "request": 1, "target": { "kind": "path", "path": "/x", "extra": 1 } }),
+            ),
+            (
+                "locateRow",
+                json!({ "request": -1, "target": { "kind": "path", "path": "/x" } }),
+            ),
+            ("setExpansion", json!("/repo/src")),
+            ("setExpansion", json!({ "path": "/repo/src" })),
+            ("setExpansion", json!({ "expanded": true })),
+            (
+                "setExpansion",
+                json!({ "path": "/repo/src", "expanded": "yes" }),
+            ),
+            (
+                "setExpansion",
+                json!({ "path": "/repo/src", "expanded": true, "extra": 1 }),
+            ),
+            ("setExpansion", json!(null)),
+            ("expandCollapseAll", json!("not a boolean")),
+            ("toggleSelection", json!({ "path": "/repo/src/main.rs" })),
+            ("toggleDirectorySelection", json!(null)),
+            ("loadDirectoryLevel", json!({ "path": "/repo/src" })),
+            ("loadFilePreview", json!(["/repo/src/main.rs"])),
+            ("updateFilters", json!("not a map")),
+            (
+                "updateFilters",
+                json!({ "searchQuery": "main", "search_query": "x" }),
+            ),
+            (
+                "updateFilters",
+                json!({ "searchQuery": "main", "extra": true }),
+            ),
+            ("updateFilters", json!({ "searchQuery": 7 })),
+            (
+                "updateFilters",
+                json!({ "searchQuery": "main", "extensionFilter": null }),
+            ),
+            // A dialog command that is refused opens no dialog.
+            ("saveFile", json!(12345)),
+            ("saveFile", json!({ "kind": "generated" })),
+            (
+                "saveFile",
+                json!({ "kind": "edited", "content": "x", "documentId": 1 }),
+            ),
+            ("selectDirectory", json!("/repo")),
+        ];
+        for (command, payload) in refused {
+            let seq = harness.send(command, payload.clone());
+            let events = harness.events(1).await;
+            assert_eq!(seqs_of(&events), [seq], "the answer to {command} {payload}");
+            assert_eq!(harness.fingerprint(), before, "{command} {payload}");
+        }
+
+        // An envelope that holds more than a command is refused as well.
+        harness.post(
+            json!({
+                "session": UI,
+                "seq": 900,
+                "command": "selectAll",
+                "payload": null,
+                "extra": 1,
+            })
+            .to_string(),
+        );
+        assert_eq!(seqs_of(&harness.events(1).await), [900]);
+        assert_eq!(harness.fingerprint(), before);
+
+        harness.quiescence().await;
+        assert!(harness.events.try_recv().is_err(), "one answer each");
+        assert!(
+            harness.dialog_opened.try_recv().is_err(),
+            "no dialog was opened"
+        );
+    }
+
+    /// A message without a number is no command either. It is answered as well, at
+    /// its place in the order, and the snapshots keep the number they had.
+    #[tokio::test]
+    async fn a_message_without_a_number_is_answered_and_accounts_for_nothing() {
+        use serde_json::json;
+        let mut harness = Harness::new().await;
+        let seq = harness.send("selectAll", serde_json::Value::Null);
+        assert_eq!(seqs_of(&harness.events(1).await), [seq]);
+        let before = harness.fingerprint();
+
+        for message in [
+            "not json".to_string(),
+            String::new(),
+            "[]".to_string(),
+            json!({ "command": "deselectAll", "payload": null }).to_string(),
+            json!({ "seq": 7, "command": "deselectAll", "payload": null }).to_string(),
+            json!({ "session": UI, "command": "deselectAll", "payload": null }).to_string(),
+            json!({ "session": UI, "seq": "7", "command": "deselectAll", "payload": null })
+                .to_string(),
+            json!({ "session": UI, "seq": -7, "command": "deselectAll", "payload": null })
+                .to_string(),
+            json!({ "session": "31", "seq": 7, "command": "deselectAll", "payload": null })
+                .to_string(),
+        ] {
+            harness.post(message.clone());
+            assert_eq!(seqs_of(&harness.events(1).await), [seq], "{message}");
+            assert_eq!(harness.fingerprint(), before, "{message}");
+        }
+    }
+
+    // --- Commands and the snapshots that answer them -------------------------------------
+    //
+    // The UI numbers its commands, and every snapshot states the number of the last
+    // command it accounts for (see `correlation`).
+
+    struct NoWake;
+
+    impl transport::WakeSink for NoWake {
+        fn wake(&self) {}
+    }
+
+    /// Snapshots nobody has fetched yet are coalesced to the latest one. That one
+    /// accounts for every command, so the UI is not left waiting for a number.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_coalesced_snapshot_carries_the_number_of_the_last_command() {
+        let harness = Harness::new().await;
+        let (proxy, outbox) = transport::channel(NoWake);
+
+        let mut last = 0;
+        for start in 0..50 {
+            last = start + 1;
+            dispatch_ipc_message(
+                &harness.dispatcher,
+                serde_json::json!({
+                    "session": UI,
+                    "seq": last,
+                    "command": "setViewport",
+                    "payload": { "start": start, "count": 10 },
+                })
+                .to_string(),
+                harness.dialog.clone(),
+                proxy.clone(),
+                harness.state.clone(),
+            );
+        }
+        harness.quiescence().await;
+
+        let Some(UserEvent::StateUpdate(snapshot)) = outbox.next_event() else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.accounts_for(), command_of_ui(last));
+        assert!(outbox.next_event().is_none(), "one snapshot is left");
+    }
+
+    /// A scan sends snapshots of its own while commands are executed. Whatever the
+    /// interleaving, the numbers never go back, every command is answered under its
+    /// number, and a snapshot that accounts for a command shows what it has done.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn snapshots_of_background_work_never_run_ahead_of_the_commands() {
+        let project = tempfile::tempdir().unwrap();
+        for dir in 0..40 {
+            let dir_path = project.path().join(format!("dir-{dir:02}"));
+            std::fs::create_dir_all(&dir_path).unwrap();
+            for file in 0..25 {
+                std::fs::write(dir_path.join(format!("file-{file:02}.txt")), "x").unwrap();
+            }
+        }
+        let mut harness = Harness::with_project(project.path()).await;
+
+        harness.send("rescanDirectory", serde_json::Value::Null);
+        let mut filename_of = std::collections::BTreeMap::new();
+        for round in 0..200 {
+            let name = format!("{round}.txt");
+            let seq = harness.send(
+                "setConfigOption",
+                serde_json::json!({ "option": "output_filename", "value": name }),
+            );
+            filename_of.insert(seq, name);
+            if round % 20 == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        let last = *filename_of.keys().last().unwrap();
+        harness.quiescence().await;
+
+        let snapshots: Vec<_> = std::iter::from_fn(|| harness.events.try_recv().ok())
+            .filter_map(|event| match event {
+                UserEvent::StateUpdate(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .collect();
+        let seqs: Vec<_> = snapshots.iter().map(|s| s.last_processed_seq).collect();
+        assert!(seqs.windows(2).all(|pair| pair[0] <= pair[1]), "{seqs:?}");
+        assert_eq!(seqs.last(), Some(&last));
+        for snapshot in &snapshots {
+            // What the snapshot shows is the edit of the command it accounts for:
+            // not an older one, and (the commands run one after the other) no newer.
+            if let Some(name) = filename_of.get(&snapshot.last_processed_seq) {
+                assert_eq!(&snapshot.config.output_filename, name);
+            }
+        }
+        for seq in filename_of.keys() {
+            assert!(seqs.contains(seq), "command {seq} was not answered");
+        }
+    }
+
+    /// A command that waits for a content search is accounted for when it suspends:
+    /// its first answer carries its number, and the matches come later.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_command_that_suspends_is_accounted_for_by_its_first_answer() {
+        let project = project_on_disk("a.txt");
+        let mut harness = Harness::with_scanned_project(project.path()).await;
+
+        let seq = harness.send(
+            "updateFilters",
+            serde_json::json!({ "contentSearchQuery": "main" }),
+        );
+        let first = harness.events(1).await;
+        assert_eq!(seqs_of(&first), [seq]);
+        let UserEvent::StateUpdate(first) = &first[0] else {
+            unreachable!()
+        };
+        assert_eq!(first.content_search_query, "main");
+
+        // The matches arrive with a later snapshot, which states the number that is
+        // current then.
+        let later = harness.send("selectAll", serde_json::Value::Null);
+        harness.quiescence().await;
+        let rest: Vec<_> = std::iter::from_fn(|| harness.events.try_recv().ok()).collect();
+        let seqs = seqs_of(&rest);
+        assert!(seqs.len() >= 2, "{seqs:?}");
+        assert!(seqs.iter().all(|seq_of| [seq, later].contains(seq_of)));
+        assert_eq!(seqs.last(), Some(&later));
+    }
+
+    /// The answer to a command is the first snapshot that names it, and nothing that
+    /// is sent before it does: not even while the command is already running.
+    ///
+    /// The command is held right before it runs, on the ordered lane. A background
+    /// task sends a snapshot at that moment; it shows the state from before the
+    /// command and has to say so. (Naming the command as soon as it starts, or
+    /// taking "a command is running" for "this is the command that sends", would
+    /// let that snapshot pass for the answer.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_sent_while_a_command_is_about_to_run_does_not_name_it() {
+        let mut harness = Harness::new().await;
+        let old_name = harness.state.lock().config.output_filename.clone();
+        let before = harness.send("selectAll", serde_json::Value::Null);
+        assert_eq!(seqs_of(&harness.events(1).await), [before]);
+
+        let proxy = Correlated::new(harness.proxy.clone(), harness.dispatcher.progress().clone());
+        let command = Command::SetConfigOption(commands::ConfigOption::OutputFilename(
+            "new.txt".to_string(),
+        ));
+        let Work::Ordered(command) =
+            command.into_work(harness.dialog.clone(), proxy.clone(), harness.state.clone())
+        else {
+            panic!("setConfigOption runs on the ordered lane");
+        };
+        let (entered, has_entered) = std_mpsc::channel();
+        let (proceed, may_proceed) = std_mpsc::channel::<()>();
+        harness
+            .dispatcher
+            .dispatch(Some(command_of_ui(before + 1)), async move {
+                entered.send(()).unwrap();
+                may_proceed.recv().unwrap();
+                command.await;
+            });
+        has_entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the command was not started");
+
+        // What a background task does: lock the state, send its snapshot.
+        send_snapshot(&proxy, &harness.state.lock());
+        proceed.send(()).unwrap();
+
+        let events = harness.events(2).await;
+        assert_eq!(seqs_of(&events), [before, before + 1]);
+        let filenames: Vec<_> = events
+            .iter()
+            .map(|event| match event {
+                UserEvent::StateUpdate(snapshot) => snapshot.config.output_filename.clone(),
+                other => panic!("expected a snapshot, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(filenames, [old_name, "new.txt".to_string()]);
+    }
+
+    /// A UI that is loaded anew has another session and counts from 1 again. The
+    /// snapshots name the UI whose command they account for, so one that was made
+    /// for the UI before cannot pass for an answer to the new one.
+    #[tokio::test]
+    async fn the_snapshots_name_the_ui_whose_command_they_account_for() {
+        let mut harness = Harness::new().await;
+        let named = |events: &[UserEvent]| match &events[0] {
+            UserEvent::StateUpdate(snapshot) => snapshot.accounts_for(),
+            other => panic!("expected a snapshot, got {other:?}"),
+        };
+        let post = |harness: &Harness, session: SessionId, seq: CommandSeq| {
+            harness.post(
+                serde_json::json!({
+                    "session": session,
+                    "seq": seq,
+                    "command": "selectAll",
+                    "payload": null,
+                })
+                .to_string(),
+            );
+            CommandId { session, seq }
+        };
+
+        let old = post(&harness, 1001, 500);
+        assert_eq!(named(&harness.events(1).await), old);
+        // Something else sends a snapshot: still for the UI that was there.
+        harness.drop_path(Path::new("/no/such/path"));
+        assert_eq!(named(&harness.events(1).await), old);
+
+        let new = post(&harness, 1002, 1);
+        harness.quiescence().await;
+        let rest: Vec<_> = std::iter::from_fn(|| harness.events.try_recv().ok())
+            .filter(|event| matches!(event, UserEvent::StateUpdate(_)))
+            .collect();
+        assert_eq!(named(&rest[rest.len() - 1..]), new);
+        assert!(rest
+            .iter()
+            .all(|event| [old, new].contains(&named(std::slice::from_ref(event)))));
+    }
+
+    /// `loadDirectoryLevel` loads a directory of the loaded list and nothing else. A
+    /// path that is not one is refused, however it is written and whatever it would
+    /// resolve to: nothing is expanded, nothing outside the project is read, and the
+    /// request is answered with the unchanged snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lazy_load_of_anything_but_a_listed_directory_is_refused() {
+        // Next to the project: a directory whose name starts like the project's, and
+        // one that a `..` leads to. Both hold a file that must never be listed.
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("repo");
+        let sibling = parent.path().join("repository");
+        let secret = parent.path().join("secret");
+        for dir in [&project.join("src"), &sibling, &secret] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("inside.txt"), "content").unwrap();
+        }
+        std::fs::write(project.join("a.txt"), "content").unwrap();
+        let src = project.join("src");
+        let text = |path: &Path| path.to_string_lossy().into_owned();
+
+        let mut harness = Harness::with_project(&project).await;
+        harness.list_directory(&src);
+        let before = harness.fingerprint();
+
+        let refused = [
+            // Leaves the project and comes back, or does not.
+            format!("{}/../secret", text(&project)),
+            format!("{}/src/../../secret", text(&project)),
+            format!("{}/../repo/src", text(&project)),
+            format!("{}/src/../src", text(&project)),
+            format!("{}/./../secret", text(&project)),
+            format!("{}//../secret", text(&project)),
+            format!("{}/src/..", text(&project)),
+            format!("{}/..", text(&project)),
+            // Outside, without any `..`.
+            text(&secret),
+            text(&sibling),
+            text(parent.path()),
+            "/".to_string(),
+            String::new(),
+            "src".to_string(),
+            "../secret".to_string(),
+            // Inside, but not a directory of the list: the root itself, a file, a
+            // directory the scan has not listed.
+            text(&project),
+            text(&project.join("a.txt")),
+            text(&project.join("src/inside.txt")),
+            text(&project.join("not-listed")),
+        ];
+        for path in &refused {
+            let seq = harness.send("loadDirectoryLevel", serde_json::json!(path));
+            assert_eq!(seqs_of(&harness.events(1).await), [seq], "{path:?}");
+            assert_eq!(harness.fingerprint(), before, "{path:?}");
+        }
+        harness.quiescence().await;
+        assert!(harness.events.try_recv().is_err(), "one answer each");
+        {
+            let state = harness.state.lock();
+            assert_eq!(listed_names(&state), ["src"]);
+            assert!(state.loaded_dirs.is_empty());
+        }
+
+        // The listed directory itself is loaded, also when it is written with `.`,
+        // doubled or trailing separators: that is the same path, and what is listed
+        // is written the way the list writes it.
+        for spelling in [
+            format!("{}/./src", text(&project)),
+            format!("{}//src/", text(&project)),
+            text(&src),
+        ] {
+            harness.send("loadDirectoryLevel", serde_json::json!(spelling));
+            harness.quiescence().await;
+            let state = harness.state.lock();
+            assert!(state.loaded_dirs.contains(&src), "{spelling}");
+            assert_eq!(listed_names(&state), ["inside.txt", "src"], "{spelling}");
+            assert!(
+                state.full_file_list().iter().all(|item| text(&item.path)
+                    .starts_with(&format!("{}/", text(&src)))
+                    || item.path == src),
+                "{spelling}: {:?}",
+                state.full_file_list()
+            );
+            assert!(state
+                .expanded_dirs
+                .iter()
+                .all(|dir| dir.as_os_str() == src.as_os_str()));
+        }
+
+        // Without a loaded directory nothing is one of its directories.
+        harness.sent_errors();
+        harness.state.lock().current_path.clear();
+        let unloaded = harness.fingerprint();
+        let seq = harness.send("loadDirectoryLevel", serde_json::json!(src));
+        assert_eq!(seqs_of(&harness.events(1).await), [seq]);
+        assert_eq!(harness.fingerprint(), unloaded);
+    }
+
+    /// `toggleSelection` selects a file of the tree and `setExpansion` expands or
+    /// collapses a directory of the tree. A path that names neither is refused: the
+    /// state stays as it is (no selected file that is none, no expansion kept for a
+    /// directory that might come), and the request is answered with the unchanged
+    /// snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_row_command_for_a_path_that_is_no_such_row_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("repo");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(project.join("a.txt"), "marker").unwrap();
+        std::fs::create_dir_all(parent.path().join("repository/src")).unwrap();
+        std::fs::write(parent.path().join("secret.txt"), "secret").unwrap();
+        let text = |path: &Path| path.to_string_lossy().into_owned();
+        let (file, directory) = (project.join("a.txt"), project.join("src"));
+
+        let mut harness = Harness::with_project(&project).await;
+        harness.send("rescanDirectory", serde_json::Value::Null);
+        harness.quiescence().await;
+        harness.sent_errors();
+        let before = harness.fingerprint();
+        let count = |harness: &Harness| harness.state.lock().selected_files.len();
+
+        // Paths that name no row at all.
+        let no_rows = [
+            format!("{}/../secret.txt", text(&project)),
+            format!("{}/src/../a.txt", text(&project)),
+            format!("{}/../repo/a.txt", text(&project)),
+            format!("{}/src/../src", text(&project)),
+            format!("{}/..", text(&project)),
+            text(&parent.path().join("secret.txt")),
+            text(&parent.path().join("repository/src")),
+            text(&project.join("not-listed.txt")),
+            text(&project.join("not-listed")),
+            // The loaded directory itself is no row of its tree.
+            text(&project),
+            "a.txt".to_string(),
+            String::new(),
+            // What the UI sends back for a name that is not valid Unicode: the
+            // lossy spelling, which is not the path of the entry.
+            text(&project.join("caf\u{fffd}.txt")),
+            text(&project.join("caf\u{fffd}")),
+        ];
+        // A row of the other kind: a directory is not selected like a file, a file
+        // is not expanded.
+        let selections = no_rows.iter().cloned().chain([text(&directory)]);
+        let expansions = no_rows.iter().cloned().chain([text(&file)]);
+
+        for path in selections {
+            let seq = harness.send("toggleSelection", serde_json::json!(path));
+            assert_eq!(seqs_of(&harness.events(1).await), [seq], "{path:?}");
+            assert_eq!(harness.fingerprint(), before, "select {path:?}");
+            assert_eq!(count(&harness), 0, "{path:?}");
+        }
+        for path in expansions {
+            for expanded in [true, false] {
+                let seq = harness.send(
+                    "setExpansion",
+                    serde_json::json!({ "path": path, "expanded": expanded }),
+                );
+                assert_eq!(seqs_of(&harness.events(1).await), [seq], "{path:?}");
+                assert_eq!(harness.fingerprint(), before, "expand {path:?}");
+                assert!(harness.state.lock().expanded_dirs.is_empty(), "{path:?}");
+            }
+        }
+
+        // The rows themselves are acted on, also when their path is written with
+        // `.` or doubled separators (that is the same path), and what is recorded
+        // is the path as the tree writes it.
+        harness.send(
+            "toggleSelection",
+            serde_json::json!(format!("{}/./a.txt", text(&project))),
+        );
+        harness.send(
+            "setExpansion",
+            serde_json::json!({ "path": format!("{}//src/", text(&project)), "expanded": true }),
+        );
+        let answers = harness.events(2).await;
+        let UserEvent::StateUpdate(last) = &answers[1] else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(last.selected_files_count, 1);
+        {
+            let state = harness.state.lock();
+            assert!(state.selected_files.contains(&file));
+            assert!(state
+                .expanded_dirs
+                .iter()
+                .all(|dir| dir.as_os_str() == directory.as_os_str()));
+            assert_eq!(state.expanded_dirs.len(), 1);
+        }
+
+        // Nothing is left behind that a rescan would bring to life.
+        harness.send("rescanDirectory", serde_json::Value::Null);
+        harness.quiescence().await;
+        let state = harness.state.lock();
+        assert_eq!(state.selected_files.len(), 1);
+        assert_eq!(state.expanded_dirs.len(), 1);
+    }
+
+    /// The other commands that take a path of the UI do not reach beyond the loaded
+    /// list either, whatever the path is: a preview reads listed files only, an
+    /// ignore pattern is made of the names below the root, a directory selection
+    /// selects listed files, and what is generated is made of listed files.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn paths_that_leave_the_loaded_directory_reach_nothing() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("repo");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(project.join("a.txt"), "marker").unwrap();
+        std::fs::create_dir_all(parent.path().join("repository")).unwrap();
+        std::fs::write(parent.path().join("secret.txt"), "secret").unwrap();
+        std::fs::write(parent.path().join("repository/secret.txt"), "secret").unwrap();
+        let text = |path: &Path| path.to_string_lossy().into_owned();
+
+        let mut harness = Harness::with_scanned_project(&project).await;
+        harness.send("updateFilters", serde_json::json!({ "searchQuery": "" }));
+        harness.quiescence().await;
+        harness.sent_errors();
+        let patterns = harness.state.lock().config.ignore_patterns.clone();
+
+        let outside = [
+            format!("{}/../secret.txt", text(&project)),
+            format!("{}/src/../../secret.txt", text(&project)),
+            format!("{}/./../secret.txt", text(&project)),
+            format!("{}//../secret.txt", text(&project)),
+            format!("{}/../repo/a.txt", text(&project)),
+            text(&parent.path().join("secret.txt")),
+            text(&parent.path().join("repository/secret.txt")),
+            text(&parent.path().join("repository")),
+        ];
+        for path in &outside {
+            // No preview: an error and the unchanged snapshot, no content.
+            harness.send("loadFilePreview", serde_json::json!(path));
+            harness.quiescence().await;
+            let events: Vec<_> = std::iter::from_fn(|| harness.events.try_recv().ok()).collect();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [UserEvent::ShowError(_), UserEvent::StateUpdate(_)]
+                ),
+                "{path}: {events:?}"
+            );
+            assert_eq!(harness.state.lock().previewed_file_path, None, "{path}");
+
+            // No ignore pattern, and no selection of a directory.
+            harness.send("addIgnorePath", serde_json::json!(path));
+            harness.send("toggleDirectorySelection", serde_json::json!(path));
+            harness.quiescence().await;
+            let state = harness.state.lock();
+            assert_eq!(state.config.ignore_patterns, patterns, "{path}");
+            assert_eq!(state.selected_files.len(), 1, "{path}");
+            drop(state);
+            harness.sent_errors();
+        }
+
+        // Such a path selects nothing either, and what is generated is made of the
+        // files of the list in any case.
+        for path in &outside {
+            harness.send("toggleSelection", serde_json::json!(path));
+        }
+        harness.quiescence().await;
+        let state = harness.state.lock();
+        assert_eq!(state.selected_files.len(), 1);
+        let plan = tasks::GenerationPlan::of(&state);
+        assert_eq!(plan.selected_files, [project.join("a.txt")]);
+    }
+
+    /// A dialog command is accounted for when the ordered lane reaches it, not when
+    /// its dialog closes: a snapshot sent while the dialog is open carries its number.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_dialog_command_is_accounted_for_when_its_turn_has_come() {
         let mut harness = Harness::new().await;
 
-        harness.send("noSuchCommand", serde_json::Value::Null);
-        dispatch_ipc_message(
-            &harness.dispatcher,
-            "not json".to_string(),
-            harness.dialog.clone(),
-            harness.proxy.clone(),
-            harness.state.clone(),
+        let dialog = harness.send("pickOutputDirectory", serde_json::Value::Null);
+        harness
+            .dialog_opened
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the dialog was not opened");
+        assert_eq!(
+            harness.dispatcher.progress().last_processed(),
+            command_of_ui(dialog)
         );
-        harness.send("initialize", serde_json::Value::Null);
 
+        // Something that is no command of the UI sends a snapshot meanwhile.
+        harness.drop_path(Path::new("/no/such/path"));
         let events = harness.events(1).await;
-        assert!(matches!(events[0], UserEvent::StateUpdate(_)));
-        assert!(harness.events.try_recv().is_err());
+        assert_eq!(seqs_of(&events), [dialog]);
+
+        let next = harness.send("selectAll", serde_json::Value::Null);
+        harness.quiescence().await;
+        let rest: Vec<_> = std::iter::from_fn(|| harness.events.try_recv().ok()).collect();
+        assert_eq!(seqs_of(&rest).last(), Some(&next));
+
+        // The dialog is dismissed: nothing is sent, and the number stays.
+        harness.close_dialog.send(()).unwrap();
+        harness.quiescence().await;
+        assert_eq!(
+            harness.dispatcher.progress().last_processed(),
+            command_of_ui(next)
+        );
     }
 
     // --- Commands that start background work -------------------------------------------
@@ -843,6 +1559,7 @@ mod tests {
             let project = project_on_disk("a.txt");
             let harness = Harness::with_project(project.path()).await;
             let src = project.path().join("src");
+            harness.list_directory(&src);
 
             harness.send("loadDirectoryLevel", serde_json::json!(src));
             harness.send(
@@ -855,7 +1572,7 @@ mod tests {
             assert!(!state.expanded_dirs.contains(&src), "round {round}");
             // The load itself is not affected by the collapse.
             assert!(state.loaded_dirs.contains(&src), "round {round}");
-            assert_eq!(listed_names(&state), ["main.rs"], "round {round}");
+            assert_eq!(listed_names(&state), ["main.rs", "src"], "round {round}");
         }
     }
 
@@ -865,6 +1582,7 @@ mod tests {
         let project = project_on_disk("a.txt");
         let harness = Harness::with_project(project.path()).await;
         let src = project.path().join("src");
+        harness.list_directory(&src);
 
         harness.send(
             "setExpansion",
@@ -890,6 +1608,8 @@ mod tests {
         async fn with_scanned_project(project: &Path) -> Self {
             let mut harness = Self::with_project(project).await;
             harness.send("rescanDirectory", serde_json::Value::Null);
+            // The rows have to be there before they can be acted on.
+            harness.quiescence().await;
             harness.send("toggleSelection", serde_json::json!(project.join("a.txt")));
             harness.send(
                 "setExpansion",
@@ -991,7 +1711,13 @@ mod tests {
 
         dispatch_ipc_message(
             &harness.dispatcher,
-            serde_json::json!({ "command": "selectDirectory", "payload": null }).to_string(),
+            serde_json::json!({
+                "session": UI,
+                "seq": 1,
+                "command": "selectDirectory",
+                "payload": null,
+            })
+            .to_string(),
             Arc::new(PicksMissingDirectory(project.path().join("gone"))),
             harness.proxy.clone(),
             harness.state.clone(),
@@ -1273,7 +1999,7 @@ mod tests {
         let mut harness = Harness::with_project(project.path()).await;
 
         let state = harness.state.clone();
-        harness.dispatcher.dispatch(async move {
+        harness.dispatcher.dispatch(None, async move {
             let mut guard = state.lock();
             guard.search_query = "set before the panic".to_string();
             panic!("deliberate panic in a command holding the state lock");
@@ -1343,10 +2069,18 @@ mod tests {
         let (tx, mut events) = mpsc::unbounded_channel();
         let proxy = TestEventProxy(tx);
         let state = SharedState::new(AppState::default());
+        let last_seq = AtomicU64::new(0);
         let send = |command: &str, payload: serde_json::Value| {
+            let seq = last_seq.fetch_add(1, Ordering::SeqCst) + 1;
             dispatch_ipc_message(
                 &dispatcher,
-                serde_json::json!({ "command": command, "payload": payload }).to_string(),
+                serde_json::json!({
+                    "session": UI,
+                    "seq": seq,
+                    "command": command,
+                    "payload": payload,
+                })
+                .to_string(),
                 dialog.clone(),
                 proxy.clone(),
                 state.clone(),
@@ -1381,7 +2115,7 @@ mod tests {
 
     // --- Serialization of events ---
 
-    fn ui_state_with_tree(paths: &[PathBuf]) -> Box<view_model::UiState> {
+    fn ui_state_with_tree(paths: &[PathBuf]) -> view_model::UiState {
         let mut state = AppState::default();
         state.current_path = "/repo".to_string();
         state.set_full_file_list(
@@ -1396,16 +2130,16 @@ mod tests {
                 .collect(),
         );
         filtering::apply_filters(&mut state);
-        Box::new(view_model::generate_ui_state(&state))
+        view_model::generate_ui_state(&state)
     }
 
     #[test]
     fn every_event_becomes_one_call_with_its_arguments() {
         let script = |event| script_for(&event).unwrap();
 
-        let render = script(UserEvent::StateUpdate(ui_state_with_tree(&[
-            PathBuf::from("/repo/a.rs"),
-        ])));
+        let render = script(UserEvent::StateUpdate(Snapshot::for_test(
+            ui_state_with_tree(&[PathBuf::from("/repo/a.rs")]),
+        )));
         assert!(
             render.starts_with("window.render({\"config\":{"),
             "{render}"
@@ -1499,7 +2233,7 @@ mod tests {
 
         let mut ui_state = ui_state_with_tree(&[odd.clone(), PathBuf::from("/repo/b.txt")]);
         ui_state.config.output_directory = Some(odd.clone());
-        let render = script_for(&UserEvent::StateUpdate(ui_state)).unwrap();
+        let render = script_for(&UserEvent::StateUpdate(Snapshot::for_test(ui_state))).unwrap();
         assert!(
             render.contains("\"path\":\"/repo/caf\u{fffd}.txt\""),
             "{render}"

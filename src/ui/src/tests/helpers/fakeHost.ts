@@ -6,10 +6,11 @@
 // component test needs: it records what the UI posts, and it answers when the
 // test says so (`answer()`), so a test decides what the UI has seen at any
 // moment: a request that is under way, a snapshot that is older than a
-// request, an answer that arrives late.
+// request, an answer that arrives late. It numbers the commands like `post()`
+// does, and its snapshots state the number of the last one, like the host's.
 
 import { TreeHostModel } from "$lib/dev/treeHostModel";
-import { UiStateSchema } from "$lib/ipc/schema";
+import { UiStateSchema, type CommandId } from "$lib/ipc/schema";
 import { appState } from "$lib/stores/app";
 import type { AppState, TreeRow } from "$lib/types";
 import { baseAppState } from "./tree";
@@ -19,15 +20,25 @@ export class FakeTreeHost {
   readonly received: [command: string, payload: unknown][] = [];
 
   private readonly model = new TreeHostModel();
+  /** The UI of the test, as `post()` would name it. */
+  private readonly session = 4711;
+  private lastSeq = 0;
 
   constructor(rows: TreeRow[], overrides: Partial<AppState> = {}) {
     this.setRows(rows, overrides);
   }
 
-  /** The implementation of `post()`: takes a command, answers nothing yet. */
-  receive = (command: string, payload?: unknown): void => {
+  /**
+   * The implementation of `post()`: numbers the command, hands the message to
+   * the host and returns the number. Nothing is answered yet.
+   */
+  receive = (command: string, payload?: unknown): CommandId => {
+    const id = { session: this.session, seq: ++this.lastSeq };
     this.received.push([command, payload ?? null]);
-    this.model.receive(command, payload ?? null);
+    this.model.receive(
+      JSON.stringify({ ...id, command, payload: payload ?? null }),
+    );
+    return id;
   };
 
   /**
@@ -51,6 +62,8 @@ export class FakeTreeHost {
       rows_total: _total,
       rows_revision: _revision,
       located: _located,
+      last_processed_session: _session,
+      last_processed_seq: _seq,
       ...state
     } = baseAppState(overrides);
     this.model.show(state, rows);

@@ -153,5 +153,7 @@
   "active_ignore_patterns": [
     "target"
   ],
-  "patterns_need_rescan": false
+  "patterns_need_rescan": false,
+  "last_processed_session": 0,
+  "last_processed_seq": 41
 }

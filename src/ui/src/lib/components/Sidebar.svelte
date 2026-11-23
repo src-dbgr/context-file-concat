@@ -41,16 +41,11 @@
   }
   // Shows the host's filters unless the draft holds them back.
   function syncFiltersFromHost() {
-    const host = hostFilters();
-    if (filterDraft.accepts(host)) filters = host;
+    if (filterDraft.accepts($appState)) {
+      filters = hostFilters();
+    }
   }
-  const filterDraft = new HostDraft<Filters>({
-    equals: (a, b) =>
-      a.searchQuery === b.searchQuery &&
-      a.extensionFilter === b.extensionFilter &&
-      a.contentSearchQuery === b.contentSearchQuery,
-    onAckTimeout: syncFiltersFromHost,
-  });
+  const filterDraft = new HostDraft();
   let filters = $state(untrack(hostFilters));
   let filterTimer: ReturnType<typeof setTimeout> | null = null;
   let filtersPath = untrack(() => $appState.current_path);
@@ -85,19 +80,14 @@
       filters = hostFilters();
       return;
     }
-    const sent = { ...filters };
-    post("updateFilters", sent);
-    filterDraft.sent(sent);
+    filterDraft.sent(post("updateFilters", { ...filters }));
   }
   function onFiltersInput() {
     filterDraft.edit();
     cancelPendingFilters();
     filterTimer = setTimeout(pushFilters, FILTER_DEBOUNCE_MS);
   }
-  onDestroy(() => {
-    cancelPendingFilters();
-    filterDraft.reset();
-  });
+  onDestroy(cancelPendingFilters);
 
   // --- Config ---------------------------------------------------------------
   // Every edit is an intent: it names the one thing the user changed. The

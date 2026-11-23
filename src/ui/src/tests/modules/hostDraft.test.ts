@@ -1,183 +1,153 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ACK_TIMEOUT_MS, HostDraft } from "$lib/modules/hostDraft";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { HostDraft } from "$lib/modules/hostDraft";
+
+// `accepts(host(n))` stands for a snapshot that accounts for the commands of
+// this UI up to n; `sent(mine(n))` for the local value having been posted with
+// command n.
+
+/** This load of the UI, and the one before it. */
+const SESSION = 4711;
+const EARLIER_SESSION = 815;
+
+const mine = (seq: number) => ({ session: SESSION, seq });
+const host = (seq: number, session = SESSION) => ({
+  last_processed_session: session,
+  last_processed_seq: seq,
+});
 
 describe("HostDraft", () => {
-  beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
   it("shows host values while the user is not editing", () => {
-    const draft = new HostDraft<string>();
-    expect(draft.accepts("a")).toBe(true);
-    expect(draft.accepts("b")).toBe(true);
+    const draft = new HostDraft();
+    expect(draft.accepts(host(0))).toBe(true);
+    expect(draft.accepts(host(3))).toBe(true);
     expect(draft.isEditing).toBe(false);
   });
 
   it("keeps the local value while the user is editing", () => {
-    const onAckTimeout = vi.fn();
-    const draft = new HostDraft<string>({ onAckTimeout });
+    const draft = new HostDraft();
     draft.edit();
     expect(draft.isEditing).toBe(true);
-    expect(draft.accepts("host")).toBe(false);
-    // Not limited in time: the user may think as long as they like.
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS * 10);
-    expect(draft.accepts("host")).toBe(false);
-    expect(onAckTimeout).not.toHaveBeenCalled();
+    // Whatever the host has processed: the edit has not been sent.
+    expect(draft.accepts(host(0))).toBe(false);
+    expect(draft.accepts(host(1_000))).toBe(false);
   });
 
-  it("skips stale host values until the sent value is acknowledged", () => {
-    const draft = new HostDraft<string>();
+  it("keeps the sent value until the host has processed its command", () => {
+    const draft = new HostDraft();
     draft.edit();
-    draft.sent("abc");
+    draft.sent(mine(5));
 
-    expect(draft.accepts("")).toBe(false); // produced before the host saw "abc"
-    expect(draft.accepts("ab")).toBe(false);
-    expect(draft.accepts("abc")).toBe(true); // the acknowledgement
-    expect(draft.accepts("changed by the host")).toBe(true);
+    expect(draft.accepts(host(3))).toBe(false); // from before the command
+    expect(draft.accepts(host(4))).toBe(false);
+    expect(draft.accepts(host(5))).toBe(true); // the answer
+    expect(draft.accepts(host(5))).toBe(true);
+    expect(draft.accepts(host(9))).toBe(true);
   });
 
-  it("keeps the newer text when an older send is acknowledged", () => {
-    const draft = new HostDraft<string>();
+  it("takes a snapshot that accounts for a later command for the answer too", () => {
+    // The answer itself was coalesced away, or another command was faster to
+    // be rendered: what counts is that the command has been processed.
+    const draft = new HostDraft();
+    draft.sent(mine(5));
+    expect(draft.accepts(host(8))).toBe(true);
+  });
+
+  it("lets the host's value win as soon as the command is processed", () => {
+    // `accepts` does not look at values at all: the host may have refused the
+    // command or decided differently, and that is then what is shown.
+    const draft = new HostDraft();
+    draft.sent(mine(2));
+    expect(draft.accepts(host(1))).toBe(false);
+    expect(draft.accepts(host(2))).toBe(true);
+  });
+
+  it("keeps the newer text when an older send is answered", () => {
+    const draft = new HostDraft();
     draft.edit();
-    draft.sent("a");
-    draft.edit(); // typing on: "ab"
+    draft.sent(mine(1));
+    draft.edit(); // typing on
 
-    expect(draft.accepts("a")).toBe(false);
-    draft.sent("ab");
-    expect(draft.accepts("a")).toBe(false);
-    expect(draft.accepts("ab")).toBe(true);
+    expect(draft.accepts(host(1))).toBe(false);
+    draft.sent(mine(2));
+    expect(draft.accepts(host(1))).toBe(false);
+    expect(draft.accepts(host(2))).toBe(true);
   });
 
-  it("lets the host win when the acknowledgement does not arrive", () => {
-    const draft = new HostDraft<string>();
-    draft.sent("abc");
-
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS - 1);
-    expect(draft.accepts("")).toBe(false);
-    vi.advanceTimersByTime(1);
-    expect(draft.accepts("")).toBe(true);
-    expect(draft.accepts("anything")).toBe(true);
+  it("waits for the last send only", () => {
+    const draft = new HostDraft();
+    draft.sent(mine(3));
+    draft.sent(mine(7));
+    expect(draft.accepts(host(3))).toBe(false);
+    expect(draft.accepts(host(6))).toBe(false);
+    expect(draft.accepts(host(7))).toBe(true);
   });
 
-  it("reports the end of the wait by itself, without a host value arriving", () => {
-    const onAckTimeout = vi.fn();
-    const draft = new HostDraft<string>({ onAckTimeout });
-    draft.sent("abc");
-    // The host's decision; skipped, and nothing follows it.
-    expect(draft.accepts("")).toBe(false);
+  it("does not let time decide anything", () => {
+    vi.useFakeTimers();
+    const draft = new HostDraft();
+    draft.sent(mine(4));
 
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS - 1);
-    expect(onAckTimeout).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
-    expect(onAckTimeout).toHaveBeenCalledTimes(1);
-    expect(draft.accepts("")).toBe(true);
-  });
-
-  it("does not report a wait that ended otherwise", () => {
-    const onAckTimeout = vi.fn();
-    const draft = new HostDraft<string>({ onAckTimeout });
-
-    draft.sent("acknowledged");
-    expect(draft.accepts("acknowledged")).toBe(true);
-
-    draft.sent("given up");
-    draft.reset();
-
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS * 2);
-    expect(onAckTimeout).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(60 * 60 * 1000);
     expect(vi.getTimerCount()).toBe(0);
+    expect(draft.accepts(host(3))).toBe(false);
+    expect(draft.accepts(host(4))).toBe(true);
   });
 
-  it("waits the full time for the value that was sent last", () => {
-    const onAckTimeout = vi.fn();
-    const draft = new HostDraft<string>({ onAckTimeout });
-    draft.sent("a");
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS - 1);
-    draft.sent("ab");
-
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS - 1);
-    expect(onAckTimeout).not.toHaveBeenCalled();
-    expect(draft.accepts("a")).toBe(false);
-    vi.advanceTimersByTime(1);
-    expect(onAckTimeout).toHaveBeenCalledTimes(1);
+  it("is not unsettled by a snapshot that goes back behind the answer", () => {
+    // The wait is over once the answer was seen.
+    const draft = new HostDraft();
+    draft.sent(mine(4));
+    expect(draft.accepts(host(4))).toBe(true);
+    expect(draft.accepts(host(3))).toBe(true);
   });
 
-  it("does not let an expired wait override an edit in progress", () => {
-    const draft = new HostDraft<string>();
-    draft.sent("abc");
-    draft.edit();
-    vi.advanceTimersByTime(ACK_TIMEOUT_MS);
-    expect(draft.accepts("")).toBe(false);
-    draft.sent("abcd");
-    expect(draft.accepts("abcd")).toBe(true);
+  describe("a UI that was loaded anew", () => {
+    it("shows what the host reports while it waits for nothing", () => {
+      // The snapshots still name the UI before it, with high numbers.
+      const draft = new HostDraft();
+      expect(draft.accepts(host(500, EARLIER_SESSION))).toBe(true);
+      expect(draft.accepts(host(0, 0))).toBe(true);
+    });
+
+    it("does not take a snapshot for the UI before it for an answer", () => {
+      // Its own commands count from 1 again. A snapshot that accounts for
+      // command 500 of the earlier UI says nothing about command 1 of this
+      // one, however high its number is.
+      const draft = new HostDraft();
+      draft.sent(mine(1));
+      expect(draft.accepts(host(500, EARLIER_SESSION))).toBe(false);
+      expect(draft.accepts(host(1, EARLIER_SESSION))).toBe(false);
+      expect(draft.accepts(host(0, 0))).toBe(false);
+      expect(draft.accepts(host(1))).toBe(true);
+    });
   });
 
-  it("reset gives up the local value", () => {
-    const draft = new HostDraft<string>();
+  it("waits for nothing when nothing was posted", () => {
+    // `post()` returns null for a command it did not post (an invalid one, in
+    // a development build): no answer will come, so the host's value applies.
+    const draft = new HostDraft();
     draft.edit();
-    draft.sent("abc");
-    draft.edit();
-    draft.reset();
+    draft.sent(null);
     expect(draft.isEditing).toBe(false);
-    expect(draft.accepts("host")).toBe(true);
+    expect(draft.accepts(host(0))).toBe(true);
   });
 
-  it("uses the given equality and timeout", () => {
-    const onAckTimeout = vi.fn();
-    const draft = new HostDraft<{ q: string }>({
-      equals: (a, b) => a.q === b.q,
-      onAckTimeout,
-      ackTimeoutMs: 10,
-    });
-    draft.sent({ q: "x" });
-    expect(draft.accepts({ q: "y" })).toBe(false);
-    expect(draft.accepts({ q: "x" })).toBe(true);
-
-    draft.sent({ q: "z" });
-    expect(draft.accepts({ q: "y" })).toBe(false);
-    vi.advanceTimersByTime(10);
-    expect(onAckTimeout).toHaveBeenCalledTimes(1);
-  });
-
-  describe("a host that has not reported anything since the send", () => {
-    it("does not end the wait by the time alone", () => {
-      const onAckTimeout = vi.fn();
-      const draft = new HostDraft<string>({ onAckTimeout });
-      draft.sent("needle");
-
-      // E.g. a content search that takes longer than the wait.
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS * 10);
-      expect(onAckTimeout).not.toHaveBeenCalled();
-      expect(vi.getTimerCount()).toBe(0);
-    });
-
-    it("shows the first value the host reports afterwards, whatever it is", () => {
-      const draft = new HostDraft<string>();
-      draft.sent("needle");
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
-
-      // Newer than the send: the host's decision.
-      expect(draft.accepts("changed by the host")).toBe(true);
-      expect(draft.accepts("anything")).toBe(true);
-    });
-
-    it("still keeps an edit in progress when that value arrives", () => {
-      const draft = new HostDraft<string>();
-      draft.sent("needle");
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
+  describe("reset", () => {
+    it("gives up an edit", () => {
+      const draft = new HostDraft();
       draft.edit();
-      expect(draft.accepts("")).toBe(false);
+      draft.reset();
+      expect(draft.isEditing).toBe(false);
+      expect(draft.accepts(host(0))).toBe(true);
     });
 
-    it("starts a full wait again with the next send", () => {
-      const onAckTimeout = vi.fn();
-      const draft = new HostDraft<string>({ onAckTimeout });
-      draft.sent("needle");
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
-
-      draft.sent("needles");
-      expect(draft.accepts("")).toBe(false);
-      vi.advanceTimersByTime(ACK_TIMEOUT_MS);
-      expect(onAckTimeout).toHaveBeenCalledTimes(1);
+    it("gives up the wait for an answer", () => {
+      const draft = new HostDraft();
+      draft.sent(mine(9));
+      draft.reset();
+      expect(draft.accepts(host(0))).toBe(true);
     });
   });
 });

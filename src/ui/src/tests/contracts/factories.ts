@@ -91,6 +91,8 @@ export function makeValidUiState(): z.input<typeof UiStateSchema> {
     rows_total: 3,
     rows_revision: 1,
     located: null,
+    last_processed_session: 0,
+    last_processed_seq: 0,
     total_files_found: 3,
     visible_files_count: 3,
     tree_files_count: 2,

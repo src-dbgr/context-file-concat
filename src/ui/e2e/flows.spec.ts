@@ -367,7 +367,11 @@ test.describe("Saving the generated output", () => {
     await page.locator("#save-btn").click();
     const posted = await page.evaluate(() =>
       (window as unknown as { __posted: string[] }).__posted.map(
-        (message) => JSON.parse(message) as Posted,
+        // The command, without the number of its envelope.
+        (message) => {
+          const { command, payload } = JSON.parse(message) as Posted;
+          return { command, payload };
+        },
       ),
     );
     expect(posted).toHaveLength(1);
@@ -696,7 +700,11 @@ test.describe("Keyboard on the controls of a tree row", () => {
     await page.keyboard.press(key);
     return page.evaluate(() =>
       (window as unknown as { __posted: string[] }).__posted.map(
-        (message) => JSON.parse(message) as Posted,
+        // The command, without the number of its envelope.
+        (message) => {
+          const { command, payload } = JSON.parse(message) as Posted;
+          return { command, payload };
+        },
       ),
     );
   }
@@ -808,5 +816,154 @@ test.describe("Keyboard on the controls of a tree row", () => {
     expect(await press(page, inRow("/repo/README.md", ""), "Space")).toEqual([
       { command: "toggleSelection", payload: "/repo/README.md" },
     ]);
+  });
+});
+
+test.describe("Text being typed and the answers of the host", () => {
+  type Message = {
+    session: number;
+    seq: number;
+    command: string;
+    payload: unknown;
+  };
+
+  test.beforeEach(async ({ page }) => {
+    // Record what the UI posts to the host; the stand-in host of the bridge
+    // listens as well and counts the commands as processed.
+    await page.addInitScript(() => {
+      const w = window as unknown as {
+        __posted: string[];
+        ipc: { postMessage: (message: string) => void };
+      };
+      w.__posted = [];
+      w.ipc = { postMessage: (message) => w.__posted.push(message) };
+    });
+    await page.goto("/?e2e=1");
+    await waitForBridge(page);
+    await renderAsHost(page, withRepo());
+    await expect(page.locator("#current-path")).toContainText("/repo");
+  });
+
+  const messages = (page: import("@playwright/test").Page) =>
+    page.evaluate(() =>
+      (window as unknown as { __posted: string[] }).__posted.map(
+        (message) => JSON.parse(message) as Message,
+      ),
+    );
+
+  test("every command is posted with the next number", async ({ page }) => {
+    await page.locator("#search-query").fill("index");
+    await expect
+      .poll(async () => (await messages(page)).at(-1)?.command)
+      .toBe("updateFilters");
+
+    const posted = await messages(page);
+    const { session } = posted[0];
+    expect(Number.isSafeInteger(session) && session > 0).toBe(true);
+    expect(posted[0]).toEqual({
+      session,
+      seq: 1,
+      command: "initialize",
+      payload: null,
+    });
+    expect(posted.map((message) => message.seq)).toEqual(
+      posted.map((_, index) => index + 1),
+    );
+    // One session for as long as the page is loaded ...
+    expect(posted.every((message) => message.session === session)).toBe(true);
+    // ... and another one after a reload, counting from 1 again.
+    await page.reload();
+    await waitForBridge(page);
+    const [first] = await messages(page);
+    expect(first.seq).toBe(1);
+    expect(first.session).not.toBe(session);
+    for (const message of posted) {
+      expect(Object.keys(message).sort()).toEqual([
+        "command",
+        "payload",
+        "seq",
+        "session",
+      ]);
+    }
+  });
+
+  test("a filter text stays until the host has processed its command", async ({
+    page,
+  }) => {
+    const search = page.locator("#search-query");
+    await search.fill("index");
+    await expect
+      .poll(async () => (await messages(page)).at(-1)?.command)
+      .toBe("updateFilters");
+    const { seq } = (await messages(page)).at(-1)!;
+
+    // A snapshot that was under way when the filter was sent: it accounts
+    // for the commands before it and still shows no filter.
+    await renderAsHost(page, {
+      ...withRepo(),
+      current_config_filename: "from-before.json",
+      last_processed_seq: seq - 1,
+    });
+    await expect(page.getByText("from-before.json").first()).toBeVisible();
+    await expect(search).toHaveValue("index");
+
+    // A snapshot the host made for an earlier load of the UI (before a
+    // reload): its number is high, but it is not about this UI's commands.
+    await renderAsHost(page, {
+      ...withRepo(),
+      current_config_filename: "for-the-ui-before.json",
+      last_processed_session: 1,
+      last_processed_seq: seq + 1000,
+    });
+    await expect(
+      page.getByText("for-the-ui-before.json").first(),
+    ).toBeVisible();
+    await expect(search).toHaveValue("index");
+
+    // The answer. The host is the source of truth: what it reports is shown,
+    // here a text it has changed.
+    await renderAsHost(page, {
+      ...withRepo(),
+      search_query: "index.ts",
+      last_processed_seq: seq,
+    });
+    await expect(search).toHaveValue("index.ts");
+
+    // And from then on every snapshot is followed again.
+    await renderAsHost(page, { ...withRepo(), search_query: "" });
+    await expect(search).toHaveValue("");
+  });
+
+  test("text typed after a send is not replaced by the answer to it", async ({
+    page,
+  }) => {
+    const search = page.locator("#search-query");
+    await search.fill("ind");
+    await expect
+      .poll(async () => (await messages(page)).at(-1)?.command)
+      .toBe("updateFilters");
+    const first = (await messages(page)).at(-1)!;
+
+    // Typing on; the answer to the first text arrives before the debounce of
+    // the second one has run out, or after: either way the text stays.
+    await search.pressSequentially("ex");
+    await renderAsHost(page, {
+      ...withRepo(),
+      search_query: "ind",
+      last_processed_seq: first.seq,
+    });
+    await expect(search).toHaveValue("index");
+
+    await expect
+      .poll(async () => (await messages(page)).at(-1)?.payload)
+      .toMatchObject({ searchQuery: "index" });
+    const second = (await messages(page)).at(-1)!;
+    expect(second.seq).toBeGreaterThan(first.seq);
+    await renderAsHost(page, {
+      ...withRepo(),
+      search_query: "index",
+      last_processed_seq: second.seq,
+    });
+    await expect(search).toHaveValue("index");
   });
 });

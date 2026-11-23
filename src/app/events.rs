@@ -1,10 +1,11 @@
-//! Defines the event and message structures for communication between the backend and frontend.
+//! Defines the events the backend sends to the frontend. (What the frontend sends is
+//! defined in [`super::ipc`].)
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::PathBuf;
 
+use super::snapshot::Snapshot;
 use super::state::GeneratedDocument;
-use super::view_model::UiState;
 use crate::core::ScanProgress;
 
 /// Events sent from the Rust backend to the WebView (UI thread).
@@ -12,8 +13,9 @@ use crate::core::ScanProgress;
 /// Each variant corresponds to a specific JavaScript function (`window.*`) that will be called in the frontend.
 #[derive(Debug)]
 pub enum UserEvent {
-    /// A complete state update to re-render the UI.
-    StateUpdate(Box<UiState>),
+    /// A complete state update to re-render the UI. It is made and sent in one step
+    /// (see [`super::snapshot::send_snapshot`]).
+    StateUpdate(Snapshot),
     /// Content for the file preview panel.
     ShowFilePreview {
         content: String,
@@ -87,13 +89,4 @@ pub enum IgnorePathRefusal {
     TrailingWhitespace { name: String },
     /// A name on the way to the entry is not valid Unicode; a pattern is text.
     NotUnicode { name: String },
-}
-
-/// A message received from the WebView via the IPC channel.
-#[derive(Deserialize, Debug)]
-pub struct IpcMessage {
-    /// The name of the command to execute.
-    pub command: String,
-    /// The payload associated with the command, as a JSON value.
-    pub payload: serde_json::Value,
 }

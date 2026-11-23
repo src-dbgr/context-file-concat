@@ -83,6 +83,8 @@ export function makeWireUiState(): z.input<typeof UiStateSchema> {
     rows_total: 1,
     rows_revision: 1,
     located: null,
+    last_processed_session: 0,
+    last_processed_seq: 0,
     total_files_found: 1,
     visible_files_count: 1,
     tree_files_count: 0,

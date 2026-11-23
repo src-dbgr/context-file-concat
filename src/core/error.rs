@@ -21,6 +21,11 @@ pub enum CoreError {
     #[error("Failed to strip prefix from path: {0}")]
     PathStrip(String),
 
+    /// A path that was to be a directory of the project does not name one: it
+    /// leaves the project on its way (`..`), or is anything but names below the root.
+    #[error("Not a directory of the project: {0}")]
+    OutsideProject(PathBuf),
+
     /// Represents a user-initiated cancellation of an operation.
     #[error("Operation was cancelled by the user")]
     Cancelled,

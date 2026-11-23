@@ -6,93 +6,59 @@
  * user is typing: a scan progress update, the answer to another command, or a
  * snapshot that was produced before the host has seen the latest input. A
  * field with a draft shows a local value instead, and asks its `HostDraft`
- * for every host value whether it may be shown:
+ * for every snapshot whether the host's value may be shown:
  *
  * - While the user is editing (changed, not sent yet), the local value stays.
- * - After the value has been sent, host values that differ from it are taken
- *   for snapshots from before the host has processed it and are skipped,
- *   until the host reports the sent value (the acknowledgement).
- * - The wait for the acknowledgement is limited, for the case that the host
- *   has decided differently (another command changed the value in the
- *   meantime). Such a decision always comes with a snapshot, and the host is
- *   the source of truth, so its value is shown again. What ends the wait is
- *   therefore a host value that is newer than the send, never the time alone:
- *   - If differing host values have arrived (and were skipped) by the time
- *     the wait runs out, the last of them is taken for the host's decision.
- *     It may have been the last snapshot, so the wait ends by a timer and
- *     `onAckTimeout` tells the field to look at the host's current value
- *     again.
- *   - If the host has reported nothing since the send (it is still busy with
- *     the command, e.g. a long content search on a host that answers only at
- *     its end), the value the field knows is older than the send. The local
- *     value stays, and the next host value that arrives is shown.
+ * - After the value has been sent, it stays until the host has processed the
+ *   command that carried it. Which snapshot that is, is not guessed: `post()`
+ *   returns the name of the command (the session of this UI and the number of
+ *   the command), and every snapshot states the last command it accounts for
+ *   (`last_processed_session`, `last_processed_seq`). A snapshot that names
+ *   another session, or has not reached the number, was made before the host
+ *   got to the command and says nothing about it.
+ * - From the first snapshot that has reached the command on, the host's value
+ *   is shown, whatever it is: the host is the source of truth. It is the sent
+ *   value unless the host has decided otherwise (it refused the command, or a
+ *   later command changed the value).
  *
- * `accepts()` is to be called for every value the host reports, also when it
- * equals the one before: that a report has arrived is what the draft goes by.
+ * There is no timer and no comparison of values in this: the host answers
+ * every command, and its answer says so itself.
  *
- * The class holds no UI state; it only answers the question and reports the
- * end of the wait.
+ * The class holds no UI state; it only answers the question.
  */
 
-/** How long a sent value is protected from differing host values. */
-export const ACK_TIMEOUT_MS = 1500;
+import type { CommandId } from "$lib/ipc/schema";
 
-export type HostDraftOptions<T> = {
-  /** When a host value counts as the acknowledgement of a sent value. */
-  equals?: (a: T, b: T) => boolean;
-  /**
-   * The wait for an acknowledgement has run out and the host has reported a
-   * different value since the send. The field is to ask `accepts()` again
-   * with the latest host value.
-   */
-  onAckTimeout?: () => void;
-  ackTimeoutMs?: number;
+/** What a snapshot says about the commands it accounts for. */
+export type ProcessedCommands = {
+  last_processed_session: number;
+  last_processed_seq: number;
 };
 
-export class HostDraft<T> {
+export class HostDraft {
   private editing = false;
-  private awaiting: {
-    value: T;
-    /** Runs while differing host values are skipped; `null` once expired. */
-    timer: ReturnType<typeof setTimeout> | null;
-    /** A differing host value has arrived since the send. */
-    reported: boolean;
-  } | null = null;
-
-  private readonly equals: (a: T, b: T) => boolean;
-  private readonly onAckTimeout: (() => void) | undefined;
-  private readonly ackTimeoutMs: number;
-
-  constructor(options: HostDraftOptions<T> = {}) {
-    this.equals = options.equals ?? Object.is;
-    this.onAckTimeout = options.onAckTimeout;
-    this.ackTimeoutMs = options.ackTimeoutMs ?? ACK_TIMEOUT_MS;
-  }
+  /** The command that carried the local value; `null`: nothing to wait for. */
+  private awaiting: CommandId | null = null;
 
   /** The user has changed the field; the change has not been sent yet. */
   edit(): void {
     this.editing = true;
   }
 
-  /** `value` has been sent to the host. */
-  sent(value: T): void {
+  /**
+   * The local value has been handed to `post()`, which returned `command`:
+   * the name of the command that carries it, or `null` if nothing was posted
+   * (then there is no answer to wait for, and the host's value applies).
+   */
+  sent(command: CommandId | null): void {
     this.editing = false;
-    this.stopWaiting();
-    const awaiting = {
-      value,
-      reported: false,
-      timer: setTimeout(() => this.expire(awaiting), this.ackTimeoutMs),
-    };
-    this.awaiting = awaiting;
+    this.awaiting = command;
   }
 
-  /**
-   * Gives up the local value: the next host value is shown. It also ends a
-   * running wait, which makes it the cleanup when the field goes away.
-   */
+  /** Gives up the local value: the next host value is shown. */
   reset(): void {
     this.editing = false;
-    this.stopWaiting();
+    this.awaiting = null;
   }
 
   /** Whether the user has changed the field without the change being sent. */
@@ -101,34 +67,17 @@ export class HostDraft<T> {
   }
 
   /**
-   * A host value has arrived. Returns whether the field is to show it; if not,
-   * the field keeps its local value.
+   * A snapshot has arrived. Returns whether the field is to show the host's
+   * value; if not, the field keeps its local value.
    */
-  accepts(host: T): boolean {
-    if (this.awaiting) {
-      // Expired without a report: this one is newer than the send.
-      const expired = this.awaiting.timer === null;
-      if (!expired && !this.equals(host, this.awaiting.value)) {
-        this.awaiting.reported = true;
-        return false;
-      }
-      this.stopWaiting();
+  accepts(snapshot: ProcessedCommands): boolean {
+    if (this.awaiting !== null) {
+      const answered =
+        snapshot.last_processed_session === this.awaiting.session &&
+        snapshot.last_processed_seq >= this.awaiting.seq;
+      if (!answered) return false;
+      this.awaiting = null;
     }
     return !this.editing;
-  }
-
-  private expire(awaiting: NonNullable<typeof this.awaiting>): void {
-    if (this.awaiting !== awaiting) return;
-    if (awaiting.reported) {
-      this.awaiting = null;
-      this.onAckTimeout?.();
-    } else {
-      awaiting.timer = null;
-    }
-  }
-
-  private stopWaiting(): void {
-    if (this.awaiting?.timer) clearTimeout(this.awaiting.timer);
-    this.awaiting = null;
   }
 }

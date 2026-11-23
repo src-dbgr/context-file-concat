@@ -22,12 +22,12 @@ use super::filtering::{self, auto_expand_for_matches};
 use super::proxy::EventProxy;
 use super::selection::selected_files_in_tree_order;
 use super::shared_state::SharedState;
+use super::snapshot::send_snapshot;
 use super::staged;
 use super::state::{
     AfterAbandonedScan, AppState, GenerationToken, LazyLoadToken, PreviewToken, ScanToken,
     StatusNotice,
 };
-use super::view_model::generate_ui_state;
 use crate::config::{AppConfig, ConfigSnapshot};
 
 use crate::core::file_handler::GenerationRequest;
@@ -430,9 +430,7 @@ fn publish_generation_outcome<P: EventProxy>(
             proxy.send_event(UserEvent::ShowError(e.to_string()));
         }
     }
-    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-        &state_guard,
-    ))));
+    send_snapshot(proxy, &state_guard);
 }
 
 /// Releases the generating state when a generation task ends without having published
@@ -453,8 +451,7 @@ impl<P: EventProxy> Drop for GenerationGuard<'_, P> {
         let mut state = self.state.lock();
         if state.finish_generation(self.token) {
             tracing::error!("Generation task ended without publishing an outcome.");
-            self.proxy
-                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&state))));
+            send_snapshot(self.proxy, &state);
         }
     }
 }
@@ -486,8 +483,7 @@ impl<P: EventProxy> Drop for ScanGuard<P> {
         // happened under the state lock; `SharedState::lock` copes with that.
         let mut state = self.state.lock();
         if state.finish_scan(&self.token) {
-            self.proxy
-                .send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&state))));
+            send_snapshot(&self.proxy, &state);
         }
     }
 }
@@ -707,7 +703,7 @@ fn publish_scanned_items<P: EventProxy>(
     items: Vec<FileItem>,
 ) -> Option<PublicationCost> {
     add_scanned_items(state, token, items, |s| {
-        proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(s))));
+        send_snapshot(proxy, s);
     })
 }
 
@@ -852,7 +848,7 @@ fn apply_shallow_scan_result<P: EventProxy>(
     s.replace_with_shallow_file_list(root, files);
     s.active_ignore_patterns = patterns;
     filtering::apply_filters(&mut s);
-    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&s))));
+    send_snapshot(proxy, &s);
     drop(s);
     drop(replaced);
     true
@@ -901,7 +897,7 @@ fn complete_scan<P: EventProxy>(state: &SharedState, proxy: &P, token: &ScanToke
     s.status = StatusNotice::IndexingComplete {
         visible_items: s.filtered_file_list().len(),
     };
-    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&s))));
+    send_snapshot(proxy, &s);
 }
 
 /// Starts a proactive, two-phase scan of `path`, replacing the scan that is running
@@ -980,9 +976,7 @@ fn launch_scan<P: EventProxy>(
     proxy: P,
     state: SharedState,
 ) {
-    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-        state_guard,
-    ))));
+    send_snapshot(&proxy, state_guard);
     let handle = tokio::spawn(scan_task(path, proxy, state, token.clone()));
     state_guard.attach_scan_task(&token, handle);
 }
@@ -1044,9 +1038,7 @@ async fn locate_scan_root<P: EventProxy>(
             let entered = state_guard.enter_opened_directory(token, &directory);
             if entered || no_longer_complete || state_guard.current_path != shown_path {
                 state_guard.current_path = shown_path;
-                proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                    &state_guard,
-                ))));
+                send_snapshot(proxy, &state_guard);
             }
             if state_guard.config.last_directory.as_ref() != Some(&directory) {
                 state_guard.config.last_directory = Some(directory.clone());
@@ -1065,9 +1057,7 @@ async fn locate_scan_root<P: EventProxy>(
             // A scan that is started here announces itself with a state update.
             match todo {
                 AfterAbandonedScan::Nothing => {
-                    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                        &state_guard,
-                    ))));
+                    send_snapshot(proxy, &state_guard);
                 }
                 AfterAbandonedScan::RescanLoadedDirectory => {
                     restart_scan(&mut state_guard, proxy.clone(), state.clone());
@@ -1129,8 +1119,24 @@ fn handle_scan_error<P: EventProxy>(
     state_lock.status = StatusNotice::ScanFailed {
         reason: error.to_string(),
     };
-    let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_lock)));
-    proxy.send_event(event);
+    send_snapshot(proxy, &state_lock);
+}
+
+/// The directory of the loaded list that `path` names, as the list writes it; `None`
+/// if there is none (or no directory is loaded).
+///
+/// The list is the reference, not the disk: it is what the user was shown, and
+/// comparing against it needs no file system access. Paths are compared name by
+/// name, so a path that only resolves to a listed directory (`a/../b`) is not one.
+fn listed_directory(state: &AppState, path: &Path) -> Option<PathBuf> {
+    if state.current_path.is_empty() {
+        return None;
+    }
+    state
+        .full_file_list()
+        .iter()
+        .find(|item| item.is_directory && item.path == path)
+        .map(|item| item.path.clone())
 }
 
 /// Initiates a scan for a specific subdirectory level (lazy loading).
@@ -1145,9 +1151,17 @@ fn handle_scan_error<P: EventProxy>(
 /// the list ahead of the walk, which does not add it a second time
 /// ([`AppState::merge_directory_level`]).
 ///
+/// Only a directory of the loaded list can be loaded: the path has to be one the scan
+/// has listed, as a directory (compared, not resolved; the file system is not asked
+/// on the command lane). That is what the UI can ask for, since it only knows the
+/// rows of the tree, and it leaves nothing a `..` in the path could get around; the
+/// request for the scan checks the path a second time ([`ScanRequest::directory_level`]).
+/// Any other path is refused: nothing is expanded or scanned, and the request is
+/// answered with the state as it is.
+///
 /// Only the scan itself runs in a spawned task. Returns its handle, which completes
 /// when the result has been dealt with (merged or discarded), or `None` if the request
-/// was refused: the directory is not part of the project.
+/// was refused.
 pub fn start_lazy_load_scan<P: EventProxy>(
     path: PathBuf,
     proxy: P,
@@ -1155,19 +1169,23 @@ pub fn start_lazy_load_scan<P: EventProxy>(
 ) -> Option<JoinHandle<()>> {
     let (scanner, token, request) = {
         let mut state_guard = state.lock();
-        let token = state_guard.begin_lazy_load();
-        // The project root anchors the ignore rules and the depth of the new items.
-        let request = match ScanRequest::directory_level(&state_guard.current_path, &path) {
-            Ok(request) if !state_guard.current_path.is_empty() => request,
-            _ => {
-                tracing::warn!("Ignoring lazy load outside the project: {:?}", path);
-                return None;
-            }
+        // The directory as the list names it, and the request for its level. The
+        // project root anchors the ignore rules and the depth of the new items.
+        let listed = listed_directory(&state_guard, &path);
+        let request = listed.and_then(|directory| {
+            ScanRequest::directory_level(&state_guard.current_path, &directory)
+                .ok()
+                .map(|request| (directory, request))
+        });
+        let Some((path, request)) = request else {
+            // Refused, and answered like every request: with the state as it is.
+            tracing::warn!("Refusing to load {path:?}: not a directory of the loaded list.");
+            send_snapshot(&proxy, &state_guard);
+            return None;
         };
+        let token = state_guard.begin_lazy_load();
         state_guard.expand_directories([path]);
-        proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_guard,
-        ))));
+        send_snapshot(&proxy, &state_guard);
         let scanner = lazy_load_scanner(&state_guard.config, &token);
         (scanner, token, request)
     };
@@ -1233,7 +1251,7 @@ fn apply_lazy_load_result<P: EventProxy>(
         state,
         |s| staged::stage_directory_level(s, token, loaded_dir, new_items, new_active_patterns),
         |s, prepared| staged::commit_directory_level(s, token, prepared),
-        |s| proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(s)))),
+        |s| send_snapshot(proxy, s),
     )
     .is_some();
     if merged {
@@ -1298,9 +1316,7 @@ where
         let token = state_guard.begin_preview(path.clone());
         let search_term = Some(state_guard.content_search_query.clone())
             .filter(|content_query| !is_blank(content_query));
-        proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_guard,
-        ))));
+        send_snapshot(&proxy, &state_guard);
         (token, search_term)
     };
     tokio::spawn(file_preview_task(
@@ -1436,16 +1452,14 @@ async fn run_content_search<P: EventProxy, S: FileSearcher>(
         if is_blank(&state_guard.content_search_query) {
             state_guard.clear_content_search();
             filtering::apply_filter_texts(&mut state_guard);
-            let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
-            proxy.send_event(event);
+            send_snapshot(&proxy, &state_guard);
             return;
         }
         let token = state_guard.begin_content_search();
         if start == SearchStart::Announced {
             // After `begin_content_search`: the filters know that a search is running.
             filtering::apply_filter_texts(&mut state_guard);
-            let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
-            proxy.send_event(event);
+            send_snapshot(&proxy, &state_guard);
         }
         let request = ContentSearchRequest {
             query: state_guard.content_search_query.clone(),
@@ -1472,8 +1486,7 @@ async fn run_content_search<P: EventProxy, S: FileSearcher>(
                 proxy.send_event(UserEvent::ShowError(format!(
                     "The content search failed: {reason}"
                 )));
-                let event = UserEvent::StateUpdate(Box::new(generate_ui_state(state_guard)));
-                proxy.send_event(event);
+                send_snapshot(&proxy, state_guard);
             }
             return;
         }
@@ -1486,7 +1499,7 @@ async fn run_content_search<P: EventProxy, S: FileSearcher>(
         |s, prepared| staged::commit_content_matches(s, &token, prepared),
         |s| {
             auto_expand_for_matches(s);
-            proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(s))));
+            send_snapshot(&proxy, s);
         },
     );
     if applied.is_none() {
@@ -1497,7 +1510,7 @@ async fn run_content_search<P: EventProxy, S: FileSearcher>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::view_model::UiState;
+    use crate::app::view_model::{generate_ui_state, UiState};
     use crate::config::AppConfig;
     use crate::core::MAX_FILE_SIZE;
     #[cfg(unix)] // Only the permission-based tests need it.
@@ -1563,7 +1576,7 @@ mod tests {
             self.drain_events()
                 .into_iter()
                 .filter_map(|event| match event {
-                    UserEvent::StateUpdate(state) => Some(*state),
+                    UserEvent::StateUpdate(state) => Some(*state.into_ui_state()),
                     _ => None,
                 })
                 .next_back()
@@ -1594,7 +1607,7 @@ mod tests {
             loop {
                 if let UserEvent::StateUpdate(state) = self.next_event().await {
                     if predicate(&state) {
-                        return *state;
+                        return *state.into_ui_state();
                     }
                 }
             }
@@ -2442,7 +2455,7 @@ mod tests {
         let events = harness.drain_events();
         assert_eq!(events.len(), 2, "Shallow update and final update expected");
         let final_state_update = match events.into_iter().next_back() {
-            Some(UserEvent::StateUpdate(state)) => *state,
+            Some(UserEvent::StateUpdate(state)) => *state.into_ui_state(),
             other => panic!("ScanGuard should send a final update, got {other:?}"),
         };
 
@@ -4241,9 +4254,10 @@ mod tests {
         assert!(state.active_ignore_patterns.contains("/src/generated/"));
     }
 
-    /// A lazy load for a path that is not part of the loaded project is refused.
+    /// A lazy load for a path that is not part of the loaded project is refused: it
+    /// loads nothing, and it is answered with the state as it is.
     #[tokio::test]
-    async fn lazy_load_outside_project_is_ignored() {
+    async fn lazy_load_outside_project_is_refused_and_answered() {
         let mut harness = TestHarness::new();
         let outside = tempdir().unwrap();
         std::fs::write(outside.path().join("file.txt"), "content").unwrap();
@@ -4255,6 +4269,11 @@ mod tests {
         );
 
         assert!(load.is_none(), "No load must have been started");
+        let answer = harness.event_rx.try_recv();
+        assert!(
+            matches!(answer, Ok(UserEvent::StateUpdate(_))),
+            "the refusal is answered, got {answer:?}"
+        );
         harness.assert_no_events("No load must have been performed");
         let state = harness.state.lock();
         assert!(state.full_file_list().is_empty());

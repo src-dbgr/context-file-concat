@@ -51,13 +51,32 @@ impl ScanRequest {
 
     /// A scan of the direct children of `directory`, which must lie inside
     /// `project_root` (or be the project root itself).
+    ///
+    /// "Inside" is decided on the path as it is written, without asking the file
+    /// system: `directory` has to be the project root followed by names, and
+    /// nothing else. A path that starts with the project root and then leaves it
+    /// (`/project/../etc`) is refused, however it would resolve; so is one that
+    /// merely starts with the same characters (`/project-two`). The directory that
+    /// is scanned is the path made of exactly those names, so `.` and doubled
+    /// separators, which name no other directory, do not survive either.
     pub fn directory_level(
         project_root: impl Into<PathBuf>,
         directory: impl Into<PathBuf>,
     ) -> Result<Self, CoreError> {
         let project_root = project_root.into();
-        let start_dir = directory.into();
-        let start_depth = start_dir.strip_prefix(&project_root)?.components().count();
+        let directory = directory.into();
+        let mut start_dir = project_root.clone();
+        let mut start_depth = 0;
+        for component in directory.strip_prefix(&project_root)?.components() {
+            match component {
+                std::path::Component::Normal(name) => {
+                    start_dir.push(name);
+                    start_depth += 1;
+                }
+                // `..`, and whatever else is no name.
+                _ => return Err(CoreError::OutsideProject(directory)),
+            }
+        }
         Ok(Self {
             project_root,
             start_dir,
@@ -1535,6 +1554,61 @@ mod tests {
         let result = ScanRequest::directory_level("/project", "/elsewhere/src");
 
         assert!(matches!(result, Err(CoreError::PathStrip(_))));
+    }
+
+    /// The request is the boundary: nothing gets past it that is not the project
+    /// root followed by names, whatever the path would resolve to on disk.
+    #[test]
+    fn directory_level_request_rejects_a_path_that_leaves_the_project() {
+        for outside in [
+            "/project/..",
+            "/project/../etc",
+            "/project/../project-two/src",
+            "/project/src/../../etc",
+            "/project/src/..",
+            "/project/./../etc",
+            "/project//../etc",
+            // Back inside in the end, but not a path made of names.
+            "/project/src/../src",
+            "/project/../project/src",
+        ] {
+            let result = ScanRequest::directory_level("/project", outside);
+            assert!(
+                matches!(result, Err(CoreError::OutsideProject(_))),
+                "{outside}: {result:?}"
+            );
+        }
+        // A sibling that starts with the same characters is not inside.
+        for sibling in ["/project-two", "/projects/src", "/projec", "/"] {
+            let result = ScanRequest::directory_level("/project", sibling);
+            assert!(
+                matches!(result, Err(CoreError::PathStrip(_))),
+                "{sibling}: {result:?}"
+            );
+        }
+        assert!(ScanRequest::directory_level("/project", "relative/src").is_err());
+    }
+
+    /// `.` and doubled or trailing separators name the same directory; what is
+    /// scanned is the directory written with its names only.
+    #[test]
+    fn directory_level_request_is_made_of_the_names_below_the_root() {
+        let plain = ScanRequest::directory_level("/project", "/project/src/core").unwrap();
+        assert_eq!(plain.start_dir(), Path::new("/project/src/core"));
+        for spelling in [
+            "/project/./src/core",
+            "/project//src///core",
+            "/project/src/core/",
+            "/project/src/./core/.",
+        ] {
+            let request = ScanRequest::directory_level("/project", spelling).unwrap();
+            assert_eq!(request, plain, "{spelling}");
+            assert_eq!(
+                request.start_dir().as_os_str(),
+                "/project/src/core",
+                "{spelling}"
+            );
+        }
     }
 
     #[test]
