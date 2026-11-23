@@ -366,113 +366,6 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
       "additionalProperties": false,
       "properties": {
         "command": {
-          "const": "updateConfig",
-          "type": "string",
-        },
-        "payload": {
-          "additionalProperties": {},
-          "properties": {
-            "auto_load_last_directory": {
-              "type": "boolean",
-            },
-            "case_sensitive_search": {
-              "type": "boolean",
-            },
-            "ignore_patterns": {
-              "items": {
-                "type": "string",
-              },
-              "type": "array",
-            },
-            "include_tree_by_default": {
-              "type": "boolean",
-            },
-            "last_directory": {
-              "type": [
-                "string",
-                "null",
-              ],
-            },
-            "max_file_size_mb": {
-              "type": "number",
-            },
-            "output_directory": {
-              "type": [
-                "string",
-                "null",
-              ],
-            },
-            "output_filename": {
-              "type": "string",
-            },
-            "remove_empty_directories": {
-              "type": "boolean",
-            },
-            "tree_ignore_patterns": {
-              "default": [],
-              "items": {
-                "type": "string",
-              },
-              "type": "array",
-            },
-            "use_relative_paths": {
-              "type": "boolean",
-            },
-            "window_position": {
-              "items": false,
-              "maxItems": 2,
-              "minItems": 2,
-              "prefixItems": [
-                {
-                  "type": "number",
-                },
-                {
-                  "type": "number",
-                },
-              ],
-              "type": "array",
-            },
-            "window_size": {
-              "items": false,
-              "maxItems": 2,
-              "minItems": 2,
-              "prefixItems": [
-                {
-                  "type": "number",
-                },
-                {
-                  "type": "number",
-                },
-              ],
-              "type": "array",
-            },
-          },
-          "required": [
-            "ignore_patterns",
-            "tree_ignore_patterns",
-            "output_filename",
-            "case_sensitive_search",
-            "include_tree_by_default",
-            "use_relative_paths",
-            "remove_empty_directories",
-            "window_size",
-            "window_position",
-            "auto_load_last_directory",
-            "max_file_size_mb",
-          ],
-          "type": "object",
-        },
-      },
-      "required": [
-        "command",
-        "payload",
-      ],
-      "type": "object",
-    },
-    {
-      "additionalProperties": false,
-      "properties": {
-        "command": {
           "const": "updateFilters",
           "type": "string",
         },
@@ -510,12 +403,204 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
       "additionalProperties": false,
       "properties": {
         "command": {
+          "const": "addIgnorePattern",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "pattern": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "pattern",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "removeIgnorePattern",
+          "type": "string",
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "pattern": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "pattern",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "clearIgnorePatterns",
+          "type": "string",
+        },
+        "payload": {
+          "type": "null",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
           "const": "addIgnorePath",
           "type": "string",
         },
         "payload": {
           "minLength": 1,
           "type": "string",
+        },
+      },
+      "required": [
+        "command",
+        "payload",
+      ],
+      "type": "object",
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "const": "setConfigOption",
+          "type": "string",
+        },
+        "payload": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "case_sensitive_search",
+                  "type": "string",
+                },
+                "value": {
+                  "type": "boolean",
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "remove_empty_directories",
+                  "type": "string",
+                },
+                "value": {
+                  "type": "boolean",
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "include_tree_by_default",
+                  "type": "string",
+                },
+                "value": {
+                  "type": "boolean",
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "use_relative_paths",
+                  "type": "string",
+                },
+                "value": {
+                  "type": "boolean",
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "output_filename",
+                  "type": "string",
+                },
+                "value": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "option": {
+                  "const": "output_directory",
+                  "type": "string",
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "null",
+                  ],
+                },
+              },
+              "required": [
+                "option",
+                "value",
+              ],
+              "type": "object",
+            },
+          ],
         },
       },
       "required": [
@@ -531,11 +616,8 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
 exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": {},
+  "additionalProperties": false,
   "properties": {
-    "auto_load_last_directory": {
-      "type": "boolean",
-    },
     "case_sensitive_search": {
       "type": "boolean",
     },
@@ -547,15 +629,6 @@ exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
     },
     "include_tree_by_default": {
       "type": "boolean",
-    },
-    "last_directory": {
-      "type": [
-        "string",
-        "null",
-      ],
-    },
-    "max_file_size_mb": {
-      "type": "number",
     },
     "output_directory": {
       "type": [
@@ -569,57 +642,18 @@ exports[`[IPC Contracts] JSON schema snapshots > Config schema snapshot 1`] = `
     "remove_empty_directories": {
       "type": "boolean",
     },
-    "tree_ignore_patterns": {
-      "default": [],
-      "items": {
-        "type": "string",
-      },
-      "type": "array",
-    },
     "use_relative_paths": {
       "type": "boolean",
-    },
-    "window_position": {
-      "items": false,
-      "maxItems": 2,
-      "minItems": 2,
-      "prefixItems": [
-        {
-          "type": "number",
-        },
-        {
-          "type": "number",
-        },
-      ],
-      "type": "array",
-    },
-    "window_size": {
-      "items": false,
-      "maxItems": 2,
-      "minItems": 2,
-      "prefixItems": [
-        {
-          "type": "number",
-        },
-        {
-          "type": "number",
-        },
-      ],
-      "type": "array",
     },
   },
   "required": [
     "ignore_patterns",
-    "tree_ignore_patterns",
-    "output_filename",
     "case_sensitive_search",
+    "remove_empty_directories",
     "include_tree_by_default",
     "use_relative_paths",
-    "remove_empty_directories",
-    "window_size",
-    "window_position",
-    "auto_load_last_directory",
-    "max_file_size_mb",
+    "output_directory",
+    "output_filename",
   ],
   "type": "object",
 }
@@ -703,11 +737,8 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
       "type": "array",
     },
     "config": {
-      "additionalProperties": {},
+      "additionalProperties": false,
       "properties": {
-        "auto_load_last_directory": {
-          "type": "boolean",
-        },
         "case_sensitive_search": {
           "type": "boolean",
         },
@@ -719,15 +750,6 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
         },
         "include_tree_by_default": {
           "type": "boolean",
-        },
-        "last_directory": {
-          "type": [
-            "string",
-            "null",
-          ],
-        },
-        "max_file_size_mb": {
-          "type": "number",
         },
         "output_directory": {
           "type": [
@@ -741,57 +763,18 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
         "remove_empty_directories": {
           "type": "boolean",
         },
-        "tree_ignore_patterns": {
-          "default": [],
-          "items": {
-            "type": "string",
-          },
-          "type": "array",
-        },
         "use_relative_paths": {
           "type": "boolean",
-        },
-        "window_position": {
-          "items": false,
-          "maxItems": 2,
-          "minItems": 2,
-          "prefixItems": [
-            {
-              "type": "number",
-            },
-            {
-              "type": "number",
-            },
-          ],
-          "type": "array",
-        },
-        "window_size": {
-          "items": false,
-          "maxItems": 2,
-          "minItems": 2,
-          "prefixItems": [
-            {
-              "type": "number",
-            },
-            {
-              "type": "number",
-            },
-          ],
-          "type": "array",
         },
       },
       "required": [
         "ignore_patterns",
-        "tree_ignore_patterns",
-        "output_filename",
         "case_sensitive_search",
+        "remove_empty_directories",
         "include_tree_by_default",
         "use_relative_paths",
-        "remove_empty_directories",
-        "window_size",
-        "window_position",
-        "auto_load_last_directory",
-        "max_file_size_mb",
+        "output_directory",
+        "output_filename",
       ],
       "type": "object",
     },

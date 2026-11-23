@@ -3,24 +3,12 @@
     "ignore_patterns": [
       "target"
     ],
-    "tree_ignore_patterns": [],
-    "last_directory": "/project",
-    "output_directory": null,
-    "output_filename": "output.txt",
     "case_sensitive_search": false,
+    "remove_empty_directories": false,
     "include_tree_by_default": true,
     "use_relative_paths": true,
-    "remove_empty_directories": false,
-    "window_size": [
-      1200.0,
-      800.0
-    ],
-    "window_position": [
-      100.0,
-      50.0
-    ],
-    "auto_load_last_directory": true,
-    "max_file_size_mb": 20
+    "output_directory": null,
+    "output_filename": "output.txt"
   },
   "current_path": "/project",
   "tree": [

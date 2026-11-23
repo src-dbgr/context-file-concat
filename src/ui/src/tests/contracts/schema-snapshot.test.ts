@@ -3,7 +3,7 @@ import { toJSONSchema } from "zod";
 import {
   AnyCommandMessageSchema,
   UiStateSchema,
-  ConfigSchema,
+  UiConfigSchema,
 } from "$lib/ipc/schema";
 
 const norm = (x: unknown) => JSON.parse(JSON.stringify(x));
@@ -16,6 +16,6 @@ describe("[IPC Contracts] JSON schema snapshots", () => {
     expect(norm(toJSONSchema(UiStateSchema))).toMatchSnapshot();
   });
   it("Config schema snapshot", () => {
-    expect(norm(toJSONSchema(ConfigSchema))).toMatchSnapshot();
+    expect(norm(toJSONSchema(UiConfigSchema))).toMatchSnapshot();
   });
 });

@@ -212,7 +212,7 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     expect(get(appState).tree[0].children).toHaveLength(1);
   });
 
-  it("render clears preview when current_path becomes null", () => {
+  it("render clears preview when the directory is closed", () => {
     appState.update((s) => {
       s.current_path = "/was/set";
       return s;
@@ -221,7 +221,7 @@ describe("ipc/handlers – behavior of installed window handlers", () => {
     const base = get(appState);
     const p = {
       ...base,
-      current_path: null,
+      current_path: "",
       tree: Array.isArray(base.tree) ? base.tree : [],
       status_message: "Ready.",
     } as Parameters<typeof window.render>[0];

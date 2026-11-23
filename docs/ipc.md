@@ -9,17 +9,17 @@ UI  ──  window.ipc.postMessage('{"command": "...", "payload": ...}')  ──
 UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  ──  Host
 ```
 
-| Concern                         | Where                                                                     |
-| ------------------------------- | ------------------------------------------------------------------------- |
-| Sending commands                | `src/ui/src/lib/services/backend.ts` (`post`)                             |
-| Command and state schemas (Zod) | `src/ui/src/lib/ipc/schema.ts`                                            |
-| Receiving host calls            | `src/ui/src/lib/ipc/handlers.ts` (`installWindowIPCHandlers`)             |
-| Frontend types                  | `src/ui/src/lib/types.ts`                                                 |
-| Command dispatch (host)         | `src/app/mod.rs` (`dispatch_ipc_message`) → `src/app/commands.rs`         |
-| Command ordering (host)         | `src/app/dispatch.rs` (`CommandDispatcher`)                               |
-| Host → UI events                | `src/app/events.rs` (`UserEvent`), `src/app/mod.rs` (`handle_user_event`) |
-| State snapshot (host)           | `src/app/view_model/` (`generate_ui_state`, `UiState`, `TreeNode`)        |
-| Delivery / coalescing           | `src/app/transport.rs`                                                    |
+| Concern                         | Where                                                                          |
+| ------------------------------- | ------------------------------------------------------------------------------ |
+| Sending commands                | `src/ui/src/lib/services/backend.ts` (`post`)                                  |
+| Command and state schemas (Zod) | `src/ui/src/lib/ipc/schema.ts`                                                 |
+| Receiving host calls            | `src/ui/src/lib/ipc/handlers.ts` (`installWindowIPCHandlers`)                  |
+| Frontend types                  | `src/ui/src/lib/types.ts` (derived from the schemas with `z.infer`)            |
+| Command dispatch (host)         | `src/app/mod.rs` (`COMMANDS`, `dispatch_ipc_message`) → `src/app/commands.rs`  |
+| Command ordering (host)         | `src/app/dispatch.rs` (`CommandDispatcher`)                                    |
+| Host → UI events                | `src/app/events.rs` (`UserEvent`), `src/app/mod.rs` (`handle_user_event`)      |
+| State snapshot (host)           | `src/app/view_model/` (`generate_ui_state`, `UiState`, `UiConfig`, `TreeNode`) |
+| Delivery / coalescing           | `src/app/transport.rs`                                                         |
 
 ## Principles
 
@@ -33,7 +33,7 @@ UI  ◀──  window.render(uiState) / window.showPreviewContent(...) / ...  �
 
 ## Commands (UI → Host)
 
-The single source of truth is `CommandSchemas` in `schema.ts`; names and payloads must match `run_command` / `DialogCommand` in `src/app/mod.rs`. The wire format is `{"command": <name>, "payload": <payload | null>}`.
+The single source of truth on the UI side is `CommandSchemas` in `schema.ts`, on the host the routing table `COMMANDS` in `src/app/mod.rs`. The two are compared by the [contract tests](#contract-tests): same command names, and every example payload the host serializes passes the schema of its command. The wire format is `{"command": <name>, "payload": <payload | null>}`.
 
 | Command                         | Payload                                                 | Effect                                                                          |
 | ------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------- |
@@ -54,10 +54,13 @@ The single source of truth is `CommandSchemas` in `schema.ts`; names and payload
 | `generatePreview`               | `null`                                                  | Concatenates the selection; answers with `showGeneratedContent`                 |
 | `cancelGeneration`              | `null`                                                  | Cancels the running generation                                                  |
 | `saveFile`                      | `string` (content)                                      | Opens the save dialog; answers with `fileSaveStatus`                            |
-| `pickOutputDirectory`           | `null`                                                  | Opens the dialog and stores the choice in the config                            |
-| `updateConfig`                  | full config (`ConfigSchema`)                            | Stores the config and applies it, see [Config changes](#config-changes)         |
+| `pickOutputDirectory`           | `null`                                                  | Opens the dialog and stores the choice as output directory                      |
+| `addIgnorePattern`              | `{ pattern: string }` (not blank, no other fields)      | Adds one ignore pattern, see [Config changes](#config-changes)                  |
+| `removeIgnorePattern`           | `{ pattern: string }` (not blank, no other fields)      | Removes one ignore pattern                                                      |
+| `clearIgnorePatterns`           | `null`                                                  | Removes all ignore patterns                                                     |
+| `setConfigOption`               | `{ option, value }` (no other fields), see below        | Sets one user-editable option                                                   |
 | `importConfig` / `exportConfig` | `null`                                                  | Config import/export via dialog                                                 |
-| `addIgnorePath`                 | `string` (path)                                         | Adds an ignore pattern for the path and rescans                                 |
+| `addIgnorePath`                 | `string` (path)                                         | Adds the ignore pattern for a path of the loaded tree (relative to the root)    |
 
 ### Filter texts
 
@@ -65,18 +68,43 @@ One rule decides whether a filter text is set, for `searchQuery`, `extensionFilt
 
 ### Config changes
 
-`updateConfig` always stores and persists the config. What else it does depends on what changed:
+**The host owns the configuration; the UI edits it with intents.** A snapshot carries the settings the UI displays (`config`, see [The state snapshot](#the-state-snapshot-uistate)), and the UI never sends that copy back. Each edit is a command that names the one thing the user changed, and the host applies it to its own configuration (`change_config` in `commands.rs`). There is deliberately no command that replaces the whole configuration: two quick edits (two clicks on pattern chips before the first snapshot has been rendered) would each be based on the same outdated copy, and the second one would silently revert the first. Loading a whole configuration is done by `importConfig`, on the host.
+
+`setConfigOption` takes one of these payloads (`ConfigOption` in `commands.rs`, `ConfigOptionSchema` in `schema.ts`):
+
+| `option`                   | `value`          | Effect                                                                                                   |
+| -------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------- |
+| `case_sensitive_search`    | `boolean`        | Filters are re-applied; an active content search is repeated, because its matches depend on the setting. |
+| `remove_empty_directories` | `boolean`        | Filters are re-applied.                                                                                  |
+| `include_tree_by_default`  | `boolean`        | Used by the next generation.                                                                             |
+| `use_relative_paths`       | `boolean`        | Used by the next generation.                                                                             |
+| `output_filename`          | `string`         | Suggested by the save dialog.                                                                            |
+| `output_directory`         | `string \| null` | Suggested by the save dialog. `null` or `""`: no preset.                                                 |
+
+Everything else in the persisted configuration (`AppConfig`: `window_size`, `window_position`, `last_directory`, `max_file_size_mb`, `tree_ignore_patterns`) is not part of the snapshot and cannot be set through IPC. Unknown options, extra fields and wrong value types are rejected.
+
+What a change of the ignore patterns does (`addIgnorePattern`, `removeIgnorePattern`, `clearIgnorePatterns`, `addIgnorePath`):
 
 | Change                                            | Effect                                                                                                                                                                                        |
 | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Ignore pattern added or removed **during a scan** | The scan is restarted with the new patterns (selection and expansion are kept). A scan works with the patterns it was started with, so its result would otherwise bring ignored entries back. |
 | Ignore pattern added, no scan running             | Applied to the loaded file list right away; no rescan.                                                                                                                                        |
 | Ignore pattern removed, no scan running           | Sets `patterns_need_rescan`; the UI offers `rescanDirectory`.                                                                                                                                 |
-| `case_sensitive_search`                           | Filters are re-applied; an active content search is repeated, because its matches depend on the setting.                                                                                      |
-| `remove_empty_directories`                        | Filters are re-applied.                                                                                                                                                                       |
-| `max_file_size_mb`                                | Used by the next scan, lazy load, content search and generation. Not exposed in the UI (it round-trips the value); set it in the config file. See the note below.                             |
+| No directory loaded                               | The configuration is changed; there is nothing to apply it to.                                                                                                                                |
 
-`max_file_size_mb` is the size limit in MiB (default 20): larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search does not read larger files either. The value is not capped: a limit above the default is honoured by all of them.
+The commands are idempotent (adding a pattern that is set, removing one that is not, and setting an option to its current value change nothing), a changed configuration is persisted, and **every config command is answered with a snapshot**, also when nothing changed. The UI relies on that: controls show the host's `config` and do not write to the store.
+
+`max_file_size_mb` is the size limit in MiB (default 20): larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search does not read larger files either. The value is not capped: a limit above the default is honoured by all of them. It is not exposed in the UI; set it in the config file.
+
+### Text fields
+
+A snapshot replaces the whole store, so a text field bound to the store would be reset by any snapshot that arrives while the user is typing (scan progress, the answer to another command, a snapshot from before the host has seen the latest input). The filter inputs (`Sidebar.svelte`) and the output fields (`HostTextInput.svelte`) therefore show a local draft and ask a `HostDraft` (`src/ui/src/lib/modules/hostDraft.ts`) whether a host value may replace it:
+
+- While the user is editing (changed, not sent yet: the 300 ms debounce of the filters, an output field that still has the focus), the draft stays.
+- After the text has been sent, host values that differ from it are skipped until the host reports the sent text (its answer to the command).
+- If that answer does not arrive within 1.5 s, the host's value is shown again: the host is the source of truth, and something else has changed the value in the meantime.
+
+Checkboxes need no draft; they send their intent on `change` and show `config`.
 
 ```ts
 import { post } from "$lib/services/backend";
@@ -91,11 +119,11 @@ post("setExpansion", { path: "/repo/src", expanded: true }); // payload is type-
 
 `dispatch_ipc_message` does not execute anything itself. It parses the message and queues the command on a `CommandDispatcher` (`src/app/dispatch.rs`), which has three lanes:
 
-| Lane         | Commands                                                                             | Guarantee                                                                                          |
-| ------------ | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| Ordered      | Everything except the dialog commands                                                | Commands start in arrival order; a command runs without interleaving until it finishes or suspends |
-| Continuation | The rest of a command that suspended (`updateFilters` during a content search)       | Finished one at a time, in the order the commands were posted                                      |
-| Blocking     | `selectDirectory`, `saveFile`, `pickOutputDirectory`, `importConfig`, `exportConfig` | One at a time, in arrival order, on the blocking thread pool                                       |
+| Lane         | Commands                                                                                                               | Guarantee                                                                                          |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Ordered      | Everything except the dialog commands                                                                                  | Commands start in arrival order; a command runs without interleaving until it finishes or suspends |
+| Continuation | The rest of a command that suspended (`updateFilters` during a content search, `setConfigOption` while it repeats one) | Finished one at a time, in the order the commands were posted                                      |
+| Blocking     | `selectDirectory`, `saveFile`, `pickOutputDirectory`, `importConfig`, `exportConfig`                                   | One at a time, in arrival order, on the blocking thread pool                                       |
 
 What follows from that:
 
@@ -140,7 +168,7 @@ Produced by `generate_ui_state` (`src/app/view_model/mod.rs`), validated by `UiS
 
 | Field                                                      | Meaning                                                                |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `config`                                                   | The application config                                                 |
+| `config`                                                   | The settings the UI displays (`UiConfig`), see below                   |
 | `current_path`                                             | Scanned root directory (`""` if none)                                  |
 | `tree`                                                     | **Pruned** tree of the filtered file list, see below                   |
 | `total_files_found`                                        | Items (files and directories) in the unfiltered list                   |
@@ -153,6 +181,10 @@ Produced by `generate_ui_state` (`src/app/view_model/mod.rs`), validated by `UiS
 | `search_query`, `extension_filter`, `content_search_query` | Active filters                                                         |
 | `current_config_filename`                                  | Name of the imported config, or `null`                                 |
 | `active_ignore_patterns`, `patterns_need_rescan`           | Ignore pattern bookkeeping                                             |
+
+### The config view
+
+`config` is a view of its own (`UiConfig` in `src/app/view_model/ui_config.rs`, `UiConfigSchema`), not the persisted `AppConfig`: `ignore_patterns` (sorted), `case_sensitive_search`, `remove_empty_directories`, `include_tree_by_default`, `use_relative_paths`, `output_directory` (`string | null`) and `output_filename`. It is an allow-list: a field added to `AppConfig` is not sent unless it is added to the view, the schema and the fixture. The UI reads it and edits it with the commands in [Config changes](#config-changes).
 
 ### The pruned tree
 
@@ -217,14 +249,15 @@ There is no optimistic update: a row changes when the snapshot arrives. Snapshot
   UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture
   ```
 
+- **TypeScript → Rust fixture (commands).** `src/app/command_contract_tests.rs` writes the routing table `COMMANDS` with example payloads into `src/ui/src/tests/contracts/fixtures/commands.json`; payloads with a type on the host (`ConfigOption`, `IgnorePatternPayload`, `SetExpansionPayload`) are serialized from that type, one example per `ConfigOption`. `rust-fixture.test.ts` checks that `CommandSchemas` has exactly the same command names, that every example passes the schema of its command unchanged, and that both sides know the same options of `setConfigOption`. `COMMANDS` is what the router resolves names with, so a command cannot be routed without being part of the contract. The fixture is regenerated with the same command as above.
 - **Schema tests.** `src/ui/src/tests/contracts/` covers the command union, the state schema, property tests and JSON-schema snapshots (`npm run test:contracts`).
 - **Pruning.** `src/app/view_model/pruning_tests.rs` and the property tests in `cache_tests.rs` compare the snapshot with the original full-tree algorithm, pruned by the same rule.
 
 ## Changing the contract
 
-1. **Host:** add the command to `commands.rs` and to `run_command` in `src/app/mod.rs` (or, if it waits for a native dialog, to `DialogCommand`), or the field to `UiState` / `TreeNode`.
-2. **UI:** extend `CommandSchemas` / `UiStateSchema` in `schema.ts` and the types in `types.ts`. Prefer additive changes.
-3. Regenerate the fixture (see above) and update the factories in `src/ui/src/tests/contracts/`.
+1. **Host:** add the command to `commands.rs`, to `OrderedCommand` (or, if it waits for a native dialog, to `DialogCommand`) and to `COMMANDS` in `src/app/mod.rs`; the compiler then asks for its handler in `run_command` and for example payloads in `command_contract_tests.rs`. A field goes into `UiState` / `UiConfig` / `TreeNode`.
+2. **UI:** extend `CommandSchemas` / `UiStateSchema` in `schema.ts`. The types in `types.ts` are derived from the schemas. Prefer additive changes.
+3. Regenerate the fixtures (see above) and update the factories in `src/ui/src/tests/contracts/`.
 4. Keep the snapshot self-contained: never send something that is only meaningful relative to an earlier update.
 5. Update this document.
 

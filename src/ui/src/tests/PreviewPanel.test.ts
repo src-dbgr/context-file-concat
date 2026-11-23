@@ -40,6 +40,13 @@ function seedApp(overrides: Partial<Parameters<typeof appState.set>[0]> = {}) {
     current_path: "/repo",
     current_config_filename: null,
     status_message: "Status: Ready.",
+    total_files_found: 0,
+    visible_files_count: 0,
+    scan_progress: {
+      files_scanned: 0,
+      large_files_skipped: 0,
+      current_scanning_path: "",
+    },
     selected_files_count: 0,
     tree_files_count: 0,
     tree_dirs_count: 0,
