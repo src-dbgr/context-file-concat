@@ -10,7 +10,9 @@ use super::filtering; // SRP: Use the new filtering module
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
 use super::state::AppState;
-use super::tasks::{self, search_in_files, start_lazy_load_scan, start_scan_on_path};
+use super::tasks::{
+    self, refresh_content_search, search_in_files, start_lazy_load_scan, start_scan_on_path,
+};
 use super::view_model::{auto_expand_for_matches, generate_ui_state, get_language_from_path};
 use crate::app::file_dialog::DialogService;
 use crate::config::{self, AppConfig}; // Import AppConfig for explicit deserialization
@@ -80,92 +82,143 @@ pub fn cancel_scan<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 }
 
 /// Updates the application configuration and persists it.
+///
+/// What else happens depends on what has changed:
+/// - Ignore patterns while a scan is running: the scan is restarted, so that it works
+///   with the new patterns instead of delivering a result based on the old ones.
+/// - Ignore patterns added otherwise: they are applied to the loaded file list.
+/// - Ignore patterns removed otherwise: the user is told that a re-scan is needed.
+/// - Case sensitivity: the filters are re-applied and an active content search is
+///   repeated, as its matches depend on it.
 pub async fn update_config<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
-    if let Ok(new_config) = serde_json::from_value::<AppConfig>(payload.clone()) {
-        let mut state_guard = state
-            .lock()
-            .expect("Mutex was poisoned. This should not happen.");
-
-        let patterns_added: HashSet<String> = new_config
-            .ignore_patterns
-            .difference(&state_guard.config.ignore_patterns)
-            .cloned()
-            .collect();
-
-        let patterns_removed: HashSet<String> = state_guard
-            .config
-            .ignore_patterns
-            .difference(&new_config.ignore_patterns)
-            .cloned()
-            .collect();
-
-        let needs_refilter = state_guard.config.remove_empty_directories
-            != new_config.remove_empty_directories
-            || state_guard.config.case_sensitive_search != new_config.case_sensitive_search;
-
-        state_guard.config = new_config;
-        if let Err(e) = config::settings::save_config(&state_guard.config, None) {
-            tracing::warn!("Failed to save config on update: {}", e);
-        }
-
-        // Without a loaded directory the config is only saved; no state update is sent.
-        if state_guard.current_path.is_empty() {
-            return;
-        }
-
-        let mut should_send_update = false;
-
-        if !patterns_removed.is_empty() {
-            tracing::info!(
-                "Ignore patterns removed: {:?}. Re-scan recommended.",
-                patterns_removed
-            );
-            state_guard.patterns_need_rescan = true;
-            should_send_update = true;
-        } else if !patterns_added.is_empty() {
-            tracing::debug!("Applying new ignore patterns locally: {:?}", patterns_added);
-
-            let root_path = PathBuf::from(&state_guard.current_path);
-            for pattern in &patterns_added {
-                let mut builder = ignore::gitignore::GitignoreBuilder::new(&root_path);
-                if builder.add_line(None, pattern).is_ok() {
-                    if let Ok(matcher) = builder.build() {
-                        let has_match = state_guard.full_file_list.iter().any(|item| {
-                            matcher
-                                .matched_path_or_any_parents(&item.path, item.is_directory)
-                                .is_ignore()
-                        });
-
-                        if has_match {
-                            state_guard.active_ignore_patterns.insert(pattern.clone());
-                        }
-                    }
-                }
-            }
-
-            state_guard.apply_ignore_patterns();
-            filtering::apply_filters(&mut state_guard);
-            should_send_update = true;
-        } else if needs_refilter {
-            tracing::debug!("Re-applying filters due to config change.");
-            filtering::apply_filters(&mut state_guard);
-            should_send_update = true;
-        }
-
-        if should_send_update {
-            let ui_state = generate_ui_state(&state_guard);
-            proxy.send_event(UserEvent::StateUpdate(Box::new(ui_state)));
-        }
-    } else {
+    let Ok(new_config) = serde_json::from_value::<AppConfig>(payload.clone()) else {
         tracing::warn!(
             "Failed to deserialize AppConfig from payload: {:?}",
             payload
         );
+        return;
+    };
+
+    if apply_config(new_config, &proxy, &state) == ContentSearchFollowUp::Repeat {
+        refresh_content_search(&proxy, &state, tasks::RealFileSearcher).await;
     }
+}
+
+/// Whether the content search has to be repeated after a configuration change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentSearchFollowUp {
+    None,
+    Repeat,
+}
+
+/// Stores `new_config` and brings the state in line with it (see [`update_config`]).
+fn apply_config<P: EventProxy>(
+    new_config: AppConfig,
+    proxy: &P,
+    state: &Arc<Mutex<AppState>>,
+) -> ContentSearchFollowUp {
+    let mut state_guard = state
+        .lock()
+        .expect("Mutex was poisoned. This should not happen.");
+
+    let patterns_added: HashSet<String> = new_config
+        .ignore_patterns
+        .difference(&state_guard.config.ignore_patterns)
+        .cloned()
+        .collect();
+
+    let patterns_removed: HashSet<String> = state_guard
+        .config
+        .ignore_patterns
+        .difference(&new_config.ignore_patterns)
+        .cloned()
+        .collect();
+
+    let case_sensitivity_changed =
+        state_guard.config.case_sensitive_search != new_config.case_sensitive_search;
+    let needs_refilter = case_sensitivity_changed
+        || state_guard.config.remove_empty_directories != new_config.remove_empty_directories;
+
+    state_guard.config = new_config;
+    if let Err(e) = config::settings::save_config(&state_guard.config, None) {
+        tracing::warn!("Failed to save config on update: {}", e);
+    }
+
+    // Without a loaded directory the config is only saved; no state update is sent.
+    if state_guard.current_path.is_empty() {
+        return ContentSearchFollowUp::None;
+    }
+
+    let patterns_changed = !patterns_added.is_empty() || !patterns_removed.is_empty();
+    let mut should_send_update = false;
+
+    if patterns_changed && state_guard.is_scanning() {
+        tracing::info!("Ignore patterns changed during a scan. Restarting the scan.");
+        // The entries that are ignored now disappear at once; the restarted scan then
+        // delivers the list that matches the new patterns.
+        if !patterns_added.is_empty() {
+            apply_added_patterns_locally(&mut state_guard, &patterns_added);
+        }
+        filtering::apply_filters(&mut state_guard);
+        state_guard.patterns_need_rescan = false;
+        // Announces the new scan with a state update of its own.
+        tasks::restart_scan(&mut state_guard, proxy.clone(), state.clone());
+    } else if !patterns_removed.is_empty() {
+        tracing::info!(
+            "Ignore patterns removed: {:?}. Re-scan recommended.",
+            patterns_removed
+        );
+        state_guard.patterns_need_rescan = true;
+        should_send_update = true;
+    } else if !patterns_added.is_empty() {
+        tracing::debug!("Applying new ignore patterns locally: {:?}", patterns_added);
+        apply_added_patterns_locally(&mut state_guard, &patterns_added);
+        filtering::apply_filters(&mut state_guard);
+        should_send_update = true;
+    } else if needs_refilter {
+        tracing::debug!("Re-applying filters due to config change.");
+        filtering::apply_filters(&mut state_guard);
+        should_send_update = true;
+    }
+
+    if should_send_update {
+        let ui_state = generate_ui_state(&state_guard);
+        proxy.send_event(UserEvent::StateUpdate(Box::new(ui_state)));
+    }
+
+    if case_sensitivity_changed && !state_guard.content_search_query.is_empty() {
+        ContentSearchFollowUp::Repeat
+    } else {
+        ContentSearchFollowUp::None
+    }
+}
+
+/// Removes the entries matching the newly added ignore patterns from the loaded file
+/// list and records which of these patterns matched something.
+fn apply_added_patterns_locally(state: &mut AppState, patterns_added: &HashSet<String>) {
+    let root_path = PathBuf::from(&state.current_path);
+    for pattern in patterns_added {
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(&root_path);
+        if builder.add_line(None, pattern).is_ok() {
+            if let Ok(matcher) = builder.build() {
+                let has_match = state.full_file_list.iter().any(|item| {
+                    matcher
+                        .matched_path_or_any_parents(&item.path, item.is_directory)
+                        .is_ignore()
+                });
+
+                if has_match {
+                    state.active_ignore_patterns.insert(pattern.clone());
+                }
+            }
+        }
+    }
+
+    state.apply_ignore_patterns();
 }
 
 /// Handles the initial request for state from the frontend when it loads.
@@ -284,7 +337,7 @@ pub fn load_directory_level<P: EventProxy>(
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
         let path = PathBuf::from(path_str);
-        start_lazy_load_scan(path, proxy, state, None);
+        start_lazy_load_scan(path, proxy, state);
     } else {
         tracing::warn!(
             "Failed to deserialize path string from payload: {:?}",
@@ -507,41 +560,6 @@ pub fn deselect_all<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     });
 }
 
-/// Expands all directories after a full scan has completed.
-/// This command is intended to be used after the `is_fully_scanned` flag is true.
-pub fn expand_all_fully<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
-    with_state_and_notify(&state, &proxy, |s| {
-        if !s.is_fully_scanned {
-            tracing::warn!("expand_all_fully called before full scan completed. Ignoring.");
-            return;
-        }
-        s.expanded_dirs = s
-            .filtered_file_list()
-            .iter()
-            .filter(|i| i.is_directory)
-            .map(|i| i.path.clone())
-            .collect();
-    });
-}
-
-/// Selects all filter-conformant files after a full scan has completed.
-/// This command is intended to be used after the `is_fully_scanned` flag is true.
-pub fn select_all_fully<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
-    with_state_and_notify(&state, &proxy, |s| {
-        if !s.is_fully_scanned {
-            tracing::warn!("select_all_fully called before full scan completed. Ignoring.");
-            return;
-        }
-        let paths_to_select: Vec<PathBuf> = s
-            .filtered_file_list()
-            .iter()
-            .filter(|item| !item.is_directory)
-            .map(|item| item.path.clone())
-            .collect();
-        s.selected_files.extend(paths_to_select);
-    });
-}
-
 /// Generates the final concatenated output from selected files by spawning a cancellable task.
 pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     let mut state_guard = state
@@ -570,6 +588,7 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 
     let real_generator = tasks::RealContentGenerator {
         cancel_flag: token.cancel_flag(),
+        max_file_size: state_guard.config.max_file_size_bytes(),
     };
     let real_tokenizer = tasks::RealTokenizer;
 
@@ -852,45 +871,80 @@ mod tests {
             state.set_filtered_file_list(items);
         }
 
-        async fn get_last_state_update(&mut self) -> Option<Box<UiState>> {
-            let mut last_update = None;
-            let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
-            tokio::pin!(timeout);
-            loop {
-                tokio::select! {
-                    event = self.event_rx.recv() => {
-                        if let Some(UserEvent::StateUpdate(ui_state)) = event {
-                            last_update = Some(ui_state);
-                        } else if event.is_none() { break; }
-                    },
-                    _ = &mut timeout => { break; }
-                }
-            }
-            last_update
+        /// The most recent state update among the events sent so far, without waiting
+        /// for more; all pending events are consumed. This is the way to look at the
+        /// outcome of a command that has run to completion. For work a command has
+        /// handed to a background task use [`Self::wait_for_state`].
+        fn last_state_update(&mut self) -> Option<Box<UiState>> {
+            std::iter::from_fn(|| self.event_rx.try_recv().ok())
+                .filter_map(|event| match event {
+                    UserEvent::StateUpdate(ui_state) => Some(ui_state),
+                    _ => None,
+                })
+                .last()
         }
 
+        /// Waits for the next event; `None` if none arrives (which fails the test that
+        /// expected one, so the waiting time does not matter).
         async fn get_next_event(&mut self) -> Option<UserEvent> {
-            tokio::time::timeout(std::time::Duration::from_secs(2), self.event_rx.recv())
+            tokio::time::timeout(EVENT_TIMEOUT, self.event_rx.recv())
                 .await
                 .ok()
                 .flatten()
         }
 
-        async fn wait_for_scan_completion(&mut self) -> Option<Box<UiState>> {
-            let timeout = tokio::time::sleep(std::time::Duration::from_secs(3));
-            tokio::pin!(timeout);
+        /// Asserts that no event is sent within `window`. Background tasks get the
+        /// chance to run during that time, so this also covers commands that might
+        /// have (wrongly) started one.
+        #[track_caller]
+        fn expect_no_event_within<'a>(
+            &'a mut self,
+            window: std::time::Duration,
+            context: &'a str,
+        ) -> impl std::future::Future<Output = ()> + 'a {
+            let caller = std::panic::Location::caller();
+            async move {
+                if let Ok(event) = tokio::time::timeout(window, self.event_rx.recv()).await {
+                    panic!("{context} (at {caller}), got {event:?}");
+                }
+            }
+        }
+
+        /// Waits until a background task sends a state update that satisfies
+        /// `predicate` and returns it; earlier events are consumed.
+        async fn wait_for_state(
+            &mut self,
+            mut predicate: impl FnMut(&UiState) -> bool,
+        ) -> Box<UiState> {
             loop {
-                tokio::select! {
-                    event = self.get_next_event() => {
-                        if let Some(UserEvent::StateUpdate(ui_state)) = event {
-                            if !ui_state.is_scanning { return Some(ui_state); }
-                        } else if event.is_none() { return None; }
-                    },
-                    _ = &mut timeout => { return None; }
+                match self.get_next_event().await {
+                    Some(UserEvent::StateUpdate(ui_state)) if predicate(&ui_state) => {
+                        return ui_state
+                    }
+                    Some(_) => {}
+                    None => panic!("Timed out waiting for the expected state update"),
+                }
+            }
+        }
+
+        async fn wait_for_scan_completion(&mut self) -> Option<Box<UiState>> {
+            loop {
+                match self.get_next_event().await? {
+                    UserEvent::StateUpdate(ui_state) if !ui_state.is_scanning => {
+                        return Some(ui_state)
+                    }
+                    _ => {}
                 }
             }
         }
     }
+
+    /// Upper bound for waiting on something a test expects to happen. It is only ever
+    /// reached by a failing test, so it does not slow the suite down.
+    const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// How long a test listens for events that must not be sent.
+    const QUIET_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
 
     fn file_item(path: PathBuf, is_dir: bool) -> FileItem {
         FileItem {
@@ -935,7 +989,7 @@ mod tests {
             harness.state.clone(),
         );
 
-        let final_state = harness.get_last_state_update().await.unwrap();
+        let final_state = harness.last_state_update().unwrap();
         assert!(!final_state.is_scanning);
     }
 
@@ -958,7 +1012,7 @@ mod tests {
             harness.state.clone(),
         );
 
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
         assert!(ui_state.is_scanning, "UI must still show the running scan");
         let mut state = harness.state.lock().unwrap();
         assert!(state.is_scanning());
@@ -987,7 +1041,7 @@ mod tests {
             assert!(state.has_generation_task());
         }
         cancel_generation(harness.proxy.clone(), harness.state.clone());
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
         assert!(!ui_state.is_generating);
         let state = harness.state.lock().unwrap();
         assert!(!state.is_generating());
@@ -1004,11 +1058,12 @@ mod tests {
 
         rescan_directory(harness.proxy.clone(), harness.state.clone());
 
-        let event = harness.get_next_event().await;
-        assert!(
-            event.is_none(),
-            "Rescan should not trigger any event when path is empty"
-        );
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "Rescan should not trigger any event when path is empty",
+            )
+            .await;
     }
 
     #[tokio::test]
@@ -1032,7 +1087,7 @@ mod tests {
         let payload = serde_json::to_value(new_config).unwrap();
         update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
 
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
         assert_eq!(
             ui_state.visible_files_count, 2,
             "Expected 'src/empty_dir' to be removed"
@@ -1054,7 +1109,7 @@ mod tests {
         });
         update_filters(filters, harness.proxy.clone(), harness.state.clone()).await;
 
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
         assert_eq!(ui_state.visible_files_count, 2);
     }
 
@@ -1130,11 +1185,12 @@ mod tests {
             );
         }
 
-        let event = harness.get_next_event().await;
-        assert!(
-            event.is_none(),
-            "No events should be sent when no directory is loaded"
-        );
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "No events should be sent when no directory is loaded",
+            )
+            .await;
     }
 
     #[tokio::test]
@@ -1158,11 +1214,12 @@ mod tests {
             );
         }
 
-        let event = harness.get_next_event().await;
-        assert!(
-            event.is_none(),
-            "No events should be sent when no directory is loaded"
-        );
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "No events should be sent when no directory is loaded",
+            )
+            .await;
     }
 
     #[tokio::test]
@@ -1206,8 +1263,9 @@ mod tests {
         let final_config = harness.state.lock().unwrap().config.clone();
         assert_eq!(initial_config.output_filename, final_config.output_filename);
 
-        let event = harness.get_next_event().await;
-        assert!(event.is_none());
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .await;
     }
 
     #[tokio::test]
@@ -1244,7 +1302,7 @@ mod tests {
 
         update_filters(filters, harness.proxy.clone(), harness.state.clone()).await;
 
-        let final_state = harness.get_last_state_update().await.unwrap();
+        let final_state = harness.last_state_update().unwrap();
         assert_eq!(final_state.content_search_query, "world");
         assert_eq!(
             final_state.visible_files_count, 1,
@@ -1261,8 +1319,9 @@ mod tests {
 
         add_ignore_path(outside_path, harness.proxy.clone(), harness.state.clone()).await;
 
-        let event = harness.get_next_event().await;
-        assert!(event.is_none());
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .await;
         let final_patterns_count = harness.state.lock().unwrap().config.ignore_patterns.len();
         assert_eq!(initial_patterns_count, final_patterns_count);
     }
@@ -1285,11 +1344,12 @@ mod tests {
 
         add_ignore_path(payload, harness.proxy.clone(), harness.state.clone()).await;
 
-        let event = harness.get_next_event().await;
-        assert!(
-            event.is_none(),
-            "No rescan should be triggered for a duplicate ignore pattern"
-        );
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "No rescan should be triggered for a duplicate ignore pattern",
+            )
+            .await;
     }
 
     #[tokio::test]
@@ -1319,11 +1379,12 @@ mod tests {
         let event = harness.get_next_event().await;
         assert!(matches!(event, Some(UserEvent::StateUpdate(_))));
 
-        let second_event = harness.get_next_event().await;
-        assert!(
-            second_event.is_none(),
-            "No scan should start for a nonexistent directory"
-        );
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "No scan should start for a nonexistent directory",
+            )
+            .await;
     }
 
     // =========================================================================================
@@ -1343,7 +1404,7 @@ mod tests {
 
         clear_directory(harness.proxy.clone(), harness.state.clone());
 
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
         assert!(ui_state.current_path.is_empty());
         assert_eq!(ui_state.visible_files_count, 0);
         let state = harness.state.lock().unwrap();
@@ -1365,7 +1426,7 @@ mod tests {
 
         cancel_scan(harness.proxy.clone(), harness.state.clone());
 
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
         assert!(!ui_state.is_scanning);
         assert_eq!(ui_state.status_message, "Scan cancelled.");
     }
@@ -1374,7 +1435,7 @@ mod tests {
     async fn test_initialize_sends_initial_state() {
         let mut harness = TestHarness::new();
         initialize(harness.proxy.clone(), harness.state.clone());
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
         assert_eq!(ui_state.current_path, harness.root_path.to_string_lossy());
     }
 
@@ -1425,7 +1486,11 @@ mod tests {
         let payload = json!(sub_dir);
         load_directory_level(payload, harness.proxy.clone(), harness.state.clone());
 
-        let final_state = harness.get_last_state_update().await.unwrap();
+        // The lazy load runs in the background and reports its result when it is done.
+        let final_state = harness.get_next_event().await;
+        let Some(UserEvent::StateUpdate(final_state)) = final_state else {
+            panic!("Expected the state update of the lazy load, got {final_state:?}");
+        };
         let src_node = final_state.tree.iter().find(|n| n.name == "src").unwrap();
         let components_node = src_node
             .children
@@ -1451,11 +1516,11 @@ mod tests {
             harness.proxy.clone(),
             harness.state.clone(),
         );
-        let ui_state1 = harness.get_last_state_update().await.unwrap();
+        let ui_state1 = harness.last_state_update().unwrap();
         assert_eq!(ui_state1.selected_files_count, 1);
 
         toggle_selection(payload, harness.proxy.clone(), harness.state.clone());
-        let ui_state2 = harness.get_last_state_update().await.unwrap();
+        let ui_state2 = harness.last_state_update().unwrap();
         assert_eq!(ui_state2.selected_files_count, 0);
     }
 
@@ -1472,11 +1537,11 @@ mod tests {
             harness.proxy.clone(),
             harness.state.clone(),
         );
-        let ui_state_select = harness.get_last_state_update().await.unwrap();
+        let ui_state_select = harness.last_state_update().unwrap();
         assert_eq!(ui_state_select.selected_files_count, 1);
 
         toggle_directory_selection(payload, harness.proxy.clone(), harness.state.clone());
-        let ui_state_deselect = harness.get_last_state_update().await.unwrap();
+        let ui_state_deselect = harness.last_state_update().unwrap();
         assert_eq!(ui_state_deselect.selected_files_count, 0);
     }
 
@@ -1492,11 +1557,11 @@ mod tests {
             harness.proxy.clone(),
             harness.state.clone(),
         );
-        let ui_state1 = harness.get_last_state_update().await.unwrap();
+        let ui_state1 = harness.last_state_update().unwrap();
         assert!(ui_state1.tree[0].is_expanded);
 
         toggle_expansion(payload, harness.proxy.clone(), harness.state.clone());
-        let ui_state2 = harness.get_last_state_update().await.unwrap();
+        let ui_state2 = harness.last_state_update().unwrap();
         assert!(!ui_state2.tree[0].is_expanded);
     }
 
@@ -1511,14 +1576,14 @@ mod tests {
         // and each request is answered with a snapshot.
         for _ in 0..2 {
             set_expansion(set(true), harness.proxy.clone(), harness.state.clone());
-            let ui_state = harness.get_last_state_update().await.unwrap();
+            let ui_state = harness.last_state_update().unwrap();
             assert!(ui_state.tree[0].is_expanded);
         }
         assert_eq!(harness.state.lock().unwrap().expanded_dirs.len(), 1);
 
         for _ in 0..2 {
             set_expansion(set(false), harness.proxy.clone(), harness.state.clone());
-            let ui_state = harness.get_last_state_update().await.unwrap();
+            let ui_state = harness.last_state_update().unwrap();
             assert!(!ui_state.tree[0].is_expanded);
         }
         assert!(harness.state.lock().unwrap().expanded_dirs.is_empty());
@@ -1547,7 +1612,7 @@ mod tests {
             harness.proxy.clone(),
             harness.state.clone(),
         );
-        let _ = harness.get_last_state_update().await.unwrap();
+        let _ = harness.last_state_update().unwrap();
 
         let state = harness.state.lock().unwrap();
         assert_eq!(state.expanded_dirs.len(), 1);
@@ -1571,7 +1636,9 @@ mod tests {
                 harness.state.clone(),
             );
         }
-        assert!(harness.get_next_event().await.is_none());
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .await;
         assert!(harness.state.lock().unwrap().expanded_dirs.is_empty());
     }
 
@@ -1582,11 +1649,11 @@ mod tests {
         harness.set_initial_files(&["src"]);
 
         expand_collapse_all(json!(true), harness.proxy.clone(), harness.state.clone());
-        let ui_state1 = harness.get_last_state_update().await.unwrap();
+        let ui_state1 = harness.last_state_update().unwrap();
         assert_eq!(ui_state1.tree.iter().filter(|n| n.is_expanded).count(), 1);
 
         expand_collapse_all(json!(false), harness.proxy.clone(), harness.state.clone());
-        let ui_state2 = harness.get_last_state_update().await.unwrap();
+        let ui_state2 = harness.last_state_update().unwrap();
         assert!(ui_state2.tree.iter().all(|n| !n.is_expanded));
     }
 
@@ -1598,30 +1665,11 @@ mod tests {
         harness.set_initial_files(&["file1.txt", "file2.txt"]);
 
         select_all(harness.proxy.clone(), harness.state.clone());
-        let ui_state1 = harness.get_last_state_update().await.unwrap();
+        let ui_state1 = harness.last_state_update().unwrap();
         assert_eq!(ui_state1.selected_files_count, 2);
 
         deselect_all(harness.proxy.clone(), harness.state.clone());
-        let ui_state2 = harness.get_last_state_update().await.unwrap();
-        assert_eq!(ui_state2.selected_files_count, 0);
-    }
-
-    #[tokio::test]
-    async fn test_fully_scanned_guards() {
-        let mut harness = TestHarness::new();
-        harness.create_file("file1.txt", "");
-        harness.set_initial_files(&["file1.txt"]);
-        {
-            let mut state = harness.state.lock().unwrap();
-            state.is_fully_scanned = false;
-        }
-
-        expand_all_fully(harness.proxy.clone(), harness.state.clone());
-        let ui_state1 = harness.get_last_state_update().await.unwrap();
-        assert!(ui_state1.tree.iter().all(|n| !n.is_expanded));
-
-        select_all_fully(harness.proxy.clone(), harness.state.clone());
-        let ui_state2 = harness.get_last_state_update().await.unwrap();
+        let ui_state2 = harness.last_state_update().unwrap();
         assert_eq!(ui_state2.selected_files_count, 0);
     }
 
@@ -1640,33 +1688,20 @@ mod tests {
         };
         assert!(ui_state.is_generating);
 
-        let mut final_event_found = false;
-        let timeout = tokio::time::sleep(std::time::Duration::from_secs(2));
-        tokio::pin!(timeout);
-        loop {
-            tokio::select! {
-                event = harness.get_next_event() => {
-                    if let Some(UserEvent::StateUpdate(ui_state)) = event {
-                        if !ui_state.is_generating {
-                            final_event_found = true;
-                            break;
-                        }
-                    } else if event.is_none() { break; }
-                },
-                _ = &mut timeout => { break; }
-            }
-        }
-        assert!(final_event_found, "Did not receive final state update");
+        // The generation task reports its end with a final state update.
+        harness
+            .wait_for_state(|ui_state| !ui_state.is_generating)
+            .await;
     }
 
     #[tokio::test]
     async fn test_cancel_generation_resets_generating_state() {
         let mut harness = TestHarness::new();
         generate_preview(harness.proxy.clone(), harness.state.clone());
-        let _ = harness.get_last_state_update().await;
+        let _ = harness.last_state_update();
 
         cancel_generation(harness.proxy.clone(), harness.state.clone());
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
         assert!(!ui_state.is_generating);
     }
 
@@ -1754,11 +1789,12 @@ mod tests {
             harness.state.clone(),
         );
 
-        let event = harness.get_next_event().await;
-        assert!(
-            event.is_none(),
-            "No event should be sent when export is cancelled"
-        );
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "No event should be sent when export is cancelled",
+            )
+            .await;
     }
 
     #[tokio::test]
@@ -1780,11 +1816,12 @@ mod tests {
             "No file should have been written with an invalid payload"
         );
 
-        let event = harness.get_next_event().await;
-        assert!(
-            event.is_none(),
-            "No event should be sent for an invalid payload"
-        );
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "No event should be sent for an invalid payload",
+            )
+            .await;
     }
 
     #[tokio::test]
@@ -1798,11 +1835,12 @@ mod tests {
             harness.state.clone(),
         );
 
-        let event = harness.get_next_event().await;
-        assert!(
-            event.is_none(),
-            "No event should be sent for an invalid payload"
-        );
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "No event should be sent for an invalid payload",
+            )
+            .await;
     }
 
     #[tokio::test]
@@ -1873,7 +1911,9 @@ mod tests {
             harness.state.clone(),
         )
         .await;
-        assert!(harness.get_next_event().await.is_none());
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .await;
     }
 
     #[tokio::test]
@@ -1885,7 +1925,9 @@ mod tests {
             harness.proxy.clone(),
             harness.state.clone(),
         );
-        assert!(harness.get_next_event().await.is_none());
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .await;
     }
 
     #[tokio::test]
@@ -1897,7 +1939,9 @@ mod tests {
             harness.proxy.clone(),
             harness.state.clone(),
         );
-        assert!(harness.get_next_event().await.is_none());
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .await;
     }
 
     #[tokio::test]
@@ -1909,7 +1953,9 @@ mod tests {
             harness.proxy.clone(),
             harness.state.clone(),
         );
-        assert!(harness.get_next_event().await.is_none());
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .await;
     }
 
     // --- Tests for user cancellation / dialog returning None ---
@@ -1944,7 +1990,9 @@ mod tests {
             harness.state.clone(),
         );
         let final_config = harness.state.lock().unwrap().config.clone();
-        assert!(harness.get_next_event().await.is_none());
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .await;
         assert_eq!(
             initial_config.output_directory,
             final_config.output_directory
@@ -1961,7 +2009,9 @@ mod tests {
             harness.state.clone(),
         )
         .await;
-        assert!(harness.get_next_event().await.is_none());
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "No event expected")
+            .await;
     }
 
     // --- Tests for specific logic and state edge cases ---
@@ -1979,10 +2029,12 @@ mod tests {
             harness.state.lock().unwrap().config.output_filename,
             "new_name.txt"
         );
-        assert!(
-            harness.get_next_event().await.is_none(),
-            "No event should be sent for a non-filtering config change"
-        );
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "No event should be sent for a non-filtering config change",
+            )
+            .await;
     }
 
     #[tokio::test]
@@ -2024,37 +2076,11 @@ mod tests {
             harness.state.clone(),
         );
 
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
         assert_eq!(
             ui_state.selected_files_count, 2,
             "Directory should be fully selected from partial state"
         );
-    }
-
-    #[tokio::test]
-    async fn test_fully_scanned_guards_happy_path() {
-        let mut harness = TestHarness::new();
-        harness.create_dir("src");
-        harness.create_file("file1.txt", "");
-        harness.set_initial_files(&["src", "file1.txt"]);
-        {
-            let mut state = harness.state.lock().unwrap();
-            state.is_fully_scanned = true;
-        }
-
-        // Test expand_all_fully
-        expand_all_fully(harness.proxy.clone(), harness.state.clone());
-        let ui_state1 = harness.get_last_state_update().await.unwrap();
-        assert_eq!(
-            ui_state1.tree.iter().filter(|n| n.is_expanded).count(),
-            1,
-            "expand_all_fully failed"
-        );
-
-        // Test select_all_fully
-        select_all_fully(harness.proxy.clone(), harness.state.clone());
-        let ui_state2 = harness.get_last_state_update().await.unwrap();
-        assert_eq!(ui_state2.selected_files_count, 1, "select_all_fully failed");
     }
 
     #[tokio::test]
@@ -2107,10 +2133,12 @@ mod tests {
             "Expected an immediate state update"
         );
         // No *second* event should follow, as no scan is started.
-        assert!(
-            harness.get_next_event().await.is_none(),
-            "No scan should start when last_directory is null"
-        );
+        harness
+            .expect_no_event_within(
+                QUIET_PERIOD,
+                "No scan should start when last_directory is null",
+            )
+            .await;
     }
 
     #[tokio::test]
@@ -2167,7 +2195,7 @@ mod tests {
         update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
 
         // Assert the outcome.
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
 
         assert!(
             !ui_state.patterns_need_rescan,
@@ -2217,7 +2245,7 @@ mod tests {
 
         update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
 
-        let ui_state = harness.get_last_state_update().await.unwrap();
+        let ui_state = harness.last_state_update().unwrap();
         assert!(
             ui_state.patterns_need_rescan,
             "Flag should be set when patterns are removed"
@@ -2367,7 +2395,7 @@ mod tests {
         let payload = serde_json::to_value(new_config).unwrap();
         update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
 
-        let _ = harness.get_last_state_update().await;
+        let _ = harness.last_state_update();
 
         rescan_directory(harness.proxy.clone(), harness.state.clone());
         let final_state = harness
@@ -2386,5 +2414,212 @@ mod tests {
             .tree
             .iter()
             .any(|node| node.name == artifact_dir_name));
+    }
+
+    // --- Config changes that need more than a re-filter ---
+
+    /// Registers a scan whose task never finishes, as if a long scan were running.
+    fn begin_parked_scan(harness: &TestHarness) -> crate::app::state::ScanToken {
+        let mut state = harness.state.lock().unwrap();
+        let token = state.begin_scan();
+        state.attach_scan_task(&token, tokio::spawn(std::future::pending()));
+        token
+    }
+
+    fn file_names(state: &AppState) -> HashSet<String> {
+        state
+            .full_file_list
+            .iter()
+            .map(|item| {
+                item.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    /// A scan works with the patterns it was started with. If a pattern is added while
+    /// it is running, its result would bring the entries back that the pattern has just
+    /// removed, so the scan is replaced by one that knows the new patterns.
+    #[tokio::test]
+    async fn test_update_config_restarts_running_scan_when_pattern_is_added() {
+        let mut harness = TestHarness::new();
+        harness.create_file("src/main.rs", "fn main() {}");
+        harness.create_file("docs/guide.md", "# Guide");
+        harness.set_initial_files(&["src", "docs"]); // The shallow list of the scan.
+        let old_scan = begin_parked_scan(&harness);
+
+        let mut new_config = harness.state.lock().unwrap().config.clone();
+        new_config.ignore_patterns.insert("docs/".to_string());
+        let payload = serde_json::to_value(new_config).unwrap();
+        update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
+
+        // The old scan is out of the game, a new one has taken over, and the ignored
+        // directory has disappeared at once.
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(old_scan.is_cancelled());
+            assert!(!state.is_current_scan(&old_scan));
+            assert!(state.is_scanning(), "A new scan must be running");
+            assert!(state.has_scan_task(), "The new scan must be cancellable");
+            assert_eq!(file_names(&state), HashSet::from(["src".to_string()]));
+        }
+
+        let final_state = harness
+            .wait_for_state(|ui_state| !ui_state.is_scanning && ui_state.is_fully_scanned)
+            .await;
+        assert!(!final_state.tree.iter().any(|node| node.name == "docs"));
+        assert!(!final_state.patterns_need_rescan);
+        let state = harness.state.lock().unwrap();
+        assert_eq!(
+            file_names(&state),
+            HashSet::from(["src".to_string(), "main.rs".to_string()]),
+            "The complete list must follow the new patterns"
+        );
+        assert!(state.active_ignore_patterns.contains("docs/"));
+    }
+
+    /// Removing a pattern during a scan restarts it as well: the new scan lists what
+    /// the pattern used to hide, so no separate re-scan has to be recommended.
+    #[tokio::test]
+    async fn test_update_config_restarts_running_scan_when_pattern_is_removed() {
+        let mut harness = TestHarness::new();
+        harness.create_file("src/main.rs", "fn main() {}");
+        harness.create_file("docs/guide.md", "# Guide");
+        harness.set_initial_files(&["src"]);
+        harness
+            .state
+            .lock()
+            .unwrap()
+            .config
+            .ignore_patterns
+            .insert("docs/".to_string());
+        let old_scan = begin_parked_scan(&harness);
+
+        let mut new_config = harness.state.lock().unwrap().config.clone();
+        new_config.ignore_patterns.remove("docs/");
+        let payload = serde_json::to_value(new_config).unwrap();
+        update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
+
+        assert!(old_scan.is_cancelled());
+        let final_state = harness
+            .wait_for_state(|ui_state| !ui_state.is_scanning && ui_state.is_fully_scanned)
+            .await;
+        assert!(final_state.tree.iter().any(|node| node.name == "docs"));
+        assert!(!final_state.patterns_need_rescan);
+        let state = harness.state.lock().unwrap();
+        assert!(file_names(&state).contains("guide.md"));
+    }
+
+    /// A config change that does not touch the patterns leaves a running scan alone.
+    #[tokio::test]
+    async fn test_update_config_without_pattern_change_keeps_running_scan() {
+        let mut harness = TestHarness::new();
+        harness.set_initial_files(&["src"]);
+        let scan = begin_parked_scan(&harness);
+
+        let mut new_config = harness.state.lock().unwrap().config.clone();
+        new_config.remove_empty_directories = !new_config.remove_empty_directories;
+        let payload = serde_json::to_value(new_config).unwrap();
+        update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
+
+        let ui_state = harness.last_state_update().unwrap();
+        assert!(ui_state.is_scanning);
+        let mut state = harness.state.lock().unwrap();
+        assert!(state.is_current_scan(&scan));
+        assert!(!scan.is_cancelled());
+        state.cancel_current_scan(); // Stop the parked task.
+    }
+
+    /// The matches of a content search depend on the case sensitivity, so changing it
+    /// repeats the search instead of filtering with the matches of the old setting.
+    #[tokio::test]
+    async fn test_update_config_case_sensitivity_change_repeats_content_search() {
+        let mut harness = TestHarness::new();
+        let lower = harness.create_file("lower.txt", "a needle in the hay");
+        let upper = harness.create_file("upper.txt", "a NEEDLE in the hay");
+        harness.set_initial_files(&["lower.txt", "upper.txt"]);
+        {
+            // The state a case-insensitive search for "needle" has left behind.
+            let mut state = harness.state.lock().unwrap();
+            state.config.case_sensitive_search = false;
+            state.content_search_query = "needle".to_string();
+            state.content_search_results = HashSet::from([lower.clone(), upper.clone()]);
+        }
+
+        let mut new_config = harness.state.lock().unwrap().config.clone();
+        new_config.case_sensitive_search = true;
+        let payload = serde_json::to_value(new_config.clone()).unwrap();
+        update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
+
+        let ui_state = harness.last_state_update().unwrap();
+        assert_eq!(ui_state.visible_files_count, 1);
+        assert_eq!(
+            harness.state.lock().unwrap().content_search_results,
+            HashSet::from([lower.clone()])
+        );
+
+        // And back: the file that only matches case-insensitively is found again.
+        new_config.case_sensitive_search = false;
+        let payload = serde_json::to_value(new_config).unwrap();
+        update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
+
+        let ui_state = harness.last_state_update().unwrap();
+        assert_eq!(ui_state.visible_files_count, 2);
+        assert_eq!(
+            harness.state.lock().unwrap().content_search_results,
+            HashSet::from([lower, upper])
+        );
+    }
+
+    /// Without a content query there is nothing to repeat: the change is answered
+    /// with the one state update of the re-filter.
+    #[tokio::test]
+    async fn test_update_config_case_sensitivity_change_without_content_query_only_refilters() {
+        let mut harness = TestHarness::new();
+        harness.create_file("Main.rs", "");
+        harness.set_initial_files(&["Main.rs"]);
+        harness.state.lock().unwrap().search_query = "main".to_string();
+
+        let mut new_config = harness.state.lock().unwrap().config.clone();
+        new_config.case_sensitive_search = true;
+        let payload = serde_json::to_value(new_config).unwrap();
+        update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
+
+        let mut updates = Vec::new();
+        while let Ok(event) = harness.event_rx.try_recv() {
+            updates.push(event);
+        }
+        assert_eq!(updates.len(), 1, "Exactly one state update expected");
+        match &updates[0] {
+            UserEvent::StateUpdate(ui_state) => assert_eq!(ui_state.visible_files_count, 0),
+            other => panic!("Expected a state update, got {other:?}"),
+        }
+    }
+
+    /// The file size limit of the configuration is the one the generation works with.
+    #[tokio::test]
+    async fn test_generate_preview_applies_configured_file_size_limit() {
+        let mut harness = TestHarness::new();
+        let file = harness.create_file("file.txt", "some content");
+        harness.set_initial_files(&["file.txt"]);
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.selected_files.insert(file);
+            state.config.max_file_size_mb = 0;
+        }
+
+        generate_preview(harness.proxy.clone(), harness.state.clone());
+
+        let content = loop {
+            match harness.get_next_event().await {
+                Some(UserEvent::ShowGeneratedContent { content, .. }) => break content,
+                Some(_) => {}
+                None => panic!("Timed out waiting for the generated content"),
+            }
+        };
+        assert!(content.contains("[FILE TOO LARGE: 12 bytes - CONTENT SKIPPED]"));
     }
 }

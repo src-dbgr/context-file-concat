@@ -164,8 +164,6 @@ export const CommandSchemas = {
   expandCollapseAll: BoolPayload,
   selectAll: NullPayload,
   deselectAll: NullPayload,
-  expandAllFully: NullPayload,
-  selectAllFully: NullPayload,
   cancelGeneration: NullPayload,
   clearPreviewState: NullPayload,
   saveFile: SaveFilePayload,

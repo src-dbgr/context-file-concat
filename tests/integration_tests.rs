@@ -263,7 +263,7 @@ async fn test_proactive_scan_loads_shallow_then_deep() {
 }
 
 #[tokio::test]
-async fn test_expand_all_fully_after_scan() {
+async fn test_expand_all_after_scan() {
     // --- ARRANGE ---
     let mut harness = helpers::TestHarness::new();
     harness.setup_basic_project();
@@ -278,8 +278,12 @@ async fn test_expand_all_fully_after_scan() {
     harness.wait_for_full_scan_completion().await;
 
     // --- ACT ---
-    // Now that the scan is complete, call the simplified command
-    app::commands::expand_all_fully(harness.proxy.clone(), harness.state.clone());
+    // Now that the scan is complete, expand everything it has found
+    app::commands::expand_collapse_all(
+        serde_json::json!(true),
+        harness.proxy.clone(),
+        harness.state.clone(),
+    );
 
     // The command is synchronous, so we can check the state immediately.
 

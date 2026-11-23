@@ -4,13 +4,15 @@
 //! - [`OutputDocument`] formats the output document (pure, no IO),
 //! - `load_selected_entry` and its helpers read and decode files (blocking IO),
 //! - [`FileHandler::generate_concatenated_content_simple`] orchestrates both, keeping
-//!   the blocking work off the async runtime and honouring cancellation.
+//!   the blocking work off the async runtime and honouring cancellation. What to
+//!   generate is described by a [`GenerationRequest`]; a [`GenerationObserver`] can
+//!   follow the progress.
 
 use super::{CoreError, FileItem, TreeGenerator, MAX_FILE_SIZE};
 use crate::utils::file_detection::{classify_by_extension, is_text_content, is_text_file};
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -78,19 +80,19 @@ fn display_path(
 /// silently skipped by the generation.
 ///
 /// Performs blocking IO; must not be called directly on the async runtime.
-fn load_selected_entry(file_path: &Path) -> Option<String> {
+fn load_selected_entry(file_path: &Path, max_file_size: u64) -> Option<String> {
     if file_path.is_dir() {
         return None;
     }
-    Some(read_file_body(file_path))
+    Some(read_file_body(file_path, max_file_size))
 }
 
 /// Reads the body of a file for the output document.
 ///
 /// Never fails: a file that cannot be read (e.g. deleted since the scan) yields an
 /// inline marker, so that a single bad file does not abort the whole generation.
-fn read_file_body(file_path: &Path) -> String {
-    try_read_file_body(file_path).unwrap_or_else(|error| {
+fn read_file_body(file_path: &Path, max_file_size: u64) -> String {
+    try_read_file_body(file_path, max_file_size).unwrap_or_else(|error| {
         tracing::warn!(
             "Skipping unreadable file {}: {}",
             file_path.display(),
@@ -101,10 +103,10 @@ fn read_file_body(file_path: &Path) -> String {
 }
 
 /// Reads a file once, with safeguards for large or binary files.
-fn try_read_file_body(file_path: &Path) -> io::Result<String> {
+fn try_read_file_body(file_path: &Path, max_file_size: u64) -> io::Result<String> {
     // Skip files that exceed the size limit to prevent excessive memory usage.
     let size = fs::metadata(file_path)?.len();
-    if size > MAX_FILE_SIZE {
+    if size > max_file_size {
         return Ok(format!("[FILE TOO LARGE: {size} bytes - CONTENT SKIPPED]"));
     }
     Ok(decode_file_bytes(file_path, fs::read(file_path)?))
@@ -120,7 +122,8 @@ fn decode_file_bytes(file_path: &Path, bytes: Vec<u8>) -> String {
 /// content.
 ///
 /// This is the one place that defines how the application reads text, shared by the
-/// output generation and the content search, so both always see the same characters.
+/// output generation, the file preview and the content search, so all of them always
+/// see the same characters.
 /// Valid UTF-8 is used as is. Anything else that still looks like text is taken to be
 /// in a legacy single-byte encoding and decoded as Windows-1252, the superset of
 /// ISO-8859-1 (Latin-1) that such files are overwhelmingly written in. Every byte maps
@@ -165,25 +168,60 @@ fn is_legacy_encoded_text(file_path: &Path, bytes: &[u8]) -> bool {
 }
 
 /// Runs [`load_selected_entry`] on the blocking thread pool.
-async fn load_selected_entry_off_runtime(file_path: PathBuf) -> Result<Option<String>, CoreError> {
-    Ok(tokio::task::spawn_blocking(move || load_selected_entry(&file_path)).await?)
+async fn load_selected_entry_off_runtime(
+    file_path: PathBuf,
+    max_file_size: u64,
+) -> Result<Option<String>, CoreError> {
+    Ok(tokio::task::spawn_blocking(move || load_selected_entry(&file_path, max_file_size)).await?)
 }
 
-/// Test-only synchronisation point between two files.
+/// Reads at most `limit` bytes of a file. The second value tells whether the file is
+/// longer than that.
 ///
-/// Signals the test that a file has been fully processed, then holds the generation
-/// until the test has requested cancellation. This makes the cancellation test
-/// deterministic without relying on timing.
-#[cfg(test)]
-async fn pause_until_cancel_requested(
-    notifier: tokio::sync::oneshot::Sender<()>,
-    cancel_flag: &AtomicBool,
-) {
-    let _ = notifier.send(());
-    while !cancel_flag.load(Ordering::SeqCst) {
-        tokio::task::yield_now().await;
+/// A cut never ends inside a UTF-8 character: an incomplete sequence at the end of the
+/// bytes read is dropped, so the cut alone cannot turn valid UTF-8 into something else.
+fn read_file_prefix(file_path: &Path, limit: u64) -> io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::new();
+    // One byte more than allowed tells a longer file from one of exactly `limit` bytes.
+    fs::File::open(file_path)?
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let is_cut = bytes.len() as u64 > limit;
+    if is_cut {
+        bytes.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        if let Err(error) = std::str::from_utf8(&bytes) {
+            // `error_len() == None`: the input ended in the middle of a character.
+            if error.error_len().is_none() {
+                bytes.truncate(error.valid_up_to());
+            }
+        }
     }
+    Ok((bytes, is_cut))
 }
+
+/// What a generation produces: which files, in which layout, under which limits.
+pub struct GenerationRequest<'a> {
+    /// The files whose content is embedded, in output order.
+    pub selected_files: &'a [PathBuf],
+    /// The project root; display paths and the tree are relative to it.
+    pub root_path: &'a Path,
+    pub include_tree: bool,
+    pub items_for_tree: Vec<FileItem>,
+    pub tree_ignore_patterns: HashSet<String>,
+    pub use_relative_paths: bool,
+    /// Files larger than this many bytes are represented by a marker instead of
+    /// their content.
+    pub max_file_size: u64,
+}
+
+/// Follows the progress of a generation. All notifications default to doing nothing,
+/// and `()` is the observer that is not interested in any of them.
+pub trait GenerationObserver: Sync {
+    /// The block of `file_path` has been appended to the document.
+    fn file_appended(&self, _file_path: &Path) {}
+}
+
+impl GenerationObserver for () {}
 
 /// A utility struct for handling file-related operations.
 ///
@@ -198,23 +236,21 @@ impl FileHandler {
     /// files. File IO runs on the blocking thread pool, not on the async runtime.
     ///
     /// Files that cannot be read get an inline marker instead of aborting the generation.
-    // The production signature has seven parameters; only the test-only notifier below
-    // pushes test builds over clippy's limit.
-    #[cfg_attr(test, allow(clippy::too_many_arguments))]
     pub async fn generate_concatenated_content_simple(
-        selected_files: &[PathBuf],
-        root_path: &Path,
-        include_tree: bool,
-        items_for_tree: Vec<FileItem>,
-        tree_ignore_patterns: HashSet<String>,
-        use_relative_paths: bool,
+        request: GenerationRequest<'_>,
         cancel_flag: Arc<AtomicBool>,
-        // This parameter only exists during `cargo test` runs. It allows deterministic
-        // testing of the cancellation logic without affecting the production build:
-        // after the first file, the generation signals the test and waits for the
-        // cancel flag (see `pause_until_cancel_requested`).
-        #[cfg(test)] mut test_notifier: Option<tokio::sync::oneshot::Sender<()>>,
+        observer: &impl GenerationObserver,
     ) -> Result<String, CoreError> {
+        let GenerationRequest {
+            selected_files,
+            root_path,
+            include_tree,
+            items_for_tree,
+            tree_ignore_patterns,
+            use_relative_paths,
+            max_file_size,
+        } = request;
+
         let mut document = OutputDocument::new(
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
             selected_files.len(),
@@ -235,25 +271,26 @@ impl FileHandler {
             }
 
             // Directories in the selection list are silently skipped.
-            let Some(body) = load_selected_entry_off_runtime(file_path.clone()).await? else {
+            let Some(body) =
+                load_selected_entry_off_runtime(file_path.clone(), max_file_size).await?
+            else {
                 continue;
             };
 
             let display_path = display_path(file_path, root_path, use_relative_paths)?;
             document.push_file(&display_path, &body);
-
-            // Removed from release builds entirely, incurring zero overhead.
-            #[cfg(test)]
-            if let Some(notifier) = test_notifier.take() {
-                pause_until_cancel_requested(notifier, &cancel_flag).await;
-            }
+            observer.file_appended(file_path);
         }
         Ok(document.finish())
     }
 
     /// Retrieves a truncated preview of a text file's content.
     ///
-    /// Reads up to a specified maximum number of lines. Identifies directories and binary files.
+    /// Shows up to `max_lines` lines. Identifies directories and binary files. The text
+    /// is decoded exactly as for the generated output (see [`decode_text`]), so a file
+    /// in a legacy encoding looks the same in the preview and in the document.
+    ///
+    /// At most [`MAX_FILE_SIZE`] bytes are read, however long the file is.
     pub fn get_file_preview(file_path: &Path, max_lines: usize) -> Result<String, CoreError> {
         if file_path.is_dir() {
             return Ok("[DIRECTORY]".to_string());
@@ -266,27 +303,20 @@ impl FileHandler {
             return Ok("[BINARY FILE]".to_string());
         }
 
-        let file = fs::File::open(file_path)
+        let (bytes, is_cut) = read_file_prefix(file_path, MAX_FILE_SIZE)
             .map_err(|e| CoreError::Io(e.to_string(), file_path.to_path_buf()))?;
-        let reader = BufReader::new(file);
-        let mut preview = String::new();
+        let Some(text) = decode_text(file_path, bytes) else {
+            return Ok("[BINARY FILE]".to_string());
+        };
 
-        for (i, line) in reader.lines().enumerate() {
-            if i >= max_lines {
-                preview.push_str("...\n[Preview truncated]");
-                break;
-            }
-            match line {
-                Ok(line_content) => {
-                    preview.push_str(&line_content);
-                    preview.push('\n');
-                }
-                // If a line cannot be read (e.g., due to invalid UTF-8 mid-file),
-                // insert an error message.
-                Err(_) => {
-                    preview.push_str("[ERROR READING LINE]\n");
-                }
-            }
+        let mut preview = String::new();
+        let mut lines = text.lines();
+        for line in lines.by_ref().take(max_lines) {
+            preview.push_str(line);
+            preview.push('\n');
+        }
+        if is_cut || lines.next().is_some() {
+            preview.push_str("...\n[Preview truncated]");
         }
         Ok(preview)
     }
@@ -303,6 +333,51 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    /// Runs a generation with the default size limit and without an observer.
+    async fn generate(
+        selected_files: &[PathBuf],
+        root_path: &Path,
+        include_tree: bool,
+        items_for_tree: Vec<FileItem>,
+        tree_ignore_patterns: HashSet<String>,
+        use_relative_paths: bool,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<String, CoreError> {
+        FileHandler::generate_concatenated_content_simple(
+            request(
+                selected_files,
+                root_path,
+                include_tree,
+                items_for_tree,
+                tree_ignore_patterns,
+                use_relative_paths,
+            ),
+            cancel_flag,
+            &(),
+        )
+        .await
+    }
+
+    /// A request with the default size limit.
+    fn request<'a>(
+        selected_files: &'a [PathBuf],
+        root_path: &'a Path,
+        include_tree: bool,
+        items_for_tree: Vec<FileItem>,
+        tree_ignore_patterns: HashSet<String>,
+        use_relative_paths: bool,
+    ) -> GenerationRequest<'a> {
+        GenerationRequest {
+            selected_files,
+            root_path,
+            include_tree,
+            items_for_tree,
+            tree_ignore_patterns,
+            use_relative_paths,
+            max_file_size: MAX_FILE_SIZE,
+        }
+    }
 
     // Die Helferfunktionen bleiben unverändert
     fn setup_test_environment() -> (TempDir, PathBuf) {
@@ -375,7 +450,7 @@ mod tests {
         let all_items =
             create_file_items(&root, &["src", "src/main.rs", "src/lib.rs", "README.md"]);
 
-        let content = FileHandler::generate_concatenated_content_simple(
+        let content = generate(
             &selected_files,
             &root,
             true,
@@ -383,8 +458,6 @@ mod tests {
             HashSet::new(),
             true,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
         .unwrap();
@@ -403,7 +476,7 @@ mod tests {
     async fn concatenated_content_absolute_no_tree() {
         let (_dir, root) = setup_test_environment();
         let selected_files = vec![root.join("src/main.rs"), root.join("README.md")];
-        let content = FileHandler::generate_concatenated_content_simple(
+        let content = generate(
             &selected_files,
             &root,
             false,
@@ -411,8 +484,6 @@ mod tests {
             HashSet::new(),
             false,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
         .unwrap();
@@ -449,7 +520,7 @@ mod tests {
         let mut tree_ignore_patterns = HashSet::new();
         tree_ignore_patterns.insert("assets/".to_string());
 
-        let content = FileHandler::generate_concatenated_content_simple(
+        let content = generate(
             &selected_files,
             &root,
             true,
@@ -457,8 +528,6 @@ mod tests {
             tree_ignore_patterns,
             true,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
         .unwrap();
@@ -478,7 +547,7 @@ mod tests {
         let (_dir, root) = setup_test_environment();
         let project_name = root.file_name().unwrap().to_str().unwrap();
         let selected_files = vec![root.join("huge_file.log"), root.join("assets/data.bin")];
-        let content = FileHandler::generate_concatenated_content_simple(
+        let content = generate(
             &selected_files,
             &root,
             false,
@@ -486,8 +555,6 @@ mod tests {
             HashSet::new(),
             true,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
         .unwrap();
@@ -526,7 +593,7 @@ mod tests {
 
     /// Runs a generation without tree and with relative paths for the given selection.
     async fn generate_plain(selected_files: &[PathBuf], root: &Path) -> Result<String, CoreError> {
-        FileHandler::generate_concatenated_content_simple(
+        generate(
             selected_files,
             root,
             false,
@@ -534,8 +601,6 @@ mod tests {
             HashSet::new(),
             true,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
     }
@@ -663,7 +728,7 @@ mod tests {
         // Test with an empty vector of selected files
         let selected_files: Vec<PathBuf> = vec![];
 
-        let content = FileHandler::generate_concatenated_content_simple(
+        let content = generate(
             &selected_files,
             &root,
             true,   // include_tree
@@ -671,8 +736,6 @@ mod tests {
             HashSet::new(),
             true,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
         .unwrap();
@@ -703,7 +766,7 @@ mod tests {
 
         let selected_files = vec![no_newline_path, empty_file_path];
 
-        let content = FileHandler::generate_concatenated_content_simple(
+        let content = generate(
             &selected_files,
             &root,
             false, // include_tree
@@ -711,8 +774,6 @@ mod tests {
             HashSet::new(),
             true,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
         .unwrap();
@@ -751,7 +812,7 @@ mod tests {
         ];
 
         // --- Execute ---
-        let content = FileHandler::generate_concatenated_content_simple(
+        let content = generate(
             &selected_files,
             &root,
             true, // Wir wollen den Baum sehen, um das Rendering zu prüfen
@@ -759,8 +820,6 @@ mod tests {
             HashSet::new(),
             true,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
         .unwrap();
@@ -799,7 +858,7 @@ mod tests {
         let selected_files = vec![exact_size_path.clone(), too_large_path.clone()];
 
         // --- Execute ---
-        let content = FileHandler::generate_concatenated_content_simple(
+        let content = generate(
             &selected_files,
             &root,
             false,
@@ -807,8 +866,6 @@ mod tests {
             HashSet::new(),
             true,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
         .unwrap();
@@ -833,7 +890,7 @@ mod tests {
         // Select a valid file AND a directory
         let selected_files = vec![root.join("src/main.rs"), root.join("src")];
 
-        let content = FileHandler::generate_concatenated_content_simple(
+        let content = generate(
             &selected_files,
             &root,
             false,
@@ -841,8 +898,6 @@ mod tests {
             HashSet::new(),
             true,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
         .unwrap();
@@ -869,7 +924,7 @@ mod tests {
         root = PathBuf::from("/");
         let selected_files = vec![readme_path.clone()];
 
-        let content = FileHandler::generate_concatenated_content_simple(
+        let content = generate(
             &selected_files,
             &root,
             false,
@@ -877,8 +932,6 @@ mod tests {
             HashSet::new(),
             true,
             Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            None,
         )
         .await
         .unwrap();
@@ -894,46 +947,97 @@ mod tests {
         });
     }
 
+    /// Requests cancellation as soon as the first file has been appended.
+    struct CancelAfterFirstFile {
+        cancel_flag: Arc<AtomicBool>,
+        appended: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl GenerationObserver for CancelAfterFirstFile {
+        fn file_appended(&self, file_path: &Path) {
+            self.appended.lock().unwrap().push(file_path.to_path_buf());
+            self.cancel_flag.store(true, Ordering::SeqCst);
+        }
+    }
+
     #[tokio::test]
     async fn generate_content_can_be_cancelled_deterministically() {
         let (_dir, root) = setup_test_environment();
         let selected_files = vec![root.join("src/main.rs"), root.join("README.md")];
         let cancel_flag = Arc::new(AtomicBool::new(false));
+        let observer = CancelAfterFirstFile {
+            cancel_flag: cancel_flag.clone(),
+            appended: Default::default(),
+        };
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
-        // Klone/kopiere alle Daten, die der Task besitzen muss
-        let task_cancel_flag = cancel_flag.clone();
-        let task_selected_files = selected_files.clone();
-        let task_root = root.clone();
-
-        let generation_task = tokio::spawn(async move {
-            FileHandler::generate_concatenated_content_simple(
-                &task_selected_files, // Verwende die owned Daten
-                &task_root,
-                false,
-                vec![],
-                HashSet::new(),
-                true,
-                task_cancel_flag,
-                #[cfg(test)]
-                Some(tx),
-            )
-            .await
-        });
-
-        // Wait until the first file has been fully processed. The task now holds
-        // before the second file until it observes the cancel flag.
-        rx.await.expect("Task did not send start signal");
-
-        // Set the flag over the original reference
-        cancel_flag.store(true, Ordering::SeqCst);
-
-        let result = generation_task.await.unwrap();
+        let result = FileHandler::generate_concatenated_content_simple(
+            request(&selected_files, &root, false, vec![], HashSet::new(), true),
+            cancel_flag,
+            &observer,
+        )
+        .await;
 
         assert!(
             matches!(result, Err(CoreError::Cancelled)),
-            "The task should have been cancelled between the two files, got {result:?}"
+            "The generation should have been cancelled between the two files, got {result:?}"
+        );
+        assert_eq!(
+            *observer.appended.lock().unwrap(),
+            vec![root.join("src/main.rs")],
+            "Only the first file may have been processed"
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_is_told_about_every_appended_file_but_not_about_directories() {
+        let (_dir, root) = setup_test_environment();
+        let selected_files = vec![
+            root.join("src/main.rs"),
+            root.join("src"),
+            root.join("README.md"),
+        ];
+        let observer = CancelAfterFirstFile {
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            appended: Default::default(),
+        };
+
+        FileHandler::generate_concatenated_content_simple(
+            request(&selected_files, &root, false, vec![], HashSet::new(), true),
+            Arc::new(AtomicBool::new(false)),
+            &observer,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *observer.appended.lock().unwrap(),
+            vec![root.join("src/main.rs"), root.join("README.md")]
+        );
+    }
+
+    #[tokio::test]
+    async fn size_limit_of_the_request_decides_which_files_are_inlined() {
+        let (_dir, root) = setup_test_environment();
+        let small = root.join("small.txt");
+        let large = root.join("large.txt");
+        fs::write(&small, "12345").unwrap();
+        fs::write(&large, "123456").unwrap();
+        let selected_files = vec![small, large];
+        let mut request = request(&selected_files, &root, false, vec![], HashSet::new(), true);
+        request.max_file_size = 5;
+
+        let content = FileHandler::generate_concatenated_content_simple(
+            request,
+            Arc::new(AtomicBool::new(false)),
+            &(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(file_block_body(&content, "small.txt"), "12345\n");
+        assert_eq!(
+            file_block_body(&content, "large.txt"),
+            "[FILE TOO LARGE: 6 bytes - CONTENT SKIPPED]\n"
         );
     }
 
@@ -943,7 +1047,7 @@ mod tests {
         // Even an unreadable file must not mask a cancellation.
         let selected_files = vec![root.join("does_not_exist.txt")];
 
-        let result = FileHandler::generate_concatenated_content_simple(
+        let result = generate(
             &selected_files,
             &root,
             false,
@@ -951,14 +1055,14 @@ mod tests {
             HashSet::new(),
             true,
             Arc::new(AtomicBool::new(true)),
-            #[cfg(test)]
-            None,
         )
         .await;
 
         assert!(matches!(result, Err(CoreError::Cancelled)));
     }
 
+    /// A line that is not valid UTF-8 is shown the way the generation embeds it:
+    /// decoded as Windows-1252 instead of being replaced by an error marker.
     #[test]
     fn get_preview_handles_corrupted_line() {
         let (_dir, root) = setup_test_environment();
@@ -972,7 +1076,79 @@ mod tests {
 
         let preview = FileHandler::get_file_preview(&corrupted_file_path, 10).unwrap();
 
-        // The snapshot will show that the second line failed to read.
+        // The snapshot shows the second line with 0x99 decoded as Windows-1252.
         insta::assert_snapshot!(preview);
+    }
+
+    #[tokio::test]
+    async fn preview_and_generation_show_the_same_text_for_a_latin1_file() {
+        let (_dir, root) = setup_test_environment();
+        let path = root.join("latin1.txt");
+        fs::write(&path, b"Gr\xF6\xDFe: 5 \x80\r\nzweite Zeile\n").unwrap();
+
+        let preview = FileHandler::get_file_preview(&path, 10).unwrap();
+        let generated = generate_plain(std::slice::from_ref(&path), &root)
+            .await
+            .unwrap();
+
+        assert_eq!(preview, "Größe: 5 €\nzweite Zeile\n");
+        assert_eq!(
+            file_block_body(&generated, "latin1.txt"),
+            "Größe: 5 €\r\nzweite Zeile\n"
+        );
+    }
+
+    #[test]
+    fn preview_of_binary_looking_text_extension_is_reported_as_binary() {
+        let (_dir, root) = setup_test_environment();
+        let path = root.join("data.txt");
+        fs::write(&path, b"\x00\x01\xFF\xFE\x00\x00").unwrap();
+
+        assert_eq!(
+            FileHandler::get_file_preview(&path, 10).unwrap(),
+            "[BINARY FILE]"
+        );
+    }
+
+    #[test]
+    fn preview_marks_truncation_only_when_lines_are_left_out() {
+        let (_dir, root) = setup_test_environment();
+        let path = root.join("three.txt");
+        fs::write(&path, "one\ntwo\nthree").unwrap();
+
+        assert_eq!(
+            FileHandler::get_file_preview(&path, 3).unwrap(),
+            "one\ntwo\nthree\n"
+        );
+        assert_eq!(
+            FileHandler::get_file_preview(&path, 2).unwrap(),
+            "one\ntwo\n...\n[Preview truncated]"
+        );
+    }
+
+    #[test]
+    fn file_prefix_is_never_cut_inside_a_utf8_character() {
+        let (_dir, root) = setup_test_environment();
+        let path = root.join("umlaut.txt");
+        fs::write(&path, "aö").unwrap(); // 'ö' takes two bytes.
+
+        assert_eq!(
+            read_file_prefix(&path, 3).unwrap(),
+            (b"a\xC3\xB6".to_vec(), false)
+        );
+        assert_eq!(read_file_prefix(&path, 2).unwrap(), (b"a".to_vec(), true));
+        assert_eq!(read_file_prefix(&path, 1).unwrap(), (b"a".to_vec(), true));
+    }
+
+    #[test]
+    fn file_prefix_keeps_bytes_that_are_invalid_rather_than_incomplete() {
+        let (_dir, root) = setup_test_environment();
+        let path = root.join("latin1.txt");
+        fs::write(&path, b"a\xF6bc").unwrap();
+
+        assert_eq!(
+            read_file_prefix(&path, 3).unwrap(),
+            (b"a\xF6b".to_vec(), true)
+        );
     }
 }

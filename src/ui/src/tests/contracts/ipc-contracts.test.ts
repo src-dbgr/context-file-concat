@@ -30,8 +30,6 @@ const NULLARY_COMMANDS: readonly NullaryCommandName[] = [
   "initialize",
   "selectAll",
   "deselectAll",
-  "expandAllFully",
-  "selectAllFully",
   "cancelGeneration",
   "clearPreviewState",
   "pickOutputDirectory",
