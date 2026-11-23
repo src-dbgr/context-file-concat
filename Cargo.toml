@@ -1,6 +1,6 @@
 [package]
 name = "context-file-concat"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 # MSRV of the dependency tree (time 0.3.47+ requires 1.88); verified by the CI job "msrv".
 rust-version = "1.88"
@@ -73,7 +73,7 @@ strip = true  # Remove debug symbols for smaller binaries
 [package.metadata.bundle]
 name = "Context File Concatenator"
 identifier = "io.devsam.contextfileconcat"
-version = "0.3.1"
+version = "0.4.0"
 short_description = "Context File Concatenator for LLMs"
 long_description = "A desktop application to intelligently select, filter, and combine project files into a single text file optimized for Large Language Models."
 icon = ["assets/icons/icon.icns"]  # macOS

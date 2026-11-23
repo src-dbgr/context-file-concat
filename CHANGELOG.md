@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0] - 2026-11-23
 
 ### Highlights
 
@@ -43,6 +43,7 @@
 - "Save to File" pressed in the moment a new output or a file preview replaced the shown output reported "no longer available"; the shown output is saved.
 - Redo in text fields was lost half a second after an undo.
 - A directory expanded while an ignore pattern was added stayed empty until it was collapsed and expanded again.
+- Native file dialogs are attached to the window and no longer abort the process on macOS ("NSView to be inside a NSWindow").
 - A content search that failed on its first run looked like "no matches"; the list now stays unfiltered and the error is shown.
 - A failed load of the editor is reported with a toast; clipboard feedback is translated.
 
