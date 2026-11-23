@@ -794,6 +794,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // Builds file names from raw bytes (OsStrExt::from_bytes).
     fn test_file_name_matcher_compares_non_unicode_names_in_their_lossy_form() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;

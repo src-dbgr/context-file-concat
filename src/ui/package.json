@@ -26,14 +26,15 @@
     "test:e2e": "playwright test -c ./playwright.config.ts --grep-invert \"@budget|@bench\"",
     "test:e2e:headed": "playwright test -c ./playwright.config.ts --headed --grep-invert \"@budget|@bench\"",
     "test:contracts": "vitest run src/tests/contracts --reporter=dot",
-    "test:e2e:budgets": "playwright test -c ./playwright.config.ts --grep @budget",
+    "test:e2e:budgets": "playwright test -c ./playwright.config.ts --project=chromium --grep @budget",
     "e2e:bench": "playwright test src/ui/e2e/benchmarks.spec.ts --project=chromium --reporter=line",
     "e2e": "playwright test",
     "bench": "playwright test -g @bench --project=chromium --reporter=line",
     "bench:strict": "BMARK_FLATTEN_MS=1500 BMARK_FILTER_MS=500 BMARK_SCROLL_MS=200 npm run bench --silent",
     "check": "npm run lint && npm run typecheck && npm run test && npm run test:contracts && npm run test:cov:core && npm run test:e2e && npm run bench:strict",
     "check:clean": "npm run clean && npm run build && npm run check",
-    "budget:bundle": "node ./scripts/check-budgets.mjs"
+    "budget:bundle": "node ./scripts/check-budgets.mjs",
+    "audit:deps": "node ./scripts/audit.mjs"
   },
   "keywords": [
     "llm",
@@ -54,7 +55,7 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.10.2",
     "@eslint/js": "^9.34.0",
-    "@playwright/test": "^1.55.0",
+    "@playwright/test": "^1.55.1",
     "@sveltejs/vite-plugin-svelte": "^6.1.3",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/svelte": "^5.4.2",

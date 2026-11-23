@@ -1107,6 +1107,7 @@ mod tests {
     use crate::app::view_model::UiState;
     use crate::config::AppConfig;
     use crate::core::MAX_FILE_SIZE;
+    #[cfg(unix)] // Only the permission-based tests need it.
     use crate::utils::test_helpers::running_as_root;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;

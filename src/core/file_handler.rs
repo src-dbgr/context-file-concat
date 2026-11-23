@@ -520,6 +520,16 @@ mod tests {
         (dir, root)
     }
 
+    /// Generated output with the path separators of this platform written as "/", so
+    /// that one snapshot serves all platforms. On Unix this is the output itself.
+    fn portable_paths(content: &str) -> String {
+        if cfg!(windows) {
+            content.replace(std::path::MAIN_SEPARATOR, "/")
+        } else {
+            content.to_owned()
+        }
+    }
+
     fn create_file_items(root: &Path, paths: &[&str]) -> Vec<FileItem> {
         paths
             .iter()
@@ -564,6 +574,7 @@ mod tests {
         .await
         .unwrap();
 
+        let content = portable_paths(&content);
         let mut settings = insta::Settings::clone_current();
         settings.set_filters(vec![
             (r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]"),
@@ -590,11 +601,9 @@ mod tests {
         .await
         .unwrap();
 
+        let content = portable_paths(&content.replace(root.to_str().unwrap(), "[ROOT]"));
         let mut settings = insta::Settings::clone_current();
-        settings.set_filters(vec![
-            (r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]"),
-            (root.to_str().unwrap(), "[ROOT]"),
-        ]);
+        settings.set_filters(vec![(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]")]);
         settings.bind(|| {
             insta::assert_snapshot!(content);
         });
@@ -634,6 +643,7 @@ mod tests {
         .await
         .unwrap();
 
+        let content = portable_paths(&content);
         let mut settings = insta::Settings::clone_current();
         settings.set_filters(vec![
             (r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]"),
@@ -661,6 +671,7 @@ mod tests {
         .await
         .unwrap();
 
+        let content = portable_paths(&content);
         let mut settings = insta::Settings::clone_current();
         settings.set_filters(vec![
             (r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]"),
@@ -842,6 +853,7 @@ mod tests {
         .await
         .unwrap();
 
+        let content = portable_paths(&content);
         let mut settings = insta::Settings::clone_current();
         settings.set_filters(vec![
             (r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]"),
@@ -880,6 +892,7 @@ mod tests {
         .await
         .unwrap();
 
+        let content = portable_paths(&content);
         let mut settings = insta::Settings::clone_current();
         settings.set_filters(vec![
             (r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]"),
@@ -927,6 +940,7 @@ mod tests {
         .unwrap();
 
         // --- Assert ---
+        let content = portable_paths(&content);
         let mut settings = insta::Settings::clone_current();
         settings.set_filters(vec![
             (r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]"),
@@ -973,6 +987,7 @@ mod tests {
         .unwrap();
 
         // --- Assert ---
+        let content = portable_paths(&content);
         let mut settings = insta::Settings::clone_current();
         settings.set_filters(vec![
             (r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]"),
@@ -1006,6 +1021,7 @@ mod tests {
 
         // The snapshot should only contain the content of main.rs.
         // The directory should be silently skipped by the `continue` statement.
+        let content = portable_paths(&content);
         let mut settings = insta::Settings::clone_current();
         settings.set_filters(vec![
             (r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]"),
@@ -1039,9 +1055,9 @@ mod tests {
         .unwrap();
 
         // In this case, `use_relative_paths` falls back to the full, absolute path.
+        let content = content.replace(readme_path.to_str().unwrap(), "[README_PATH]");
         insta::with_settings!({
             filters => vec![
-                (readme_path.to_str().unwrap(), "[README_PATH]"),
                 (r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", "[DATETIME]"),
             ]
         }, {

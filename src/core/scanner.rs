@@ -334,10 +334,8 @@ mod tests {
             }
         })
     }
-    use crate::utils::test_helpers::running_as_root;
     use crate::utils::test_helpers::setup_test_logging;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::panic;
     use std::path::PathBuf;
     use std::sync::{atomic::AtomicBool, Mutex};
@@ -714,6 +712,9 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)] // Relies on Unix-style permissions.
     async fn test_scan_unreadable_directory() {
+        use crate::utils::test_helpers::running_as_root;
+        use std::os::unix::fs::PermissionsExt;
+
         if running_as_root() {
             eprintln!("Skipping permission-based test because process runs as root (Docker/act).");
             return;
