@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub window_size: (f64, f64),
     pub window_position: (f64, f64),
     pub auto_load_last_directory: bool,
+    /// Size limit for files in MiB: larger files are not listed by the scan, not read
+    /// by the content search and not inlined into the generated output.
     pub max_file_size_mb: u64,
     pub scan_chunk_size: usize,
 }
@@ -26,6 +28,13 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn load() -> Result<Self> {
         settings::load_config(None)
+    }
+
+    /// The file size limit ([`AppConfig::max_file_size_mb`]) in bytes, the unit the
+    /// core works with.
+    pub fn max_file_size_bytes(&self) -> u64 {
+        const BYTES_PER_MIB: u64 = 1024 * 1024;
+        self.max_file_size_mb.saturating_mul(BYTES_PER_MIB)
     }
 }
 
@@ -92,5 +101,34 @@ impl Default for AppConfig {
             max_file_size_mb: 20,
             scan_chunk_size: 100,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh configuration must behave exactly like the core does on its own.
+    #[test]
+    fn default_file_size_limit_is_the_limit_of_the_core() {
+        assert_eq!(
+            AppConfig::default().max_file_size_bytes(),
+            crate::core::MAX_FILE_SIZE
+        );
+    }
+
+    #[test]
+    fn file_size_limit_is_converted_from_mib_without_overflow() {
+        let limit_of = |max_file_size_mb| {
+            AppConfig {
+                max_file_size_mb,
+                ..Default::default()
+            }
+            .max_file_size_bytes()
+        };
+
+        assert_eq!(limit_of(3), 3 * 1024 * 1024);
+        assert_eq!(limit_of(0), 0);
+        assert_eq!(limit_of(u64::MAX), u64::MAX);
     }
 }

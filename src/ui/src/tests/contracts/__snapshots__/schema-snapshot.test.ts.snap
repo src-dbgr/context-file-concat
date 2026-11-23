@@ -282,40 +282,6 @@ exports[`[IPC Contracts] JSON schema snapshots > AnyCommandMessage schema snapsh
       "additionalProperties": false,
       "properties": {
         "command": {
-          "const": "expandAllFully",
-          "type": "string",
-        },
-        "payload": {
-          "type": "null",
-        },
-      },
-      "required": [
-        "command",
-        "payload",
-      ],
-      "type": "object",
-    },
-    {
-      "additionalProperties": false,
-      "properties": {
-        "command": {
-          "const": "selectAllFully",
-          "type": "string",
-        },
-        "payload": {
-          "type": "null",
-        },
-      },
-      "required": [
-        "command",
-        "payload",
-      ],
-      "type": "object",
-    },
-    {
-      "additionalProperties": false,
-      "properties": {
-        "command": {
           "const": "cancelGeneration",
           "type": "string",
         },

@@ -130,8 +130,6 @@ async fn run_command<P: EventProxy>(msg: IpcMessage, proxy: P, state: Arc<Mutex<
         "expandCollapseAll" => commands::expand_collapse_all(msg.payload, proxy, state),
         "selectAll" => commands::select_all(proxy, state),
         "deselectAll" => commands::deselect_all(proxy, state),
-        "expandAllFully" => commands::expand_all_fully(proxy, state),
-        "selectAllFully" => commands::select_all_fully(proxy, state),
         "cancelGeneration" => commands::cancel_generation(proxy, state),
         "clearPreviewState" => commands::clear_preview_state(proxy, state),
 

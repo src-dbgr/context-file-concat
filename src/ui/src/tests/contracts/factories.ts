@@ -143,8 +143,6 @@ export function makeValidPayloadForCommand(name: CommandName): unknown {
     case "initialize":
     case "selectAll":
     case "deselectAll":
-    case "expandAllFully":
-    case "selectAllFully":
     case "cancelGeneration":
     case "clearPreviewState":
     case "pickOutputDirectory":

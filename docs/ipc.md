@@ -46,11 +46,9 @@ The single source of truth is `CommandSchemas` in `schema.ts`; names and payload
 | `setExpansion`             | `{ path: string, expanded: boolean }` (no other fields)    | Expands or collapses one directory. Idempotent; always answered with a snapshot |
 | `toggleExpansion`          | `string` (path)                                            | Flips one directory. Not idempotent and not used by the UI, see [Expansion](#expansion-one-source-of-truth) |
 | `expandCollapseAll`        | `boolean`                                                  | Expands (`true`) or collapses (`false`) every listed directory         |
-| `expandAllFully`           | `null`                                                     | Expands everything; only after the full scan                           |
 | `toggleSelection`          | `string` (path)                                            | Selects/deselects one file                                             |
 | `toggleDirectorySelection` | `string` (path)                                            | Selects/deselects all files below a directory                          |
 | `selectAll` / `deselectAll`| `null`                                                     | Selects all listed files / clears the selection                        |
-| `selectAllFully`           | `null`                                                     | Selects everything; only after the full scan                           |
 | `updateFilters`            | `{ searchQuery, extensionFilter, contentSearchQuery }`     | Applies the filters; expands the ancestors of matches                  |
 | `loadFilePreview`          | `string` (path)                                            | Answers with `showPreviewContent`                                      |
 | `clearPreviewState`        | `null`                                                     | Clears the previewed file                                              |
@@ -58,9 +56,24 @@ The single source of truth is `CommandSchemas` in `schema.ts`; names and payload
 | `cancelGeneration`         | `null`                                                     | Cancels the running generation                                         |
 | `saveFile`                 | `string` (content)                                         | Opens the save dialog; answers with `fileSaveStatus`                   |
 | `pickOutputDirectory`      | `null`                                                     | Opens the dialog and stores the choice in the config                   |
-| `updateConfig`             | full config (`ConfigSchema`)                               | Stores the config, rescans if necessary                                |
+| `updateConfig`             | full config (`ConfigSchema`)                               | Stores the config and applies it, see [Config changes](#config-changes) |
 | `importConfig` / `exportConfig` | `null`                                                | Config import/export via dialog                                        |
 | `addIgnorePath`            | `string` (path)                                            | Adds an ignore pattern for the path and rescans                        |
+
+### Config changes
+
+`updateConfig` always stores and persists the config. What else it does depends on what changed:
+
+| Change                                             | Effect                                                                                                                                                                                         |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ignore pattern added or removed **during a scan**  | The scan is restarted with the new patterns (selection and expansion are kept). A scan works with the patterns it was started with, so its result would otherwise bring ignored entries back.   |
+| Ignore pattern added, no scan running              | Applied to the loaded file list right away; no rescan.                                                                                                                                         |
+| Ignore pattern removed, no scan running            | Sets `patterns_need_rescan`; the UI offers `rescanDirectory`.                                                                                                                                   |
+| `case_sensitive_search`                            | Filters are re-applied; an active content search is repeated, because its matches depend on the setting.                                                                                       |
+| `remove_empty_directories`                         | Filters are re-applied.                                                                                                                                                                        |
+| `max_file_size_mb`                                 | Used by the next scan, lazy load, content search and generation. Not exposed in the UI (it round-trips the value); set it in the config file. See the note below.                               |
+
+`max_file_size_mb` is the size limit in MiB (default 20): larger files are not listed by a scan and are replaced by a `[FILE TOO LARGE …]` marker in the generated output. The content search honours limits up to the default of 20 MiB and never reads larger files.
 
 ```ts
 import { post } from "$lib/services/backend";

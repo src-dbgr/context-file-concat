@@ -96,6 +96,8 @@ impl ScanRequest {
 /// Scans a directory for files and subdirectories, respecting ignore patterns.
 pub struct DirectoryScanner {
     ignore_patterns: HashSet<String>,
+    /// Files larger than this many bytes are not listed.
+    max_file_size: u64,
     // This field only exists in test builds to allow deterministic testing of progress updates.
     #[cfg(test)]
     progress_throttle_override: Option<Duration>,
@@ -106,10 +108,12 @@ pub struct DirectoryScanner {
 /// polluting the public API signature.
 ///
 /// Entries up to and including `start_depth` (the start directory of the scan and the
-/// directories leading to it) are walked but neither counted nor reported.
+/// directories leading to it) are walked but neither counted nor reported. Files larger
+/// than `max_file_size` bytes are counted as skipped and not reported either.
 fn process_walker_results<F, H>(
     walker: ignore::Walk,
     start_depth: usize,
+    max_file_size: u64,
     cancel_flag: Arc<AtomicBool>,
     progress_callback: F,
     progress_throttle: Duration,
@@ -179,7 +183,7 @@ where
             }
         };
 
-        if !metadata.is_dir() && metadata.len() > MAX_FILE_SIZE {
+        if !metadata.is_dir() && metadata.len() > max_file_size {
             large_files_skipped_counter.fetch_add(1, Ordering::Relaxed);
             continue;
         }
@@ -205,19 +209,28 @@ where
 }
 
 impl DirectoryScanner {
+    /// Creates a scanner that skips files above the default size limit
+    /// ([`MAX_FILE_SIZE`]).
     pub fn new(ignore_patterns: HashSet<String>) -> Self {
         Self {
             ignore_patterns,
+            max_file_size: MAX_FILE_SIZE,
             #[cfg(test)]
             progress_throttle_override: None,
         }
     }
 
+    /// Replaces the size limit: files larger than `max_file_size` bytes are not listed.
+    pub fn with_max_file_size(mut self, max_file_size: u64) -> Self {
+        self.max_file_size = max_file_size;
+        self
+    }
+
     #[cfg(test)]
     fn new_with_throttle(ignore_patterns: HashSet<String>, throttle: Duration) -> Self {
         Self {
-            ignore_patterns,
             progress_throttle_override: Some(throttle),
+            ..Self::new(ignore_patterns)
         }
     }
 
@@ -246,6 +259,7 @@ impl DirectoryScanner {
     {
         let request = request.clone();
         let ignore_patterns_clone = self.ignore_patterns.clone();
+        let max_file_size = self.max_file_size;
 
         #[cfg(test)]
         let throttle = self
@@ -310,6 +324,7 @@ impl DirectoryScanner {
             let final_files = process_walker_results(
                 walker,
                 start_depth,
+                max_file_size,
                 cancel_flag,
                 progress_callback,
                 throttle,
@@ -450,6 +465,7 @@ mod tests {
             process_walker_results(
                 walker,
                 0,
+                MAX_FILE_SIZE,
                 task_cancel_flag,
                 move |progress| {
                     if progress.files_scanned > 20 {
@@ -503,6 +519,7 @@ mod tests {
         process_walker_results(
             walker,
             0,
+            MAX_FILE_SIZE,
             Arc::new(AtomicBool::new(false)),
             move |progress| {
                 updates_clone.lock().unwrap().push(progress);
@@ -706,6 +723,7 @@ mod tests {
         let files = process_walker_results(
             walker,
             0,
+            MAX_FILE_SIZE,
             Arc::new(AtomicBool::new(false)),
             |_| {},
             PROGRESS_UPDATE_THROTTLE,
@@ -755,6 +773,7 @@ mod tests {
         let files = process_walker_results(
             walker,
             0,
+            MAX_FILE_SIZE,
             cancel_flag,
             |_| {},
             PROGRESS_UPDATE_THROTTLE,
@@ -832,6 +851,7 @@ mod tests {
         let files = process_walker_results(
             walker,
             0,
+            MAX_FILE_SIZE,
             Arc::new(AtomicBool::new(false)),
             |_| {},
             PROGRESS_UPDATE_THROTTLE,
@@ -1023,5 +1043,47 @@ mod tests {
             ScanRequest::directory_level("/project", "/project").unwrap(),
             request
         );
+    }
+
+    /// The size limit is a property of the scanner: the default is the limit of the
+    /// core, a custom one decides which files are listed and which count as skipped.
+    #[tokio::test]
+    async fn scan_applies_the_configured_file_size_limit() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().to_path_buf();
+        fs::write(root.join("fits.txt"), b"12345").unwrap();
+        fs::write(root.join("too_big.txt"), b"123456").unwrap();
+        fs::create_dir(root.join("dir")).unwrap();
+        let skipped = Arc::new(AtomicUsize::new(0));
+        let skipped_by_scan = skipped.clone();
+
+        let (files, _) = DirectoryScanner::new_with_throttle(HashSet::new(), Duration::ZERO)
+            .with_max_file_size(5)
+            .scan(
+                &ScanRequest::project(&root, None),
+                Arc::new(AtomicBool::new(false)),
+                move |progress| {
+                    skipped_by_scan.fetch_max(progress.large_files_skipped, Ordering::SeqCst);
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut names: Vec<String> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["dir", "fits.txt"], "Directories have no size");
+
+        let (default_files, _) = DirectoryScanner::new(HashSet::new())
+            .scan(
+                &ScanRequest::project(&root, None),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(default_files.len(), 3);
     }
 }
