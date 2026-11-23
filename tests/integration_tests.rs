@@ -133,7 +133,7 @@ mod helpers {
 /// No test may ever read or write the developer's real configuration: the state the
 /// tests work with is an `AppState::default()`, which is bound to no config file (see
 /// `test_default_state_has_the_default_config_and_is_not_bound_to_a_file` in
-/// `state.rs`), so "saving" its configuration succeeds and writes nothing.
+/// `app/state/tests`), so "saving" its configuration succeeds and writes nothing.
 #[test]
 fn test_state_of_the_tests_is_not_bound_to_a_config_file() {
     let harness = helpers::TestHarness::new();
