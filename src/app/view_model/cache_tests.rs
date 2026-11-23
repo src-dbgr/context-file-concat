@@ -44,7 +44,7 @@ fn reference_tree(state: &AppState) -> Vec<TreeNode> {
         selected: &state.selected_files,
         expanded: &state.expanded_dirs,
         loaded_dirs: &state.loaded_dirs,
-        content_search_matches: &state.content_search_results,
+        content_search_matches: state.content_search_results(),
         filename_query: &state.search_query,
         extension_filter: &state.extension_filter,
         case_sensitive: state.config.case_sensitive_search,
@@ -274,7 +274,9 @@ fn apply(state: &mut AppState, op: Op) {
         }
         Op::ToggleContentMatch(target) => {
             let path = target.resolve(state);
-            toggle(&mut state.content_search_results, path);
+            let mut matches = state.content_search_results().clone();
+            toggle(&mut matches, path);
+            state.set_content_search_results(matches);
         }
         Op::Preview(target) => {
             state.previewed_file_path = target.map(|target| target.resolve(state));
@@ -426,11 +428,11 @@ proptest! {
 
 fn scanned_state() -> AppState {
     let mut state = test_state();
-    state.full_file_list = vec![
+    state.set_full_file_list(vec![
         item("/root/src", true),
         item("/root/src/main.rs", false),
         item("/root/readme.md", false),
-    ];
+    ]);
     filtering::apply_filters(&mut state);
     state
 }
@@ -484,7 +486,7 @@ fn index_is_rebuilt_after_scan_results_replace_the_list() {
     generate_ui_state(&state);
 
     // A (deep) scan result replaces the full list and re-applies the filters.
-    state.full_file_list = vec![item("/root/docs", true), item("/root/zz.txt", false)];
+    state.set_full_file_list(vec![item("/root/docs", true), item("/root/zz.txt", false)]);
     filtering::apply_filters(&mut state);
 
     assert_eq!(root_names(&state), ["docs", "zz.txt"]);
@@ -497,7 +499,7 @@ fn index_is_rebuilt_after_lazy_load_merge() {
     generate_ui_state(&state);
 
     // A lazy load appends the children of one directory and re-applies the filters.
-    state.full_file_list.push(item("/root/src/lib.rs", false));
+    state.edit_full_file_list(|list| list.push(item("/root/src/lib.rs", false)));
     state.loaded_dirs.insert(PathBuf::from("/root/src"));
     state.expanded_dirs.insert(PathBuf::from("/root/src"));
     filtering::apply_filters(&mut state);
@@ -519,7 +521,7 @@ fn index_is_rebuilt_after_reset_directory_state() {
     // Same list and root as before the reset: the old index must not be picked up
     // unseen, the revision has moved on.
     state.current_path = "/root".to_string();
-    state.full_file_list = vec![item("/root/other.rs", false)];
+    state.set_full_file_list(vec![item("/root/other.rs", false)]);
     filtering::apply_filters(&mut state);
 
     assert_eq!(root_names(&state), ["other.rs"]);

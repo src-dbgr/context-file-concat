@@ -96,7 +96,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
         rows_total: tree.rows_total,
         rows_revision: tree.rows_revision,
         located: tree.located,
-        total_files_found: state.full_file_list.len(),
+        total_files_found: state.full_file_list().len(),
         visible_files_count: state.filtered_file_list().len(),
         tree_files_count: counts.files,
         tree_dirs_count: counts.dirs,

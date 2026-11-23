@@ -5,7 +5,7 @@
 //! These handlers are responsible for interacting with the `AppState` and the `core`
 //! logic, and for sending `UserEvent`s back to the UI.
 
-use super::events::{OutputSizeNotice, SaveResult, UserEvent};
+use super::events::{IgnorePathRefusal, OutputSizeNotice, SaveResult, UserEvent};
 use super::filtering;
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
@@ -332,7 +332,7 @@ fn apply_added_patterns_locally(state: &mut AppState, patterns_added: &HashSet<S
     for pattern in patterns_added {
         let rules = crate::core::IgnoreRules::new(&state.current_path, [pattern]);
         let has_match = state
-            .full_file_list
+            .full_file_list()
             .iter()
             .any(|item| rules.is_ignored(&item.path, item.is_directory));
         if has_match {
@@ -444,7 +444,7 @@ pub fn load_file_preview<P: EventProxy>(payload: serde_json::Value, proxy: P, st
 /// nothing a `..` or a symbolic link in the requested path could get around. The path
 /// has to be the listed one; it is compared, not resolved.
 fn is_listed(state: &AppState, path: &Path) -> bool {
-    state.full_file_list.iter().any(|item| item.path == path)
+    state.full_file_list().iter().any(|item| item.path == path)
 }
 
 /// Loads the children of a specific directory for lazy loading.
@@ -478,17 +478,27 @@ pub fn load_directory_level<P: EventProxy>(
 /// any other added pattern, see [`change_config`].
 ///
 /// A path that has no pattern adds nothing: one outside the loaded directory, one
-/// with a name that is not valid Unicode, or any path while no directory is loaded.
-/// Like every config command it is answered with a state update either way.
+/// with a name no pattern can name ([`IgnorePathRefusal`]), or any path while no
+/// directory is loaded. Like every config command it is answered with a state update
+/// either way. Where it is the name of the entry that stands in the way, the user
+/// pressed a button on a row and nothing happened: they are told why
+/// ([`UserEvent::IgnorePathRefused`]), before the state update.
 pub async fn add_ignore_path<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
     state: SharedState,
 ) {
     let pattern = parse_payload::<PathBuf>("addIgnorePath", payload)
+        .ok_or(NoPattern::NotInTheLoadedDirectory)
         .and_then(|path| ignore_pattern_for_path(&state.lock(), &path));
-    let Some(pattern) = pattern else {
-        return answer_unchanged(&proxy, &state);
+    let pattern = match pattern {
+        Ok(pattern) => pattern,
+        Err(reason) => {
+            if let NoPattern::Refused(refusal) = reason {
+                proxy.send_event(UserEvent::IgnorePathRefused(refusal));
+            }
+            return answer_unchanged(&proxy, &state);
+        }
     };
 
     change_config(&proxy, &state, |config| {
@@ -497,19 +507,49 @@ pub async fn add_ignore_path<P: EventProxy>(
     .await;
 }
 
-/// The ignore pattern for `path`, a path of the loaded tree; `None` without a loaded
-/// directory and for a path that does not lie below it.
-fn ignore_pattern_for_path(state: &AppState, path: &Path) -> Option<String> {
+/// Why a path has no ignore pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NoPattern {
+    /// It is not an entry below the loaded directory (or there is none).
+    NotInTheLoadedDirectory,
+    /// It is one, with a name no pattern can name.
+    Refused(IgnorePathRefusal),
+}
+
+/// The ignore pattern for `path`, a path of the loaded tree.
+fn ignore_pattern_for_path(state: &AppState, path: &Path) -> Result<String, NoPattern> {
     if state.current_path.is_empty() {
-        return None;
+        return Err(NoPattern::NotInTheLoadedDirectory);
     }
-    let relative_path = path.strip_prefix(&state.current_path).ok()?;
-    let is_directory = state
-        .full_file_list
-        .iter()
-        .any(|item| item.is_directory && item.path == path);
+    let relative_path = path
+        .strip_prefix(&state.current_path)
+        .map_err(|_| NoPattern::NotInTheLoadedDirectory)?;
+    let listed = state.full_file_list().iter().find(|item| item.path == path);
+    if listed.is_none() {
+        if let Some(name) = name_that_is_not_unicode(state, path) {
+            return Err(NoPattern::Refused(IgnorePathRefusal::NotUnicode { name }));
+        }
+    }
+    let is_directory = listed.is_some_and(|item| item.is_directory);
 
     gitignore_pattern(relative_path, is_directory)
+}
+
+/// The UI knows the paths of the tree as text, so an entry whose name is not valid
+/// Unicode reaches it (and comes back from it) written lossily: with U+FFFD in place
+/// of what could not be read. If `path` is such a path, i.e. not listed itself but
+/// the lossy form of a listed one, this is the name of that entry as the UI shows
+/// it. A pattern made of `path` would name nothing.
+fn name_that_is_not_unicode(state: &AppState, path: &Path) -> Option<String> {
+    let text = path.to_str().filter(|text| text.contains('\u{fffd}'))?;
+    let is_lossy_form = state
+        .full_file_list()
+        .iter()
+        .any(|item| item.path.to_str().is_none() && item.path.to_string_lossy() == text);
+    is_lossy_form.then(|| {
+        let name = path.file_name().unwrap_or_default();
+        name.to_string_lossy().into_owned()
+    })
 }
 
 /// The gitignore pattern that hides the entry at `relative_path` (relative to the
@@ -534,22 +574,28 @@ fn ignore_pattern_for_path(state: &AppState, path: &Path) -> Option<String> {
 ///   whitespace: space, tab, line feed, vertical tab, form feed, carriage return.
 ///   (The slash at the end of a directory pattern protects the name of a directory.)
 ///
-/// `None` for a path that has no such pattern: the root itself, a path with anything
-/// but names in it (`..`, a drive), a name that is not valid Unicode (a pattern is
-/// text; a lossy conversion would name some other entry, or none), or a file name
+/// A path that has no such pattern is an error: the root itself or a path with
+/// anything but names in it (`..`, a drive) is not an entry below the root; a name
+/// that is not valid Unicode cannot be written (a pattern is text; a lossy
+/// conversion would name some other entry, or none); and neither can a file name
 /// that ends with whitespace outside ASCII (a no-break space, an ideographic space):
 /// the matcher drops it like any other, and its character classes are not a way to
 /// write it that this function vouches for.
-fn gitignore_pattern(relative_path: &Path, is_directory: bool) -> Option<String> {
+fn gitignore_pattern(relative_path: &Path, is_directory: bool) -> Result<String, NoPattern> {
     let names = relative_path
         .components()
         .map(|component| match component {
-            std::path::Component::Normal(name) => name.to_str().map(escape_pattern_characters),
-            _ => None,
+            std::path::Component::Normal(name) => match name.to_str() {
+                Some(name) => Ok(escape_pattern_characters(name)),
+                None => Err(NoPattern::Refused(IgnorePathRefusal::NotUnicode {
+                    name: name.to_string_lossy().into_owned(),
+                })),
+            },
+            _ => Err(NoPattern::NotInTheLoadedDirectory),
         })
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     if names.is_empty() {
-        return None;
+        return Err(NoPattern::NotInTheLoadedDirectory);
     }
     let mut pattern = format!("/{}", names.join("/"));
     if is_directory {
@@ -562,12 +608,15 @@ fn gitignore_pattern(relative_path: &Path, is_directory: bool) -> Option<String>
         pattern.push('/');
     } else if let Some(last) = pattern.chars().next_back().filter(|c| c.is_whitespace()) {
         if !last.is_ascii() {
-            return None;
+            let name = relative_path.file_name().unwrap_or_default();
+            return Err(NoPattern::Refused(IgnorePathRefusal::TrailingWhitespace {
+                name: name.to_string_lossy().into_owned(),
+            }));
         }
         pattern.pop();
         pattern.extend(['[', last, ']']);
     }
-    Some(pattern)
+    Ok(pattern)
 }
 
 /// `name` with a backslash before every character a gitignore pattern would not take
@@ -1251,7 +1300,7 @@ mod tests {
                 let path = self.root_path.join(p_str);
                 items.push(file_item(path.clone(), path.is_dir()));
             }
-            state.full_file_list = items.clone();
+            state.set_full_file_list(items.clone());
             state.set_filtered_file_list(items);
         }
 
@@ -1656,7 +1705,7 @@ mod tests {
             let state = harness.state.lock();
             assert!(state.selected_files.is_empty() && state.search_query.is_empty());
             let listed: Vec<_> = state
-                .full_file_list
+                .full_file_list()
                 .iter()
                 .filter_map(|item| item.path.file_name()?.to_str())
                 .collect();
@@ -1711,7 +1760,7 @@ mod tests {
         {
             let state = harness.state.lock();
             assert_eq!(state.current_path, "");
-            assert!(state.full_file_list.is_empty() && !state.is_scanning());
+            assert!(state.full_file_list().is_empty() && !state.is_scanning());
             assert_eq!(state.config, expected);
             assert_geometry_is_kept(&state.config);
         }
@@ -1942,19 +1991,19 @@ mod tests {
         let nested = Path::new("src").join("gen").join("out");
         assert_eq!(
             gitignore_pattern(&nested, true).as_deref(),
-            Some("/src/gen/out/")
+            Ok("/src/gen/out/")
         );
         assert_eq!(
             gitignore_pattern(&nested.join("a b.rs"), false).as_deref(),
-            Some("/src/gen/out/a b.rs")
+            Ok("/src/gen/out/a b.rs")
         );
         assert_eq!(
             gitignore_pattern(Path::new("docs"), true).as_deref(),
-            Some("/docs/")
+            Ok("/docs/")
         );
         assert_eq!(
             gitignore_pattern(Path::new("notes.txt"), false).as_deref(),
-            Some("/notes.txt")
+            Ok("/notes.txt")
         );
     }
 
@@ -1964,23 +2013,24 @@ mod tests {
     fn test_gitignore_pattern_of_a_path_with_backslashes() {
         assert_eq!(
             gitignore_pattern(Path::new(r"src\gen"), true).as_deref(),
-            Some("/src/gen/")
+            Ok("/src/gen/")
         );
         assert_eq!(
             gitignore_pattern(Path::new(r"src\gen\mod.rs"), false).as_deref(),
-            Some("/src/gen/mod.rs")
+            Ok("/src/gen/mod.rs")
         );
     }
 
     /// Only a path that names an entry below the root has a pattern.
     #[test]
     fn test_gitignore_pattern_needs_a_path_below_the_root() {
-        assert_eq!(gitignore_pattern(Path::new(""), true), None);
+        let outside = Err(NoPattern::NotInTheLoadedDirectory);
+        assert_eq!(gitignore_pattern(Path::new(""), true), outside);
         assert_eq!(
             gitignore_pattern(&Path::new("..").join("other"), false),
-            None
+            outside
         );
-        assert_eq!(gitignore_pattern(Path::new("/absolute"), false), None);
+        assert_eq!(gitignore_pattern(Path::new("/absolute"), false), outside);
     }
 
     /// A name that is not valid Unicode has no pattern: a pattern is text.
@@ -1991,8 +2041,19 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let name = OsStr::from_bytes(b"bad\xff.txt");
 
-        assert_eq!(gitignore_pattern(Path::new(name), false), None);
-        assert_eq!(gitignore_pattern(&Path::new("src").join(name), true), None);
+        let refused = Err(NoPattern::Refused(IgnorePathRefusal::NotUnicode {
+            name: "bad\u{fffd}.txt".to_string(),
+        }));
+        assert_eq!(gitignore_pattern(Path::new(name), false), refused);
+        assert_eq!(
+            gitignore_pattern(&Path::new("src").join(name), true),
+            refused
+        );
+        // The name that stands in the way is the one that is named.
+        assert_eq!(
+            gitignore_pattern(&Path::new(name).join("inside.txt"), false),
+            refused
+        );
     }
 
     /// An entry of a project (path relative to the root, with `/`) and whether it is
@@ -2014,7 +2075,7 @@ mod tests {
         let (relative, is_directory) = entry;
         let pattern =
             gitignore_pattern(path_of(relative).strip_prefix(root).unwrap(), is_directory)
-                .unwrap_or_else(|| panic!("{relative:?} has a pattern"));
+                .unwrap_or_else(|_| panic!("{relative:?} has a pattern"));
         let rules = crate::core::IgnoreRules::new(root, [&pattern]);
 
         assert!(
@@ -2095,7 +2156,7 @@ mod tests {
         assert_pattern_hides_only((" lead", FILE), &[("lead", FILE)]);
         assert_eq!(
             gitignore_pattern(Path::new("trail  "), false).as_deref(),
-            Some("/trail [ ]")
+            Ok("/trail [ ]")
         );
     }
 
@@ -2105,7 +2166,7 @@ mod tests {
     fn test_pattern_of_a_name_that_ends_with_ascii_whitespace_hides_only_that_name() {
         assert_eq!(
             gitignore_pattern(Path::new("tab\t"), false).as_deref(),
-            Some("/tab[\t]")
+            Ok("/tab[\t]")
         );
         assert_pattern_hides_only(
             ("tab\t", FILE),
@@ -2154,15 +2215,19 @@ mod tests {
         for whitespace in ['\u{a0}', '\u{3000}', '\u{85}', '\u{2028}', '\u{2003}'] {
             assert!(!whitespace.is_ascii() && whitespace.is_whitespace());
             let name = format!("name{whitespace}");
-            assert_eq!(gitignore_pattern(Path::new(&name), false), None, "{name:?}");
+            let refused = |name: &str| {
+                Err(NoPattern::Refused(IgnorePathRefusal::TrailingWhitespace {
+                    name: name.to_string(),
+                }))
+            };
+            assert_eq!(gitignore_pattern(Path::new(&name), false), refused(&name));
             assert_eq!(
                 gitignore_pattern(&Path::new("src").join(&name), false),
-                None,
-                "{name:?}"
+                refused(&name)
             );
             // ASCII whitespace before it does not change that.
             let name = format!("name {whitespace}");
-            assert_eq!(gitignore_pattern(Path::new(&name), false), None, "{name:?}");
+            assert_eq!(gitignore_pattern(Path::new(&name), false), refused(&name));
 
             // Elsewhere in a path it is a character like any other: the slash of a
             // directory pattern stands behind it, and so does the rest of a name.
@@ -2177,9 +2242,11 @@ mod tests {
 
     /// The ignore button on a file whose name has no pattern adds nothing, and what
     /// its pattern would have been (the name without the whitespace) stays visible.
+    /// The user is told why nothing happened, and the command is answered with a
+    /// state update like every other.
     #[tokio::test]
     async fn test_add_ignore_path_for_a_name_that_ends_with_other_whitespace_adds_nothing() {
-        let harness = TestHarness::new();
+        let mut harness = TestHarness::new();
         harness.set_initial_files(&["name\u{a0}", "name"]);
         let patterns = harness.state.lock().config.ignore_patterns.clone();
 
@@ -2190,9 +2257,90 @@ mod tests {
         )
         .await;
 
-        let state = harness.state.lock();
-        assert_eq!(state.config.ignore_patterns, patterns);
-        assert_eq!(state.full_file_list.len(), 2);
+        {
+            let state = harness.state.lock();
+            assert_eq!(state.config.ignore_patterns, patterns);
+            assert_eq!(state.full_file_list().len(), 2);
+        }
+        let events: Vec<UserEvent> =
+            std::iter::from_fn(|| harness.event_rx.try_recv().ok()).collect();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    UserEvent::IgnorePathRefused(IgnorePathRefusal::TrailingWhitespace { name }),
+                    UserEvent::StateUpdate(_)
+                ] if name == "name\u{a0}"
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// The same for a name that is not valid Unicode. The UI holds such a path as
+    /// text (lossily), and that is what it sends: the entry is recognized by it, and
+    /// no pattern is made of a path that names nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_add_ignore_path_for_a_name_that_is_not_unicode_says_so() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let mut harness = TestHarness::new();
+        let path = harness.root_path.join(OsStr::from_bytes(b"bad\xff.txt"));
+        {
+            let mut state = harness.state.lock();
+            state.set_full_file_list(vec![file_item(path.clone(), false)]);
+            filtering::apply_filters(&mut state);
+        }
+        let patterns = harness.state.lock().config.ignore_patterns.clone();
+
+        add_ignore_path(
+            json!(path.to_string_lossy()),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+
+        assert_eq!(harness.state.lock().config.ignore_patterns, patterns);
+        let events: Vec<UserEvent> =
+            std::iter::from_fn(|| harness.event_rx.try_recv().ok()).collect();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    UserEvent::IgnorePathRefused(IgnorePathRefusal::NotUnicode { name }),
+                    UserEvent::StateUpdate(_)
+                ] if name == "bad\u{fffd}.txt"
+            ),
+            "{events:?}"
+        );
+
+        // A name with U+FFFD in it that is listed as such is a name like any other.
+        let literal = harness.root_path.join("odd\u{fffd}.txt");
+        harness
+            .state
+            .lock()
+            .set_full_file_list(vec![file_item(literal.clone(), false)]);
+        assert_eq!(
+            ignore_pattern_for_path(&harness.state.lock(), &literal).as_deref(),
+            Ok("/odd\u{fffd}.txt")
+        );
+    }
+
+    /// A path that is no entry of the loaded directory adds nothing either, and
+    /// that is all: there is no row whose button could have been pressed.
+    #[tokio::test]
+    async fn test_add_ignore_path_outside_the_loaded_directory_is_not_reported() {
+        let mut harness = TestHarness::new();
+        harness.set_initial_files(&["name"]);
+
+        add_ignore_path(
+            json!("/somewhere/else"),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        )
+        .await;
+
+        assert_eq!(harness.state_updates_sent(), 1);
     }
 
     /// A backslash in a name (not a separator on Unix) is that character, not an
@@ -2234,7 +2382,7 @@ mod tests {
             state.config.ignore_patterns
         );
         let remaining: HashSet<PathBuf> = state
-            .full_file_list
+            .full_file_list()
             .iter()
             .map(|item| item.path.clone())
             .collect();
@@ -2260,8 +2408,10 @@ mod tests {
         let file = harness.root_path.join("notes");
         {
             let mut state = harness.state.lock();
-            state.full_file_list =
-                vec![file_item(dir.clone(), true), file_item(file.clone(), false)];
+            state.set_full_file_list(vec![
+                file_item(dir.clone(), true),
+                file_item(file.clone(), false),
+            ]);
             filtering::apply_filters(&mut state);
         }
 
@@ -2272,7 +2422,7 @@ mod tests {
         let state = harness.state.lock();
         assert!(state.config.ignore_patterns.contains("/build/"));
         assert!(state.config.ignore_patterns.contains("/notes"));
-        assert!(state.full_file_list.is_empty());
+        assert!(state.full_file_list().is_empty());
     }
 
     #[tokio::test]
@@ -2363,7 +2513,7 @@ mod tests {
         assert_eq!(ui_state.visible_files_count, 0);
         let state = harness.state.lock();
         assert!(state.current_path.is_empty());
-        assert!(state.full_file_list.is_empty());
+        assert!(state.full_file_list().is_empty());
         assert!(state.selected_files.is_empty());
         assert!(state.config.last_directory.is_none());
     }
@@ -2590,7 +2740,7 @@ mod tests {
             let items: Vec<FileItem> = (0..files)
                 .map(|i| file_item(harness.root_path.join(format!("file{i:04}.rs")), false))
                 .collect();
-            state.full_file_list = items.clone();
+            state.set_full_file_list(items.clone());
             state.set_filtered_file_list(items);
         }
         harness
@@ -3437,10 +3587,10 @@ mod tests {
         let root = PathBuf::from("/project");
         let mut state = AppState::default();
         state.current_path = "/project".to_string();
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             file_item(root.join("src"), true),
             file_item(root.join("src/main.rs"), false),
-        ];
+        ]);
 
         for (path, expected) in [
             ("/project/src/main.rs", true),
@@ -4024,7 +4174,7 @@ mod tests {
         set_option(&harness, ConfigOption::CaseSensitiveSearch(true)).await;
 
         let state = harness.state.lock();
-        assert_eq!(state.content_search_results, HashSet::from([file]));
+        assert_eq!(*state.content_search_results(), HashSet::from([file]));
         assert!(state.expanded_dirs.is_empty(), "must not be re-opened");
         drop(state);
         let _ = harness.last_state_update();
@@ -4503,7 +4653,7 @@ mod tests {
         assert_eq!(answered.content_search_query, "needle");
         assert_eq!(answered.visible_files_count, 1);
         assert_eq!(
-            harness.state.lock().content_search_results,
+            *harness.state.lock().content_search_results(),
             HashSet::from([
                 harness.root_path.join("main.rs"),
                 harness.root_path.join("notes.md"),
@@ -4682,7 +4832,7 @@ mod tests {
             let mut s = AppState::default();
             s.config.ignore_patterns.clear();
             s.current_path = "/app".to_string();
-            s.full_file_list = vec![
+            s.set_full_file_list(vec![
                 FileItem {
                     path: PathBuf::from("/app/src/main.rs"),
                     ..Default::default()
@@ -4691,8 +4841,8 @@ mod tests {
                     path: PathBuf::from("/app/debug.log"),
                     ..Default::default()
                 },
-            ];
-            s.set_filtered_file_list(s.full_file_list.clone());
+            ]);
+            s.set_filtered_file_list(s.full_file_list().to_vec());
             SharedState::new(s)
         };
 
@@ -4712,7 +4862,7 @@ mod tests {
         assert!(!ui_state.patterns_need_rescan);
 
         let final_state = state.lock();
-        assert_eq!(final_state.full_file_list.len(), 1);
+        assert_eq!(final_state.full_file_list().len(), 1);
         assert!(final_state.config.ignore_patterns.contains("*.log"));
     }
 
@@ -4835,7 +4985,7 @@ mod tests {
 
     fn file_names(state: &AppState) -> HashSet<String> {
         state
-            .full_file_list
+            .full_file_list()
             .iter()
             .map(|item| {
                 item.path
@@ -4954,7 +5104,7 @@ mod tests {
             let mut state = harness.state.lock();
             state.config.case_sensitive_search = false;
             state.content_search_query = "needle".to_string();
-            state.content_search_results = HashSet::from([lower.clone(), upper.clone()]);
+            state.set_content_search_results(HashSet::from([lower.clone(), upper.clone()]));
         }
 
         set_option(&harness, ConfigOption::CaseSensitiveSearch(true)).await;
@@ -4962,7 +5112,7 @@ mod tests {
         let ui_state = harness.last_state_update().unwrap();
         assert_eq!(ui_state.visible_files_count, 1);
         assert_eq!(
-            harness.state.lock().content_search_results,
+            *harness.state.lock().content_search_results(),
             HashSet::from([lower.clone()])
         );
 
@@ -4972,7 +5122,7 @@ mod tests {
         let ui_state = harness.last_state_update().unwrap();
         assert_eq!(ui_state.visible_files_count, 2);
         assert_eq!(
-            harness.state.lock().content_search_results,
+            *harness.state.lock().content_search_results(),
             HashSet::from([lower, upper])
         );
     }
@@ -5042,7 +5192,7 @@ mod tests {
         state
             .selected_files
             .extend(items.iter().map(|item| item.path.clone()).collect());
-        state.full_file_list = items.clone();
+        state.set_full_file_list(items.clone());
         state.set_filtered_file_list(items);
     }
 
@@ -5285,7 +5435,7 @@ mod tests {
             state
                 .selected_files
                 .extend(items.iter().map(|item| item.path.clone()).collect());
-            state.full_file_list = items.clone();
+            state.set_full_file_list(items.clone());
             state.set_filtered_file_list(items);
             state.is_fully_scanned = true;
         }

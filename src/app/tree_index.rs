@@ -229,6 +229,27 @@ fn count_files_below(items: &[FileItem], children: &[Vec<usize>]) -> Vec<u32> {
     counts.into_iter().map(|count| count.unwrap_or(0)).collect()
 }
 
+/// Tells whether a path is in a list, without a copy of the paths: the list and a
+/// hash table of positions into it.
+#[derive(Debug)]
+pub(crate) struct ListedPaths {
+    items: Arc<Vec<FileItem>>,
+    lookup: PathLookup,
+}
+
+impl ListedPaths {
+    /// Builds the table for `items`; one pass over the list.
+    pub(crate) fn build(items: Arc<Vec<FileItem>>) -> Self {
+        let (lookup, _) = PathLookup::build(&items);
+        Self { items, lookup }
+    }
+
+    /// `true` if `path` is the path of an item of the list.
+    pub(crate) fn contains(&self, path: &Path) -> bool {
+        self.lookup.position(&self.items, path).is_some()
+    }
+}
+
 /// Finds the position of a path in an item list.
 ///
 /// A hash table of positions: the paths themselves stay in the item list, so the
@@ -381,11 +402,6 @@ impl IndexedList {
         }
     }
 
-    /// The path the hierarchy was built below.
-    pub(crate) fn root_path(&self) -> &Path {
-        &self.root_path
-    }
-
     /// The list, the root path and the index, for the owner of a [`TreeIndexCache`].
     pub(crate) fn into_parts(self) -> (Arc<Vec<FileItem>>, PathBuf, Arc<TreeIndex>) {
         (self.items, self.root_path, self.index)
@@ -443,6 +459,12 @@ impl TreeIndexCache {
             index: Arc::clone(&index),
         });
         index
+    }
+
+    /// The index the cache holds, whatever list it belongs to.
+    pub(crate) fn cached(&self) -> Option<Arc<TreeIndex>> {
+        let slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref().map(|cached| Arc::clone(&cached.index))
     }
 
     /// `true` if the cache holds the index of the list of `revision` below `root_path`.

@@ -29,6 +29,8 @@ pub enum UserEvent {
     },
     /// What the size of the output means for a generation that was asked for.
     OutputSize(OutputSizeNotice),
+    /// The ignore button of a row has added no pattern, and why.
+    IgnorePathRefused(IgnorePathRefusal),
     /// An error message to be displayed to the user.
     ShowError(String),
     /// The result of a file save operation.
@@ -72,6 +74,19 @@ pub enum OutputSizeNotice {
         estimated_bytes: u64,
         limit_bytes: u64,
     },
+}
+
+/// Why the ignore button of a tree row (`addIgnorePath`) has added no pattern: the
+/// entry has a name that no pattern of the application can name. `name` is that
+/// name, written lossily if it is not valid Unicode. The UI words the message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum IgnorePathRefusal {
+    /// The name of the file ends with whitespace outside ASCII (a no-break space,
+    /// an ideographic space), which the matcher drops from the end of a pattern.
+    TrailingWhitespace { name: String },
+    /// A name on the way to the entry is not valid Unicode; a pattern is text.
+    NotUnicode { name: String },
 }
 
 /// A message received from the WebView via the IPC channel.

@@ -91,7 +91,7 @@ fn project() -> AppState {
         .filter(|item| item.is_directory)
         .map(|item| item.path.clone())
         .collect();
-    state.full_file_list = items;
+    state.set_full_file_list(items);
     state.is_fully_scanned = true;
     filtering::apply_filters(&mut state);
     state.expand_directories(["/project/alpha", "/project/big", "/project/zoo"].map(PathBuf::from));

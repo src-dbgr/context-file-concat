@@ -22,12 +22,14 @@ fn test_state(paths: &[(&str, bool)]) -> AppState {
         ..Default::default()
     };
     state.current_path = "/root".to_string();
-    state.full_file_list = paths
-        .iter()
-        .map(|&(path, is_directory)| item(path, is_directory))
-        .collect();
+    state.set_full_file_list(
+        paths
+            .iter()
+            .map(|&(path, is_directory)| item(path, is_directory))
+            .collect(),
+    );
     state.loaded_dirs = state
-        .full_file_list
+        .full_file_list()
         .iter()
         .filter(|item| item.is_directory)
         .map(|item| item.path.clone())
@@ -224,7 +226,7 @@ fn fully_expanded_snapshot_is_the_complete_tree() {
         selected: &state.selected_files,
         expanded: &state.expanded_dirs,
         loaded_dirs: &state.loaded_dirs,
-        content_search_matches: &state.content_search_results,
+        content_search_matches: state.content_search_results(),
         filename_query: &state.search_query,
         extension_filter: &state.extension_filter,
         case_sensitive: state.config.case_sensitive_search,

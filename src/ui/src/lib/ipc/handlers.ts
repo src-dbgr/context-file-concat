@@ -20,9 +20,11 @@ import {
   StatusMessageSchema,
   SaveResultSchema,
   OutputSizeNoticeSchema,
+  IgnorePathRefusalSchema,
   DragStateSchema,
   type SaveResult,
   type OutputSizeNotice,
+  type IgnorePathRefusal,
 } from "$lib/ipc/schema";
 
 import {
@@ -53,6 +55,7 @@ declare global {
       documentId: number,
     ) => void;
     outputSizeNotice: (notice: OutputSizeNotice) => void;
+    ignorePathRefused: (refusal: IgnorePathRefusal) => void;
     showError: (msg: string) => void;
     showStatus: (msg: string) => void;
     saveResult: (result: SaveResult) => void;
@@ -210,6 +213,29 @@ export function installWindowIPCHandlers(): void {
         title: tr("toast.outputLargeTitle"),
       });
     }
+  };
+
+  window.ignorePathRefused = (refusal: IgnorePathRefusal) => {
+    const parsed = IgnorePathRefusalSchema.safeParse(refusal);
+    if (!parsed.success) {
+      console.warn(
+        "[IPC] Ignored invalid ignorePathRefused() payload:",
+        parsed.error.flatten(),
+      );
+      return;
+    }
+    // The button was pressed and nothing was hidden: the reason has to stay
+    // readable for a while.
+    const tr = get(tStore);
+    const name = truncate(parsed.data.name, HOST_ERROR_MAX_CHARS);
+    const text =
+      parsed.data.reason === "not_unicode"
+        ? tr("toast.ignoreRefusedNotUnicode", { name })
+        : tr("toast.ignoreRefusedWhitespace", { name });
+    toast.warning(text, {
+      title: tr("toast.ignoreRefusedTitle"),
+      duration: HOST_ERROR_TOAST_MS,
+    });
   };
 
   window.showError = (msg: string) => {

@@ -192,6 +192,22 @@ export const OutputSizeNoticeSchema = z.discriminatedUnion("status", [
 ]);
 export type OutputSizeNotice = z.infer<typeof OutputSizeNoticeSchema>;
 
+const ignorePathRefusal = <R extends string>(reason: R) =>
+  z.object({ reason: z.literal(reason), name: z.string() }).strict();
+
+/**
+ * Why the ignore button of a tree row has added no pattern
+ * (`IgnorePathRefusal` in `src/app/events.rs`): the entry `name` has a name no
+ * ignore pattern can name. `trailing_whitespace` – the file name ends with
+ * whitespace outside ASCII; `not_unicode` – the name is not valid Unicode
+ * (`name` is written lossily then).
+ */
+export const IgnorePathRefusalSchema = z.discriminatedUnion("reason", [
+  ignorePathRefusal("trailing_whitespace"),
+  ignorePathRefusal("not_unicode"),
+]);
+export type IgnorePathRefusal = z.infer<typeof IgnorePathRefusalSchema>;
+
 export const DragStateSchema = z.boolean();
 
 /* ------------------------------ Outgoing IPC ------------------------------- */

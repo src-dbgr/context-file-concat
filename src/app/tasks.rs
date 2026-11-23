@@ -22,11 +22,12 @@ use super::filtering::{self, auto_expand_for_matches};
 use super::proxy::EventProxy;
 use super::selection::selected_files_in_tree_order;
 use super::shared_state::SharedState;
+use super::staged;
+use super::state::Discarded;
 use super::state::{
     AfterAbandonedScan, AppState, GenerationToken, LazyLoadToken, PreviewToken, ScanToken,
     StatusNotice,
 };
-use super::tree_index::IndexedList;
 use super::view_model::generate_ui_state;
 use crate::config::{AppConfig, ConfigSnapshot};
 
@@ -295,14 +296,14 @@ impl GenerationPlan {
     /// The plan of a generation of what is selected in `state` right now.
     pub fn of(state: &AppState) -> Self {
         let config = &state.config;
-        let items = &state.full_file_list;
+        let items = state.full_file_list();
         let include_tree = config.include_tree_by_default;
 
         let estimated_size = FileHandler::estimate_output_size(
             items
                 .iter()
                 .filter(|item| state.selected_files.contains(&item.path)),
-            include_tree.then_some(items.as_slice()),
+            include_tree.then_some(items),
             config.max_file_size_bytes(),
         );
 
@@ -310,7 +311,7 @@ impl GenerationPlan {
             selected_files: selected_files_in_tree_order(items, &state.selected_files),
             root: PathBuf::from(&state.current_path),
             tree: include_tree.then(|| PlannedTree {
-                items: items.clone(),
+                items: items.to_vec(),
                 prune_empty_directories: config.remove_empty_directories && state.is_fully_scanned,
                 ignore_patterns: config.tree_ignore_patterns.clone(),
             }),
@@ -718,22 +719,41 @@ fn publish_scanned_items<P: EventProxy>(
 /// anything (and without calling `added`) if the scan is no longer the current one.
 ///
 /// The state is locked twice, briefly: to take what is needed out of it and to put
-/// the result in. The work in between (the filtered list and its hierarchy, which
-/// grow with the project) holds no lock, see [`filtering::StagedScanItems`].
+/// the result in. The work in between (the lists and the hierarchy, which grow with
+/// the project) holds no lock, see [`staged`].
 fn add_scanned_items(
     state: &SharedState,
     token: &ScanToken,
     items: Vec<FileItem>,
     added: impl FnOnce(&AppState),
 ) -> Option<PublicationCost> {
+    in_three_steps(
+        state,
+        |s| staged::stage_scanned_items(s, token, items),
+        |s, prepared| staged::commit_scanned_items(s, token, prepared),
+        |s| added(s),
+    )
+}
+
+/// Brings an event into the state in the three steps of [`staged`]: `stage` and
+/// `commit` are called with the state locked, the preparation in between is not.
+/// `committed` is called after a successful `commit`, under the same lock: this is
+/// where the state update is made, of exactly the state the event has left.
+///
+/// Returns what all of this took, or `None` if the event is outdated (`stage`
+/// returned `None`, or `commit` `false`): nothing was changed then, and `committed`
+/// was not called.
+fn in_three_steps<C: staged::Change>(
+    state: &SharedState,
+    stage: impl FnOnce(&mut AppState) -> Option<staged::Staged<C>>,
+    commit: impl FnOnce(&mut AppState, staged::Prepared<C::Rest>) -> (bool, Discarded),
+    committed: impl FnOnce(&mut AppState),
+) -> Option<PublicationCost> {
     let started = std::time::Instant::now();
     let (staged, staging) = {
         let mut s = state.lock();
         let locked = std::time::Instant::now();
-        (
-            filtering::stage_scanned_items(&mut s, token, items)?,
-            locked.elapsed(),
-        )
+        (stage(&mut s)?, locked.elapsed())
     };
 
     let prepared = staged.prepare();
@@ -741,9 +761,9 @@ fn add_scanned_items(
     let (is_current, committing, discarded) = {
         let mut s = state.lock();
         let locked = std::time::Instant::now();
-        let (is_current, discarded) = filtering::commit_scanned_items(&mut s, token, prepared);
+        let (is_current, discarded) = commit(&mut s, prepared);
         if is_current {
-            added(&s);
+            committed(&mut s);
         }
         (is_current, locked.elapsed(), discarded)
     };
@@ -754,19 +774,6 @@ fn add_scanned_items(
         total: started.elapsed(),
         locked: staging.max(committing),
     })
-}
-
-/// Builds the hierarchy of the filtered file list, if the state does not have it,
-/// without holding the lock meanwhile, so that the state update that follows finds
-/// it. If the list changes while it is being built, the result is dropped
-/// ([`AppState::adopt_file_tree`]).
-fn build_file_tree_ahead(state: &SharedState) {
-    let Some((list, revision, root_path)) = state.lock().file_tree_to_build() else {
-        return;
-    };
-    let built = IndexedList::build(list, root_path);
-    let discarded = state.lock().adopt_file_tree(revision, built);
-    drop(discarded);
 }
 
 /// What the scan identified by `token` does with the progress its scanner reports
@@ -821,10 +828,16 @@ fn apply_shallow_scan_result<P: EventProxy>(
     if !s.is_current_scan(token) {
         return false;
     }
+    // The first level is small, whatever the project is like. What it replaces
+    // may be the lists of a large project (a re-scan): they are let go of after
+    // the lock.
+    let replaced = s.lists_to_outlive_the_lock();
     s.replace_with_shallow_file_list(root, files);
     s.active_ignore_patterns = patterns;
     filtering::apply_filters(&mut s);
     proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(&s))));
+    drop(s);
+    drop(replaced);
     true
 }
 
@@ -833,9 +846,9 @@ fn apply_shallow_scan_result<P: EventProxy>(
 /// not finished by this, see [`complete_scan`]; nothing is sent to the UI.
 ///
 /// Like a publication, this does not hold the lock on the state for the work that
-/// grows with the list where it can be avoided: the items are added as every batch
-/// is, and the hierarchy of the complete list is built before [`complete_scan`]
-/// needs it for its state update.
+/// grows with the list: the items are added as every batch is, and the complete
+/// list, its filtered list and the hierarchy are there before [`complete_scan`]
+/// makes its state update ([`staged`]).
 ///
 /// Returns `false` without touching the state if the scan is no longer the current one.
 fn apply_deep_scan_result(
@@ -849,11 +862,13 @@ fn apply_deep_scan_result(
     if add_scanned_items(state, token, remaining_items, |_| {}).is_none() {
         return false;
     }
-    if !filtering::complete_scanned_file_list(&mut state.lock(), token, patterns) {
-        return false;
-    }
-    build_file_tree_ahead(state);
-    true
+    in_three_steps(
+        state,
+        |s| staged::stage_scan_completion(s, token),
+        |s, prepared| staged::commit_scan_completion(s, token, prepared, patterns),
+        |_| {},
+    )
+    .is_some()
 }
 
 /// Marks the scan as finished and reports it to the UI. This is the last step of a
@@ -1190,39 +1205,49 @@ fn apply_lazy_load_result<P: EventProxy>(
     state: &SharedState,
     token: &LazyLoadToken,
 ) -> bool {
-    let mut state_guard = state.lock();
-    match scan_result {
-        Ok((new_items, new_active_patterns)) => {
-            let found = new_items.len();
-            if !state_guard.merge_directory_level(token, loaded_dir, new_items, new_active_patterns)
-            {
-                tracing::debug!("Discarding outdated lazy load result for {:?}.", loaded_dir);
-                return false;
-            }
-            tracing::debug!("Lazy load found {} items in {:?}.", found, loaded_dir);
-
-            // Apply other filters to the now-updated list.
-            filtering::apply_filters(&mut state_guard);
-
-            proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-                &state_guard,
-            ))));
-            true
-        }
-        Err(_) if !state_guard.is_current_lazy_load(token) => {
-            tracing::debug!("Discarding outdated lazy load result for {:?}.", loaded_dir);
-            false
-        }
-        Err(e) => {
-            tracing::error!("Lazy load failed for {:?}: {}", loaded_dir, e);
-            proxy.send_event(UserEvent::ShowError(format!(
-                "Failed to load directory {}: {}",
-                loaded_dir.display(),
-                e
-            )));
-            false
-        }
+    let (new_items, new_active_patterns) = match scan_result {
+        Ok(level) => level,
+        Err(error) => return report_failed_lazy_load(error, loaded_dir, proxy, state, token),
+    };
+    let found = new_items.len();
+    // The level joins the list and the filters are applied to it without the lock
+    // being held for the work on the whole list.
+    let merged = in_three_steps(
+        state,
+        |s| staged::stage_directory_level(s, token, loaded_dir, new_items),
+        |s, prepared| staged::commit_directory_level(s, token, prepared, new_active_patterns),
+        |s| proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(s)))),
+    )
+    .is_some();
+    if merged {
+        tracing::debug!("Lazy load found {} items in {:?}.", found, loaded_dir);
+    } else {
+        tracing::debug!("Discarding outdated lazy load result for {:?}.", loaded_dir);
     }
+    merged
+}
+
+/// What becomes of a lazy load that failed. Returns `false`: nothing was merged.
+fn report_failed_lazy_load<P: EventProxy>(
+    error: CoreError,
+    loaded_dir: &Path,
+    proxy: &P,
+    state: &SharedState,
+    token: &LazyLoadToken,
+) -> bool {
+    // Held until the error is on its way, as the outcome of a load that succeeded.
+    let state_guard = state.lock();
+    if !state_guard.is_current_lazy_load(token) {
+        tracing::debug!("Discarding outdated lazy load result for {:?}.", loaded_dir);
+        return false;
+    }
+    tracing::error!("Lazy load failed for {:?}: {}", loaded_dir, error);
+    proxy.send_event(UserEvent::ShowError(format!(
+        "Failed to load directory {}: {}",
+        loaded_dir.display(),
+        error
+    )));
+    false
 }
 
 /// The number of lines of a file shown in the preview.
@@ -1413,14 +1438,16 @@ async fn run_content_search<P: EventProxy, S: FileSearcher>(
             // stops reading files nobody is waiting for.
             cancel_flag: token.cancel_flag(),
         };
-        (token, state_guard.full_file_list.clone(), request)
+        (token, state_guard.shared_full_file_list(), request)
     };
     let query = request.query.clone();
+    // The copy of the list the searcher takes is made here, not under the lock.
+    let files_to_search = Arc::unwrap_or_clone(files_to_search);
     let outcome = searcher.search(files_to_search, request).await;
-    let mut state_guard = state.lock();
     let matching_paths = match outcome {
         Ok(matching_paths) => matching_paths,
         Err(reason) => {
+            let state_guard = &mut *state.lock();
             // The matches of the search before stay: "the search failed" must not
             // look like "nothing matches".
             if state_guard.abandon_content_search(&token) {
@@ -1428,20 +1455,26 @@ async fn run_content_search<P: EventProxy, S: FileSearcher>(
                 proxy.send_event(UserEvent::ShowError(format!(
                     "The content search failed: {reason}"
                 )));
-                let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
+                let event = UserEvent::StateUpdate(Box::new(generate_ui_state(state_guard)));
                 proxy.send_event(event);
             }
             return;
         }
     };
-    if !state_guard.finish_content_search(&token, matching_paths) {
+    // The matches become the content filter without the lock being held for the
+    // filtering of the whole list.
+    let applied = in_three_steps(
+        &state,
+        |s| staged::stage_content_matches(s, &token, matching_paths),
+        |s, prepared| staged::commit_content_matches(s, &token, prepared),
+        |s| {
+            auto_expand_for_matches(s);
+            proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(s))));
+        },
+    );
+    if applied.is_none() {
         tracing::debug!("Discarding outdated content search result for {:?}.", query);
-        return;
     }
-    filtering::apply_filters(&mut state_guard);
-    auto_expand_for_matches(&mut state_guard);
-    let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
-    proxy.send_event(event);
 }
 
 #[cfg(test)]
@@ -2065,25 +2098,31 @@ mod tests {
         {
             let mut state = harness.state.lock();
             state.content_search_query = "magic".to_string();
-            state.full_file_list.push(FileItem {
-                path: match1.clone(),
-                ..Default::default()
+            state.edit_full_file_list(|list| {
+                list.push(FileItem {
+                    path: match1.clone(),
+                    ..Default::default()
+                })
             });
-            state.full_file_list.push(FileItem {
-                path: match2.clone(),
-                ..Default::default()
+            state.edit_full_file_list(|list| {
+                list.push(FileItem {
+                    path: match2.clone(),
+                    ..Default::default()
+                })
             });
-            state.full_file_list.push(FileItem {
-                path: harness.root_path.join("nomatch.txt"),
-                ..Default::default()
+            state.edit_full_file_list(|list| {
+                list.push(FileItem {
+                    path: harness.root_path.join("nomatch.txt"),
+                    ..Default::default()
+                })
             });
         }
         search_in_files(harness.proxy.clone(), harness.state.clone(), searcher).await;
         {
             let final_state = harness.state.lock();
-            assert_eq!(final_state.content_search_results.len(), 2);
-            assert!(final_state.content_search_results.contains(&match1));
-            assert!(final_state.content_search_results.contains(&match2));
+            assert_eq!(final_state.content_search_results().len(), 2);
+            assert!(final_state.content_search_results().contains(&match1));
+            assert!(final_state.content_search_results().contains(&match2));
         }
         let ui_state = harness.last_state_update().unwrap();
         assert_eq!(
@@ -2098,16 +2137,14 @@ mod tests {
         let searcher = MockFileSearcher::default();
         {
             let mut state = harness.state.lock();
-            state
-                .content_search_results
-                .insert(PathBuf::from("previous_match.txt"));
+            state.set_content_search_results(HashSet::from([PathBuf::from("previous_match.txt")]));
             state.content_search_query = "".to_string();
         }
         search_in_files(harness.proxy.clone(), harness.state.clone(), searcher).await;
         {
             let final_state = harness.state.lock();
             assert!(
-                final_state.content_search_results.is_empty(),
+                final_state.content_search_results().is_empty(),
                 "Search results should be cleared"
             );
         }
@@ -2565,7 +2602,7 @@ mod tests {
         std::fs::write(project.join("new.rs"), "").unwrap();
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![file_item(Path::new("/old/a.rs"), 1)];
+            state.set_full_file_list(vec![file_item(Path::new("/old/a.rs"), 1)]);
             state.selected_files = HashSet::from([PathBuf::from("/old/a.rs")]).into();
             state.expanded_dirs = HashSet::from([PathBuf::from("/old/src")]).into();
             state.search_query = "a".to_string();
@@ -2598,7 +2635,7 @@ mod tests {
             Some(project.as_path())
         );
         let listed: Vec<_> = state
-            .full_file_list
+            .full_file_list()
             .iter()
             .map(|i| i.path.clone())
             .collect();
@@ -2636,10 +2673,10 @@ mod tests {
         let file = harness.root_path.join("src").join("a.rs");
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![
+            state.set_full_file_list(vec![
                 dir_item(&harness.root_path.join("src"), 1),
                 file_item(&file, 2),
-            ];
+            ]);
             state.selected_files = HashSet::from([file.clone()]).into();
             state.expanded_dirs = HashSet::from([harness.root_path.join("src")]).into();
             state.loaded_dirs = HashSet::from([harness.root_path.join("src")]);
@@ -2745,7 +2782,7 @@ mod tests {
         assert_eq!(completed.selected_files_count, 1, "the selection is kept");
 
         let state = harness.state.lock();
-        assert_eq!(state.full_file_list.len(), 2);
+        assert_eq!(state.full_file_list().len(), 2);
         assert_eq!(
             state.config.last_directory.as_deref(),
             Some(loaded.as_path())
@@ -2790,7 +2827,7 @@ mod tests {
             Some(harness.root_path.as_path())
         );
         assert!(state
-            .full_file_list
+            .full_file_list()
             .iter()
             .any(|item| item.path == file_path));
     }
@@ -2870,7 +2907,7 @@ mod tests {
         // Populate state
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![
+            state.set_full_file_list(vec![
                 FileItem {
                     path: text_file_path.clone(),
                     is_binary: false,
@@ -2891,7 +2928,7 @@ mod tests {
                     is_directory: true,
                     ..Default::default()
                 },
-            ];
+            ]);
         }
 
         // --- SCENARIO 1: Case-sensitive search (no match) ---
@@ -2904,7 +2941,7 @@ mod tests {
         search_in_files(harness.proxy.clone(), harness.state.clone(), searcher).await;
         // Assert against the AppState, not the UiState
         assert!(
-            harness.state.lock().content_search_results.is_empty(),
+            harness.state.lock().content_search_results().is_empty(),
             "Case-sensitive search should not find 'magicword'"
         );
         // Drain the event queue
@@ -2920,11 +2957,13 @@ mod tests {
         // Assert against the AppState for correctness
         let final_state = harness.state.lock();
         assert_eq!(
-            final_state.content_search_results.len(),
+            final_state.content_search_results().len(),
             1,
             "Case-sensitive search should find 'MagicWord'"
         );
-        assert!(final_state.content_search_results.contains(&text_file_path));
+        assert!(final_state
+            .content_search_results()
+            .contains(&text_file_path));
     }
 
     /// Tests that the generation_task correctly prunes empty directories from the
@@ -2947,7 +2986,7 @@ mod tests {
             state.config.remove_empty_directories = true; // Enable feature
             state.config.include_tree_by_default = true;
             state.selected_files.insert(file_path.clone());
-            state.full_file_list = vec![
+            state.set_full_file_list(vec![
                 FileItem {
                     path: harness.root_path.join("src"),
                     is_directory: true,
@@ -2962,7 +3001,7 @@ mod tests {
                     is_directory: true,
                     ..Default::default()
                 },
-            ];
+            ]);
         }
 
         let token = harness.state.lock().begin_generation();
@@ -3035,7 +3074,7 @@ mod tests {
         let empty = harness.root_path.join("empty");
         let readme = harness.root_path.join("README.md");
         let mut state = harness.state.lock();
-        state.full_file_list = vec![
+        state.set_full_file_list(vec![
             dir_item(&src, 1),
             FileItem {
                 size: 100,
@@ -3046,7 +3085,7 @@ mod tests {
                 size: 1000,
                 ..file_item(&readme, 1)
             },
-        ];
+        ]);
         (src, main, empty, readme)
     }
 
@@ -3182,7 +3221,7 @@ mod tests {
         {
             let mut state = harness.state.lock();
             state.config.include_tree_by_default = false;
-            state.full_file_list[3].size = 3 * 1024 * 1024;
+            state.edit_full_file_list(|list| list[3].size = 3 * 1024 * 1024);
             state.config.max_file_size_mb = 1;
         }
         assert!(estimate(&harness) < two_files);
@@ -3299,12 +3338,14 @@ mod tests {
 
         {
             let mut state = harness.state.lock();
-            state.full_file_list.push(FileItem {
-                path: dir_to_load.clone(),
-                is_directory: true,
-                ..Default::default()
+            state.edit_full_file_list(|list| {
+                list.push(FileItem {
+                    path: dir_to_load.clone(),
+                    is_directory: true,
+                    ..Default::default()
+                })
             });
-            let all_items = state.full_file_list.clone();
+            let all_items = state.full_file_list().to_vec();
             state.set_filtered_file_list(all_items);
         }
 
@@ -3333,7 +3374,7 @@ mod tests {
         assert!(state.loaded_dirs.contains(&dir_to_load));
         assert!(state.expanded_dirs.contains(&dir_to_load));
         assert!(state
-            .full_file_list
+            .full_file_list()
             .iter()
             .any(|item| item.path == new_file_path));
     }
@@ -3374,7 +3415,7 @@ mod tests {
         assert!(state.expanded_dirs.contains(&dir_to_load));
         assert!(state.loaded_dirs.contains(&dir_to_load));
         assert!(state
-            .full_file_list
+            .full_file_list()
             .iter()
             .any(|item| item.path == dir_to_load.join("main.rs")));
     }
@@ -3406,10 +3447,10 @@ mod tests {
 
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![FileItem {
+            state.set_full_file_list(vec![FileItem {
                 path: unreadable_file_path.clone(),
                 ..Default::default()
-            }];
+            }]);
             state.content_search_query = "read".to_string();
         }
 
@@ -3421,7 +3462,7 @@ mod tests {
         // We also assert that the unreadable file is not included in the results.
         let final_state = harness.state.lock();
         assert!(
-            final_state.content_search_results.is_empty(),
+            final_state.content_search_results().is_empty(),
             "Unreadable file should not be a search result."
         );
     }
@@ -3484,9 +3525,11 @@ mod tests {
             let file_path = harness.root_path.join("file1.txt");
             std::fs::write(&file_path, "content").unwrap();
             state.selected_files.insert(file_path.clone());
-            state.full_file_list.push(FileItem {
-                path: file_path,
-                ..Default::default()
+            state.edit_full_file_list(|list| {
+                list.push(FileItem {
+                    path: file_path,
+                    ..Default::default()
+                })
             });
         }
 
@@ -3639,9 +3682,9 @@ mod tests {
         let file = harness.root_path.join("a.txt");
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![file_item(&file, 1)];
+            state.set_full_file_list(vec![file_item(&file, 1)]);
             state.content_search_query = " \t ".to_string();
-            state.content_search_results = HashSet::from([PathBuf::from("/elsewhere.txt")]);
+            state.set_content_search_results(HashSet::from([PathBuf::from("/elsewhere.txt")]));
         }
 
         search_in_files(
@@ -3653,7 +3696,7 @@ mod tests {
 
         let update = harness.last_state_update().expect("The state is sent");
         assert_eq!(update.visible_files_count, 1);
-        assert!(harness.state.lock().content_search_results.is_empty());
+        assert!(harness.state.lock().content_search_results().is_empty());
     }
 
     #[tokio::test]
@@ -3717,7 +3760,7 @@ mod tests {
         std::fs::write(&file, "needle").unwrap();
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![file_item(&file, 1)];
+            state.set_full_file_list(vec![file_item(&file, 1)]);
             state.content_search_query = "needle".to_string();
         }
         let (asked_tx, asked) = oneshot::channel();
@@ -3879,7 +3922,7 @@ mod tests {
             "A superseded scan must not send state updates"
         );
         assert!(
-            harness.state.lock().full_file_list.is_empty(),
+            harness.state.lock().full_file_list().is_empty(),
             "Results of the superseded scan must be discarded"
         );
         assert_replacement_scan_is_intact(&harness, &new_token);
@@ -3916,7 +3959,7 @@ mod tests {
         assert!(harness.last_state_update().is_none());
         {
             let state = harness.state.lock();
-            assert!(state.full_file_list.is_empty());
+            assert!(state.full_file_list().is_empty());
             assert!(state.loaded_dirs.is_empty());
         }
         assert_replacement_scan_is_intact(&harness, &new_token);
@@ -4080,7 +4123,7 @@ mod tests {
         // Assert
         harness.assert_no_events("A discarded lazy load must stay silent");
         let state = harness.state.lock();
-        assert!(state.full_file_list.is_empty());
+        assert!(state.full_file_list().is_empty());
         assert!(!state.loaded_dirs.contains(&old_dir));
         assert!(!state.expanded_dirs.contains(&old_dir));
     }
@@ -4097,7 +4140,7 @@ mod tests {
         scanner.set_results(vec![file_item(&dir.join("main.rs"), 2)], vec![]);
         let token = {
             let mut state = harness.state.lock();
-            state.full_file_list.push(dir_item(&dir, 1));
+            state.edit_full_file_list(|list| list.push(dir_item(&dir, 1)));
             state.begin_lazy_load()
         };
 
@@ -4168,7 +4211,7 @@ mod tests {
 
         let state = harness.state.lock();
         let loaded: Vec<&FileItem> = state
-            .full_file_list
+            .full_file_list()
             .iter()
             .filter(|item| item.path != src)
             .collect();
@@ -4197,7 +4240,7 @@ mod tests {
         assert!(load.is_none(), "No load must have been started");
         harness.assert_no_events("No load must have been performed");
         let state = harness.state.lock();
-        assert!(state.full_file_list.is_empty());
+        assert!(state.full_file_list().is_empty());
         assert!(state.expanded_dirs.is_empty());
     }
 
@@ -4270,7 +4313,7 @@ mod tests {
         let foo_match = harness.root_path.join("foo.txt");
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![file_item(&fo_match, 1), file_item(&foo_match, 1)];
+            state.set_full_file_list(vec![file_item(&fo_match, 1), file_item(&foo_match, 1)]);
             state.content_search_query = "fo".to_string();
         }
         let (slow_searcher, slow_started, release_slow) =
@@ -4298,7 +4341,7 @@ mod tests {
             "The outdated search must not publish anything"
         );
         let state = harness.state.lock();
-        assert_eq!(state.content_search_results, HashSet::from([foo_match]));
+        assert_eq!(*state.content_search_results(), HashSet::from([foo_match]));
         assert_eq!(state.filtered_file_list().len(), 1);
     }
 
@@ -4310,7 +4353,7 @@ mod tests {
         let file = harness.root_path.join("a.txt");
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![file_item(&file, 1)];
+            state.set_full_file_list(vec![file_item(&file, 1)]);
             state.content_search_query = "a".to_string();
         }
         let (slow_searcher, slow_started, release_slow) =
@@ -4332,7 +4375,7 @@ mod tests {
         release_slow.send(()).unwrap();
         slow_search.await.unwrap();
 
-        assert!(harness.state.lock().content_search_results.is_empty());
+        assert!(harness.state.lock().content_search_results().is_empty());
     }
 
     /// A content query entered while the scan is still running has only been applied to
@@ -4359,7 +4402,7 @@ mod tests {
             // The query was entered during the scan and searched on the shallow list.
             let mut state = harness.state.lock();
             state.content_search_query = "needle".to_string();
-            state.content_search_results = HashSet::from([top_match.clone()]);
+            state.set_content_search_results(HashSet::from([top_match.clone()]));
             state.begin_scan()
         };
 
@@ -4379,7 +4422,7 @@ mod tests {
         assert!(!ui_state.is_scanning);
         let state = harness.state.lock();
         assert_eq!(
-            state.content_search_results,
+            *state.content_search_results(),
             HashSet::from([top_match.clone(), deep_match.clone()])
         );
         let visible: HashSet<PathBuf> = state
@@ -4433,7 +4476,7 @@ mod tests {
         let token = {
             let mut state = harness.state.lock();
             state.content_search_query = "needle".to_string();
-            state.content_search_results = HashSet::from([top_match.clone()]);
+            state.set_content_search_results(HashSet::from([top_match.clone()]));
             state.begin_scan()
         };
 
@@ -4515,7 +4558,7 @@ mod tests {
         // Assert
         assert!(!ui_state.is_scanning);
         let state = harness.state.lock();
-        assert_eq!(state.content_search_results, HashSet::from([deep_match]));
+        assert_eq!(*state.content_search_results(), HashSet::from([deep_match]));
         assert_eq!(state.status, StatusNotice::ScanCancelled);
     }
 
@@ -4702,7 +4745,7 @@ mod tests {
         );
         let token = {
             let mut state = harness.state.lock();
-            state.full_file_list.push(dir_item(&dir, 1));
+            state.edit_full_file_list(|list| list.push(dir_item(&dir, 1)));
             state.content_search_query = "needle".to_string();
             state.begin_lazy_load()
         };
@@ -4720,7 +4763,7 @@ mod tests {
         .await;
 
         let state = harness.state.lock();
-        assert_eq!(state.content_search_results, HashSet::from([new_match]));
+        assert_eq!(*state.content_search_results(), HashSet::from([new_match]));
     }
 
     /// A lazy load started with the previous ignore patterns must not re-insert entries
@@ -4735,7 +4778,7 @@ mod tests {
         scanner.set_results(vec![dir_item(&generated, 2)], vec![]);
         let token = {
             let mut state = harness.state.lock();
-            state.full_file_list.push(dir_item(&dir, 1));
+            state.edit_full_file_list(|list| list.push(dir_item(&dir, 1)));
             state.begin_lazy_load()
         };
 
@@ -4761,7 +4804,7 @@ mod tests {
         // Assert
         assert!(harness.last_state_update().is_none());
         let state = harness.state.lock();
-        assert!(!state.full_file_list.iter().any(|i| i.path == generated));
+        assert!(!state.full_file_list().iter().any(|i| i.path == generated));
         assert!(
             !state.loaded_dirs.contains(&dir),
             "The directory stays loadable with the new patterns"
@@ -4803,7 +4846,7 @@ mod tests {
         assert!(ended.is_fully_scanned);
         let mut state = harness.state.lock();
         assert!(state.is_fully_scanned);
-        assert_eq!(state.full_file_list.len(), 3);
+        assert_eq!(state.full_file_list().len(), 3);
         // The empty directory is still removed from what is shown.
         filtering::apply_filters(&mut state);
         assert_eq!(state.filtered_file_list().len(), 2);
@@ -4935,7 +4978,7 @@ mod tests {
         let other = harness.root_path.join("b.txt");
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![file_item(&matching, 1), file_item(&other, 1)];
+            state.set_full_file_list(vec![file_item(&matching, 1), file_item(&other, 1)]);
             state.content_search_query = "needle".to_string();
         }
         let first = MockFileSearcher::default();
@@ -4961,7 +5004,7 @@ mod tests {
         }
         {
             let state = harness.state.lock();
-            assert_eq!(state.content_search_results, HashSet::from([matching]));
+            assert_eq!(*state.content_search_results(), HashSet::from([matching]));
         }
 
         // The slot is free: a later search delivers.
@@ -4969,7 +5012,7 @@ mod tests {
         next.set_results(HashSet::from([other.clone()]));
         search_in_files(harness.proxy.clone(), harness.state.clone(), next).await;
         assert_eq!(
-            harness.state.lock().content_search_results,
+            *harness.state.lock().content_search_results(),
             HashSet::from([other])
         );
     }
@@ -5007,10 +5050,10 @@ mod tests {
         let matching = harness.root_path.join("a.txt");
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![
+            state.set_full_file_list(vec![
                 file_item(&matching, 1),
                 file_item(&harness.root_path.join("b.txt"), 1),
-            ];
+            ]);
             filtering::apply_filters(&mut state);
             state.content_search_query = "needle".to_string();
         }
@@ -5047,7 +5090,7 @@ mod tests {
         let mut harness = TestHarness::new();
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![file_item(&harness.root_path.join("a.txt"), 1)];
+            state.set_full_file_list(vec![file_item(&harness.root_path.join("a.txt"), 1)]);
             state.content_search_query = "needle".to_string();
         }
         search_in_files(
@@ -5087,11 +5130,11 @@ mod tests {
         let new_match = lib.join("new.txt");
         {
             let mut state = harness.state.lock();
-            state.full_file_list = vec![
+            state.set_full_file_list(vec![
                 dir_item(&src, 1),
                 dir_item(&lib, 1),
                 file_item(&old_match, 2),
-            ];
+            ]);
             state.content_search_query = "needle".to_string();
         }
         let searcher = ListBoundFileSearcher {
@@ -5125,7 +5168,7 @@ mod tests {
 
         let state = harness.state.lock();
         assert_eq!(
-            state.content_search_results,
+            *state.content_search_results(),
             HashSet::from([old_match, new_match])
         );
         assert!(!state.expanded_dirs.contains(&src), "stays collapsed");
@@ -5205,7 +5248,7 @@ mod tests {
     fn listed(harness: &TestHarness) -> Vec<PathBuf> {
         let state = harness.state.lock();
         state
-            .full_file_list
+            .full_file_list()
             .iter()
             .map(|item| item.path.clone())
             .collect()
@@ -5368,7 +5411,7 @@ mod tests {
         let src = harness.root_path.join("src");
         let (task, token, feed) = spawn_streaming_scan(&mut harness, vec![dir_item(&src, 1)]).await;
 
-        let staged = filtering::stage_scanned_items(
+        let staged = staged::stage_scanned_items(
             &mut harness.state.lock(),
             &token,
             vec![file_item(&src.join("a.rs"), 2)],
@@ -5384,7 +5427,7 @@ mod tests {
         let ui_state = {
             let mut state = harness.state.lock();
             let (is_current, discarded) =
-                filtering::commit_scanned_items(&mut state, &token, prepared);
+                staged::commit_scanned_items(&mut state, &token, prepared);
             drop(discarded);
             assert!(is_current);
             generate_ui_state(&state)
@@ -5400,9 +5443,9 @@ mod tests {
         task.await.unwrap();
     }
 
-    /// The end of the walk leaves the hierarchy of the complete list behind, so the
-    /// state update that reports the scan as finished does not build it with the
-    /// state locked: with a filter (the list is filtered once more) and without.
+    /// The end of the walk leaves the complete list, filtered, and its hierarchy
+    /// behind, so the state update that reports the scan as finished does not build
+    /// them with the state locked: with a filter and without.
     #[tokio::test]
     async fn the_end_of_the_walk_prepares_the_hierarchy_for_the_last_state_update() {
         for query in ["", "a"] {
@@ -5565,17 +5608,33 @@ mod tests {
     }
 
     /// Measurement, not a test: `cargo test --release --lib perf_lock_hold --
-    /// --ignored --nocapture`. How long the state is locked for one publication of
-    /// scanned items, next to the plain way (merge, filter and state update under
-    /// one lock, which is what a publication used to be).
+    /// --ignored --nocapture`. How long the state is locked for the events that
+    /// change the file list of a large project (a publication of scanned items, a
+    /// level loaded on demand, the matches of a content search, the completion of
+    /// the list), each with its state update, next to the plain way: the same
+    /// change, the filters and the state update under one lock, which is what
+    /// these events used to be.
     #[test]
     #[ignore = "a benchmark, run on request"]
-    fn perf_lock_hold_of_a_publication() {
-        /// A scan of a project of which `listed` entries have been published.
+    fn perf_lock_hold_of_list_events() {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Scenario {
+            Plain,
+            /// A file name filter that matches every fifth file.
+            NameFilter,
+            /// As after a re-scan of a project the user has worked in: every
+            /// directory expanded, every file selected.
+            WorkedIn,
+            /// Empty directories are removed (from the complete list).
+            RemoveEmpty,
+        }
+
+        /// A scan of a project of which `listed` entries have been published, and
+        /// the items the walk lists after them.
         fn scanning_state(
             listed: usize,
             later: usize,
-            worked_in: bool,
+            scenario: Scenario,
         ) -> (AppState, ScanToken, Vec<FileItem>) {
             let mut walk = synthetic_walk(listed + later);
             let first_level: Vec<FileItem> = walk
@@ -5585,13 +5644,18 @@ mod tests {
                 .collect();
             let mut state = AppState::default();
             state.current_path = "/root".to_string();
-            if worked_in {
-                let (dirs, files): (Vec<_>, Vec<_>) =
-                    walk.iter().partition(|item| item.is_directory);
-                state.expand_directories(dirs.into_iter().map(|dir| dir.path.clone()));
-                state
-                    .selected_files
-                    .extend(files.into_iter().map(|file| file.path.clone()).collect());
+            match scenario {
+                Scenario::Plain => {}
+                Scenario::NameFilter => state.search_query = "file_0".to_string(),
+                Scenario::RemoveEmpty => state.config.remove_empty_directories = true,
+                Scenario::WorkedIn => {
+                    let (dirs, files): (Vec<_>, Vec<_>) =
+                        walk.iter().partition(|item| item.is_directory);
+                    state.expand_directories(dirs.into_iter().map(|dir| dir.path.clone()));
+                    state
+                        .selected_files
+                        .extend(files.into_iter().map(|file| file.path.clone()).collect());
+                }
             }
             let later = walk.split_off(listed);
             let token = state.begin_scan();
@@ -5603,78 +5667,214 @@ mod tests {
             (state, token, later)
         }
 
-        fn millis(durations: &[Duration]) -> String {
-            let all: Vec<String> = durations
-                .iter()
-                .map(|duration| format!("{:.1}", duration.as_secs_f64() * 1000.0))
+        /// The content of a directory the walk has not come to.
+        fn level() -> (PathBuf, Vec<FileItem>) {
+            let directory = PathBuf::from("/root/package_0000/module_000/loaded");
+            let items = (0..25)
+                .map(|file| file_item(&directory.join(format!("file_{file:02}.rs")), 4))
                 .collect();
-            format!("{} ms", all.join(" / "))
+            (directory, items)
+        }
+
+        /// Every tenth file of the list.
+        fn matches(state: &AppState) -> HashSet<PathBuf> {
+            let files = state
+                .full_file_list()
+                .iter()
+                .filter(|item| !item.is_directory);
+            files.step_by(10).map(|item| item.path.clone()).collect()
+        }
+
+        fn locked(cost: Option<PublicationCost>) -> Duration {
+            cost.expect("the event is not outdated").locked
+        }
+
+        fn timed(work: impl FnOnce()) -> Duration {
+            let started = std::time::Instant::now();
+            work();
+            started.elapsed()
+        }
+
+        fn millis(durations: &[Duration]) -> String {
+            let (min, max) = (
+                durations.iter().min().unwrap(),
+                durations.iter().max().unwrap(),
+            );
+            let (min, max) = (min.as_secs_f64() * 1000.0, max.as_secs_f64() * 1000.0);
+            if max - min < 0.05 {
+                format!("{max:.1} ms")
+            } else {
+                format!("{min:.1}-{max:.1} ms")
+            }
         }
 
         const ROUNDS: usize = 4;
         for listed in [200_000usize, 1_000_000] {
-            for batch in [4_096usize, listed / 10] {
-                // As after a re-scan of a project the user has worked in: every
-                // directory expanded, every file selected. This is the worst case
-                // for what is left under the lock (the rows, the selection counts).
-                for worked_in in [false, true] {
-                    let (tx, mut rx) = mpsc::unbounded_channel();
-                    let proxy = TestEventProxy { sender: tx };
+            for scenario in [
+                Scenario::Plain,
+                Scenario::NameFilter,
+                Scenario::WorkedIn,
+                Scenario::RemoveEmpty,
+            ] {
+                println!(
+                    "{listed} listed, {}: locked in steps (plain way)",
+                    match scenario {
+                        Scenario::Plain => "no filter",
+                        Scenario::NameFilter => "file name filter",
+                        Scenario::WorkedIn => "all expanded and selected",
+                        Scenario::RemoveEmpty => "empty directories removed",
+                    }
+                );
+                let snapshot = |s: &mut AppState| drop(generate_ui_state(s));
 
-                    let (state, token, later) = scanning_state(listed, ROUNDS * batch, worked_in);
+                for batch in [4_096usize, listed / 10] {
+                    let (state, token, later) = scanning_state(listed, ROUNDS * batch, scenario);
                     let state = SharedState::new(state);
-                    let (mut total, mut locked) = (Vec::new(), Vec::new());
-                    for items in later.chunks(batch) {
-                        let cost = publish_scanned_items(&state, &proxy, &token, items.to_vec())
-                            .expect("the scan is the current one");
+                    let (mut steps, mut total) = (Vec::new(), Vec::new());
+                    for items in later.chunks(batch).take(ROUNDS) {
+                        let cost = add_scanned_items(&state, &token, items.to_vec(), |s| {
+                            drop(generate_ui_state(s))
+                        })
+                        .unwrap();
+                        steps.push(cost.locked);
                         total.push(cost.total);
-                        locked.push(cost.locked);
-                        while rx.try_recv().is_ok() {}
                     }
-                    let completing = std::time::Instant::now();
-                    assert!(filtering::complete_scanned_file_list(
-                        &mut state.lock(),
-                        &token,
-                        HashSet::new()
-                    ));
-                    drop(generate_ui_state(&state.lock()));
-                    let completing = completing.elapsed();
-
                     let (mut state, token, later) =
-                        scanning_state(listed, ROUNDS * batch, worked_in);
+                        scanning_state(listed, ROUNDS * batch, scenario);
                     let mut plain = Vec::new();
-                    for items in later.chunks(batch) {
+                    for items in later.chunks(batch).take(ROUNDS) {
                         let items = items.to_vec();
-                        let started = std::time::Instant::now();
-                        assert!(state.merge_scanned_items(&token, items));
-                        filtering::apply_filters(&mut state);
-                        let ui_state = generate_ui_state(&state);
-                        plain.push(started.elapsed());
-                        drop(ui_state);
+                        plain.push(timed(|| {
+                            assert!(state.merge_scanned_items(&token, items));
+                            filtering::apply_filters(&mut state);
+                            snapshot(&mut state);
+                        }));
                     }
-                    let started = std::time::Instant::now();
-                    assert!(state.complete_scanned_file_list(&token, HashSet::new()));
-                    filtering::apply_filters(&mut state);
-                    drop(generate_ui_state(&state));
-                    let plain_completing = started.elapsed();
-
                     println!(
-                        "{listed} listed{}, batches of {batch}",
-                        if worked_in {
-                            ", all expanded and selected"
-                        } else {
-                            ""
-                        }
-                    );
-                    println!("  locked, plain way:   {}", millis(&plain));
-                    println!("  locked, in steps:    {}", millis(&locked));
-                    println!("  publication, total:  {}", millis(&total));
-                    println!(
-                        "  completion, locked:  {} (plain way: {})",
-                        millis(&[completing]),
-                        millis(&[plain_completing])
+                        "  publication of {batch} items: {} ({}), as a whole {}",
+                        millis(&steps),
+                        millis(&plain),
+                        millis(&total)
                     );
                 }
+
+                // A level loaded on demand.
+                let (state, _token, _) = scanning_state(listed, 0, scenario);
+                let lazy_load = state.begin_lazy_load();
+                let state = SharedState::new(state);
+                let (directory, items) = level();
+                let steps = locked(in_three_steps(
+                    &state,
+                    |s| staged::stage_directory_level(s, &lazy_load, &directory, items),
+                    |s, prepared| {
+                        staged::commit_directory_level(s, &lazy_load, prepared, HashSet::new())
+                    },
+                    snapshot,
+                ));
+                let (mut state, _token, _) = scanning_state(listed, 0, scenario);
+                let lazy_load = state.begin_lazy_load();
+                let (directory, items) = level();
+                let plain = timed(|| {
+                    assert!(state.merge_directory_level(
+                        &lazy_load,
+                        &directory,
+                        items,
+                        HashSet::new()
+                    ));
+                    filtering::apply_filters(&mut state);
+                    snapshot(&mut state);
+                });
+                println!(
+                    "  level loaded on demand: {} ({})",
+                    millis(&[steps]),
+                    millis(&[plain])
+                );
+
+                // The matches of a content search.
+                let (mut state, _token, _) = scanning_state(listed, 0, scenario);
+                state.content_search_query = "fn".to_string();
+                let search = state.begin_content_search();
+                let found = matches(&state);
+                let state = SharedState::new(state);
+                let steps = locked(in_three_steps(
+                    &state,
+                    |s| staged::stage_content_matches(s, &search, found),
+                    |s, prepared| staged::commit_content_matches(s, &search, prepared),
+                    |s| {
+                        auto_expand_for_matches(s);
+                        snapshot(s);
+                    },
+                ));
+                let (mut state, _token, _) = scanning_state(listed, 0, scenario);
+                state.content_search_query = "fn".to_string();
+                let search = state.begin_content_search();
+                let found = matches(&state);
+                let plain = timed(|| {
+                    assert!(state.finish_content_search(&search, found));
+                    filtering::apply_filters(&mut state);
+                    auto_expand_for_matches(&mut state);
+                    snapshot(&mut state);
+                });
+                println!(
+                    "  matches of a content search: {} ({})",
+                    millis(&[steps]),
+                    millis(&[plain])
+                );
+
+                // The first level of a re-scan, which replaces the lists.
+                let first_level = |state: &AppState| -> Vec<FileItem> {
+                    let items = state.full_file_list().iter();
+                    items.filter(|item| item.depth == 1).cloned().collect()
+                };
+                let (mut state, _token, _) = scanning_state(listed, 0, scenario);
+                let files = first_level(&state);
+                let _token = state.begin_scan();
+                // As `apply_shallow_scan_result` does it: what is replaced is
+                // dropped after the lock.
+                let mut replaced = None;
+                let steps = timed(|| {
+                    replaced = Some(state.lists_to_outlive_the_lock());
+                    state.replace_with_shallow_file_list(Path::new("/root"), files);
+                    filtering::apply_filters(&mut state);
+                    snapshot(&mut state);
+                });
+                drop(replaced);
+                let (mut state, _token, _) = scanning_state(listed, 0, scenario);
+                let files = first_level(&state);
+                let _token = state.begin_scan();
+                let plain = timed(|| {
+                    state.replace_with_shallow_file_list(Path::new("/root"), files);
+                    filtering::apply_filters(&mut state);
+                    snapshot(&mut state);
+                });
+                println!(
+                    "  first level of a re-scan: {} ({})",
+                    millis(&[steps]),
+                    millis(&[plain])
+                );
+
+                // The completion of the list.
+                let (state, token, _) = scanning_state(listed, 0, scenario);
+                let state = SharedState::new(state);
+                let steps = locked(in_three_steps(
+                    &state,
+                    |s| staged::stage_scan_completion(s, &token),
+                    |s, prepared| {
+                        staged::commit_scan_completion(s, &token, prepared, HashSet::new())
+                    },
+                    snapshot,
+                ));
+                let (mut state, token, _) = scanning_state(listed, 0, scenario);
+                let plain = timed(|| {
+                    assert!(state.complete_scanned_file_list(&token, HashSet::new()));
+                    filtering::apply_filters(&mut state);
+                    snapshot(&mut state);
+                });
+                println!(
+                    "  completion of the list: {} ({})",
+                    millis(&[steps]),
+                    millis(&[plain])
+                );
             }
         }
     }

@@ -16,6 +16,7 @@ mod helpers;
 pub mod proxy;
 pub mod selection;
 pub mod shared_state;
+mod staged;
 pub mod state;
 pub mod tasks;
 pub mod tracked;
@@ -321,6 +322,9 @@ fn script_for(event: &UserEvent) -> serde_json::Result<String> {
         UserEvent::OutputSize(notice) => {
             format!("window.outputSizeNotice({});", json(notice)?)
         }
+        UserEvent::IgnorePathRefused(refusal) => {
+            format!("window.ignorePathRefused({});", json(refusal)?)
+        }
         UserEvent::ShowError(msg) => format!("window.showError({});", json(msg)?),
         UserEvent::SaveResult(result) => format!("window.saveResult({});", json(result)?),
         UserEvent::ConfigExported(success) => format!(
@@ -367,6 +371,7 @@ fn event_name(event: &UserEvent) -> &'static str {
         UserEvent::StateUpdate(_) => "StateUpdate",
         UserEvent::ShowFilePreview { .. } => "ShowFilePreview",
         UserEvent::ShowGeneratedContent { .. } => "ShowGeneratedContent",
+        UserEvent::IgnorePathRefused(_) => "IgnorePathRefused",
         UserEvent::ShowError(_) => "ShowError",
         UserEvent::OutputSize(_) => "OutputSize",
         UserEvent::SaveResult(_) => "SaveResult",
@@ -755,7 +760,7 @@ mod tests {
 
     fn listed_names(state: &AppState) -> Vec<String> {
         let mut names: Vec<String> = state
-            .full_file_list
+            .full_file_list()
             .iter()
             .filter_map(|item| item.path.file_name())
             .map(|name| name.to_string_lossy().to_string())
@@ -778,7 +783,7 @@ mod tests {
             assert!(!state.is_scanning(), "round {round}");
             assert_eq!(state.status, StatusNotice::ScanCancelled, "round {round}");
             assert!(!state.is_fully_scanned, "round {round}");
-            assert!(state.full_file_list.is_empty(), "round {round}");
+            assert!(state.full_file_list().is_empty(), "round {round}");
         }
     }
 
@@ -795,7 +800,7 @@ mod tests {
             let state = harness.state.lock();
             assert_eq!(state.current_path, "", "round {round}");
             assert!(!state.is_scanning(), "round {round}");
-            assert!(state.full_file_list.is_empty(), "round {round}");
+            assert!(state.full_file_list().is_empty(), "round {round}");
             assert_eq!(state.config.last_directory, None, "round {round}");
         }
     }
@@ -1166,7 +1171,7 @@ mod tests {
                 assert!(state.search_query.is_empty(), "round {round}");
                 assert!(
                     state
-                        .full_file_list
+                        .full_file_list()
                         .iter()
                         .all(|item| item.path.starts_with(second.path())),
                     "round {round}"
@@ -1189,7 +1194,7 @@ mod tests {
             let state = harness.state.lock();
             assert_eq!(state.current_path, "", "round {round}");
             assert!(!state.is_scanning(), "round {round}");
-            assert!(state.full_file_list.is_empty(), "round {round}");
+            assert!(state.full_file_list().is_empty(), "round {round}");
             assert_eq!(state.config.last_directory, None, "round {round}");
         }
     }
@@ -1379,15 +1384,17 @@ mod tests {
     fn ui_state_with_tree(paths: &[PathBuf]) -> Box<view_model::UiState> {
         let mut state = AppState::default();
         state.current_path = "/repo".to_string();
-        state.full_file_list = paths
-            .iter()
-            .map(|path| crate::core::FileItem {
-                path: path.clone(),
-                parent: path.parent().map(Path::to_path_buf),
-                depth: 1,
-                ..Default::default()
-            })
-            .collect();
+        state.set_full_file_list(
+            paths
+                .iter()
+                .map(|path| crate::core::FileItem {
+                    path: path.clone(),
+                    parent: path.parent().map(Path::to_path_buf),
+                    depth: 1,
+                    ..Default::default()
+                })
+                .collect(),
+        );
         filtering::apply_filters(&mut state);
         Box::new(view_model::generate_ui_state(&state))
     }
