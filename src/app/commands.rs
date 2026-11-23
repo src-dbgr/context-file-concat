@@ -13,10 +13,10 @@ use super::state::{AppState, StatusNotice};
 use super::tasks::{
     self, refresh_content_search, search_in_files, start_lazy_load_scan, start_scan_on_path,
 };
-use super::view_model::{auto_expand_for_matches, generate_ui_state, get_language_from_path};
+use super::view_model::{auto_expand_for_matches, generate_ui_state};
 use crate::app::file_dialog::DialogService;
 use crate::config::{self, AppConfig}; // Import AppConfig for explicit deserialization
-use crate::core::{is_blank, FileHandler};
+use crate::core::is_blank;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -43,33 +43,38 @@ pub fn select_directory<P: EventProxy, D: DialogService + ?Sized>(
     }
 }
 
+/// Opens a path that was dropped onto the window, replacing the loaded directory.
+/// A dropped file opens the directory it lies in.
+pub fn open_dropped_path<P: EventProxy>(path: PathBuf, proxy: P, state: Arc<Mutex<AppState>>) {
+    start_scan_on_path(path, proxy, state, false);
+}
+
 /// Clears the currently loaded directory and resets the application state.
 pub fn clear_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
     with_state_and_notify(&state, &proxy, |s| {
         s.reset_directory_state();
         s.config.last_directory = None;
-        if let Err(e) = config::settings::save_config(&s.config, None) {
-            tracing::warn!("Failed to save config after clearing directory: {}", e);
-        }
+        // The file is written in the background; neither the lock nor the lane waits.
+        tasks::save_config_in_background(s.config_snapshot());
     });
 }
 
 /// Re-scans the currently loaded directory path.
 ///
 /// This preserves the current UI state (selections, expansions) while refreshing
-/// the file list from the filesystem.
+/// the file list from the filesystem. Does nothing if no directory is loaded.
 pub fn rescan_directory<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
-    let current_path_str = {
+    let current_path = {
         let mut state_guard = state
             .lock()
             .expect("Mutex was poisoned. This should not happen.");
-
         state_guard.patterns_need_rescan = false;
         state_guard.current_path.clone()
     };
 
-    if !current_path_str.is_empty() {
-        start_scan_on_path(PathBuf::from(current_path_str), proxy, state, true);
+    // Nothing can slip in between the two locks: commands run one after the other.
+    if !current_path.is_empty() {
+        start_scan_on_path(PathBuf::from(current_path), proxy, state, true);
     }
 }
 
@@ -278,48 +283,18 @@ pub async fn update_filters<P: EventProxy>(
     }
 }
 
-/// Loads a file's content and sends it to the UI for preview.
+/// Makes a file the previewed one and loads its content for the UI.
+///
+/// The state update (highlighting in the tree) is sent right away. The content follows
+/// with `ShowFilePreview` once the file has been read in the background, unless another
+/// preview was requested or the preview was closed in the meantime.
 pub fn load_file_preview<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
     state: Arc<Mutex<AppState>>,
 ) {
     if let Ok(path_str) = serde_json::from_value::<String>(payload.clone()) {
-        let path = PathBuf::from(path_str);
-        let search_term;
-        {
-            let mut state_guard = state
-                .lock()
-                .expect("Mutex was poisoned. This should not happen.");
-            state_guard.previewed_file_path = Some(path.clone());
-            search_term = if is_blank(&state_guard.content_search_query) {
-                None
-            } else {
-                Some(state_guard.content_search_query.clone())
-            };
-        }
-
-        match FileHandler::get_file_preview(&path, 1500) {
-            Ok(content) => {
-                let event = UserEvent::ShowFilePreview {
-                    content,
-                    language: get_language_from_path(&path),
-                    search_term,
-                    path: path.clone(),
-                };
-                proxy.send_event(event);
-            }
-            Err(e) => {
-                proxy.send_event(UserEvent::ShowError(e.to_string()));
-            }
-        }
-
-        // Send a state update to reflect the `previewed_file_path` change in the UI (highlighting).
-        let state_guard = state
-            .lock()
-            .expect("Mutex was poisoned. This should not happen.");
-        let event = UserEvent::StateUpdate(Box::new(generate_ui_state(&state_guard)));
-        proxy.send_event(event);
+        tasks::start_file_preview(PathBuf::from(path_str), proxy, state);
     } else {
         tracing::warn!(
             "Failed to deserialize path string from payload: {:?}",
@@ -330,6 +305,8 @@ pub fn load_file_preview<P: EventProxy>(
 
 /// Loads the children of a specific directory for lazy loading.
 /// This is triggered when a user expands a directory that hasn't been fully scanned yet.
+/// The directory is marked as expanded by the command itself; only the scan of the
+/// level runs in the background.
 pub fn load_directory_level<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
@@ -544,7 +521,9 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 
     // Supersedes a generation that is still running; only the new one may publish.
     let token = state_guard.begin_generation();
-    state_guard.previewed_file_path = None;
+    // The generated output takes the place of a file preview, also of one whose
+    // content is still being read.
+    state_guard.clear_preview();
 
     // Only generate a new timestamped filename if the current one appears to be a default.
     // This preserves any filename explicitly set by the user.
@@ -594,9 +573,7 @@ pub fn cancel_generation<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
 
 /// Resets the preview state in the UI.
 pub fn clear_preview_state<P: EventProxy>(proxy: P, state: Arc<Mutex<AppState>>) {
-    with_state_and_notify(&state, &proxy, |s| {
-        s.previewed_file_path = None;
-    });
+    with_state_and_notify(&state, &proxy, |s| s.clear_preview());
 }
 
 /// Saves the provided content to a file, prompting the user for a location.
@@ -909,12 +886,16 @@ mod tests {
             }
         }
 
+        /// Waits for a scan to run and end: returns the first state update without a
+        /// running scan that follows one with a running scan. Updates that were sent
+        /// before the scan was announced do not count, so this does not return for a
+        /// command that never started a scan (it returns `None` after the timeout).
         async fn wait_for_scan_completion(&mut self) -> Option<Box<UiState>> {
+            let mut scan_seen = false;
             loop {
                 match self.get_next_event().await? {
-                    UserEvent::StateUpdate(ui_state) if !ui_state.is_scanning => {
-                        return Some(ui_state)
-                    }
+                    UserEvent::StateUpdate(ui_state) if ui_state.is_scanning => scan_seen = true,
+                    UserEvent::StateUpdate(ui_state) if scan_seen => return Some(ui_state),
                     _ => {}
                 }
             }
@@ -1095,8 +1076,10 @@ mod tests {
         assert_eq!(ui_state.visible_files_count, 2);
     }
 
+    /// No scan is running, so the new pattern is applied to the loaded list directly;
+    /// no scan is started for it.
     #[tokio::test]
-    async fn test_add_ignore_path_retriggers_scan() {
+    async fn test_add_ignore_path_applies_pattern_to_loaded_list() {
         let mut harness = TestHarness::new();
         harness.create_file("src/main.rs", "");
         harness.create_dir("docs");
@@ -1107,10 +1090,12 @@ mod tests {
         let payload = json!(path_to_ignore);
         add_ignore_path(payload, harness.proxy.clone(), harness.state.clone()).await;
 
-        let final_state = harness.wait_for_scan_completion().await.unwrap();
+        let final_state = harness.last_state_update().unwrap();
+        assert!(!final_state.is_scanning, "No scan must have been started");
         assert_eq!(final_state.visible_files_count, 2);
         assert!(!final_state.tree.iter().any(|n| n.name == "docs"));
         let state = harness.state.lock().unwrap();
+        assert!(!state.is_scanning() && !state.is_fully_scanned);
         assert!(state.config.ignore_patterns.contains("docs/"));
     }
 
@@ -1261,7 +1246,8 @@ mod tests {
 
         update_config(payload, harness.proxy.clone(), harness.state.clone()).await;
 
-        let final_state = harness.wait_for_scan_completion().await.unwrap();
+        // No scan runs here (none was running): the pattern is applied to the list.
+        let final_state = harness.last_state_update().unwrap();
         assert_eq!(
             final_state.visible_files_count, 0,
             "Scan should have removed the .rs file"
@@ -1322,7 +1308,8 @@ mod tests {
         )
         .await;
 
-        let _ = harness.wait_for_scan_completion().await;
+        // The first call has been answered (no scan runs for it); drop its events.
+        assert!(harness.last_state_update().is_some());
 
         add_ignore_path(payload, harness.proxy.clone(), harness.state.clone()).await;
 
@@ -1434,20 +1421,49 @@ mod tests {
 
         load_file_preview(payload, harness.proxy.clone(), harness.state.clone());
 
-        let mut saw_preview = false;
-        for _ in 0..2 {
-            if let Some(UserEvent::ShowFilePreview {
-                search_term: term, ..
-            }) = harness.get_next_event().await
-            {
-                assert_eq!(term, Some(search_term.to_string()));
-                saw_preview = true;
-            }
-        }
-        assert!(
-            saw_preview,
-            "Did not receive the ShowFilePreview event with correct search term"
+        // The command answers with the state (the file is highlighted) right away ...
+        let Some(UserEvent::StateUpdate(_)) = harness.event_rx.try_recv().ok() else {
+            panic!("Expected the synchronous state update");
+        };
+        assert_eq!(
+            harness.state.lock().unwrap().previewed_file_path,
+            Some(file_path.clone())
         );
+        // ... and the content follows once the file has been read in the background.
+        match harness.get_next_event().await {
+            Some(UserEvent::ShowFilePreview {
+                search_term: term,
+                content,
+                path,
+                ..
+            }) => {
+                assert_eq!(term, Some(search_term.to_string()));
+                assert!(content.contains("content with magic_word"));
+                assert_eq!(path, file_path);
+            }
+            other => panic!("Expected the ShowFilePreview event, got {other:?}"),
+        }
+    }
+
+    /// A preview that is closed before its file has been read shows nothing.
+    #[tokio::test]
+    async fn test_clear_preview_state_discards_preview_being_loaded() {
+        let mut harness = TestHarness::new();
+        let file_path = harness.create_file("preview.txt", "content");
+
+        load_file_preview(
+            json!(file_path),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        // On the single-threaded test runtime the read has not been started yet.
+        clear_preview_state(harness.proxy.clone(), harness.state.clone());
+        let _ = harness.last_state_update();
+
+        harness
+            .expect_no_event_within(QUIET_PERIOD, "A closed preview must not show content")
+            .await;
+        assert_eq!(harness.state.lock().unwrap().previewed_file_path, None);
     }
 
     #[tokio::test]
@@ -1468,21 +1484,70 @@ mod tests {
         let payload = json!(sub_dir);
         load_directory_level(payload, harness.proxy.clone(), harness.state.clone());
 
+        // The command itself marks the directory as expanded and says so.
+        let components_of = |ui_state: &UiState| {
+            let src_node = ui_state.tree.iter().find(|n| n.name == "src").unwrap();
+            src_node
+                .children
+                .iter()
+                .find(|n| n.name == "components")
+                .cloned()
+                .unwrap()
+        };
+        let announced = harness
+            .last_state_update()
+            .expect("The command must answer synchronously");
+        let components_node = components_of(&announced);
+        assert!(components_node.is_expanded && !components_node.children_loaded);
+        assert!(harness
+            .state
+            .lock()
+            .unwrap()
+            .expanded_dirs
+            .contains(&sub_dir));
+
         // The lazy load runs in the background and reports its result when it is done.
         let final_state = harness.get_next_event().await;
         let Some(UserEvent::StateUpdate(final_state)) = final_state else {
             panic!("Expected the state update of the lazy load, got {final_state:?}");
         };
-        let src_node = final_state.tree.iter().find(|n| n.name == "src").unwrap();
-        let components_node = src_node
-            .children
-            .iter()
-            .find(|n| n.name == "components")
-            .unwrap();
+        let components_node = components_of(&final_state);
+        assert!(components_node.children_loaded);
         assert!(components_node
             .children
             .iter()
             .any(|n| n.name == "button.js"));
+    }
+
+    /// End to end through the command: the user collapses the directory while its
+    /// content is being loaded. The result of the load must not open it again.
+    #[tokio::test]
+    async fn test_load_directory_level_then_collapse_stays_collapsed() {
+        let mut harness = TestHarness::new();
+        let src = harness.create_dir("src");
+        harness.create_file("src/main.rs", "");
+        harness.set_initial_files(&["src"]);
+
+        load_directory_level(json!(src), harness.proxy.clone(), harness.state.clone());
+        // On the single-threaded test runtime the load has not run yet.
+        assert!(harness.state.lock().unwrap().expanded_dirs.contains(&src));
+        set_expansion(
+            json!({ "path": src, "expanded": false }),
+            harness.proxy.clone(),
+            harness.state.clone(),
+        );
+        let _ = harness.last_state_update();
+
+        // The result of the load arrives.
+        let loaded = harness
+            .wait_for_state(|s| s.tree.iter().any(|n| n.name == "src" && n.children_loaded))
+            .await;
+        let src_node = loaded.tree.iter().find(|n| n.name == "src").unwrap();
+        assert!(src_node.has_children);
+        assert!(!src_node.is_expanded, "Directory must stay collapsed");
+        let state = harness.state.lock().unwrap();
+        assert!(state.loaded_dirs.contains(&src));
+        assert!(!state.expanded_dirs.contains(&src));
     }
 
     // ... All other synchronous tests remain unchanged ...
