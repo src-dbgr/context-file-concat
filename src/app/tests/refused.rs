@@ -254,10 +254,14 @@ async fn a_lazy_load_of_anything_but_a_listed_directory_is_refused() {
         let state = harness.state.lock();
         assert!(state.loaded_dirs.contains(&src), "{spelling}");
         assert_eq!(listed_names(&state), ["inside.txt", "src"], "{spelling}");
+        // Compared as text, so that a `.` in the listed paths would show; the
+        // separator is the one the scan joins the names with.
+        let below_src = format!("{}{}", text(&src), std::path::MAIN_SEPARATOR);
         assert!(
-            state.full_file_list().iter().all(|item| text(&item.path)
-                .starts_with(&format!("{}/", text(&src)))
-                || item.path == src),
+            state
+                .full_file_list()
+                .iter()
+                .all(|item| text(&item.path).starts_with(&below_src) || item.path == src),
             "{spelling}: {:?}",
             state.full_file_list()
         );

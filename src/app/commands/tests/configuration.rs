@@ -821,22 +821,14 @@ async fn test_add_ignore_pattern_applies_locally() {
         harness.state.lock().config_mut().ignore_patterns.clear();
     }
 
-    // The `current_path` is the root for the ignore matcher. All file paths
-    // in the state MUST be children of this root path.
-    let root = "/test/project";
-    harness.state.lock().current_path = root.to_string();
+    // The `current_path` is the root for the ignore matcher, and every listed path
+    // lies below it. It is the directory of the harness: a root written by hand
+    // (`/test/project`) is absolute on Unix only, on Windows it lacks the drive.
+    harness.state.lock().current_path = harness.root_path.to_string_lossy().into_owned();
 
-    // Create abstract files on the "filesystem".
     harness.create_file("src/main.rs", "fn main() {}");
     harness.create_file("debug.log", "log content");
-
-    // Set up the initial file list using full paths that are consistent
-    // with the root path. This resolves the `ignore` crate panic.
-    harness.set_initial_files(&[
-        &format!("{}/src", root),
-        &format!("{}/src/main.rs", root),
-        &format!("{}/debug.log", root),
-    ]);
+    harness.set_initial_files(&["src", "src/main.rs", "debug.log"]);
 
     add_pattern(&harness, "*.log").await;
 
@@ -848,7 +840,7 @@ async fn test_add_ignore_pattern_applies_locally() {
         "Flag should NOT be set when only adding patterns"
     );
 
-    // After filtering "*.log", two items remain: "/test/project/src" and "/test/project/src/main.rs".
+    // After filtering "*.log", two items remain: `src` and `src/main.rs`.
     assert_eq!(
         ui_state.visible_files_count, 2,
         "Should have src dir and main.rs, log file should be filtered out"

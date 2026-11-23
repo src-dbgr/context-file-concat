@@ -20,7 +20,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pinned like the Linux jobs of ci.yml, so a release is built against the
+          # system libraries CI tested with.
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             name: linux-x86_64
             ext: tar.gz
