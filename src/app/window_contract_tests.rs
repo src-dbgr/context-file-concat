@@ -264,6 +264,10 @@ async fn record_scenario() -> String {
         "a malformed viewport changes nothing",
         json!({ "start": 5 }),
     );
+    scenario.set_viewport(
+        "a viewport without rows changes nothing",
+        json!({ "start": 5, "count": 0 }),
+    );
 
     // --- Looking up a row ---
     scenario.locate(
@@ -310,6 +314,11 @@ async fn record_scenario() -> String {
         "a path that is not listed",
         9,
         json!({ "kind": "path", "path": "/project/nope.txt" }),
+    );
+    scenario.locate(
+        "a type-ahead for nothing changes nothing",
+        10,
+        json!({ "kind": "typeahead", "prefix": "", "from": 0 }),
     );
     scenario.locate(
         "a malformed lookup changes nothing",
@@ -464,6 +473,11 @@ async fn window_scenario_covers_the_edges_of_the_contract() {
     assert_eq!(expect("type-ahead from behind")["located"]["row"], 646);
     assert_eq!(expect("type-ahead without")["located"]["row"], Value::Null);
     assert_eq!(expect("a malformed lookup")["located"]["request"], 9);
+    assert_eq!(expect("a type-ahead for nothing")["located"]["request"], 9);
+    assert_eq!(
+        expect("a viewport without rows"),
+        expect("a window that reaches over")
+    );
 
     let collapsed = expect("the directory is collapsed");
     assert_eq!(collapsed["rows_total"], 10);

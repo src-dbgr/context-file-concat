@@ -15,6 +15,7 @@
   import {
     ITEM_HEIGHT,
     renderRange,
+    visibleRange,
     windowToRequest,
     type RowWindow,
   } from "$lib/modules/treeWindow";
@@ -201,12 +202,15 @@
   // The UI cannot know where a row outside its window is. It asks
   // (`locateRow`); the answer is `located` of a later snapshot.
   let locateRequests = 0;
-  let awaitedLocate: { request: number; purpose: "focus" | "restore" } | null =
-    null;
+  let awaitedLocate: {
+    request: number;
+    purpose: "focus" | "restore";
+    at: number;
+  } | null = null;
 
   function locate(target: RowTarget, purpose: "focus" | "restore") {
     locateRequests += 1;
-    awaitedLocate = { request: locateRequests, purpose };
+    awaitedLocate = { request: locateRequests, purpose, at: Date.now() };
     post("locateRow", { request: locateRequests, target });
   }
 
@@ -219,6 +223,8 @@
     awaitedLocate = null;
     if (purpose === "focus") {
       if (answer.row !== null) setFocusByIndex(answer.row);
+      // The keys pressed since the question act from where the focus is now.
+      replayKeysAfterLookup();
     } else if (answer.row !== null) {
       // The focused row has moved; it keeps the focus where it is now.
       focusedIndex = answer.row;
@@ -260,7 +266,7 @@
       focusedPath = null;
       awaitedLocate = null;
       domFocusWanted = null;
-      queuedKeys = [];
+      dropKeptKeys();
     }
 
     // If the list goes from 0 → >0 rows (e.g., filters cleared), scroll to start
@@ -270,7 +276,7 @@
     const listChanged = state.rows_revision !== lastRowsRevision;
     lastRowsRevision = state.rows_revision;
     // A position means another row in another list.
-    if (listChanged) queuedKeys = [];
+    if (listChanged) dropKeptKeys();
 
     takeLocateAnswer(state);
 
@@ -545,6 +551,42 @@
     }
   }
 
+  // --- Keys ----------------------------------------------------------------------
+  // A key can come before the UI knows what it acts on: the focus has moved to
+  // a row the host has not sent yet, or the host is still looking for the row
+  // the focus is to move to (type-ahead, the parent). Such a key is kept and
+  // carried out when the answer is here, so quick typing loses nothing. But a
+  // kept key is an intention of that moment. It is dropped, never carried out
+  // late, when it is older than `KEPT_KEY_MS`, when the user takes over with
+  // the pointer or the wheel, when the list becomes another one, and when the
+  // viewport has moved away from the row it was pressed on.
+  const KEPT_KEY_MS = 1000;
+  const isFresh = (at: number) => Date.now() - at < KEPT_KEY_MS;
+
+  /** Keys that were pressed on a row before the host had sent it. */
+  let queuedKeys: { key: string; index: number; at: number }[] = [];
+  /** Keys that were pressed while the host was looking for the row to focus. */
+  let keysAfterLookup: { key: string; at: number }[] = [];
+
+  function dropKeptKeys() {
+    queuedKeys = [];
+    keysAfterLookup = [];
+  }
+
+  function focusLookupIsOpen(): boolean {
+    return awaitedLocate?.purpose === "focus" && isFresh(awaitedLocate.at);
+  }
+
+  const NAVIGATION_KEYS = [
+    "ArrowDown",
+    "ArrowUp",
+    "Home",
+    "End",
+    "PageDown",
+    "PageUp",
+  ];
+  const ROW_KEYS = ["ArrowRight", "ArrowLeft", "Enter", " "];
+
   // Central key handler for roving navigation & item actions
   function onTreeKeyDown(e: KeyboardEvent) {
     // A key on the checkbox or the ignore button of a row that activates the
@@ -553,87 +595,82 @@
     // a control, and every key on the arrow and the name, are the tree's.
     if (activatesNatively(e.target, e.key)) return;
 
-    if (focusedIndex < 0 || focusedIndex >= totalRows) {
-      // allow starting typeahead even if nothing focused
+    if (!NAVIGATION_KEYS.includes(e.key) && !ROW_KEYS.includes(e.key)) {
+      // Typeahead; also possible while nothing is focused.
       if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
         pushTypeahead(e.key);
         e.preventDefault();
       }
       return;
     }
+    if (focusedIndex < 0 || focusedIndex >= totalRows) return;
 
+    e.preventDefault();
+    if (focusLookupIsOpen()) {
+      // The focus is about to move: the key belongs to where it will be.
+      if (keysAfterLookup.length < 8) {
+        keysAfterLookup.push({ key: e.key, at: Date.now() });
+      }
+      return;
+    }
+    handleTreeKey(e.key);
+  }
+
+  /** A navigation key or a key that acts on the focused row. */
+  function handleTreeKey(key: string) {
     // Navigation: by index, so it also reaches rows the host has not sent.
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setFocusByIndex(focusedIndex + 1);
-      return;
-    }
-    if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setFocusByIndex(focusedIndex - 1);
-      return;
-    }
-    if (e.key === "Home") {
-      e.preventDefault();
-      setFocusByIndex(0);
-      return;
-    }
-    if (e.key === "End") {
-      e.preventDefault();
-      setFocusByIndex(totalRows - 1);
-      return;
-    }
-    if (e.key === "PageDown") {
-      e.preventDefault();
-      setFocusByIndex(focusedIndex + itemsPerPage());
-      return;
-    }
-    if (e.key === "PageUp") {
-      e.preventDefault();
-      setFocusByIndex(focusedIndex - itemsPerPage());
-      return;
-    }
-
-    // Typeahead
-    const isActionKey =
-      e.key === "ArrowRight" ||
-      e.key === "ArrowLeft" ||
-      e.key === "Enter" ||
-      e.key === " ";
-    if (!isActionKey) {
-      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        pushTypeahead(e.key);
-        e.preventDefault();
-      }
-      return;
+    switch (key) {
+      case "ArrowDown":
+        return setFocusByIndex(focusedIndex + 1);
+      case "ArrowUp":
+        return setFocusByIndex(focusedIndex - 1);
+      case "Home":
+        return setFocusByIndex(0);
+      case "End":
+        return setFocusByIndex(totalRows - 1);
+      case "PageDown":
+        return setFocusByIndex(focusedIndex + itemsPerPage());
+      case "PageUp":
+        return setFocusByIndex(focusedIndex - itemsPerPage());
     }
 
     // The remaining keys act on the focused row itself.
-    e.preventDefault();
     const node = rowAt(focusedIndex);
     if (node) {
-      actOnRow(e.key, node, focusedIndex);
+      actOnRow(key, node, focusedIndex);
     } else {
       // The row has not arrived yet (the focus has just moved there), or it
-      // was scrolled far away: the key is kept and acts on the row as soon as
-      // it is here.
+      // was scrolled far away: bring it into view and keep the key for it.
       if (queuedKeys.length < 8) {
-        queuedKeys.push({ key: e.key, index: focusedIndex });
+        queuedKeys.push({ key, index: focusedIndex, at: Date.now() });
       }
       setFocusByIndex(focusedIndex);
     }
   }
 
-  /** Keys that were pressed on a row before the host had sent it. */
-  let queuedKeys: { key: string; index: number }[] = [];
+  function replayKeysAfterLookup() {
+    while (keysAfterLookup.length && !focusLookupIsOpen()) {
+      const { key, at } = keysAfterLookup.shift()!;
+      if (isFresh(at) && focusedIndex >= 0) handleTreeKey(key);
+    }
+  }
 
   function runQueuedKeys() {
     while (queuedKeys.length) {
-      const { key, index } = queuedKeys[0];
-      const node = rowAt(index);
-      if (!node) return;
+      const { key, index, at } = queuedKeys[0];
+      const node = isFresh(at) ? rowAt(index) : undefined;
+      if (node) {
+        queuedKeys.shift();
+        actOnRow(key, node, index);
+        continue;
+      }
+      // Still worth waiting for? Only while the key is fresh and the
+      // viewport is where the row will be: then its rows are under way.
+      const visible = visibleRange(scrollTop, viewportHeight, totalRows);
+      const awaited =
+        isFresh(at) && index >= visible.start && index < visible.end;
+      if (awaited) return;
       queuedKeys.shift();
-      actOnRow(key, node, index);
     }
   }
 
@@ -735,6 +772,9 @@
         class="tree"
         bind:this={scrollEl}
         onscroll={onScroll}
+        onpointerdown={dropKeptKeys}
+        onwheel={dropKeptKeys}
+        ontouchstart={dropKeptKeys}
         onfocusin={onTreeFocusIn}
         onkeydown={onTreeKeyDown}
         style="overflow:auto; height:100%; min-height:0; flex:1 1 auto;"

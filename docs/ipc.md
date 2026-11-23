@@ -275,6 +275,7 @@ The tree is shown as a flat list of **rows**: every item of the filtered file li
 The window is where the UI looks. The UI reports its viewport with `setViewport { start, count }` (the rows it shows plus a buffer, see [Virtualization Patterns](./virtualization.md)), the host stores it and every snapshot from then on, whatever command it answers, carries the rows `start .. start + count` of the list as it is at that moment. So a snapshot stays self-contained: it never depends on rows sent earlier, and dropping one in favour of a newer one (see `transport.rs`) loses nothing.
 
 - Until the UI has reported a viewport the window is the first 100 rows (`Viewport::DEFAULT_ROWS`).
+- `count` is at least 1; a viewport without rows is refused like any malformed payload (answered with the unchanged snapshot), by the host and by the UI's schema alike.
 - The host sends at most 600 rows (`Viewport::MAX_ROWS`), whatever `count` says. This is what bounds a snapshot. The UI knows the two limits as constants (`MAX_WINDOW_ROWS`, `DEFAULT_WINDOW_ROWS` in `treeWindow.ts`), its schema rejects a snapshot with more rows, and the [contract tests](#contract-tests) compare the constants with what the host states.
 - A window that would start behind the end of the list (a directory was collapsed, a filter applied) is moved up so that it ends with the list. `rows_start` states where the rows really start; the UI must not assume it is what it asked for.
 - A new tree is shown from the top: loading or closing a directory, changed filter texts and `initialize` set `start` to 0 (the UI scrolls to the top on the same occasions).
@@ -338,6 +339,8 @@ The UI knows the rows of its window. For everything else it asks: `locateRow { r
 | `{ kind: "typeahead", prefix, from }` | The first row from row `from` on, wrapping around, whose name starts with `prefix` (any case) | Typing a name in the tree                 |
 
 The host resolves the target to a path, remembers it, and **every** snapshot from then on states where that path is in its own list: `located: { request, row }`, with `row: null` if there is no such row (not listed, below a collapsed directory, nothing found). The answer is therefore true for the snapshot it arrives with, also when the list has changed in between or the snapshot that was sent first has been dropped. The UI acts on the answer to the request it is waiting for and ignores every other; `located` is `null` until the first lookup and again after a new tree is shown or the UI has started (`initialize`).
+
+A `typeahead` with an empty `prefix` asks for nothing: the host refuses it like a malformed payload (the snapshot that answers it still carries the previous `located`), as does the UI's schema.
 
 A lookup does not move the window. The UI scrolls to the row (if it wants to show it), which reports the viewport, and the rows arrive with the answer to that.
 

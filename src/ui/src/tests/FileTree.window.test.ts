@@ -392,6 +392,8 @@ describe("FileTree – keyboard across the edge of the window", () => {
   it("acts on the row a key was pressed on, also when the focus has moved on", async () => {
     const { host, container } = await mountFocused(manyRows(1000));
 
+    // End, Enter, Home in quick succession; the row of the Enter arrives
+    // right away (within the time a kept key lives).
     await fireEvent.keyDown(rowEl(container, 0), { key: "End" });
     await tick();
     await fireEvent.keyDown(document.activeElement!, { key: "Enter" });
@@ -400,6 +402,64 @@ describe("FileTree – keyboard across the edge of the window", () => {
 
     expect(host.posted("loadFilePreview")).toEqual(["/repo/file-00999.txt"]);
     expect(focusedRow(container)).toBe(0);
+  });
+
+  it("never carries out a kept key late: the answer was overtaken", async () => {
+    const { host, tree, container } = await mountFocused(manyRows(1000));
+
+    // End, Space; before the host answers, the viewport moves elsewhere and
+    // the answer the UI gets is the one for that position.
+    await fireEvent.keyDown(rowEl(container, 0), { key: "End" });
+    await tick();
+    await fireEvent.keyDown(document.activeElement!, { key: " " });
+    await scrollToRow(tree, 400);
+    await answerAll(host);
+    expect(host.posted("toggleSelection")).toEqual([]);
+
+    // Much later the last row is scrolled into view by hand. Nothing happens.
+    await scrollToRow(tree, 990);
+    await answerAll(host);
+    expect(renderedIndices(container)).toContain(999);
+    expect(host.posted("toggleSelection")).toEqual([]);
+  });
+
+  it("never carries out a kept key late: the answer took too long", async () => {
+    const { host, container } = await mountFocused(manyRows(1000));
+    const now = vi.spyOn(Date, "now");
+    const pressedAt = Date.now();
+    now.mockReturnValue(pressedAt);
+
+    await fireEvent.keyDown(rowEl(container, 0), { key: "End" });
+    await tick();
+    await fireEvent.keyDown(document.activeElement!, { key: " " });
+    // The host answers after more than a second.
+    now.mockReturnValue(pressedAt + 1500);
+    await answerAll(host);
+    now.mockRestore();
+
+    // The focus still goes where End sent it; the Space is not carried out.
+    expect(focusedRow(container)).toBe(999);
+    expect(host.posted("toggleSelection")).toEqual([]);
+    host.answer();
+    await settle();
+    expect(host.posted("toggleSelection")).toEqual([]);
+  });
+
+  it("drops kept keys when the user takes over with the pointer or the wheel", async () => {
+    for (const takeOver of [fireEvent.pointerDown, fireEvent.wheel]) {
+      const { host, tree, container } = await mountFocused(manyRows(1000));
+
+      await fireEvent.keyDown(rowEl(container, 0), { key: "End" });
+      await tick();
+      await fireEvent.keyDown(document.activeElement!, { key: " " });
+      await takeOver(tree);
+      await answerAll(host);
+
+      expect(renderedIndices(container)).toContain(999);
+      expect(host.posted("toggleSelection")).toEqual([]);
+      document.body.innerHTML = "";
+      await settle();
+    }
   });
 
   it("drops keys kept for a row when the list changes before it arrives", async () => {
@@ -479,6 +539,76 @@ describe("FileTree – keyboard across the edge of the window", () => {
       "data-path",
       "/repo/zebra.txt",
     );
+  });
+
+  describe("keys pressed while the host looks for a row", () => {
+    const withZebra = () =>
+      rowsOf([
+        ...Array.from({ length: 400 }, (_, i) =>
+          file(`/repo/file-${String(i).padStart(5, "0")}.txt`),
+        ),
+        file("/repo/zebra.txt"),
+      ]);
+
+    it("a navigation key acts from the row that was found", async () => {
+      const { host, tree, container } = await mountFocused(withZebra());
+
+      // "z", then ArrowUp before the host has answered where "z..." is.
+      await fireEvent.keyDown(tree, { key: "z" });
+      await fireEvent.keyDown(tree, { key: "ArrowUp" });
+      expect(focusedRow(container)).toBe(0);
+      await answerAll(host);
+
+      // One above zebra.txt (row 400), not one above the old position.
+      expect(focusedRow(container)).toBe(399);
+      expect(document.activeElement).toBe(rowEl(container, 399));
+    });
+
+    it("a key that acts on a row acts on the row that was found", async () => {
+      const { host, tree, container } = await mountFocused(withZebra());
+
+      await fireEvent.keyDown(tree, { key: "z" });
+      await fireEvent.keyDown(tree, { key: " " });
+      expect(host.posted("toggleSelection")).toEqual([]);
+      await answerAll(host);
+
+      expect(focusedRow(container)).toBe(400);
+      expect(host.posted("toggleSelection")).toEqual(["/repo/zebra.txt"]);
+    });
+
+    it("the keys are dropped if the answer takes too long", async () => {
+      const { host, tree, container } = await mountFocused(withZebra());
+      const now = vi.spyOn(Date, "now");
+      const pressedAt = Date.now();
+      now.mockReturnValue(pressedAt);
+
+      await fireEvent.keyDown(tree, { key: "z" });
+      await fireEvent.keyDown(tree, { key: "ArrowUp" });
+      await fireEvent.keyDown(tree, { key: " " });
+      now.mockReturnValue(pressedAt + 1500);
+      await answerAll(host);
+      now.mockRestore();
+
+      expect(focusedRow(container)).toBe(400);
+      expect(host.posted("toggleSelection")).toEqual([]);
+    });
+
+    it("a key pressed after a lookup has gone unanswered for long acts at once", async () => {
+      const { host, tree, container } = await mountFocused(withZebra());
+      const now = vi.spyOn(Date, "now");
+      const pressedAt = Date.now();
+      now.mockReturnValue(pressedAt);
+
+      await fireEvent.keyDown(tree, { key: "z" });
+      now.mockReturnValue(pressedAt + 1500);
+      await fireEvent.keyDown(tree, { key: "ArrowDown" });
+      await settle();
+      now.mockRestore();
+
+      // Not held back by the lookup that is still open.
+      expect(focusedRow(container)).toBe(1);
+      expect(host.posted("locateRow")).toHaveLength(1);
+    });
   });
 
   it("typing something no row starts with leaves the focus where it is", async () => {

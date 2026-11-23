@@ -118,7 +118,7 @@ fn example_payloads(command: Command) -> Vec<Value> {
             C::ExpandCollapseAll => vec![json!(true), json!(false)],
             C::SetViewport => vec![to_json(SetViewportPayload {
                 start: 120,
-                count: 90,
+                count: std::num::NonZeroUsize::new(90).expect("not zero"),
             })],
             C::LocateRow => row_target_examples()
                 .into_iter()

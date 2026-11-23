@@ -578,8 +578,9 @@ pub fn set_expansion<P: EventProxy>(payload: serde_json::Value, proxy: P, state:
 pub(crate) struct SetViewportPayload {
     /// The first row of the window.
     pub start: usize,
-    /// The number of rows of the window, overscan included.
-    pub count: usize,
+    /// The number of rows of the window, overscan included. A window without rows
+    /// is not a viewport: 0 is refused, like by the UI's schema.
+    pub count: std::num::NonZeroUsize,
 }
 
 /// Stores the window of rows the UI looks at; the snapshot that answers it (and every
@@ -594,7 +595,7 @@ pub fn set_viewport<P: EventProxy>(payload: serde_json::Value, proxy: P, state: 
         return answer_unchanged(&proxy, &state);
     };
     with_state_and_notify(&state, &proxy, |s| {
-        s.tree_view.set_viewport(Viewport::new(start, count));
+        s.tree_view.set_viewport(Viewport::new(start, count.get()));
     });
 }
 
@@ -616,8 +617,16 @@ pub(crate) enum RowTarget {
     /// The row of the directory the item at `path` lies in.
     ParentOf { path: PathBuf },
     /// The first row from row `from` on (wrapping around) whose name starts with
-    /// `prefix`, ignoring case.
+    /// `prefix`, ignoring case. An empty prefix asks for nothing and is refused,
+    /// like by the UI's schema.
     Typeahead { prefix: String, from: usize },
+}
+
+impl RowTarget {
+    /// `true` for a target the types allow but that is no lookup.
+    fn is_malformed(&self) -> bool {
+        matches!(self, Self::Typeahead { prefix, .. } if prefix.is_empty())
+    }
 }
 
 /// Answers where a row is in the list of all rows.
@@ -634,6 +643,10 @@ pub fn locate_row<P: EventProxy>(payload: serde_json::Value, proxy: P, state: Sh
     let Some(LocateRowPayload { request, target }) = parse_payload("locateRow", payload) else {
         return answer_unchanged(&proxy, &state);
     };
+    if target.is_malformed() {
+        tracing::warn!("Refused a locateRow without anything to look for");
+        return answer_unchanged(&proxy, &state);
+    }
     with_state_and_notify(&state, &proxy, |s| {
         let path = match target {
             RowTarget::Path { path } => Some(path),
@@ -2114,6 +2127,7 @@ mod tests {
             json!(null),
             json!({ "start": -1, "count": 10 }),
             json!({ "start": 1 }),
+            json!({ "start": 1, "count": 0 }),
             json!({ "start": 1, "count": 2, "extra": true }),
         ] {
             set_viewport(payload, harness.proxy.clone(), harness.state.clone());
@@ -2126,6 +2140,7 @@ mod tests {
             json!({ "request": 1, "target": { "kind": "nope" } }),
             json!({ "request": 1, "target": { "kind": "path", "path": "/x", "extra": 1 } }),
             json!({ "request": -1, "target": { "kind": "path", "path": "/x" } }),
+            json!({ "request": 1, "target": { "kind": "typeahead", "prefix": "", "from": 0 } }),
         ] {
             locate_row(payload, harness.proxy.clone(), harness.state.clone());
             let answer = harness.last_state_update().expect("answered");

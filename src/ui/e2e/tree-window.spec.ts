@@ -265,6 +265,41 @@ test.describe("with a host that takes its time to answer", () => {
     ]);
   });
 
+  test("a key kept for a row is never carried out late", async ({ page }) => {
+    const tree = page.locator(".tree");
+
+    // End, Space, Home: the Space is kept for the last row. Before the host
+    // answers, the viewport moves on and reports another position, so the
+    // rows of the end never arrive (the answer is overtaken).
+    await page.keyboard.press("End");
+    await page.keyboard.press("Space");
+    await page.keyboard.press("Home");
+    await tree.evaluate((el, top) => (el.scrollTop = top), 2_000 * ROW_HEIGHT);
+    await expect(rowAt(page, 2_005)).toBeVisible();
+    await expect(tree).toHaveAttribute("aria-busy", "false");
+    expect(await posted(page, "toggleSelection")).toEqual([]);
+
+    // Seconds later the user scrolls to the end with the mouse.
+    const since = await page.evaluate(() => performance.now());
+    await page.waitForFunction((t) => performance.now() - t > 1200, since);
+    await tree.evaluate((el) => (el.scrollTop = el.scrollHeight));
+    await expect(rowAt(page, LAST_ROW)).toBeVisible();
+    await expect(tree).toHaveAttribute("aria-busy", "false");
+
+    // No selection is toggled without a key press.
+    expect(await posted(page, "toggleSelection")).toEqual([]);
+  });
+
+  test("typing, then ArrowUp: the key acts from the row that is found", async ({
+    page,
+  }) => {
+    await page.keyboard.type("ze");
+    await page.keyboard.press("ArrowUp");
+
+    await expect(rowAt(page, LAST_ROW - 1)).toBeFocused();
+    await expect(rowAt(page, LAST_ROW - 1)).toBeInViewport();
+  });
+
   test("placeholders take exactly the place of the rows", async ({ page }) => {
     const tree = page.locator(".tree");
     await tree.evaluate((el, top) => (el.scrollTop = top), 3_000 * ROW_HEIGHT);

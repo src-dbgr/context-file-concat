@@ -892,6 +892,26 @@
     },
     {
       "action": {
+        "command": "setViewport",
+        "kind": "command",
+        "payload": {
+          "count": 0,
+          "start": 5
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": null,
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "a viewport without rows changes nothing"
+    },
+    {
+      "action": {
         "command": "locateRow",
         "kind": "command",
         "payload": {
@@ -1128,6 +1148,33 @@
         "rows_total": 650
       },
       "name": "a path that is not listed"
+    },
+    {
+      "action": {
+        "command": "locateRow",
+        "kind": "command",
+        "payload": {
+          "request": 10,
+          "target": {
+            "from": 0,
+            "kind": "typeahead",
+            "prefix": ""
+          }
+        }
+      },
+      "expect": {
+        "first_path": "/project/big/file-595.txt",
+        "last_path": "/project/zeta.txt",
+        "located": {
+          "request": 9,
+          "row": null
+        },
+        "rows_count": 50,
+        "rows_revision_changed": false,
+        "rows_start": 600,
+        "rows_total": 650
+      },
+      "name": "a type-ahead for nothing changes nothing"
     },
     {
       "action": {
