@@ -425,6 +425,10 @@ pub(crate) fn directories_of(list: &[FileItem]) -> HashSet<PathBuf> {
 /// locks it.
 pub struct AppState {
     /// The application's configuration settings.
+    ///
+    /// Whoever changes them takes a snapshot right away ([`Self::config_snapshot`])
+    /// and has it saved: the last save of a session writes the most recent snapshot
+    /// and does not look at this field.
     pub config: AppConfig,
     /// The absolute path to the currently loaded directory.
     pub current_path: String,

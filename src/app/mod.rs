@@ -22,6 +22,8 @@ pub mod snapshot;
 mod staged;
 pub mod state;
 pub mod tasks;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tracked;
 pub mod transport;
 pub mod tree_index;

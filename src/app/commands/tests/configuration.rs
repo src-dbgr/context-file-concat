@@ -888,7 +888,7 @@ async fn test_add_ignore_pattern_isolated() {
 
     // --- ARRANGE ---
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let proxy = TestEventProxy { sender: tx };
+    let proxy = TestEventProxy::new(tx);
     let state = {
         let mut s = AppState::default();
         s.config.ignore_patterns.clear();

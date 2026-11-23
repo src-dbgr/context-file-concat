@@ -14,6 +14,11 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 /// Contains the test infrastructure.
+///
+/// Deliberately a small harness of its own instead of the one the unit tests share
+/// (`src/app/test_support.rs`, compiled for unit tests only): an integration test is
+/// another crate, and building its harness from the public API is part of what it
+/// shows.
 mod helpers {
     use super::*;
     use std::fs;

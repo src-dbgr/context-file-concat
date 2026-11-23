@@ -2,15 +2,15 @@
 //! topics share are here; the tests are grouped by topic in the files beside it.
 
 use super::*;
-use crate::app::view_model::{generate_ui_state, UiState};
-use crate::config::AppConfig;
+use crate::app::test_support::{TestEventProxy, TestHarness, EVENT_TIMEOUT};
+use crate::app::view_model::generate_ui_state;
 use crate::core::MAX_FILE_SIZE;
 #[cfg(unix)] // Only the permission-based tests need it.
 use crate::utils::test_helpers::running_as_root;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
-use tempfile::{tempdir, TempDir};
+use tempfile::tempdir;
 use tokio::sync::oneshot;
 
 mod content_search;
@@ -19,103 +19,6 @@ mod generation;
 mod lazy_load;
 mod preview;
 mod scan;
-
-#[derive(Clone)]
-struct TestEventProxy {
-    sender: mpsc::UnboundedSender<UserEvent>,
-}
-
-impl EventProxy for TestEventProxy {
-    fn send_event(&self, event: UserEvent) {
-        self.sender.send(event).expect("Test receiver dropped");
-    }
-}
-
-struct TestHarness {
-    state: SharedState,
-    proxy: TestEventProxy,
-    event_rx: mpsc::UnboundedReceiver<UserEvent>,
-    _temp_dir: TempDir,
-    root_path: PathBuf,
-}
-
-impl TestHarness {
-    fn new() -> Self {
-        let temp_dir = tempdir().expect("Failed to create temp dir");
-        let root_path = temp_dir.path().to_path_buf();
-        let (tx, rx) = mpsc::unbounded_channel();
-        let proxy = TestEventProxy { sender: tx };
-        let mut state = AppState::default();
-        state.config = AppConfig::default();
-        state.current_path = root_path.to_string_lossy().to_string();
-        Self {
-            state: SharedState::new(state),
-            proxy,
-            event_rx: rx,
-            _temp_dir: temp_dir,
-            root_path,
-        }
-    }
-    /// The events sent so far, without waiting for more. This is the way to look
-    /// at the outcome of code that has run to completion (an awaited task or a
-    /// synchronous function): everything it sent is already here.
-    fn drain_events(&mut self) -> Vec<UserEvent> {
-        std::iter::from_fn(|| self.event_rx.try_recv().ok()).collect()
-    }
-
-    /// The plan of a generation of what is selected right now, as the command
-    /// that starts a generation makes it.
-    fn plan(&self) -> GenerationPlan {
-        GenerationPlan::of(&self.state.lock())
-    }
-
-    /// The most recent state update among the events sent so far (see
-    /// [`Self::drain_events`]); all pending events are consumed.
-    fn last_state_update(&mut self) -> Option<UiState> {
-        self.drain_events()
-            .into_iter()
-            .filter_map(|event| match event {
-                UserEvent::StateUpdate(state) => Some(*state.into_ui_state()),
-                _ => None,
-            })
-            .next_back()
-    }
-
-    /// Asserts that nothing has been sent since the events were last consumed.
-    /// Only conclusive once the code under test has run to completion.
-    #[track_caller]
-    fn assert_no_events(&mut self, context: &str) {
-        let events = self.drain_events();
-        assert!(events.is_empty(), "{context}, got {events:?}");
-    }
-
-    /// Waits for the next event of a task that is still running in the background.
-    async fn next_event(&mut self) -> UserEvent {
-        tokio::time::timeout(EVENT_TIMEOUT, self.event_rx.recv())
-            .await
-            .expect("Timed out waiting for an event")
-            .expect("Event channel closed")
-    }
-
-    /// Waits until a background task sends a state update that satisfies
-    /// `predicate` and returns it; earlier events are consumed.
-    async fn wait_for_state_update(
-        &mut self,
-        mut predicate: impl FnMut(&UiState) -> bool,
-    ) -> UiState {
-        loop {
-            if let UserEvent::StateUpdate(state) = self.next_event().await {
-                if predicate(&state) {
-                    return *state.into_ui_state();
-                }
-            }
-        }
-    }
-}
-
-/// Upper bound for waiting on something a test expects to happen. It is only ever
-/// reached by a failing test, so it does not slow the suite down.
-const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct MockContentGenerator {

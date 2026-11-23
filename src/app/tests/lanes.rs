@@ -236,7 +236,7 @@ async fn save_dialog_sees_the_config_edit_posted_right_before_it() {
     let dispatcher = CommandDispatcher::new();
     let dialog = Arc::new(RecordingDialog::default());
     let (tx, mut events) = mpsc::unbounded_channel();
-    let proxy = TestEventProxy(tx);
+    let proxy = TestEventProxy::lenient(tx);
     let state = SharedState::new(AppState::default());
     let last_seq = AtomicU64::new(0);
     let send = |command: &str, payload: serde_json::Value| {

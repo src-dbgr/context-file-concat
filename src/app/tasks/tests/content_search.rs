@@ -662,9 +662,7 @@ async fn search_after_deep_scan_survives_the_cancellation_of_the_scan() {
     harness.state.lock().cancel_current_scan();
     let _ = harness.drain_events();
     release_search.send(()).unwrap();
-    let ui_state = harness
-        .wait_for_state_update(|s| s.visible_files_count == 2)
-        .await;
+    let ui_state = harness.wait_for_state(|s| s.visible_files_count == 2).await;
 
     // Assert
     assert!(!ui_state.is_scanning);

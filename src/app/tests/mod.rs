@@ -7,6 +7,7 @@ use crate::app::correlation::{CommandId, CommandSeq, SessionId};
 use crate::app::events::{OutputSizeNotice, SaveResult};
 use crate::app::snapshot::{send_snapshot, Snapshot};
 use crate::app::state::{AppState, GeneratedDocument, StatusNotice};
+use crate::app::test_support::{lenient_event_channel, EventStream, TestEventProxy};
 use crate::config::AppConfig;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,16 +21,6 @@ mod background;
 mod event_calls;
 mod lanes;
 mod refused;
-
-#[derive(Clone)]
-struct TestEventProxy(mpsc::UnboundedSender<UserEvent>);
-
-impl EventProxy for TestEventProxy {
-    fn send_event(&self, event: UserEvent) {
-        // The receiver may already be gone when a test has finished.
-        let _ = self.0.send(event);
-    }
-}
 
 /// A dialog that stays "open" until the test closes it, and is then cancelled.
 struct BlockingDialog {
@@ -66,7 +57,7 @@ struct Harness {
     dialog_opened: std_mpsc::Receiver<()>,
     close_dialog: std_mpsc::Sender<()>,
     proxy: TestEventProxy,
-    events: mpsc::UnboundedReceiver<UserEvent>,
+    events: EventStream,
     state: SharedState,
     idle_tasks: usize,
     /// The number of the last message sent, as the UI counts them.
@@ -117,7 +108,8 @@ impl Harness {
 
         let (opened, dialog_opened) = std_mpsc::channel();
         let (close_dialog, close) = std_mpsc::channel();
-        let (tx, events) = mpsc::unbounded_channel();
+        // The receiver may already be gone when a test has finished.
+        let (proxy, events) = lenient_event_channel();
         let mut state = AppState::default();
         state.config = AppConfig::default();
         state.current_path = "/repo".to_string();
@@ -145,7 +137,7 @@ impl Harness {
             }),
             dialog_opened,
             close_dialog,
-            proxy: TestEventProxy(tx),
+            proxy,
             events,
             state: SharedState::new(state),
             last_seq: AtomicU64::new(0),

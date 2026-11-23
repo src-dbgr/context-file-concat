@@ -88,7 +88,7 @@ async fn deep_scan_publishes_its_batches_while_it_runs() {
     feed.send(vec![dir_item(&src, 1), file_item(&src.join("a.rs"), 2)])
         .unwrap();
     let first = harness
-        .wait_for_state_update(|ui| ui.visible_files_count == 2)
+        .wait_for_state(|ui| ui.visible_files_count == 2)
         .await;
     assert!(first.is_scanning);
     assert!(!first.is_fully_scanned);
@@ -96,7 +96,7 @@ async fn deep_scan_publishes_its_batches_while_it_runs() {
     // Second batch.
     feed.send(vec![file_item(&src.join("b.rs"), 2)]).unwrap();
     let second = harness
-        .wait_for_state_update(|ui| ui.visible_files_count == 3)
+        .wait_for_state(|ui| ui.visible_files_count == 3)
         .await;
     assert!(second.is_scanning);
     assert!(
@@ -206,7 +206,7 @@ async fn a_cancelled_deep_scan_keeps_what_it_has_published() {
     let (task, _token, feed) = spawn_streaming_scan(&mut harness, vec![dir_item(&src, 1)]).await;
     feed.send(vec![file_item(&src.join("a.rs"), 2)]).unwrap();
     harness
-        .wait_for_state_update(|ui| ui.visible_files_count == 2)
+        .wait_for_state(|ui| ui.visible_files_count == 2)
         .await;
 
     harness.state.lock().cancel_current_scan();
@@ -401,7 +401,7 @@ async fn perf_scan_of_a_large_tree() {
         make: impl Fn(Arc<AtomicBool>) -> S,
     ) {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let proxy = TestEventProxy { sender: tx };
+        let proxy = TestEventProxy::new(tx);
         let mut app_state = AppState::default();
         app_state.current_path = root.to_string_lossy().to_string();
         let state = SharedState::new(app_state);

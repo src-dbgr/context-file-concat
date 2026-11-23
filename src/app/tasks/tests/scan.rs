@@ -471,14 +471,14 @@ async fn opening_a_path_replaces_the_loaded_directory_once_it_is_found() {
 
     let project_path = project.to_string_lossy().to_string();
     let entered = harness
-        .wait_for_state_update(|s| s.current_path == project_path)
+        .wait_for_state(|s| s.current_path == project_path)
         .await;
     assert!(entered.is_scanning);
     assert_eq!(entered.selected_files_count, 0);
     assert_eq!(entered.search_query, "");
     assert!(entered.rows.is_empty() && !entered.is_fully_scanned);
 
-    let completed = harness.wait_for_state_update(|s| !s.is_scanning).await;
+    let completed = harness.wait_for_state(|s| !s.is_scanning).await;
     assert!(completed.is_fully_scanned);
     let state = harness.state.lock();
     assert!(state.selected_files.is_empty() && state.expanded_dirs.is_empty());
@@ -664,11 +664,9 @@ async fn start_scan_on_path_handles_path_is_file() {
     }
     // Its task then finds the directory to scan: the parent of the file.
     let root = harness.root_path.to_string_lossy().to_string();
-    let located = harness
-        .wait_for_state_update(|s| s.current_path == root)
-        .await;
+    let located = harness.wait_for_state(|s| s.current_path == root).await;
     assert!(located.is_scanning);
-    let completed = harness.wait_for_state_update(|s| !s.is_scanning).await;
+    let completed = harness.wait_for_state(|s| !s.is_scanning).await;
     assert!(completed.is_fully_scanned);
 
     let state = harness.state.lock();
@@ -725,7 +723,7 @@ async fn start_scan_on_path_preserves_state() {
 
     // The scan runs to its end and reports the complete (empty) directory.
     let final_update = harness
-        .wait_for_state_update(|ui_state| !ui_state.is_scanning)
+        .wait_for_state(|ui_state| !ui_state.is_scanning)
         .await;
     assert!(final_update.is_fully_scanned);
 }
@@ -978,7 +976,7 @@ async fn a_failed_rescan_leaves_the_list_fully_scanned() {
 
     start_scan_on_path(vanished, harness.proxy.clone(), harness.state.clone(), true);
 
-    let ended = harness.wait_for_state_update(|s| !s.is_scanning).await;
+    let ended = harness.wait_for_state(|s| !s.is_scanning).await;
     assert!(ended.is_fully_scanned);
     let mut state = harness.state.lock();
     assert!(state.is_fully_scanned);
@@ -1008,9 +1006,9 @@ async fn a_rescan_marks_the_list_incomplete_once_the_directory_is_found() {
         }
         other => panic!("Expected the announcement of the scan, got {other:?}"),
     }
-    let walking = harness.wait_for_state_update(|s| !s.is_fully_scanned).await;
+    let walking = harness.wait_for_state(|s| !s.is_fully_scanned).await;
     assert!(walking.is_scanning);
-    let completed = harness.wait_for_state_update(|s| !s.is_scanning).await;
+    let completed = harness.wait_for_state(|s| !s.is_scanning).await;
     assert!(completed.is_fully_scanned);
 }
 
@@ -1072,7 +1070,7 @@ async fn a_panic_while_the_scan_root_is_located_releases_the_scan() {
         UserEvent::StateUpdate(announced) => assert!(announced.is_scanning),
         other => panic!("Expected the announcement of the scan, got {other:?}"),
     }
-    let released = harness.wait_for_state_update(|s| !s.is_scanning).await;
+    let released = harness.wait_for_state(|s| !s.is_scanning).await;
     assert!(!released.is_scanning);
     {
         let state = harness.state.lock();
@@ -1088,7 +1086,7 @@ async fn a_panic_while_the_scan_root_is_located_releases_the_scan() {
         false,
     );
     let completed = harness
-        .wait_for_state_update(|s| !s.is_scanning && s.is_fully_scanned)
+        .wait_for_state(|s| !s.is_scanning && s.is_fully_scanned)
         .await;
     assert_eq!(
         completed.current_path,
