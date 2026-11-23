@@ -10,7 +10,7 @@
 // does, and its snapshots state the number of the last one, like the host's.
 
 import { TreeHostModel } from "$lib/dev/treeHostModel";
-import { UiStateSchema, type CommandSeq } from "$lib/ipc/schema";
+import { UiStateSchema, type CommandId } from "$lib/ipc/schema";
 import { appState } from "$lib/stores/app";
 import type { AppState, TreeRow } from "$lib/types";
 import { baseAppState } from "./tree";
@@ -20,7 +20,9 @@ export class FakeTreeHost {
   readonly received: [command: string, payload: unknown][] = [];
 
   private readonly model = new TreeHostModel();
-  private lastSeq: CommandSeq = 0;
+  /** The UI of the test, as `post()` would name it. */
+  private readonly session = 4711;
+  private lastSeq = 0;
 
   constructor(rows: TreeRow[], overrides: Partial<AppState> = {}) {
     this.setRows(rows, overrides);
@@ -30,13 +32,13 @@ export class FakeTreeHost {
    * The implementation of `post()`: numbers the command, hands the message to
    * the host and returns the number. Nothing is answered yet.
    */
-  receive = (command: string, payload?: unknown): CommandSeq => {
-    const seq = ++this.lastSeq;
+  receive = (command: string, payload?: unknown): CommandId => {
+    const id = { session: this.session, seq: ++this.lastSeq };
     this.received.push([command, payload ?? null]);
     this.model.receive(
-      JSON.stringify({ seq, command, payload: payload ?? null }),
+      JSON.stringify({ ...id, command, payload: payload ?? null }),
     );
-    return seq;
+    return id;
   };
 
   /**
@@ -60,6 +62,7 @@ export class FakeTreeHost {
       rows_total: _total,
       rows_revision: _revision,
       located: _located,
+      last_processed_session: _session,
       last_processed_seq: _seq,
       ...state
     } = baseAppState(overrides);

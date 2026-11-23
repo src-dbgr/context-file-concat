@@ -12,12 +12,13 @@ use super::filtering;
 use super::helpers::with_state_and_notify;
 use super::proxy::EventProxy;
 use super::shared_state::SharedState;
+use super::snapshot::send_snapshot;
 use super::state::{AppState, GeneratedDocument, StatusNotice};
 use super::tasks::{
     self, refresh_content_search, search_for_new_query, start_lazy_load_scan, start_scan_on_path,
 };
 use super::view_model::rows::typeahead_match;
-use super::view_model::{generate_ui_state, Viewport};
+use super::view_model::Viewport;
 use crate::app::file_dialog::DialogService;
 use crate::config::{self, AppConfig};
 use crate::core::is_blank;
@@ -76,7 +77,7 @@ pub fn rescan_directory<P: EventProxy>(proxy: P, state: SharedState) {
     let current_path = {
         let mut state_guard = state.lock();
         if state_guard.is_opening() {
-            send_state(&proxy, &state_guard);
+            send_snapshot(&proxy, &state_guard);
             return;
         }
         state_guard.patterns_need_rescan = false;
@@ -149,7 +150,7 @@ impl ConfigOption {
 /// a command that refuses what it was asked for as well as for a message that is no
 /// command at all (see [`super::ipc`]).
 pub(crate) fn answer_unchanged<P: EventProxy>(proxy: &P, state: &SharedState) {
-    send_state(proxy, &state.lock());
+    send_snapshot(proxy, &state.lock());
 }
 
 /// Adds one ignore pattern. Adding a pattern that is already set changes nothing.
@@ -267,7 +268,7 @@ fn apply_config_change<P: EventProxy>(
 
     // Without a loaded directory there is nothing the change could apply to.
     if state_guard.current_path.is_empty() {
-        send_state(proxy, &state_guard);
+        send_snapshot(proxy, &state_guard);
         return ContentSearchFollowUp::None;
     }
 
@@ -296,7 +297,7 @@ fn apply_config_change<P: EventProxy>(
         if !patterns_added.is_empty() || needs_refilter {
             filtering::apply_filters(&mut state_guard);
         }
-        send_state(proxy, &state_guard);
+        send_snapshot(proxy, &state_guard);
     }
 
     if case_sensitivity_changed && !is_blank(&state_guard.content_search_query) {
@@ -304,10 +305,6 @@ fn apply_config_change<P: EventProxy>(
     } else {
         ContentSearchFollowUp::None
     }
-}
-
-fn send_state<P: EventProxy>(proxy: &P, state: &AppState) {
-    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(state))));
 }
 
 /// Removes the entries matching the newly added ignore patterns from the loaded file
@@ -398,7 +395,7 @@ pub fn load_file_preview<P: EventProxy>(path: PathBuf, proxy: P, state: SharedSt
                 "Cannot preview {}: it is not part of the loaded directory.",
                 path.display()
             )));
-            send_state(&proxy, &state_guard);
+            send_snapshot(&proxy, &state_guard);
             return;
         }
     }
@@ -819,9 +816,7 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: SharedState) {
             estimated_bytes: plan.estimated_size,
             limit_bytes: tasks::MAX_OUTPUT_SIZE,
         }));
-        proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-            &state_guard,
-        ))));
+        send_snapshot(&proxy, &state_guard);
         return;
     }
 
@@ -842,9 +837,7 @@ pub fn generate_preview<P: EventProxy>(proxy: P, state: SharedState) {
     }
 
     // Send an immediate state update to the UI to show the 'generating' state.
-    proxy.send_event(UserEvent::StateUpdate(Box::new(generate_ui_state(
-        &state_guard,
-    ))));
+    send_snapshot(&proxy, &state_guard);
     if plan.estimated_size > tasks::LARGE_OUTPUT_SIZE {
         proxy.send_event(UserEvent::OutputSize(OutputSizeNotice::Large {
             estimated_bytes: plan.estimated_size,
@@ -1032,7 +1025,7 @@ pub fn import_config<P: EventProxy, D: DialogService + ?Sized>(
     tasks::save_config_in_background(state_guard.config_snapshot());
 
     // The UI is wiped clean before the scan (if any) announces itself.
-    send_state(&proxy, &state_guard);
+    send_snapshot(&proxy, &state_guard);
     if let Some(directory) = directory_to_open {
         tasks::open_path(&mut state_guard, directory, proxy, state.clone());
     }
@@ -1252,7 +1245,7 @@ mod tests {
         fn last_state_update(&mut self) -> Option<Box<UiState>> {
             std::iter::from_fn(|| self.event_rx.try_recv().ok())
                 .filter_map(|event| match event {
-                    UserEvent::StateUpdate(ui_state) => Some(ui_state),
+                    UserEvent::StateUpdate(ui_state) => Some(ui_state.into_ui_state()),
                     _ => None,
                 })
                 .last()
@@ -1301,7 +1294,7 @@ mod tests {
             loop {
                 match self.get_next_event().await {
                     Some(UserEvent::StateUpdate(ui_state)) if predicate(&ui_state) => {
-                        return ui_state
+                        return ui_state.into_ui_state()
                     }
                     Some(_) => {}
                     None => panic!("Timed out waiting for the expected state update"),
@@ -1318,7 +1311,9 @@ mod tests {
             loop {
                 match self.get_next_event().await? {
                     UserEvent::StateUpdate(ui_state) if ui_state.is_scanning => scan_seen = true,
-                    UserEvent::StateUpdate(ui_state) if scan_seen => return Some(ui_state),
+                    UserEvent::StateUpdate(ui_state) if scan_seen => {
+                        return Some(ui_state.into_ui_state())
+                    }
                     _ => {}
                 }
             }

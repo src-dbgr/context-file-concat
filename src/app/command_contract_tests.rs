@@ -9,8 +9,9 @@
 //! * `commands.json`: every command name with example payloads. The UI validates
 //!   each example with its `CommandSchemas` and checks that it knows exactly the
 //!   same command names (`src/ui/src/tests/contracts/rust-fixture.test.ts`).
-//! * `command_messages.json`: the same examples as complete messages, numbered, as
-//!   the host reads them. The UI checks that `post()` writes exactly these.
+//! * `command_messages.json`: the same examples as complete messages, with the
+//!   session and the number of their envelope, as the host reads them. The UI checks
+//!   that `post()` writes exactly these (with a session of its own).
 //!
 //! The list of names is not kept by hand: it is the one serde states for the enum
 //! ([`Command::wire_names`]), and the examples have to cover it.
@@ -22,7 +23,7 @@ use super::commands::{
     ConfigOption, IgnorePatternPayload, LocateRowPayload, RowTarget, SaveFilePayload,
     SetExpansionPayload, SetViewportPayload, UpdateFiltersPayload,
 };
-use super::correlation::CommandSeq;
+use super::correlation::{CommandId, CommandSeq, SessionId};
 use super::ipc::{Command, IpcMessage};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -203,13 +204,24 @@ pub(super) fn example_commands() -> Vec<Command> {
     examples
 }
 
-/// A command as the UI posts it: `{"seq", "command", "payload"}`. The UI always
-/// sends a payload, `null` for a command that has none.
-fn message(seq: CommandSeq, command: &Command) -> Value {
+/// The UI the example messages are posted by.
+const EXAMPLE_SESSION: SessionId = 1_234_567;
+
+fn example_id(seq: CommandSeq) -> CommandId {
+    CommandId {
+        session: EXAMPLE_SESSION,
+        seq,
+    }
+}
+
+/// A command as the UI posts it: `{"session", "seq", "command", "payload"}`. The UI
+/// always sends a payload, `null` for a command that has none.
+fn message(id: CommandId, command: &Command) -> Value {
     let mut message = serde_json::to_value(command).expect("a command is serializable");
     let fields = message.as_object_mut().expect("a command is an object");
     fields.entry("payload").or_insert(Value::Null);
-    fields.insert("seq".to_string(), json!(seq));
+    fields.insert("session".to_string(), json!(id.session));
+    fields.insert("seq".to_string(), json!(id.seq));
     message
 }
 
@@ -218,7 +230,7 @@ fn example_messages() -> Vec<Value> {
     example_commands()
         .iter()
         .zip(1..)
-        .map(|(command, seq)| message(seq, command))
+        .map(|(command, seq)| message(example_id(seq), command))
         .collect()
 }
 
@@ -288,10 +300,11 @@ fn the_examples_cover_every_command() {
 #[test]
 fn the_example_messages_are_read_as_the_commands_they_were_made_of() {
     for (command, seq) in example_commands().into_iter().zip(1..) {
-        let message = message(seq, &command);
+        let id = example_id(seq);
+        let message = message(id, &command);
         assert_eq!(
             IpcMessage::parse(&message.to_string()),
-            IpcMessage::Command { seq, command },
+            IpcMessage::Command { id, command },
             "{message}"
         );
     }
@@ -302,9 +315,9 @@ fn the_example_messages_are_read_as_the_commands_they_were_made_of() {
 #[test]
 fn the_example_messages_are_written_one_way() {
     for example in example_messages() {
-        let IpcMessage::Command { seq, command } = IpcMessage::parse(&example.to_string()) else {
+        let IpcMessage::Command { id, command } = IpcMessage::parse(&example.to_string()) else {
             panic!("not a command: {example}");
         };
-        assert_eq!(message(seq, &command), example);
+        assert_eq!(message(id, &command), example);
     }
 }

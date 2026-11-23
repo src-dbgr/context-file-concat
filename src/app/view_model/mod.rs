@@ -29,7 +29,7 @@ mod reference;
 #[cfg(test)]
 mod windowing_tests;
 
-use crate::app::correlation::CommandSeq;
+use crate::app::correlation::{CommandSeq, SessionId};
 use crate::app::state::AppState;
 use crate::app::tree_index::TreeCounts;
 use serde::Serialize;
@@ -78,10 +78,12 @@ pub struct UiState {
     pub scan_progress: crate::core::ScanProgress,
     pub active_ignore_patterns: HashSet<String>,
     pub patterns_need_rescan: bool,
-    /// The number of the last command of the UI this snapshot accounts for (0: none
-    /// yet). It says nothing about the application state and is not derived from
-    /// it: [`generate_ui_state`] leaves it at 0, and the transport fills it in when
-    /// the snapshot is sent (see [`crate::app::correlation`]).
+    /// The UI whose command this snapshot accounts for last (0: none yet), and
+    /// the number of that command (0: none yet). They say nothing about the
+    /// application state and are not derived from it: [`generate_ui_state`] leaves
+    /// them at 0, and the transport fills them in when the snapshot is sent (see
+    /// [`crate::app::correlation`]).
+    pub last_processed_session: SessionId,
     pub last_processed_seq: CommandSeq,
 }
 
@@ -118,6 +120,7 @@ pub fn generate_ui_state(state: &AppState) -> UiState {
         scan_progress: status::scan_progress_for_ui(state),
         active_ignore_patterns: state.active_ignore_patterns.clone(),
         patterns_need_rescan: state.patterns_need_rescan,
+        last_processed_session: 0,
         last_processed_seq: 0,
     }
 }

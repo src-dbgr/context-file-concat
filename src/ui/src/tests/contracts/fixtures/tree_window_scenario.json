@@ -778,13 +778,14 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "expanded",
-        "message": "{\"command\":\"initialize\",\"payload\":null,\"seq\":1}",
+        "message": "{\"command\":\"initialize\",\"payload\":null,\"seq\":1,\"session\":1001}",
         "search_query": ""
       },
       "expect": {
         "first_path": "/project/alpha",
         "last_path": "/project/big/file-094.txt",
         "last_processed_seq": 1,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 100,
         "rows_revision_changed": true,
@@ -796,12 +797,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":80,\"start\":200},\"seq\":2}"
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":80,\"start\":200},\"seq\":2,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-195.txt",
         "last_path": "/project/big/file-274.txt",
         "last_processed_seq": 2,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 80,
         "rows_revision_changed": false,
@@ -813,12 +815,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":5000,\"start\":10},\"seq\":3}"
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":5000,\"start\":10},\"seq\":3,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-005.txt",
         "last_path": "/project/big/file-604.txt",
         "last_processed_seq": 3,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 600,
         "rows_revision_changed": false,
@@ -830,12 +833,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":50,\"start\":100000},\"seq\":4}"
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":50,\"start\":100000},\"seq\":4,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 4,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 50,
         "rows_revision_changed": false,
@@ -847,12 +851,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":50,\"start\":630},\"seq\":5}"
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":50,\"start\":630},\"seq\":5,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 5,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 50,
         "rows_revision_changed": false,
@@ -864,12 +869,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"payload\":{\"start\":5},\"seq\":6}"
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"start\":5},\"seq\":6,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 6,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 50,
         "rows_revision_changed": false,
@@ -881,12 +887,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":0,\"start\":5},\"seq\":7}"
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":0,\"start\":5},\"seq\":7,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 7,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 50,
         "rows_revision_changed": false,
@@ -898,12 +905,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":1,\"target\":{\"kind\":\"path\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":8}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":1,\"target\":{\"kind\":\"path\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":8,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 8,
+        "last_processed_session": 1001,
         "located": {
           "request": 1,
           "row": 325
@@ -918,12 +926,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":2,\"target\":{\"kind\":\"parent_of\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":9}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":2,\"target\":{\"kind\":\"parent_of\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":9,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 9,
+        "last_processed_session": 1001,
         "located": {
           "request": 2,
           "row": 4
@@ -938,12 +947,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":3,\"target\":{\"kind\":\"parent_of\",\"path\":\"/project/big\"}},\"seq\":10}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":3,\"target\":{\"kind\":\"parent_of\",\"path\":\"/project/big\"}},\"seq\":10,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 10,
+        "last_processed_session": 1001,
         "located": {
           "request": 3,
           "row": null
@@ -958,12 +968,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":4,\"target\":{\"from\":0,\"kind\":\"typeahead\",\"prefix\":\"ze\"}},\"seq\":11}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":4,\"target\":{\"from\":0,\"kind\":\"typeahead\",\"prefix\":\"ze\"}},\"seq\":11,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 11,
+        "last_processed_session": 1001,
         "located": {
           "request": 4,
           "row": 646
@@ -978,12 +989,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":5,\"target\":{\"from\":647,\"kind\":\"typeahead\",\"prefix\":\"ZE\"}},\"seq\":12}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":5,\"target\":{\"from\":647,\"kind\":\"typeahead\",\"prefix\":\"ZE\"}},\"seq\":12,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 12,
+        "last_processed_session": 1001,
         "located": {
           "request": 5,
           "row": 649
@@ -998,12 +1010,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":6,\"target\":{\"from\":600,\"kind\":\"typeahead\",\"prefix\":\"a\"}},\"seq\":13}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":6,\"target\":{\"from\":600,\"kind\":\"typeahead\",\"prefix\":\"a\"}},\"seq\":13,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 13,
+        "last_processed_session": 1001,
         "located": {
           "request": 6,
           "row": 0
@@ -1018,12 +1031,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":7,\"target\":{\"from\":9999,\"kind\":\"typeahead\",\"prefix\":\"ze\"}},\"seq\":14}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":7,\"target\":{\"from\":9999,\"kind\":\"typeahead\",\"prefix\":\"ze\"}},\"seq\":14,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 14,
+        "last_processed_session": 1001,
         "located": {
           "request": 7,
           "row": 646
@@ -1038,12 +1052,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":8,\"target\":{\"from\":3,\"kind\":\"typeahead\",\"prefix\":\"qq\"}},\"seq\":15}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":8,\"target\":{\"from\":3,\"kind\":\"typeahead\",\"prefix\":\"qq\"}},\"seq\":15,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 15,
+        "last_processed_session": 1001,
         "located": {
           "request": 8,
           "row": null
@@ -1058,12 +1073,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":9,\"target\":{\"kind\":\"path\",\"path\":\"/project/nope.txt\"}},\"seq\":16}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":9,\"target\":{\"kind\":\"path\",\"path\":\"/project/nope.txt\"}},\"seq\":16,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 16,
+        "last_processed_session": 1001,
         "located": {
           "request": 9,
           "row": null
@@ -1078,12 +1094,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":10,\"target\":{\"from\":0,\"kind\":\"typeahead\",\"prefix\":\"\"}},\"seq\":17}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":10,\"target\":{\"from\":0,\"kind\":\"typeahead\",\"prefix\":\"\"}},\"seq\":17,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 17,
+        "last_processed_session": 1001,
         "located": {
           "request": 9,
           "row": null
@@ -1098,12 +1115,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":10,\"target\":{\"kind\":\"sideways\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":18}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":10,\"target\":{\"kind\":\"sideways\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":18,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-595.txt",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 18,
+        "last_processed_session": 1001,
         "located": {
           "request": 9,
           "row": null
@@ -1118,12 +1136,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":60,\"start\":300},\"seq\":19}"
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":60,\"start\":300},\"seq\":19,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-295.txt",
         "last_path": "/project/big/file-354.txt",
         "last_processed_seq": 19,
+        "last_processed_session": 1001,
         "located": {
           "request": 9,
           "row": null
@@ -1138,12 +1157,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":11,\"target\":{\"kind\":\"path\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":20}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":11,\"target\":{\"kind\":\"path\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":20,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-295.txt",
         "last_path": "/project/big/file-354.txt",
         "last_processed_seq": 20,
+        "last_processed_session": 1001,
         "located": {
           "request": 11,
           "row": 325
@@ -1160,13 +1180,14 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "collapsed",
-        "message": "{\"command\":\"setExpansion\",\"payload\":{\"expanded\":false,\"path\":\"/project/big\"},\"seq\":21}",
+        "message": "{\"command\":\"setExpansion\",\"payload\":{\"expanded\":false,\"path\":\"/project/big\"},\"seq\":21,\"session\":1001}",
         "search_query": ""
       },
       "expect": {
         "first_path": "/project/alpha",
         "last_path": "/project/zeta.txt",
         "last_processed_seq": 21,
+        "last_processed_session": 1001,
         "located": {
           "request": 11,
           "row": null
@@ -1183,13 +1204,14 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "expanded",
-        "message": "{\"command\":\"setExpansion\",\"payload\":{\"expanded\":true,\"path\":\"/project/big\"},\"seq\":22}",
+        "message": "{\"command\":\"setExpansion\",\"payload\":{\"expanded\":true,\"path\":\"/project/big\"},\"seq\":22,\"session\":1001}",
         "search_query": ""
       },
       "expect": {
         "first_path": "/project/big/file-295.txt",
         "last_path": "/project/big/file-354.txt",
         "last_processed_seq": 22,
+        "last_processed_session": 1001,
         "located": {
           "request": 11,
           "row": 325
@@ -1206,13 +1228,14 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "expanded",
-        "message": "{\"command\":\"toggleSelection\",\"payload\":\"/project/big/file-320.txt\",\"seq\":23}",
+        "message": "{\"command\":\"toggleSelection\",\"payload\":\"/project/big/file-320.txt\",\"seq\":23,\"session\":1001}",
         "search_query": ""
       },
       "expect": {
         "first_path": "/project/big/file-295.txt",
         "last_path": "/project/big/file-354.txt",
         "last_processed_seq": 23,
+        "last_processed_session": 1001,
         "located": {
           "request": 11,
           "row": 325
@@ -1229,13 +1252,14 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "filtered",
-        "message": "{\"command\":\"updateFilters\",\"payload\":{\"searchQuery\":\"file-1\"},\"seq\":24}",
+        "message": "{\"command\":\"updateFilters\",\"payload\":{\"searchQuery\":\"file-1\"},\"seq\":24,\"session\":1001}",
         "search_query": "file-1"
       },
       "expect": {
         "first_path": "/project/big",
         "last_path": "/project/big/file-158.txt",
         "last_processed_seq": 24,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 60,
         "rows_revision_changed": true,
@@ -1247,12 +1271,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":30,\"start\":40},\"seq\":25}"
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":30,\"start\":40},\"seq\":25,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-139.txt",
         "last_path": "/project/big/file-168.txt",
         "last_processed_seq": 25,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 30,
         "rows_revision_changed": false,
@@ -1264,12 +1289,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":12,\"target\":{\"from\":0,\"kind\":\"typeahead\",\"prefix\":\"file-15\"}},\"seq\":26}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":12,\"target\":{\"from\":0,\"kind\":\"typeahead\",\"prefix\":\"file-15\"}},\"seq\":26,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-139.txt",
         "last_path": "/project/big/file-168.txt",
         "last_processed_seq": 26,
+        "last_processed_session": 1001,
         "located": {
           "request": 12,
           "row": 51
@@ -1286,13 +1312,14 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "filtered",
-        "message": "{\"command\":\"updateFilters\",\"payload\":{\"searchQuery\":\"file-1\"},\"seq\":27}",
+        "message": "{\"command\":\"updateFilters\",\"payload\":{\"searchQuery\":\"file-1\"},\"seq\":27,\"session\":1001}",
         "search_query": "file-1"
       },
       "expect": {
         "first_path": "/project/big/file-139.txt",
         "last_path": "/project/big/file-168.txt",
         "last_processed_seq": 27,
+        "last_processed_session": 1001,
         "located": {
           "request": 12,
           "row": 51
@@ -1309,13 +1336,14 @@
         "current_path": "/project",
         "kind": "shows",
         "list": "expanded",
-        "message": "{\"command\":\"updateFilters\",\"payload\":{\"searchQuery\":\"\"},\"seq\":28}",
+        "message": "{\"command\":\"updateFilters\",\"payload\":{\"searchQuery\":\"\"},\"seq\":28,\"session\":1001}",
         "search_query": ""
       },
       "expect": {
         "first_path": "/project/alpha",
         "last_path": "/project/big/file-024.txt",
         "last_processed_seq": 28,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 30,
         "rows_revision_changed": true,
@@ -1327,12 +1355,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":70,\"start\":500},\"seq\":29}"
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":70,\"start\":500},\"seq\":29,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-495.txt",
         "last_path": "/project/big/file-564.txt",
         "last_processed_seq": 29,
+        "last_processed_session": 1001,
         "located": null,
         "rows_count": 70,
         "rows_revision_changed": false,
@@ -1344,12 +1373,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":13,\"target\":{\"kind\":\"path\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":30}"
+        "message": "{\"command\":\"locateRow\",\"payload\":{\"request\":13,\"target\":{\"kind\":\"path\",\"path\":\"/project/big/file-320.txt\"}},\"seq\":30,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-495.txt",
         "last_path": "/project/big/file-564.txt",
         "last_processed_seq": 30,
+        "last_processed_session": 1001,
         "located": {
           "request": 13,
           "row": 325
@@ -1364,12 +1394,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"noSuchCommand\",\"payload\":null,\"seq\":31}"
+        "message": "{\"command\":\"noSuchCommand\",\"payload\":null,\"seq\":31,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-495.txt",
         "last_path": "/project/big/file-564.txt",
         "last_processed_seq": 31,
+        "last_processed_session": 1001,
         "located": {
           "request": 13,
           "row": 325
@@ -1384,12 +1415,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"extra\":true,\"payload\":{\"count\":10,\"start\":0},\"seq\":32}"
+        "message": "{\"command\":\"setViewport\",\"extra\":true,\"payload\":{\"count\":10,\"start\":0},\"seq\":32,\"session\":1001}"
       },
       "expect": {
         "first_path": "/project/big/file-495.txt",
         "last_path": "/project/big/file-564.txt",
         "last_processed_seq": 32,
+        "last_processed_session": 1001,
         "located": {
           "request": 13,
           "row": 325
@@ -1410,6 +1442,7 @@
         "first_path": "/project/big/file-495.txt",
         "last_path": "/project/big/file-564.txt",
         "last_processed_seq": 32,
+        "last_processed_session": 1001,
         "located": {
           "request": 13,
           "row": 325
@@ -1430,6 +1463,7 @@
         "first_path": "/project/big/file-495.txt",
         "last_path": "/project/big/file-564.txt",
         "last_processed_seq": 32,
+        "last_processed_session": 1001,
         "located": {
           "request": 13,
           "row": 325
@@ -1439,17 +1473,39 @@
         "rows_start": 500,
         "rows_total": 650
       },
-      "name": "a command without a number is not executed"
+      "name": "a command without a name is not executed"
     },
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":10,\"start\":0},\"seq\":\"12\"}"
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":10,\"start\":0},\"seq\":999}"
       },
       "expect": {
         "first_path": "/project/big/file-495.txt",
         "last_path": "/project/big/file-564.txt",
         "last_processed_seq": 32,
+        "last_processed_session": 1001,
+        "located": {
+          "request": 13,
+          "row": 325
+        },
+        "rows_count": 70,
+        "rows_revision_changed": false,
+        "rows_start": 500,
+        "rows_total": 650
+      },
+      "name": "a number without a session is no name"
+    },
+    {
+      "action": {
+        "kind": "command",
+        "message": "{\"command\":\"setViewport\",\"payload\":{\"count\":10,\"start\":0},\"seq\":\"12\",\"session\":1001}"
+      },
+      "expect": {
+        "first_path": "/project/big/file-495.txt",
+        "last_path": "/project/big/file-564.txt",
+        "last_processed_seq": 32,
+        "last_processed_session": 1001,
         "located": {
           "request": 13,
           "row": 325
@@ -1464,12 +1520,13 @@
     {
       "action": {
         "kind": "command",
-        "message": "{\"command\":\"initialize\",\"payload\":null,\"seq\":1}"
+        "message": "{\"command\":\"initialize\",\"payload\":null,\"seq\":1,\"session\":1002}"
       },
       "expect": {
         "first_path": "/project/alpha",
         "last_path": "/project/big/file-064.txt",
         "last_processed_seq": 1,
+        "last_processed_session": 1002,
         "located": null,
         "rows_count": 70,
         "rows_revision_changed": false,

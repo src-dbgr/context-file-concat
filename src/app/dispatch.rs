@@ -46,7 +46,7 @@
 //!
 //! # Numbered commands
 //!
-//! A command can be dispatched with the number the UI gave it. The ordered lane then
+//! A command can be dispatched with the name the UI gave it (its session and number). The ordered lane then
 //! reports to its [`CommandProgress`] while it runs the command and when the command
 //! has finished or suspended; a blocking command is reported when the lane reaches
 //! its barrier. What that is good for is described in [`super::correlation`]; this
@@ -69,13 +69,13 @@ use std::task::Poll;
 
 use tokio::sync::{mpsc, oneshot};
 
-use super::correlation::{CommandProgress, CommandSeq};
+use super::correlation::{CommandId, CommandProgress};
 
 type Work = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-/// A command of the ordered lane, with the number the UI gave it (if any).
+/// A command of the ordered lane, with the name the UI gave it (if any).
 struct Job {
-    seq: Option<CommandSeq>,
+    id: Option<CommandId>,
     work: Work,
 }
 
@@ -132,16 +132,16 @@ impl CommandDispatcher {
 
     /// Queues a command on the ordered lane. Never blocks.
     ///
-    /// `seq` is the number the UI gave the command, `None` for work that did not come
+    /// `id` is the name the UI gave the command, `None` for work that did not come
     /// from the UI (a dropped path). A numbered command is processed once it has
     /// finished or suspended for the first time.
     pub fn dispatch(
         &self,
-        seq: Option<CommandSeq>,
+        id: Option<CommandId>,
         command: impl Future<Output = ()> + Send + 'static,
     ) {
         let job = Job {
-            seq,
+            id,
             work: Box::pin(command),
         };
         if self.ordered.send(job).is_err() {
@@ -160,7 +160,7 @@ impl CommandDispatcher {
     /// wait for a dialog, so neither does the number.
     pub fn dispatch_blocking(
         &self,
-        seq: Option<CommandSeq>,
+        id: Option<CommandId>,
         command: impl FnOnce() + Send + 'static,
     ) {
         // The barrier is a marker command: when the ordered lane gets to it, everything
@@ -168,7 +168,7 @@ impl CommandDispatcher {
         // gone, the sender is dropped, which releases the job as well.
         let (caught_up, ordered_lane_caught_up) = oneshot::channel();
         let _ = self.ordered.send(Job {
-            seq,
+            id,
             work: Box::pin(async move {
                 let _ = caught_up.send(());
             }),
@@ -197,8 +197,8 @@ async fn run_ordered_lane(
     continuations: mpsc::UnboundedSender<Work>,
     progress: Arc<CommandProgress>,
 ) {
-    while let Some(Job { seq, mut work }) = commands.recv().await {
-        if run_until_first_suspension(&mut work, seq, &progress)
+    while let Some(Job { id, mut work }) = commands.recv().await {
+        if run_until_first_suspension(&mut work, id, &progress)
             .await
             .is_pending()
             && continuations.send(work).is_err()
@@ -214,7 +214,7 @@ async fn run_ordered_lane(
 /// `progress` tell the events of a numbered command from those of everything else.
 async fn run_until_first_suspension(
     command: &mut Work,
-    seq: Option<CommandSeq>,
+    id: Option<CommandId>,
     progress: &CommandProgress,
 ) -> Poll<()> {
     std::future::poll_fn(|cx| {
@@ -224,8 +224,8 @@ async fn run_until_first_suspension(
                 Poll::Ready(())
             })
         };
-        Poll::Ready(match seq {
-            Some(seq) => progress.while_answering(seq, poll),
+        Poll::Ready(match id {
+            Some(id) => progress.while_answering(id, poll),
             None => poll(),
         })
     })
@@ -577,24 +577,29 @@ mod tests {
 
     // --- Numbered commands ---
 
+    /// Command `seq` of the one UI of these tests.
+    fn numbered(seq: u64) -> CommandId {
+        CommandId { session: 7, seq }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_numbered_command_is_processed_when_it_has_finished() {
         let dispatcher = CommandDispatcher::new();
         let progress = dispatcher.progress().clone();
-        assert_eq!(progress.last_processed(), 0);
+        assert_eq!(progress.last_processed(), CommandId::default());
 
         let seen = Arc::new(Mutex::new(None));
         let during = seen.clone();
         let running = progress.clone();
-        dispatcher.dispatch(Some(1), async move {
+        dispatcher.dispatch(Some(numbered(1)), async move {
             *during.lock().unwrap() = Some(running.last_processed());
         });
         dispatcher.dispatch(None, async {});
         ordered_lane_drained(&dispatcher).await;
 
         // Not before it has run, and work without a number does not change it.
-        assert_eq!(*seen.lock().unwrap(), Some(0));
-        assert_eq!(progress.last_processed(), 1);
+        assert_eq!(*seen.lock().unwrap(), Some(CommandId::default()));
+        assert_eq!(progress.last_processed(), numbered(1));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -605,21 +610,21 @@ mod tests {
         let (finish_search, search_finished) = oneshot::channel::<()>();
 
         let search = journal.clone();
-        dispatcher.dispatch(Some(1), async move {
+        dispatcher.dispatch(Some(numbered(1)), async move {
             let _ = search_finished.await;
             search.record("search: finished");
         });
         ordered_lane_drained(&dispatcher).await;
-        assert_eq!(progress.last_processed(), 1);
+        assert_eq!(progress.last_processed(), numbered(1));
 
         // The command after it is not held back, and the continuation does not
         // take the number back when it ends.
-        dispatcher.dispatch(Some(2), async {});
+        dispatcher.dispatch(Some(numbered(2)), async {});
         ordered_lane_drained(&dispatcher).await;
-        assert_eq!(progress.last_processed(), 2);
+        assert_eq!(progress.last_processed(), numbered(2));
         finish_search.send(()).unwrap();
         eventually(&journal, 1).await;
-        assert_eq!(progress.last_processed(), 2);
+        assert_eq!(progress.last_processed(), numbered(2));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -631,9 +636,9 @@ mod tests {
 
         let dialog = journal.clone();
         let at_start = progress.clone();
-        dispatcher.dispatch(Some(1), async {});
-        dispatcher.dispatch_blocking(Some(2), move || {
-            dialog.record(format!("dialog: open at {}", at_start.last_processed()));
+        dispatcher.dispatch(Some(numbered(1)), async {});
+        dispatcher.dispatch_blocking(Some(numbered(2)), move || {
+            dialog.record(format!("dialog: open at {}", at_start.last_processed().seq));
             dialog_closed.recv().unwrap();
             dialog.record("dialog: closed");
         });
@@ -641,19 +646,21 @@ mod tests {
 
         // The dialog is still open; later commands are processed meanwhile, and the
         // end of the dialog command does not change the number.
-        dispatcher.dispatch(Some(3), async {});
+        dispatcher.dispatch(Some(numbered(3)), async {});
         ordered_lane_drained(&dispatcher).await;
-        assert_eq!(progress.last_processed(), 3);
+        assert_eq!(progress.last_processed(), numbered(3));
         close_dialog.send(()).unwrap();
         eventually(&journal, 2).await;
-        assert_eq!(progress.last_processed(), 3);
+        assert_eq!(progress.last_processed(), numbered(3));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_numbered_command_that_panics_is_processed() {
         let dispatcher = CommandDispatcher::new();
-        dispatcher.dispatch(Some(1), async { panic!("panic in a numbered command") });
+        dispatcher.dispatch(Some(numbered(1)), async {
+            panic!("panic in a numbered command")
+        });
         ordered_lane_drained(&dispatcher).await;
-        assert_eq!(dispatcher.progress().last_processed(), 1);
+        assert_eq!(dispatcher.progress().last_processed(), numbered(1));
     }
 }

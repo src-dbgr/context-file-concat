@@ -7,19 +7,19 @@
    * those from before the host has processed the edit (see `HostDraft`).
    * The edit is handed to `oncommit` when the field is left or Enter is
    * pressed (the `change` event); the caller sends it as an intent command
-   * and returns the number of that command (what `post()` returns).
+   * and returns the name of that command (what `post()` returns).
    */
   import { untrack } from "svelte";
   import { HostDraft } from "$lib/modules/hostDraft";
   import { appState } from "$lib/stores/app";
-  import type { CommandSeq } from "$lib/ipc/schema";
+  import type { CommandId } from "$lib/ipc/schema";
 
   type Props = {
     id: string;
     /** The value the host reports. */
     value: string;
-    /** Sends the edit; returns the number of the command that carries it. */
-    oncommit: (value: string) => CommandSeq;
+    /** Sends the edit; returns what `post()` returned for its command. */
+    oncommit: (value: string) => CommandId | null;
   };
   let { id, value, oncommit }: Props = $props();
 
@@ -29,10 +29,10 @@
   // Runs for every snapshot of the host: shows the host's value unless the
   // draft holds it back.
   $effect(() => {
-    const processed = $appState.last_processed_seq;
+    const snapshot = $appState;
     void value;
     untrack(() => {
-      if (draft.accepts(processed)) text = value;
+      if (draft.accepts(snapshot)) text = value;
     });
   });
 

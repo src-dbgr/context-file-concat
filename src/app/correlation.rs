@@ -1,13 +1,15 @@
 //! Correlation of commands and snapshots.
 //!
 //! A command returns nothing; its effect arrives with a snapshot. So that the UI can
-//! tell *which* snapshot that is, it numbers the commands it posts (the `seq` of the
-//! envelope, see [`super::ipc`]), and every snapshot states the number of the last
-//! command it accounts for: `last_processed_seq`.
+//! tell *which* snapshot that is, it names the commands it posts (the `session` and
+//! `seq` of the envelope, see [`super::ipc`]): `session` identifies the UI that
+//! posts (a number it draws when it is loaded), `seq` counts its commands from 1.
+//! Every snapshot states the last command it accounts for:
+//! `last_processed_session` and `last_processed_seq`.
 //!
-//! # What the number means
+//! # What the snapshot says
 //!
-//! A snapshot carries `last_processed_seq = n` if and only if
+//! A snapshot names command `n` of a session if and only if
 //!
 //! * it was sent by command `n` itself while that command ran on the ordered lane
 //!   (it is, or belongs to, the answer to `n`), or
@@ -15,12 +17,14 @@
 //!   ordered lane without sending one,
 //!
 //! and no later command has got that far yet. Commands pass the ordered lane in the
-//! order they were posted, so a snapshot with `last_processed_seq >= n` shows what
-//! command `n` and every command before it have done there: everything a command
-//! does before it finishes or suspends for the first time (see [`super::dispatch`]).
+//! order they were posted. So for the UI: **from the first snapshot on that names
+//! its session and a `seq >= n`, it is looking at the answer to command `n` or at
+//! something newer.** What the host reports from then on is its decision about the
+//! command, not a state from before it.
 //!
-//! What a command does *later* is not covered by its number, and comes with later
-//! snapshots (which carry the number that is current then):
+//! This is a statement about the answer, not about everything a command sets in
+//! motion. What a command does after its answer comes with later snapshots (which
+//! name the command that is current then):
 //!
 //! * **A command that suspends** (`updateFilters` while its content search runs) is
 //!   processed when it suspends. It has stored the filter texts and sent its first
@@ -31,32 +35,38 @@
 //!   follows its closing happen after that, like the results of background work.
 //! * **Background work** a command starts (a scan, a generation) is registered by
 //!   the command; its results are not waited for.
+//! * A command may also go on, on the lane, after it has sent its answer.
+//!   `setConfigOption` for the case sensitivity answers with the new setting and
+//!   then, if a content query is active, starts the search again; a snapshot a
+//!   background task sends in between names the command and shows the setting, but
+//!   not yet that a search is running.
 //!
-//! A message that is refused (a malformed payload, an unknown command) is numbered
+//! A message that is refused (a malformed payload, an unknown command) is named
 //! like any other and is processed by being answered with the unchanged snapshot. A
-//! message without a number changes none.
+//! message without a name changes nothing about what the snapshots say.
 //!
-//! The number is the one of the *last* command, not the highest one ever seen: a UI
-//! that starts anew (a reload) counts from 1 again, and the snapshots follow it.
+//! The snapshot names the *last* command. A UI that is loaded anew (a reload) has
+//! another `session` and counts from 1 again; snapshots that were made for the UI
+//! before it name the session of that one, so the new UI does not take them for
+//! answers to its own commands.
 //!
 //! # How it is kept
 //!
 //! This is a concern of the transport, and no command knows about it. The ordered
-//! lane tells a [`CommandProgress`] which numbered command it is running
+//! lane tells a [`CommandProgress`] which named command it is running
 //! ([`CommandProgress::while_answering`]), and the proxy the commands send their
-//! events through ([`Correlated`]) writes the number into every snapshot on its way
+//! events through ([`Correlated`]) writes the name into every snapshot on its way
 //! out. A snapshot sent on the thread of the lane while a command runs there is
 //! sent by that command.
 //!
-//! The number is written when a snapshot is *sent*. That is as good as when it is
-//! made, because every snapshot is made and sent while the state is locked (which
-//! the coalescing of the transport relies on as well: the snapshot sent last is the
-//! newest). Of two snapshots the later one therefore never carries the smaller
-//! number, and dropping the earlier one loses nothing.
+//! The name is written when a snapshot is *sent*. That is as good as when it is
+//! made: a snapshot can only be made and sent in one step, from the locked state
+//! (see [`super::snapshot`]), so snapshots are sent in the order they are made. Of
+//! two snapshots the later one therefore never names the earlier command, and the
+//! transport dropping the earlier one loses nothing.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::events::UserEvent;
 use super::proxy::EventProxy;
@@ -65,61 +75,82 @@ use super::proxy::EventProxy;
 /// "no command yet".
 pub type CommandSeq = u64;
 
-thread_local! {
-    /// The numbered command that is running on this thread, with the progress it
-    /// reports to (its address: several dispatchers can exist side by side).
-    static ANSWERING: Cell<Option<(usize, CommandSeq)>> = const { Cell::new(None) };
+/// Identifies the UI that posts: a number it draws when it is loaded. 0 stands for
+/// "no UI yet".
+pub type SessionId = u64;
+
+/// The name of a command: who posted it, and which of its commands it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommandId {
+    pub session: SessionId,
+    pub seq: CommandSeq,
 }
 
-/// How far the ordered lane has got with the numbered commands.
+thread_local! {
+    /// The named command that is running on this thread, with the progress it
+    /// reports to (its address: several dispatchers can exist side by side).
+    static ANSWERING: Cell<Option<(usize, CommandId)>> = const { Cell::new(None) };
+}
+
+/// How far the ordered lane has got with the named commands.
 #[derive(Debug, Default)]
 pub struct CommandProgress {
-    last_processed: AtomicU64,
+    last_processed: Mutex<CommandId>,
 }
 
 impl CommandProgress {
-    /// The number of the last command that was processed.
-    pub fn last_processed(&self) -> CommandSeq {
-        self.last_processed.load(Ordering::SeqCst)
+    /// The last command that was processed.
+    pub fn last_processed(&self) -> CommandId {
+        *self
+            .last_processed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Runs the part of command `seq` that the ordered lane executes: up to its end
+    /// Runs the part of command `id` that the ordered lane executes: up to its end
     /// or its first suspension. Snapshots sent from within `run` are answers to the
     /// command; when `run` returns (or panics), the command is processed.
-    pub fn while_answering<R>(&self, seq: CommandSeq, run: impl FnOnce() -> R) -> R {
-        let _answering = Answering::begin(self, seq);
+    pub fn while_answering<R>(&self, id: CommandId, run: impl FnOnce() -> R) -> R {
+        let _answering = Answering::begin(self, id);
         run()
     }
 
-    fn id(&self) -> usize {
+    fn address(&self) -> usize {
         std::ptr::from_ref(self) as usize
     }
 
-    /// The number a snapshot that is sent now, on this thread, has to carry.
-    fn seq_of_snapshot(&self) -> CommandSeq {
-        if let Some((progress, seq)) = ANSWERING.get() {
-            if progress == self.id() {
+    fn processed(&self, id: CommandId) {
+        *self
+            .last_processed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = id;
+    }
+
+    /// The command a snapshot that is sent now, on this thread, has to name.
+    fn command_of_snapshot(&self) -> CommandId {
+        if let Some((progress, id)) = ANSWERING.get() {
+            if progress == self.address() {
                 // The command answers: from here on it counts as processed.
-                self.last_processed.store(seq, Ordering::SeqCst);
+                self.processed(id);
             }
         }
         self.last_processed()
     }
 }
 
-/// Marks the thread as running a numbered command for as long as it lives.
+/// Marks the thread as running a named command for as long as it lives.
 struct Answering<'a> {
     progress: &'a CommandProgress,
-    seq: CommandSeq,
-    outer: Option<(usize, CommandSeq)>,
+    id: CommandId,
+    outer: Option<(usize, CommandId)>,
 }
 
 impl<'a> Answering<'a> {
-    fn begin(progress: &'a CommandProgress, seq: CommandSeq) -> Self {
-        let outer = ANSWERING.replace(Some((progress.id(), seq)));
+    fn begin(progress: &'a CommandProgress, id: CommandId) -> Self {
+        let outer = ANSWERING.replace(Some((progress.address(), id)));
         Self {
             progress,
-            seq,
+            id,
             outer,
         }
     }
@@ -128,14 +159,12 @@ impl<'a> Answering<'a> {
 impl Drop for Answering<'_> {
     fn drop(&mut self) {
         ANSWERING.set(self.outer);
-        self.progress
-            .last_processed
-            .store(self.seq, Ordering::SeqCst);
+        self.progress.processed(self.id);
     }
 }
 
-/// An [`EventProxy`] that writes `last_processed_seq` into every snapshot it sends.
-/// Every other event passes unchanged.
+/// An [`EventProxy`] that writes into every snapshot it sends which command the
+/// snapshot accounts for. Every other event passes unchanged.
 #[derive(Clone)]
 pub struct Correlated<P> {
     proxy: P,
@@ -151,7 +180,7 @@ impl<P> Correlated<P> {
 impl<P: EventProxy> EventProxy for Correlated<P> {
     fn send_event(&self, mut event: UserEvent) {
         if let UserEvent::StateUpdate(snapshot) = &mut event {
-            snapshot.last_processed_seq = self.progress.seq_of_snapshot();
+            snapshot.account_for(self.progress.command_of_snapshot());
         }
         self.proxy.send_event(event);
     }
@@ -160,9 +189,8 @@ impl<P: EventProxy> EventProxy for Correlated<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::snapshot::send_snapshot;
     use crate::app::state::AppState;
-    use crate::app::view_model::generate_ui_state;
-    use std::sync::Mutex;
 
     #[derive(Clone, Default)]
     struct Sent(Arc<Mutex<Vec<UserEvent>>>);
@@ -174,19 +202,29 @@ mod tests {
     }
 
     impl Sent {
-        fn seqs(&self) -> Vec<CommandSeq> {
+        /// The commands the snapshots that were sent name, as (session, seq).
+        fn named(&self) -> Vec<(SessionId, CommandSeq)> {
             let sent = self.0.lock().unwrap();
             sent.iter()
                 .filter_map(|event| match event {
-                    UserEvent::StateUpdate(snapshot) => Some(snapshot.last_processed_seq),
+                    UserEvent::StateUpdate(snapshot) => {
+                        let id = snapshot.accounts_for();
+                        Some((id.session, id.seq))
+                    }
                     _ => None,
                 })
                 .collect()
         }
     }
 
-    fn snapshot() -> UserEvent {
-        UserEvent::StateUpdate(Box::new(generate_ui_state(&AppState::default())))
+    const UI: SessionId = 77;
+
+    fn command(seq: CommandSeq) -> CommandId {
+        CommandId { session: UI, seq }
+    }
+
+    fn send(proxy: &Correlated<Sent>) {
+        send_snapshot(proxy, &AppState::default());
     }
 
     fn correlated() -> (Arc<CommandProgress>, Correlated<Sent>, Sent) {
@@ -200,61 +238,59 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_carries_zero_before_any_command() {
+    fn a_snapshot_names_no_command_before_the_first_one() {
         let (progress, proxy, sent) = correlated();
-        proxy.send_event(snapshot());
-        assert_eq!(sent.seqs(), [0]);
-        assert_eq!(progress.last_processed(), 0);
+        send(&proxy);
+        assert_eq!(sent.named(), [(0, 0)]);
+        assert_eq!(progress.last_processed(), CommandId::default());
     }
 
     #[test]
-    fn the_snapshots_of_a_command_carry_its_number_and_so_do_all_after_it() {
+    fn the_snapshots_of_a_command_name_it_and_so_do_all_after_it() {
         let (progress, proxy, sent) = correlated();
 
-        progress.while_answering(7, || {
-            proxy.send_event(snapshot());
-            proxy.send_event(snapshot());
+        progress.while_answering(command(7), || {
+            send(&proxy);
+            send(&proxy);
         });
-        proxy.send_event(snapshot());
+        send(&proxy);
 
-        assert_eq!(sent.seqs(), [7, 7, 7]);
+        assert_eq!(sent.named(), [(UI, 7), (UI, 7), (UI, 7)]);
     }
 
     /// A background task sends a snapshot while a command is running on the lane:
     /// what it shows was made before the command changed anything.
     #[test]
-    fn a_snapshot_of_another_thread_does_not_carry_the_number_of_a_running_command() {
+    fn a_snapshot_of_another_thread_does_not_name_a_running_command() {
         let (progress, proxy, sent) = correlated();
-        progress.while_answering(1, || {});
+        progress.while_answering(command(1), || {});
 
-        progress.while_answering(2, || {
+        progress.while_answering(command(2), || {
             let task = proxy.clone();
-            std::thread::spawn(move || task.send_event(snapshot()))
-                .join()
-                .unwrap();
-            assert_eq!(sent.seqs(), [1]);
+            std::thread::spawn(move || send(&task)).join().unwrap();
+            assert_eq!(sent.named(), [(UI, 1)]);
 
             // The command answers; a snapshot the task sends from now on follows
             // that answer.
-            proxy.send_event(snapshot());
+            send(&proxy);
             let task = proxy.clone();
-            std::thread::spawn(move || task.send_event(snapshot()))
-                .join()
-                .unwrap();
+            std::thread::spawn(move || send(&task)).join().unwrap();
         });
 
-        assert_eq!(sent.seqs(), [1, 2, 2]);
+        assert_eq!(sent.named(), [(UI, 1), (UI, 2), (UI, 2)]);
     }
 
     #[test]
     fn a_command_that_sends_nothing_is_processed_when_it_returns() {
         let (progress, proxy, sent) = correlated();
 
-        progress.while_answering(3, || assert_eq!(progress.last_processed(), 0));
-        assert_eq!(progress.last_processed(), 3);
-        proxy.send_event(snapshot());
+        progress.while_answering(command(3), || {
+            assert_eq!(progress.last_processed(), CommandId::default());
+        });
+        assert_eq!(progress.last_processed(), command(3));
+        send(&proxy);
 
-        assert_eq!(sent.seqs(), [3]);
+        assert_eq!(sent.named(), [(UI, 3)]);
     }
 
     #[test]
@@ -262,44 +298,55 @@ mod tests {
         let (progress, proxy, sent) = correlated();
 
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            progress.while_answering(4, || panic!("deliberate panic in a command"));
+            progress.while_answering(command(4), || panic!("deliberate panic in a command"));
         }));
         assert!(panicked.is_err());
-        assert_eq!(progress.last_processed(), 4);
+        assert_eq!(progress.last_processed(), command(4));
 
-        // Nothing is running on this thread any more: the number stays.
-        progress.last_processed.store(9, Ordering::SeqCst);
-        proxy.send_event(snapshot());
-        assert_eq!(sent.seqs(), [9]);
+        // Nothing is running on this thread any more: what is processed stays.
+        progress.processed(command(9));
+        send(&proxy);
+        assert_eq!(sent.named(), [(UI, 9)]);
     }
 
-    /// The number is the one of the last command, so a UI that was reloaded and
-    /// counts from 1 again is followed.
+    /// The snapshots name the last command, whoever posted it: a UI that was
+    /// loaded anew has another session and counts from 1 again.
     #[test]
-    fn the_number_follows_a_ui_that_starts_counting_anew() {
+    fn the_snapshots_follow_a_ui_that_was_loaded_anew() {
         let (progress, proxy, sent) = correlated();
+        let reloaded = CommandId {
+            session: UI + 1,
+            seq: 1,
+        };
 
-        progress.while_answering(500, || proxy.send_event(snapshot()));
-        progress.while_answering(1, || proxy.send_event(snapshot()));
-        proxy.send_event(snapshot());
+        progress.while_answering(command(500), || send(&proxy));
+        // Still on its way when the new UI starts: it names the old one.
+        send(&proxy);
+        progress.while_answering(reloaded, || send(&proxy));
+        send(&proxy);
 
-        assert_eq!(sent.seqs(), [500, 1, 1]);
+        assert_eq!(
+            sent.named(),
+            [(UI, 500), (UI, 500), (UI + 1, 1), (UI + 1, 1)]
+        );
     }
 
     #[test]
-    fn a_command_of_one_dispatcher_does_not_number_the_snapshots_of_another() {
+    fn a_command_of_one_dispatcher_does_not_name_the_snapshots_of_another() {
         let (progress, _, _) = correlated();
         let (_, other_proxy, other_sent) = correlated();
 
-        progress.while_answering(5, || other_proxy.send_event(snapshot()));
+        progress.while_answering(command(5), || send(&other_proxy));
 
-        assert_eq!(other_sent.seqs(), [0]);
+        assert_eq!(other_sent.named(), [(0, 0)]);
     }
 
     #[test]
     fn other_events_pass_unchanged() {
         let (progress, proxy, sent) = correlated();
-        progress.while_answering(2, || proxy.send_event(UserEvent::ShowError("no".into())));
+        progress.while_answering(command(2), || {
+            proxy.send_event(UserEvent::ShowError("no".into()));
+        });
 
         let sent = sent.0.lock().unwrap();
         assert!(matches!(&sent[0], UserEvent::ShowError(message) if message == "no"));

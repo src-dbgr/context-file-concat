@@ -12,8 +12,8 @@ import type { Page } from "@playwright/test";
  * - `setTree` hands the rows to the stand-in host of the E2E bridge, which
  *   answers the viewport reports of the UI with windows like the real host.
  *
- * A snapshot states the number of the last command it accounts for
- * (`last_processed_seq`). A seeded snapshot is one of a host that has
+ * A snapshot states the last command it accounts for (the UI that posted it
+ * and its number, `last_processed_seq`). A seeded snapshot is one of a host that has
  * processed everything the UI has posted, unless the spec states a number
  * itself (to play a snapshot from before a command).
  */
@@ -71,6 +71,8 @@ export type AppState = {
    * one of the last command the UI has posted.
    */
   last_processed_seq?: number;
+  /** The UI that posted that command. Left out: the one that is loaded. */
+  last_processed_session?: number;
 };
 
 /** The rows of a tree: preorder, the children of expanded directories only. */
@@ -169,7 +171,12 @@ type Bridge = {
   render: (s: unknown) => void;
   __e2e: {
     store: { setAppState: (s: unknown) => void };
-    host: { processedSeq: () => number };
+    host: {
+      processed: () => {
+        last_processed_session: number;
+        last_processed_seq: number;
+      };
+    };
   };
 };
 
@@ -181,7 +188,7 @@ export async function renderAsHost(page: Page, state: AppState): Promise<void> {
   await page.evaluate((next) => {
     const w = window as unknown as Bridge;
     // Unless the spec says otherwise, the host has processed every command.
-    w.render({ last_processed_seq: w.__e2e.host.processedSeq(), ...next });
+    w.render({ ...w.__e2e.host.processed(), ...next });
   }, snapshotOf(state));
 }
 
@@ -189,10 +196,7 @@ export async function renderAsHost(page: Page, state: AppState): Promise<void> {
 export async function setAppState(page: Page, state: AppState): Promise<void> {
   await page.evaluate((next) => {
     const w = window as unknown as Bridge;
-    w.__e2e.store.setAppState({
-      last_processed_seq: w.__e2e.host.processedSeq(),
-      ...next,
-    });
+    w.__e2e.store.setAppState({ ...w.__e2e.host.processed(), ...next });
   }, snapshotOf(state));
 }
 
@@ -202,7 +206,12 @@ export async function setAppState(page: Page, state: AppState): Promise<void> {
  */
 export async function setTree(page: Page, state: AppState): Promise<void> {
   // The number of the last command is the stand-in host's to state.
-  const { tree, last_processed_seq: _seq, ...rest } = state;
+  const {
+    tree,
+    last_processed_seq: _seq,
+    last_processed_session: _session,
+    ...rest
+  } = state;
   await page.evaluate(
     ([base, rows]) => {
       (

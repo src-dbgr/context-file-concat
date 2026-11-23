@@ -820,7 +820,12 @@ test.describe("Keyboard on the controls of a tree row", () => {
 });
 
 test.describe("Text being typed and the answers of the host", () => {
-  type Message = { seq: number; command: string; payload: unknown };
+  type Message = {
+    session: number;
+    seq: number;
+    command: string;
+    payload: unknown;
+  };
 
   test.beforeEach(async ({ page }) => {
     // Record what the UI posts to the host; the stand-in host of the bridge
@@ -853,15 +858,31 @@ test.describe("Text being typed and the answers of the host", () => {
       .toBe("updateFilters");
 
     const posted = await messages(page);
-    expect(posted[0]).toEqual({ seq: 1, command: "initialize", payload: null });
+    const { session } = posted[0];
+    expect(Number.isSafeInteger(session) && session > 0).toBe(true);
+    expect(posted[0]).toEqual({
+      session,
+      seq: 1,
+      command: "initialize",
+      payload: null,
+    });
     expect(posted.map((message) => message.seq)).toEqual(
       posted.map((_, index) => index + 1),
     );
+    // One session for as long as the page is loaded ...
+    expect(posted.every((message) => message.session === session)).toBe(true);
+    // ... and another one after a reload, counting from 1 again.
+    await page.reload();
+    await waitForBridge(page);
+    const [first] = await messages(page);
+    expect(first.seq).toBe(1);
+    expect(first.session).not.toBe(session);
     for (const message of posted) {
       expect(Object.keys(message).sort()).toEqual([
         "command",
         "payload",
         "seq",
+        "session",
       ]);
     }
   });
@@ -884,6 +905,19 @@ test.describe("Text being typed and the answers of the host", () => {
       last_processed_seq: seq - 1,
     });
     await expect(page.getByText("from-before.json").first()).toBeVisible();
+    await expect(search).toHaveValue("index");
+
+    // A snapshot the host made for an earlier load of the UI (before a
+    // reload): its number is high, but it is not about this UI's commands.
+    await renderAsHost(page, {
+      ...withRepo(),
+      current_config_filename: "for-the-ui-before.json",
+      last_processed_session: 1,
+      last_processed_seq: seq + 1000,
+    });
+    await expect(
+      page.getByText("for-the-ui-before.json").first(),
+    ).toBeVisible();
     await expect(search).toHaveValue("index");
 
     // The answer. The host is the source of truth: what it reports is shown,

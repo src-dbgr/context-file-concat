@@ -34,15 +34,18 @@ type Overrides = Partial<Omit<AppState, "config">> & {
   config?: Partial<Config>;
 };
 
+/** This load of the UI, as `post()` names it. */
+const SESSION = 4711;
 /** The number `post()` gave the last command. */
 let lastPosted = 0;
-/** The number of the last command the host has processed. */
+/** The number of the last command (of this UI) the host has processed. */
 let processed = 0;
 
 function snapshot(overrides: Overrides = {}): AppState {
   const base = UiStateSchema.parse(makeValidUiState());
   return {
     ...base,
+    last_processed_session: processed === 0 ? 0 : SESSION,
     last_processed_seq: processed,
     ...overrides,
     config: { ...base.config, ...overrides.config },
@@ -81,7 +84,10 @@ beforeEach(() => {
   processed = 0;
   vi.mocked(post).mockReset();
   // Like the real `post()`: every command gets the next number.
-  vi.mocked(post).mockImplementation(() => ++lastPosted);
+  vi.mocked(post).mockImplementation(() => ({
+    session: SESSION,
+    seq: ++lastPosted,
+  }));
   appState.set(snapshot());
 });
 
@@ -501,6 +507,40 @@ describe("text being typed survives snapshots", () => {
     expect(field.value).toBe("/out/");
     await hostAnswers({ config: { output_directory: "/out" } });
     expect(field.value).toBe("/out");
+  });
+
+  it("does not take a snapshot made for an earlier load of the UI for the answer", async () => {
+    // After a reload the host's snapshots name the UI before it, with a high
+    // number, until it has processed the first command of this one.
+    render(Sidebar);
+    const search = input("search-query");
+
+    await type(search, "main");
+    vi.advanceTimersByTime(300);
+    await hostSends({
+      search_query: "",
+      last_processed_session: 815,
+      last_processed_seq: 500,
+    });
+    expect(search.value).toBe("main");
+
+    await hostAnswers({ search_query: "main" });
+    await hostSends({ search_query: "" });
+    expect(search.value).toBe("");
+  });
+
+  it("follows the host when a text could not be posted", async () => {
+    // What `post()` does with a command that is not valid (development
+    // builds): nothing is posted, so no answer will come.
+    vi.mocked(post).mockImplementation(() => null);
+    render(StatusBar);
+    const field = input("output-filename");
+
+    await type(field, "context.md");
+    await fireEvent.change(field);
+    expect(field.value).toBe("context.md");
+    await hostSends({ status_message: "anything" });
+    expect(field.value).toBe("output.txt");
   });
 
   it("shows the cleared filters when the directory is cleared right after typing", async () => {

@@ -1,10 +1,12 @@
 //! The wire format of what the UI posts: the envelope and the commands.
 //!
-//! A message is `{"seq": <number>, "command": "<name>", "payload": <payload | null>}`.
+//! A message is
+//! `{"session": <number>, "seq": <number>, "command": "<name>", "payload": <payload | null>}`.
 //!
-//! * `seq` belongs to the transport: the UI numbers the commands it posts, and the
-//!   snapshots tell it how far the host has got (see [`super::correlation`]). It is
-//!   not part of any payload, and no command sees it.
+//! * `session` and `seq` belong to the transport: the UI names the commands it
+//!   posts (who it is, and which of its commands this is), and the snapshots tell
+//!   it how far the host has got (see [`super::correlation`]). They are not part of
+//!   any payload, and no command sees them.
 //! * `command` and `payload` are one [`Command`]. That type is the contract: reading
 //!   a message into it is the validation of the message and decides which command
 //!   runs with which payload, in one step. There is no list of command names beside
@@ -12,11 +14,15 @@
 //!
 //! # Messages that are refused
 //!
-//! Every message that is not a numbered command is treated the same way, whatever is
-//! wrong with it (not JSON, no `seq`, an unknown command, a payload that is missing a
-//! field, has one too many or one of the wrong type, an extra field in the envelope):
-//! it is logged, it changes nothing, and it is answered with the unchanged snapshot.
-//! If the message has a number, the snapshot accounts for it.
+//! Every message that is not a named command is treated the same way, whatever is
+//! wrong with it (not JSON, no `session` or `seq`, an unknown command, a payload that
+//! is missing a field, has one too many or one of the wrong type, an extra field in
+//! the envelope): it is logged, it changes nothing, and it is answered with the
+//! unchanged snapshot. If the message has a name, the snapshot accounts for it.
+//!
+//! What is logged is short, whatever the size of the message: the reason is cut
+//! ([`excerpt`]), because the reason serde gives quotes the value it stumbled over,
+//! and a payload can be as large as an output.
 
 use std::path::PathBuf;
 
@@ -27,7 +33,7 @@ use super::commands::{
     ConfigOption, IgnorePatternPayload, LocateRowPayload, SaveFilePayload, SetExpansionPayload,
     SetViewportPayload, UpdateFiltersPayload,
 };
-use super::correlation::CommandSeq;
+use super::correlation::CommandId;
 
 /// A command of the IPC contract with its payload, on the wire
 /// `{"command": "<name>", "payload": <payload>}`. A command without a payload is
@@ -77,12 +83,23 @@ pub(crate) enum Command {
 /// A message of the UI, as far as it could be read.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum IpcMessage {
-    /// A numbered command.
-    Command { seq: CommandSeq, command: Command },
-    /// A numbered message that is no command; `reason` says why.
-    Refused { seq: CommandSeq, reason: String },
-    /// Not a message at all: it has no number; `reason` says why.
+    /// A named command.
+    Command { id: CommandId, command: Command },
+    /// A named message that is no command; `reason` says why (in short).
+    Refused { id: CommandId, reason: String },
+    /// Not a message at all: it has no name; `reason` says why (in short).
     Unreadable { reason: String },
+}
+
+/// The beginning of `text`, for the log: a message can be as large as an output,
+/// and so can what is said about it.
+pub(crate) fn excerpt(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let mut excerpt: String = text.chars().take(MAX_CHARS).collect();
+    if excerpt.len() < text.len() {
+        excerpt.push('…');
+    }
+    excerpt
 }
 
 impl IpcMessage {
@@ -97,21 +114,24 @@ impl IpcMessage {
             }
             Err(e) => {
                 return Self::Unreadable {
-                    reason: e.to_string(),
+                    reason: excerpt(&e.to_string()),
                 }
             }
         };
-        // The number is taken off; what is left has to be the command, and nothing else.
-        let Some(seq) = envelope.remove("seq").as_ref().and_then(Value::as_u64) else {
+        // The name is taken off; what is left has to be the command, and nothing else.
+        let mut number = |field: &str| envelope.remove(field).as_ref().and_then(Value::as_u64);
+        let (Some(session), Some(seq)) = (number("session"), number("seq")) else {
             return Self::Unreadable {
-                reason: "the message has no `seq` (a non-negative integer)".to_string(),
+                reason: "the message has no `session` and `seq` (non-negative integers)"
+                    .to_string(),
             };
         };
+        let id = CommandId { session, seq };
         match Command::deserialize(Value::Object(envelope)) {
-            Ok(command) => Self::Command { seq, command },
+            Ok(command) => Self::Command { id, command },
             Err(e) => Self::Refused {
-                seq,
-                reason: e.to_string(),
+                id,
+                reason: excerpt(&e.to_string()),
             },
         }
     }
@@ -169,16 +189,30 @@ mod tests {
     use crate::app::commands::RowTarget;
     use serde_json::json;
 
-    fn parse(message: Value) -> IpcMessage {
+    use crate::app::correlation::CommandSeq;
+
+    /// The UI of these tests.
+    const UI: u64 = 4242;
+
+    fn id(seq: CommandSeq) -> CommandId {
+        CommandId { session: UI, seq }
+    }
+
+    /// Reads `message` as one of the UI of these tests.
+    fn parse(mut message: Value) -> IpcMessage {
+        message["session"] = json!(UI);
         IpcMessage::parse(&message.to_string())
     }
 
     fn command(seq: CommandSeq, command: Command) -> IpcMessage {
-        IpcMessage::Command { seq, command }
+        IpcMessage::Command {
+            id: id(seq),
+            command,
+        }
     }
 
     fn is_refused(message: Value, seq: CommandSeq) -> bool {
-        matches!(parse(message), IpcMessage::Refused { seq: refused, .. } if refused == seq)
+        matches!(parse(message), IpcMessage::Refused { id: refused, .. } if refused == id(seq))
     }
 
     #[test]
@@ -228,8 +262,7 @@ mod tests {
     /// The order of the fields does not matter, and the number is not a payload.
     #[test]
     fn the_number_is_part_of_the_envelope_only() {
-        let message =
-            r#"{"payload":{"path":"/repo/src","expanded":true},"command":"setExpansion","seq":12}"#;
+        let message = r#"{"payload":{"path":"/repo/src","expanded":true},"command":"setExpansion","seq":12,"session":4242}"#;
         assert_eq!(
             IpcMessage::parse(message),
             command(
@@ -327,11 +360,22 @@ mod tests {
             "[1, 2]".to_string(),
             "\"initialize\"".to_string(),
             json!({ "command": "initialize", "payload": null }).to_string(),
-            json!({ "seq": "1", "command": "initialize", "payload": null }).to_string(),
-            json!({ "seq": -1, "command": "initialize", "payload": null }).to_string(),
-            json!({ "seq": 1.5, "command": "initialize", "payload": null }).to_string(),
-            json!({ "seq": null, "command": "initialize", "payload": null }).to_string(),
-        ];
+            // Half a name is none.
+            json!({ "seq": 1, "command": "initialize", "payload": null }).to_string(),
+            json!({ "session": 9, "command": "initialize", "payload": null }).to_string(),
+        ]
+        .into_iter()
+        .chain(
+            [json!("1"), json!(-1), json!(1.5), json!(null)]
+                .into_iter()
+                .flat_map(|bad| {
+                    [
+                        json!({ "session": 9, "seq": bad, "command": "initialize", "payload": null }),
+                        json!({ "session": bad, "seq": 1, "command": "initialize", "payload": null }),
+                    ]
+                })
+                .map(|message| message.to_string()),
+        );
         for message in unreadable {
             assert!(
                 matches!(IpcMessage::parse(&message), IpcMessage::Unreadable { .. }),
@@ -369,5 +413,44 @@ mod tests {
             Command::ExpandCollapseAll(true).wire_name(),
             "expandCollapseAll"
         );
+    }
+
+    /// The reason serde gives for a refusal quotes the value that does not fit. What
+    /// is kept of it (and logged) stays short, however large the payload is.
+    #[test]
+    fn the_reason_of_a_refusal_is_short_whatever_the_size_of_the_payload() {
+        let large = "x".repeat(700_000);
+        let refused = [
+            json!({ "seq": 1, "command": "expandCollapseAll", "payload": large }),
+            json!({ "seq": 1, "command": large, "payload": null }),
+            json!({ "seq": 1, "command": "setConfigOption", "payload": { "option": large, "value": 1 } }),
+            json!({
+                "seq": 1,
+                "command": "setConfigOption",
+                "payload": { "option": "case_sensitive_search", "value": large },
+            }),
+            json!({ "seq": 1, "command": "selectAll", "payload": null, large.clone(): 1 }),
+        ];
+        for message in refused {
+            let IpcMessage::Refused { reason, .. } = parse(message) else {
+                panic!("the message is refused");
+            };
+            assert!(reason.chars().count() <= 201, "{} characters", reason.len());
+            assert!(!reason.is_empty());
+        }
+
+        let IpcMessage::Unreadable { reason } = IpcMessage::parse(&large) else {
+            panic!("the message cannot be read");
+        };
+        assert!(reason.chars().count() <= 201);
+    }
+
+    #[test]
+    fn an_excerpt_is_the_beginning_of_a_text() {
+        assert_eq!(excerpt("not json"), "not json");
+        let long = "ä".repeat(10_000);
+        let shown = excerpt(&long);
+        assert_eq!(shown.chars().count(), 201);
+        assert!(shown.ends_with('…'));
     }
 }

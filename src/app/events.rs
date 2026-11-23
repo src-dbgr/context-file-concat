@@ -4,8 +4,8 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
+use super::snapshot::Snapshot;
 use super::state::GeneratedDocument;
-use super::view_model::UiState;
 use crate::core::ScanProgress;
 
 /// Events sent from the Rust backend to the WebView (UI thread).
@@ -13,8 +13,9 @@ use crate::core::ScanProgress;
 /// Each variant corresponds to a specific JavaScript function (`window.*`) that will be called in the frontend.
 #[derive(Debug)]
 pub enum UserEvent {
-    /// A complete state update to re-render the UI.
-    StateUpdate(Box<UiState>),
+    /// A complete state update to re-render the UI. It is made and sent in one step
+    /// (see [`super::snapshot::send_snapshot`]).
+    StateUpdate(Snapshot),
     /// Content for the file preview panel.
     ShowFilePreview {
         content: String,

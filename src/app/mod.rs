@@ -18,6 +18,7 @@ pub(crate) mod ipc;
 pub mod proxy;
 pub mod selection;
 pub mod shared_state;
+pub mod snapshot;
 mod staged;
 pub mod state;
 pub mod tasks;
@@ -40,7 +41,7 @@ use crate::app::proxy::EventProxy;
 use correlation::Correlated;
 use dispatch::CommandDispatcher;
 use events::UserEvent;
-use ipc::{Command, IpcMessage};
+use ipc::{excerpt, Command, IpcMessage};
 use shared_state::SharedState;
 
 /// The main handler for IPC messages from the WebView: reads the message and queues
@@ -58,7 +59,7 @@ use shared_state::SharedState;
 /// - A message that is no command is refused: it is logged and answered with the
 ///   unchanged snapshot, at its place in the order (see [`ipc`]).
 ///
-/// The number of the message is handed to the dispatcher, and the events of the
+/// The name of the message is handed to the dispatcher, and the events of the
 /// command are sent through a proxy that writes into every snapshot how far the
 /// commands have got (see [`correlation`]). The commands know nothing of either.
 pub fn dispatch_ipc_message<P: EventProxy, D: DialogService + 'static>(
@@ -70,11 +71,16 @@ pub fn dispatch_ipc_message<P: EventProxy, D: DialogService + 'static>(
 ) {
     let proxy = Correlated::new(proxy, dispatcher.progress().clone());
 
-    let (seq, command) = match IpcMessage::parse(&message) {
-        IpcMessage::Command { seq, command } => (Some(seq), Some(command)),
-        IpcMessage::Refused { seq, reason } => {
-            tracing::warn!("Refused IPC message {seq}: {reason}");
-            (Some(seq), None)
+    // What is logged of a message is short, whatever its size (see [`ipc`]).
+    let (id, command) = match IpcMessage::parse(&message) {
+        IpcMessage::Command { id, command } => (Some(id), Some(command)),
+        IpcMessage::Refused { id, reason } => {
+            tracing::warn!(
+                "Refused IPC message {} of UI {}: {reason}",
+                id.seq,
+                id.session
+            );
+            (Some(id), None)
         }
         IpcMessage::Unreadable { reason } => {
             tracing::error!(
@@ -90,19 +96,9 @@ pub fn dispatch_ipc_message<P: EventProxy, D: DialogService + 'static>(
         None => at_once(move || commands::answer_unchanged(&proxy, &state)),
     };
     match work {
-        Work::Ordered(command) => dispatcher.dispatch(seq, command),
-        Work::Blocking(command) => dispatcher.dispatch_blocking(seq, command),
+        Work::Ordered(command) => dispatcher.dispatch(id, command),
+        Work::Blocking(command) => dispatcher.dispatch_blocking(id, command),
     }
-}
-
-/// The beginning of a message, for the log: a message can be as large as an output.
-fn excerpt(message: &str) -> String {
-    const MAX_CHARS: usize = 200;
-    let mut excerpt: String = message.chars().take(MAX_CHARS).collect();
-    if excerpt.len() < message.len() {
-        excerpt.push('…');
-    }
-    excerpt
 }
 
 /// Queues the opening of a path that was dropped onto the window.
@@ -335,8 +331,9 @@ fn event_name(event: &UserEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::correlation::CommandSeq;
+    use crate::app::correlation::{CommandId, CommandSeq, SessionId};
     use crate::app::events::{OutputSizeNotice, SaveResult};
+    use crate::app::snapshot::{send_snapshot, Snapshot};
     use crate::app::state::{AppState, GeneratedDocument, StatusNotice};
     use crate::config::AppConfig;
     use std::path::Path;
@@ -398,12 +395,25 @@ mod tests {
         last_seq: AtomicU64,
     }
 
-    /// The numbers the snapshots among `events` carry, in order.
+    /// The UI of these tests: what it puts into the envelope of its messages.
+    const UI: SessionId = 31;
+
+    /// Command `seq` of the UI of these tests.
+    fn command_of_ui(seq: CommandSeq) -> CommandId {
+        CommandId { session: UI, seq }
+    }
+
+    /// The numbers of the commands the snapshots among `events` account for, in
+    /// order. They are commands of the UI of these tests.
     fn seqs_of(events: &[UserEvent]) -> Vec<CommandSeq> {
         events
             .iter()
             .filter_map(|event| match event {
-                UserEvent::StateUpdate(snapshot) => Some(snapshot.last_processed_seq),
+                UserEvent::StateUpdate(snapshot) => {
+                    let id = snapshot.accounts_for();
+                    assert_eq!(id.session, UI, "a snapshot for another UI");
+                    Some(id.seq)
+                }
                 _ => None,
             })
             .collect()
@@ -496,8 +506,13 @@ mod tests {
         fn send(&self, command: &str, payload: serde_json::Value) -> CommandSeq {
             let seq = self.last_seq.fetch_add(1, Ordering::SeqCst) + 1;
             self.post(
-                serde_json::json!({ "seq": seq, "command": command, "payload": payload })
-                    .to_string(),
+                serde_json::json!({
+                    "session": UI,
+                    "seq": seq,
+                    "command": command,
+                    "payload": payload,
+                })
+                .to_string(),
             );
             seq
         }
@@ -843,7 +858,14 @@ mod tests {
 
         // An envelope that holds more than a command is refused as well.
         harness.post(
-            json!({ "seq": 900, "command": "selectAll", "payload": null, "extra": 1 }).to_string(),
+            json!({
+                "session": UI,
+                "seq": 900,
+                "command": "selectAll",
+                "payload": null,
+                "extra": 1,
+            })
+            .to_string(),
         );
         assert_eq!(seqs_of(&harness.events(1).await), [900]);
         assert_eq!(harness.fingerprint(), before);
@@ -871,22 +893,19 @@ mod tests {
             String::new(),
             "[]".to_string(),
             json!({ "command": "deselectAll", "payload": null }).to_string(),
-            json!({ "seq": "7", "command": "deselectAll", "payload": null }).to_string(),
-            json!({ "seq": -7, "command": "deselectAll", "payload": null }).to_string(),
+            json!({ "seq": 7, "command": "deselectAll", "payload": null }).to_string(),
+            json!({ "session": UI, "command": "deselectAll", "payload": null }).to_string(),
+            json!({ "session": UI, "seq": "7", "command": "deselectAll", "payload": null })
+                .to_string(),
+            json!({ "session": UI, "seq": -7, "command": "deselectAll", "payload": null })
+                .to_string(),
+            json!({ "session": "31", "seq": 7, "command": "deselectAll", "payload": null })
+                .to_string(),
         ] {
             harness.post(message.clone());
             assert_eq!(seqs_of(&harness.events(1).await), [seq], "{message}");
             assert_eq!(harness.fingerprint(), before, "{message}");
         }
-    }
-
-    #[test]
-    fn the_excerpt_of_a_message_is_short() {
-        assert_eq!(excerpt("not json"), "not json");
-        let long = "ä".repeat(10_000);
-        let shown = excerpt(&long);
-        assert_eq!(shown.chars().count(), 201);
-        assert!(shown.ends_with('…'));
     }
 
     // --- Commands and the snapshots that answer them -------------------------------------
@@ -913,6 +932,7 @@ mod tests {
             dispatch_ipc_message(
                 &harness.dispatcher,
                 serde_json::json!({
+                    "session": UI,
                     "seq": last,
                     "command": "setViewport",
                     "payload": { "start": start, "count": 10 },
@@ -928,7 +948,7 @@ mod tests {
         let Some(UserEvent::StateUpdate(snapshot)) = outbox.next_event() else {
             panic!("expected a snapshot");
         };
-        assert_eq!(snapshot.last_processed_seq, last);
+        assert_eq!(snapshot.accounts_for(), command_of_ui(last));
         assert!(outbox.next_event().is_none(), "one snapshot is left");
     }
 
@@ -1013,6 +1033,121 @@ mod tests {
         assert_eq!(seqs.last(), Some(&later));
     }
 
+    /// The answer to a command is the first snapshot that names it, and nothing that
+    /// is sent before it does: not even while the command is already running.
+    ///
+    /// The command is held right before it runs, on the ordered lane. A background
+    /// task sends a snapshot at that moment; it shows the state from before the
+    /// command and has to say so. (Naming the command as soon as it starts, or
+    /// taking "a command is running" for "this is the command that sends", would
+    /// let that snapshot pass for the answer.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_sent_while_a_command_is_about_to_run_does_not_name_it() {
+        let mut harness = Harness::new().await;
+        let old_name = harness.state.lock().config.output_filename.clone();
+        let before = harness.send("selectAll", serde_json::Value::Null);
+        assert_eq!(seqs_of(&harness.events(1).await), [before]);
+
+        let proxy = Correlated::new(harness.proxy.clone(), harness.dispatcher.progress().clone());
+        let command = Command::SetConfigOption(commands::ConfigOption::OutputFilename(
+            "new.txt".to_string(),
+        ));
+        let Work::Ordered(command) =
+            command.into_work(harness.dialog.clone(), proxy.clone(), harness.state.clone())
+        else {
+            panic!("setConfigOption runs on the ordered lane");
+        };
+        let (entered, has_entered) = std_mpsc::channel();
+        let (proceed, may_proceed) = std_mpsc::channel::<()>();
+        harness
+            .dispatcher
+            .dispatch(Some(command_of_ui(before + 1)), async move {
+                entered.send(()).unwrap();
+                may_proceed.recv().unwrap();
+                command.await;
+            });
+        has_entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the command was not started");
+
+        // What a background task does: lock the state, send its snapshot.
+        send_snapshot(&proxy, &harness.state.lock());
+        proceed.send(()).unwrap();
+
+        let events = harness.events(2).await;
+        assert_eq!(seqs_of(&events), [before, before + 1]);
+        let filenames: Vec<_> = events
+            .iter()
+            .map(|event| match event {
+                UserEvent::StateUpdate(snapshot) => snapshot.config.output_filename.clone(),
+                other => panic!("expected a snapshot, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(filenames, [old_name, "new.txt".to_string()]);
+    }
+
+    /// A UI that is loaded anew has another session and counts from 1 again. The
+    /// snapshots name the UI whose command they account for, so one that was made
+    /// for the UI before cannot pass for an answer to the new one.
+    #[tokio::test]
+    async fn the_snapshots_name_the_ui_whose_command_they_account_for() {
+        let mut harness = Harness::new().await;
+        let named = |events: &[UserEvent]| match &events[0] {
+            UserEvent::StateUpdate(snapshot) => snapshot.accounts_for(),
+            other => panic!("expected a snapshot, got {other:?}"),
+        };
+        let post = |harness: &Harness, session: SessionId, seq: CommandSeq| {
+            harness.post(
+                serde_json::json!({
+                    "session": session,
+                    "seq": seq,
+                    "command": "selectAll",
+                    "payload": null,
+                })
+                .to_string(),
+            );
+            CommandId { session, seq }
+        };
+
+        let old = post(&harness, 1001, 500);
+        assert_eq!(named(&harness.events(1).await), old);
+        // Something else sends a snapshot: still for the UI that was there.
+        harness.drop_path(Path::new("/no/such/path"));
+        assert_eq!(named(&harness.events(1).await), old);
+
+        let new = post(&harness, 1002, 1);
+        harness.quiescence().await;
+        let rest: Vec<_> = std::iter::from_fn(|| harness.events.try_recv().ok())
+            .filter(|event| matches!(event, UserEvent::StateUpdate(_)))
+            .collect();
+        assert_eq!(named(&rest[rest.len() - 1..]), new);
+        assert!(rest
+            .iter()
+            .all(|event| [old, new].contains(&named(std::slice::from_ref(event)))));
+    }
+
+    /// `loadDirectoryLevel` for a directory outside the loaded one loads nothing. It
+    /// is answered like every request that is refused: with the unchanged snapshot.
+    #[tokio::test]
+    async fn a_lazy_load_outside_the_loaded_directory_is_answered_unchanged() {
+        let mut harness = Harness::new().await;
+        let before = harness.fingerprint();
+
+        for path in ["/elsewhere", "/repository", ""] {
+            let seq = harness.send("loadDirectoryLevel", serde_json::json!(path));
+            assert_eq!(seqs_of(&harness.events(1).await), [seq], "{path:?}");
+            assert_eq!(harness.fingerprint(), before, "{path:?}");
+        }
+        harness.state.lock().current_path.clear();
+        let unloaded = harness.fingerprint();
+        let seq = harness.send("loadDirectoryLevel", serde_json::json!("/repo/src"));
+        assert_eq!(seqs_of(&harness.events(1).await), [seq]);
+        assert_eq!(harness.fingerprint(), unloaded);
+
+        harness.quiescence().await;
+        assert!(harness.events.try_recv().is_err(), "one answer each");
+    }
+
     /// A dialog command is accounted for when the ordered lane reaches it, not when
     /// its dialog closes: a snapshot sent while the dialog is open carries its number.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1024,7 +1159,10 @@ mod tests {
             .dialog_opened
             .recv_timeout(Duration::from_secs(5))
             .expect("the dialog was not opened");
-        assert_eq!(harness.dispatcher.progress().last_processed(), dialog);
+        assert_eq!(
+            harness.dispatcher.progress().last_processed(),
+            command_of_ui(dialog)
+        );
 
         // Something that is no command of the UI sends a snapshot meanwhile.
         harness.drop_path(Path::new("/no/such/path"));
@@ -1039,7 +1177,10 @@ mod tests {
         // The dialog is dismissed: nothing is sent, and the number stays.
         harness.close_dialog.send(()).unwrap();
         harness.quiescence().await;
-        assert_eq!(harness.dispatcher.progress().last_processed(), next);
+        assert_eq!(
+            harness.dispatcher.progress().last_processed(),
+            command_of_ui(next)
+        );
     }
 
     // --- Commands that start background work -------------------------------------------
@@ -1290,8 +1431,13 @@ mod tests {
 
         dispatch_ipc_message(
             &harness.dispatcher,
-            serde_json::json!({ "seq": 1, "command": "selectDirectory", "payload": null })
-                .to_string(),
+            serde_json::json!({
+                "session": UI,
+                "seq": 1,
+                "command": "selectDirectory",
+                "payload": null,
+            })
+            .to_string(),
             Arc::new(PicksMissingDirectory(project.path().join("gone"))),
             harness.proxy.clone(),
             harness.state.clone(),
@@ -1648,8 +1794,13 @@ mod tests {
             let seq = last_seq.fetch_add(1, Ordering::SeqCst) + 1;
             dispatch_ipc_message(
                 &dispatcher,
-                serde_json::json!({ "seq": seq, "command": command, "payload": payload })
-                    .to_string(),
+                serde_json::json!({
+                    "session": UI,
+                    "seq": seq,
+                    "command": command,
+                    "payload": payload,
+                })
+                .to_string(),
                 dialog.clone(),
                 proxy.clone(),
                 state.clone(),
@@ -1684,7 +1835,7 @@ mod tests {
 
     // --- Serialization of events ---
 
-    fn ui_state_with_tree(paths: &[PathBuf]) -> Box<view_model::UiState> {
+    fn ui_state_with_tree(paths: &[PathBuf]) -> view_model::UiState {
         let mut state = AppState::default();
         state.current_path = "/repo".to_string();
         state.set_full_file_list(
@@ -1699,16 +1850,16 @@ mod tests {
                 .collect(),
         );
         filtering::apply_filters(&mut state);
-        Box::new(view_model::generate_ui_state(&state))
+        view_model::generate_ui_state(&state)
     }
 
     #[test]
     fn every_event_becomes_one_call_with_its_arguments() {
         let script = |event| script_for(&event).unwrap();
 
-        let render = script(UserEvent::StateUpdate(ui_state_with_tree(&[
-            PathBuf::from("/repo/a.rs"),
-        ])));
+        let render = script(UserEvent::StateUpdate(Snapshot::for_test(
+            ui_state_with_tree(&[PathBuf::from("/repo/a.rs")]),
+        )));
         assert!(
             render.starts_with("window.render({\"config\":{"),
             "{render}"
@@ -1802,7 +1953,7 @@ mod tests {
 
         let mut ui_state = ui_state_with_tree(&[odd.clone(), PathBuf::from("/repo/b.txt")]);
         ui_state.config.output_directory = Some(odd.clone());
-        let render = script_for(&UserEvent::StateUpdate(ui_state)).unwrap();
+        let render = script_for(&UserEvent::StateUpdate(Snapshot::for_test(ui_state))).unwrap();
         assert!(
             render.contains("\"path\":\"/repo/caf\u{fffd}.txt\""),
             "{render}"

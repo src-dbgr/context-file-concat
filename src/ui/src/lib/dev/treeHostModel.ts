@@ -7,8 +7,8 @@
 // and `initialize` do: it keeps the list of all rows, the window the UI asked
 // for and the last row lookup, and states them in snapshots. It reads the
 // messages of the UI the way the host does (`src/app/ipc.rs`), and like the
-// host it states in every snapshot the number of the last command it has
-// processed (`last_processed_seq`, `src/app/correlation.rs`). That it behaves
+// host it states in every snapshot the last command it has processed
+// (`last_processed_session`, `last_processed_seq`, `src/app/correlation.rs`). That it behaves
 // like the host is not a matter of care: the host records a scenario
 // (`src/app/window_contract_tests.rs` →
 // `tests/contracts/fixtures/tree_window_scenario.json`) and
@@ -18,7 +18,7 @@
 import {
   AnyCommandMessageSchema,
   type CommandName,
-  type CommandSeq,
+  type CommandId,
   type PayloadFor,
 } from "$lib/ipc/schema";
 import {
@@ -30,7 +30,7 @@ import type { AppState, TreeRow } from "$lib/types";
 
 /**
  * A state without the fields the model fills in: those that describe the
- * window of rows, and the number of the last command.
+ * window of rows, and the last command it accounts for.
  */
 export type TreeLessState = Omit<
   AppState,
@@ -39,28 +39,29 @@ export type TreeLessState = Omit<
   | "rows_total"
   | "rows_revision"
   | "located"
+  | "last_processed_session"
   | "last_processed_seq"
 >;
 
 /** A message of the UI, as far as it could be read (`IpcMessage` on the host). */
 type ReadMessage =
-  /** A numbered command. */
+  /** A named command. */
   | {
       kind: "command";
-      seq: CommandSeq;
+      id: CommandId;
       command: {
         [K in CommandName]: { command: K; payload: PayloadFor<K> };
       }[CommandName];
     }
-  /** A numbered message that is no command. */
-  | { kind: "refused"; seq: CommandSeq }
-  /** Not a message at all: it has no number. */
+  /** A named message that is no command. */
+  | { kind: "refused"; id: CommandId }
+  /** Not a message at all: it has no name. */
   | { kind: "unreadable" };
 
 /**
- * Reads a message the way the host does (`IpcMessage::parse`): the number is
- * taken off the envelope, and what is left has to be a command and nothing
- * else.
+ * Reads a message the way the host does (`IpcMessage::parse`): the name
+ * (session and number) is taken off the envelope, and what is left has to be
+ * a command and nothing else.
  */
 function readMessage(message: string): ReadMessage {
   let posted: unknown;
@@ -72,16 +73,17 @@ function readMessage(message: string): ReadMessage {
   if (typeof posted !== "object" || posted === null || Array.isArray(posted)) {
     return { kind: "unreadable" };
   }
-  const { seq, ...rest } = posted as Record<string, unknown>;
-  if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0) {
-    return { kind: "unreadable" };
-  }
+  const { session, seq, ...rest } = posted as Record<string, unknown>;
+  const isNumber = (value: unknown): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  if (!isNumber(session) || !isNumber(seq)) return { kind: "unreadable" };
+  const id = { session, seq };
   // A command without a payload may be posted without one.
   const parsed = AnyCommandMessageSchema.safeParse({ payload: null, ...rest });
-  if (!parsed.success) return { kind: "refused", seq };
+  if (!parsed.success) return { kind: "refused", id };
   return {
     kind: "command",
-    seq,
+    id,
     command: parsed.data as Extract<
       ReadMessage,
       { kind: "command" }
@@ -121,8 +123,8 @@ export class TreeHostModel {
   private revision = 0;
   /** The path of the last lookup: every snapshot states where it is. */
   private located: { request: number; path: string | null } | null = null;
-  /** The number of the last numbered message that was received. */
-  private processedSeq: CommandSeq = 0;
+  /** The name of the last named message that was received. */
+  private processed: CommandId = { session: 0, seq: 0 };
 
   /**
    * The state of the host has changed by something this model does not do
@@ -162,7 +164,7 @@ export class TreeHostModel {
   receive(message: string): boolean {
     const read = readMessage(message);
     if (read.kind === "unreadable") return true;
-    this.processedSeq = read.seq;
+    this.processed = read.id;
     if (read.kind === "refused") return true;
 
     const { command } = read;
@@ -191,9 +193,9 @@ export class TreeHostModel {
     return false;
   }
 
-  /** The number of the last command the model has processed. */
-  get lastProcessedSeq(): CommandSeq {
-    return this.processedSeq;
+  /** The last command the model has processed. */
+  get lastProcessed(): CommandId {
+    return this.processed;
   }
 
   /** The snapshot of the current state; `null` before anything is shown. */
@@ -211,7 +213,8 @@ export class TreeHostModel {
         request: this.located.request,
         row: this.rowOf(this.located.path),
       },
-      last_processed_seq: this.processedSeq,
+      last_processed_session: this.processed.session,
+      last_processed_seq: this.processed.seq,
     };
   }
 

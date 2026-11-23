@@ -33,6 +33,7 @@ type Expectation = {
   located: AppState["located"];
   first_path: string | null;
   last_path: string | null;
+  last_processed_session: number;
   last_processed_seq: number;
 };
 
@@ -97,6 +98,7 @@ function stateFor(current_path: string, search_query: string): TreeLessState {
     rows_total: _total,
     rows_revision: _revision,
     located: _located,
+    last_processed_session: _session,
     last_processed_seq: _seq,
     ...state
   } = makeValidUiState() as AppState;
@@ -203,6 +205,7 @@ describe("[IPC Contracts] the model of the host's windowing", () => {
         located: snapshot.located,
         first_path: snapshot.rows[0]?.path ?? null,
         last_path: snapshot.rows[snapshot.rows.length - 1]?.path ?? null,
+        last_processed_session: snapshot.last_processed_session,
         last_processed_seq: snapshot.last_processed_seq,
       };
       expect(actual, step.name).toEqual(step.expect);

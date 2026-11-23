@@ -905,6 +905,11 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
       "minimum": 0,
       "type": "integer",
     },
+    "last_processed_session": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
     "located": {
       "anyOf": [
         {
@@ -1097,6 +1102,7 @@ exports[`[IPC Contracts] JSON schema snapshots > UiState schema snapshot 1`] = `
     "scan_progress",
     "active_ignore_patterns",
     "patterns_need_rescan",
+    "last_processed_session",
     "last_processed_seq",
   ],
   "type": "object",

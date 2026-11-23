@@ -16,7 +16,7 @@
 //! After an intentional change, regenerate the fixture with
 //! `UPDATE_CONTRACT_FIXTURES=1 cargo test contract_fixture` and adapt the model.
 
-use super::correlation::CommandSeq;
+use super::correlation::{CommandSeq, SessionId};
 use super::dispatch::CommandDispatcher;
 use super::dispatch_ipc_message;
 use super::events::UserEvent;
@@ -46,7 +46,7 @@ struct Snapshots(Arc<Mutex<Vec<UiState>>>);
 impl EventProxy for Snapshots {
     fn send_event(&self, event: UserEvent) {
         if let UserEvent::StateUpdate(ui_state) = event {
-            self.0.lock().unwrap().push(*ui_state);
+            self.0.lock().unwrap().push(*ui_state.into_ui_state());
         }
     }
 }
@@ -122,11 +122,16 @@ fn project() -> AppState {
 }
 
 /// The scenario as it is written to the fixture.
+/// The UI that posts the scenario, and the one that is loaded after it.
+const FIRST_UI: SessionId = 1001;
+const RELOADED_UI: SessionId = 1002;
+
 struct Recorder {
     dispatcher: CommandDispatcher,
     state: SharedState,
     snapshots: Snapshots,
-    /// The number of the last message, as the UI counts them.
+    /// The UI that posts, and the number of its last message, as it counts them.
+    session: SessionId,
     seq: CommandSeq,
     /// The distinct lists of rows the scenario shows, by name.
     lists: BTreeMap<String, Value>,
@@ -141,6 +146,7 @@ impl Recorder {
             dispatcher: CommandDispatcher::new(),
             state: SharedState::new(project()),
             snapshots: Snapshots::default(),
+            session: FIRST_UI,
             seq: 0,
             lists: BTreeMap::new(),
             steps: Vec::new(),
@@ -166,6 +172,7 @@ impl Recorder {
             "located": answer.located,
             "first_path": path(answer.rows.first()),
             "last_path": path(answer.rows.last()),
+            "last_processed_session": answer.last_processed_session,
             "last_processed_seq": answer.last_processed_seq,
         })
     }
@@ -173,7 +180,13 @@ impl Recorder {
     /// The next message of the UI: `command` with `payload`, numbered.
     fn message(&mut self, command: &str, payload: Value) -> String {
         self.seq += 1;
-        json!({ "seq": self.seq, "command": command, "payload": payload }).to_string()
+        json!({
+            "session": self.session,
+            "seq": self.seq,
+            "command": command,
+            "payload": payload,
+        })
+        .to_string()
     }
 
     /// Posts `message` to the host the way the WebView does and waits for the
@@ -528,6 +541,7 @@ async fn record_scenario() -> String {
         .await;
     scenario.seq += 1;
     let message = json!({
+        "session": scenario.session,
         "seq": scenario.seq,
         "command": "setViewport",
         "payload": { "start": 0, "count": 10 },
@@ -549,9 +563,19 @@ async fn record_scenario() -> String {
     })
     .to_string();
     scenario
-        .posts("a command without a number is not executed", message)
+        .posts("a command without a name is not executed", message)
         .await;
     let message = json!({
+        "seq": 999,
+        "command": "setViewport",
+        "payload": { "start": 0, "count": 10 },
+    })
+    .to_string();
+    scenario
+        .posts("a number without a session is no name", message)
+        .await;
+    let message = json!({
+        "session": scenario.session,
         "seq": "12",
         "command": "setViewport",
         "payload": { "start": 0, "count": 10 },
@@ -560,7 +584,8 @@ async fn record_scenario() -> String {
     scenario.posts("a number has to be a number", message).await;
 
     // --- A new UI ---
-    // A UI that starts (anew) counts its commands from 1.
+    // A UI that is loaded (anew) has a session of its own and counts from 1.
+    scenario.session = RELOADED_UI;
     scenario.seq = 0;
     let message = scenario.message("initialize", Value::Null);
     scenario
@@ -637,6 +662,7 @@ async fn window_scenario_covers_the_edges_of_the_contract() {
     let view = |name: &str| {
         let mut view = expect(name).clone();
         view["last_processed_seq"] = Value::Null;
+        view["last_processed_session"] = Value::Null;
         view["rows_revision_changed"] = Value::Null;
         view
     };
@@ -688,14 +714,28 @@ async fn window_scenario_covers_the_edges_of_the_contract() {
     assert!(unknown > 30, "{unknown}");
     assert_eq!(seq_of("an envelope with more"), unknown + 1);
     assert_eq!(seq_of("a message that is not JSON"), unknown + 1);
-    assert_eq!(seq_of("a command without a number"), unknown + 1);
+    assert_eq!(seq_of("a command without a name"), unknown + 1);
+    assert_eq!(seq_of("a number without a session"), unknown + 1);
     assert_eq!(seq_of("a number has to be"), unknown + 1);
     assert_eq!(restarted["last_processed_seq"], 1);
+    for step in steps {
+        let session = if step["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("a UI that starts")
+        {
+            RELOADED_UI
+        } else {
+            FIRST_UI
+        };
+        assert_eq!(step["expect"]["last_processed_session"], session, "{step}");
+    }
     for refused in [
         "a command that does not exist",
         "an envelope with more",
         "a message that is not JSON",
-        "a command without a number",
+        "a command without a name",
+        "a number without a session",
         "a number has to be",
     ] {
         let (answer, before) = (view(refused), view("and a lookup"));

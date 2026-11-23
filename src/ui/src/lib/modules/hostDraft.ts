@@ -11,11 +11,12 @@
  * - While the user is editing (changed, not sent yet), the local value stays.
  * - After the value has been sent, it stays until the host has processed the
  *   command that carried it. Which snapshot that is, is not guessed: `post()`
- *   returns the number of the command, and every snapshot states the number
- *   of the last command it accounts for (`last_processed_seq`). A snapshot
- *   that has not reached the number was made before the host got to the
- *   command and says nothing about it.
- * - From the first snapshot that has reached the number on, the host's value
+ *   returns the name of the command (the session of this UI and the number of
+ *   the command), and every snapshot states the last command it accounts for
+ *   (`last_processed_session`, `last_processed_seq`). A snapshot that names
+ *   another session, or has not reached the number, was made before the host
+ *   got to the command and says nothing about it.
+ * - From the first snapshot that has reached the command on, the host's value
  *   is shown, whatever it is: the host is the source of truth. It is the sent
  *   value unless the host has decided otherwise (it refused the command, or a
  *   later command changed the value).
@@ -26,12 +27,18 @@
  * The class holds no UI state; it only answers the question.
  */
 
-import type { CommandSeq } from "$lib/ipc/schema";
+import type { CommandId } from "$lib/ipc/schema";
+
+/** What a snapshot says about the commands it accounts for. */
+export type ProcessedCommands = {
+  last_processed_session: number;
+  last_processed_seq: number;
+};
 
 export class HostDraft {
   private editing = false;
   /** The command that carried the local value; `null`: nothing to wait for. */
-  private awaiting: CommandSeq | null = null;
+  private awaiting: CommandId | null = null;
 
   /** The user has changed the field; the change has not been sent yet. */
   edit(): void {
@@ -39,12 +46,13 @@ export class HostDraft {
   }
 
   /**
-   * The local value has been sent to the host, with the command `seq` (what
-   * `post()` returned for it).
+   * The local value has been handed to `post()`, which returned `command`:
+   * the name of the command that carries it, or `null` if nothing was posted
+   * (then there is no answer to wait for, and the host's value applies).
    */
-  sent(seq: CommandSeq): void {
+  sent(command: CommandId | null): void {
     this.editing = false;
-    this.awaiting = seq;
+    this.awaiting = command;
   }
 
   /** Gives up the local value: the next host value is shown. */
@@ -59,13 +67,15 @@ export class HostDraft {
   }
 
   /**
-   * A snapshot has arrived that accounts for the commands up to
-   * `lastProcessedSeq`. Returns whether the field is to show the host's
+   * A snapshot has arrived. Returns whether the field is to show the host's
    * value; if not, the field keeps its local value.
    */
-  accepts(lastProcessedSeq: CommandSeq): boolean {
+  accepts(snapshot: ProcessedCommands): boolean {
     if (this.awaiting !== null) {
-      if (lastProcessedSeq < this.awaiting) return false;
+      const answered =
+        snapshot.last_processed_session === this.awaiting.session &&
+        snapshot.last_processed_seq >= this.awaiting.seq;
+      if (!answered) return false;
       this.awaiting = null;
     }
     return !this.editing;

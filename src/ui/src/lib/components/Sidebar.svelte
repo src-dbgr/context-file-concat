@@ -41,7 +41,7 @@
   }
   // Shows the host's filters unless the draft holds them back.
   function syncFiltersFromHost() {
-    if (filterDraft.accepts($appState.last_processed_seq)) {
+    if (filterDraft.accepts($appState)) {
       filters = hostFilters();
     }
   }

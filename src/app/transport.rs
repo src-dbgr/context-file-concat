@@ -188,6 +188,7 @@ impl EventOutbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::snapshot::Snapshot;
     use crate::app::state::AppState;
     use crate::app::view_model::generate_ui_state;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -227,7 +228,7 @@ mod tests {
     fn snapshot(tag: &str) -> UserEvent {
         let mut ui_state = generate_ui_state(&AppState::default());
         ui_state.status_message = tag.to_string();
-        UserEvent::StateUpdate(Box::new(ui_state))
+        UserEvent::StateUpdate(Snapshot::for_test(ui_state))
     }
 
     /// Renders an event as a short label so sequences can be compared.
@@ -347,7 +348,7 @@ mod tests {
         let tagged = move |tag: String| {
             let mut ui_state = template.clone();
             ui_state.status_message = tag;
-            UserEvent::StateUpdate(Box::new(ui_state))
+            UserEvent::StateUpdate(Snapshot::for_test(ui_state))
         };
         let senders: Vec<_> = (0..THREADS)
             .map(|t| {

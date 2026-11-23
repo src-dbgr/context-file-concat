@@ -87,6 +87,20 @@ export type LocatedRow = z.infer<typeof LocatedRowObject>;
 export const CommandSeqSchema = z.number().int().nonnegative();
 export type CommandSeq = z.infer<typeof CommandSeqSchema>;
 
+/**
+ * Identifies the UI that posts: a number it draws when it is loaded, so a UI
+ * that is loaded anew is another one. The host states in every snapshot whose
+ * command it accounts for last (`last_processed_session`; 0: none yet).
+ */
+export const SessionIdSchema = z.number().int().nonnegative();
+export type SessionId = z.infer<typeof SessionIdSchema>;
+
+/**
+ * The name of a command, as it stands in the envelope of its message: who
+ * posted it, and which of its commands it is. `post()` returns it.
+ */
+export type CommandId = { session: SessionId; seq: CommandSeq };
+
 /* --------------------------------- UiState --------------------------------- */
 export const ScanProgressSchema = z
   .object({
@@ -130,10 +144,12 @@ const UiStateObject = z.object({
   active_ignore_patterns: z.array(z.string()),
   patterns_need_rescan: z.boolean(),
   /**
-   * The number of the last command this snapshot accounts for: it was sent by
-   * that command or after it, so it shows what the command and every command
-   * posted before it have done. 0 before the first command.
+   * The last command this snapshot accounts for: the UI that posted it and
+   * its number. The snapshot was sent by that command or after it, so for
+   * that UI it is the answer to the command (and to every command it posted
+   * before), or something newer. Both are 0 before the first command.
    */
+  last_processed_session: SessionIdSchema,
   last_processed_seq: CommandSeqSchema,
 });
 
@@ -383,8 +399,8 @@ export type NonNullCommandName = Exclude<CommandName, NullaryCommandName>;
 
 /* ----------------------- Dev-time validation union ------------------------- */
 // A command on the wire: its name and its payload, and nothing else (the host
-// refuses a message with anything more). The number of the message is not
-// part of the command; `post()` puts it next to it.
+// refuses a message with anything more). The name of the message (session
+// and number) is not part of the command; `post()` puts it next to it.
 const _commandObjectSchemas = (
   Object.keys(CommandSchemas) as CommandName[]
 ).map((name) =>

@@ -4,7 +4,7 @@
 // module free of top-level side effects, so that it is tree-shaken otherwise.
 
 import { appState, getState } from "$lib/stores/app";
-import type { CommandSeq } from "$lib/ipc/schema";
+import type { ProcessedCommands } from "$lib/modules/hostDraft";
 import type { AppState, TreeRow } from "$lib/types";
 import { TreeHostModel, type TreeLessState } from "./treeHostModel";
 
@@ -39,13 +39,13 @@ type E2EHostAPI = {
   /** Deliver the answers kept back since `hold`, in order, and go on. */
   release: () => void;
   /**
-   * The number of the last command the UI has posted, which the stand-in host
-   * has processed by receiving it. It is what `last_processed_seq` of a
-   * snapshot has to be for the UI to take it for one from after its commands;
-   * a spec that seeds a snapshot by hand states it (or a smaller number, to
-   * play a snapshot from before).
+   * The last command the UI has posted, which the stand-in host has processed
+   * by receiving it, as a snapshot states it. It is what a snapshot has to
+   * say for the UI to take it for one from after its commands; a spec that
+   * seeds a snapshot by hand states it (or a smaller number, to play a
+   * snapshot from before).
    */
-  processedSeq: () => CommandSeq;
+  processed: () => ProcessedCommands;
 };
 
 type E2EDebugAPI = {
@@ -129,7 +129,10 @@ function createTreeHost(): E2EHostAPI {
   if ((window.ipc as Window["ipc"] | undefined) !== undefined) intercept();
 
   return {
-    processedSeq: () => model.lastProcessedSeq,
+    processed: () => ({
+      last_processed_session: model.lastProcessed.session,
+      last_processed_seq: model.lastProcessed.seq,
+    }),
     setTree(state: TreeLessState, rows: TreeRow[]) {
       intercept();
       model.show(state, rows);
