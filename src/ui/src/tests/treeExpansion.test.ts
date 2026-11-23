@@ -50,23 +50,19 @@ describe("treeExpansion – expansion intents go to the backend", () => {
   });
 
   describe("needsLazyLoad", () => {
-    it("is true only for a collapsed, unloaded directory while no scan is running", () => {
-      expect(needsLazyLoad(dir({ children_loaded: false }), false)).toBe(true);
-      expect(needsLazyLoad(dir({ children_loaded: false }), true)).toBe(false);
-      expect(needsLazyLoad(dir({ children_loaded: true }), false)).toBe(false);
+    it("is true only for a collapsed, unloaded directory", () => {
+      expect(needsLazyLoad(dir({ children_loaded: false }))).toBe(true);
+      expect(needsLazyLoad(dir({ children_loaded: true }))).toBe(false);
       expect(
-        needsLazyLoad(
-          dir({ children_loaded: false, is_expanded: true }),
-          false,
-        ),
+        needsLazyLoad(dir({ children_loaded: false, is_expanded: true })),
       ).toBe(false);
     });
 
-    it("reads the scan state from the store by default", () => {
+    it("does not depend on whether a scan is running", () => {
       const unloaded = dir({ children_loaded: false });
       expect(needsLazyLoad(unloaded)).toBe(true);
       setScanning(true);
-      expect(needsLazyLoad(unloaded)).toBe(false);
+      expect(needsLazyLoad(unloaded)).toBe(true);
     });
   });
 
@@ -111,9 +107,18 @@ describe("treeExpansion – expansion intents go to the backend", () => {
       ]);
     });
 
-    it("only sets the expansion while a scan is running (the scan delivers the children)", () => {
+    it("loads an unloaded directory while a scan is running too (the tree can be explored during the scan)", () => {
       setScanning(true);
       toggleDirectory(dir({ children_loaded: false }));
+
+      expect(vi.mocked(post).mock.calls).toEqual([
+        ["loadDirectoryLevel", "/repo/src"],
+      ]);
+    });
+
+    it("does not load a directory the scan has completed meanwhile", () => {
+      setScanning(true);
+      toggleDirectory(dir({ children_loaded: true }));
 
       expect(vi.mocked(post).mock.calls).toEqual([
         ["setExpansion", { path: "/repo/src", expanded: true }],

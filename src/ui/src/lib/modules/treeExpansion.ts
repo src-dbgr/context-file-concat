@@ -15,7 +15,6 @@
 // harmless, whereas a second toggle would undo the first.
 
 import { post } from "$lib/services/backend";
-import { getState } from "$lib/stores/app";
 import type { TreeRow } from "$lib/types";
 
 /** The part of a directory row the expansion intents depend on. */
@@ -32,14 +31,13 @@ export type ExpandableNode = Pick<
  * a scan that was cancelled) is not loaded again by a gesture; it can be
  * collapsed like any other, and is loaded when it is expanded the next time.
  *
- * While a scan is running the backend refuses lazy loads: the scan itself
- * delivers the children, so nothing has to be requested.
+ * This holds while a scan is running as well. The scan delivers the tree piece
+ * by piece, but it gets to a directory when it gets to it; the user who expands
+ * the directory wants to see it now. The backend lists that one level at once
+ * and the scan goes on (it does not add the level a second time).
  */
-export function needsLazyLoad(
-  node: ExpandableNode,
-  isScanning: boolean = getState().is_scanning,
-): boolean {
-  return !node.is_expanded && !node.children_loaded && !isScanning;
+export function needsLazyLoad(node: ExpandableNode): boolean {
+  return !node.is_expanded && !node.children_loaded;
 }
 
 function setExpanded(node: ExpandableNode, expanded: boolean): void {
