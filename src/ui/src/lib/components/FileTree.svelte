@@ -11,8 +11,7 @@
     setAllExpanded,
     toggleDirectory,
   } from "$lib/modules/treeExpansion";
-  import Spinner from "$lib/components/Spinner.svelte";
-  import LinearProgress from "$lib/components/LinearProgress.svelte";
+  import ScanProgress from "$lib/components/ScanProgress.svelte";
   import { t } from "$lib/i18n";
 
   // Virtualization constants
@@ -35,7 +34,9 @@
 
   function setFocusByIndex(
     next: number,
-    opts: { ensureView?: boolean } = { ensureView: true }
+    opts: { ensureView?: boolean; onlyIfUnfocused?: boolean } = {
+      ensureView: true,
+    }
   ) {
     if (!flatTree.length) {
       focusedIndex = -1;
@@ -53,6 +54,15 @@
       if (isInputFocused) {
         return;
       }
+      // An unrequested focus (the tree has just appeared) must not take the
+      // focus away from wherever the user has put it in the meantime.
+      if (
+        opts.onlyIfUnfocused &&
+        activeEl &&
+        activeEl !== document.body
+      ) {
+        return;
+      }
       const node = document.querySelector<HTMLElement>(
         `.tree [data-index="${clamped}"]`
       );
@@ -63,7 +73,7 @@
   // When tree content appears for the first time, focus the first item
   $effect(() => {
     if (flatTree.length && focusedIndex === -1)
-      setFocusByIndex(0, { ensureView: false });
+      setFocusByIndex(0, { ensureView: false, onlyIfUnfocused: true });
   });
 
   // Preserve focus by path across re-renders if possible
@@ -543,44 +553,7 @@
 
   <div class="file-tree-body" class:centered={centerBody}>
     {#if $appState.is_scanning && $appState.tree.length === 0}
-      <div class="scan-progress-container">
-        <div class="scan-progress-header">
-          <div class="scan-status" role="status" aria-live="polite">
-            <Spinner size={16} ariaLabel={$t("filetree.scanning")} />
-            <span class="scan-text">{$t("filetree.scanning")}</span>
-          </div>
-          <button
-            id="cancel-scan-btn"
-            class="cancel-scan-btn"
-            title={$t("filetree.cancel")}
-            onclick={() => post("cancelScan")}
-          >
-            <svg
-              class="icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-            {$t("filetree.cancel")}
-          </button>
-        </div>
-
-        <LinearProgress
-          idForFill="scan-progress-fill"
-          ariaLabel={$t("aria.scanProgress")}
-          indeterminate
-        />
-
-        <div class="scan-details" aria-live="polite">
-          <span id="scan-files-count">0 files processed</span>
-          <span id="scan-current-path">Starting scan...</span>
-          <span id="scan-skipped-count"></span>
-        </div>
-      </div>
+      <ScanProgress />
     {:else if !$appState.current_path}
       <button
         type="button"
@@ -695,25 +668,5 @@
   :global(.file-tree-container),
   .tree {
     min-height: 0;
-  }
-
-  .scan-progress-container {
-    width: 100%;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-6);
-    max-width: 720px;
-  }
-  .scan-progress-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-6);
-  }
-  .scan-status {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-5);
-    color: var(--color-text);
   }
 </style>

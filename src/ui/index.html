@@ -27,30 +27,7 @@
     </script>
   </head>
   <body>
-    <div class="container" style="height: calc(100% - 30px)">
-      <aside id="sidebar-root" class="sidebar"></aside>
-
-      <main class="main-content">
-        <div class="sidebar-resize-handle-right" aria-hidden="true"></div>
-
-        <div id="header-root"></div>
-
-        <div class="content-splitter">
-          <div id="file-list-panel" class="file-list-panel">
-            <!-- Header/buttons/stats are rendered by FileTree.svelte -->
-            <div id="file-tree-container" class="file-tree-container"></div>
-          </div>
-
-          <div id="resizer" class="resizer"></div>
-
-          <div id="preview-panel" class="preview-panel"></div>
-        </div>
-
-        <footer id="footer-root" class="bottom-panel"></footer>
-      </main>
-    </div>
-
-    <div id="svelte-root"></div>
+    <!-- The layout is rendered by src/App.svelte, mounted into <body>. -->
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -1,6 +1,10 @@
 <script lang="ts">
   import { appState, editorInstance, previewedPath } from "$lib/stores/app";
-  import { previewMode, generatedTokenCount } from "$lib/stores/preview";
+  import {
+    previewMode,
+    generatedTokenCount,
+    copyFeedback,
+  } from "$lib/stores/preview";
   import { splitPathForDisplay, generateStatsString } from "$lib/utils";
   import { handleCopy } from "$lib/modules/clipboard";
   import { clearPreview } from "$lib/modules/editor";
@@ -96,7 +100,7 @@
 </script>
 
 <!--
-  This component renders INTO the existing #preview-panel element.
+  This component renders INTO the #preview-panel element of App.svelte.
   We add subtle, accessible feedback while generation is in progress.
 -->
 <div class="preview-fragment" style="display: contents">
@@ -135,21 +139,29 @@
       <button
         id="copy-btn"
         aria-label="Copy"
+        class:button-cta={$copyFeedback === "copied"}
+        class:button-cancel-action={$copyFeedback === "failed"}
         style:display={$previewMode !== "idle" ? "inline-block" : "none"}
         onclick={onCopyClick}
         disabled={$previewMode === "idle"}
       >
-        <svg
-          class="icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
-        {$t("preview.copy")}
+        {#if $copyFeedback === "copied"}
+          {$t("preview.copied")}
+        {:else if $copyFeedback === "failed"}
+          {$t("preview.copyFailed")}
+        {:else}
+          <svg
+            class="icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+          {$t("preview.copy")}
+        {/if}
       </button>
 
       <button

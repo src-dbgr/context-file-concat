@@ -167,4 +167,4 @@ To build and run the application locally, you need [Node.js/npm](https://nodejs.
     cargo test
     ```
 
-    The UI tests live in `src/ui` (`npm test`, `npm run test:contracts`, `npm run test:e2e`). The end-to-end tests run in Chromium and WebKit; install both once with `npx playwright install chromium webkit`, or run a single engine with `npm run test:e2e -- --project=chromium`.
+    The UI tests live in `src/ui` (`npm test`, `npm run test:contracts`, `npm run test:e2e`). The end-to-end tests run in Chromium and WebKit; install both once with `npx playwright install chromium webkit`, or run a single engine with `npm run test:e2e -- --project=chromium`. The suite starts its own preview server on port 4173; set `E2E_PORT` to use another port, e.g. when two checkouts run the suite at the same time.

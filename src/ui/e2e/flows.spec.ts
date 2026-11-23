@@ -3,7 +3,7 @@ import AxeBuilder from "@axe-core/playwright";
 
 /**
  * Deterministic E2E:
- * - Bridge is enabled via __PW_E2E flag + ?e2e=1 (see main.ts)
+ * - The bridge (window.__e2e) is part of the e2e build only (see vite.config.ts, main.ts)
  * - State transitions via window.__e2e.store.setAppState (no timers)
  * - No "any", no artificial timeouts, no regression to production logic
  */
@@ -52,13 +52,6 @@ type AppState = {
   active_ignore_patterns: string[];
   config: AppConfig;
 };
-
-test.beforeEach(async ({ page }) => {
-  // Ensure bridge loads in production preview before app init
-  await page.addInitScript(() => {
-    (window as unknown as { __PW_E2E: boolean }).__PW_E2E = true;
-  });
-});
 
 function seedTree(): TreeNode[] {
   return [
@@ -407,6 +400,21 @@ test("A11y sanity on main screen (no critical issues)", async ({ page }) => {
   const results = await new AxeBuilder({ page }).analyze();
   const critical = results.violations.filter((v) => v.impact === "critical");
   expect(critical.length, "Expected no CRITICAL a11y violations").toBe(0);
+
+  // With a toast on screen (its list must only own list items).
+  await page.evaluate(() => {
+    (window as unknown as { showError: (m: string) => void }).showError(
+      "Something failed",
+    );
+  });
+  await expect(page.locator(".toast-list .toast")).toHaveCount(1);
+  const withToast = await new AxeBuilder({ page }).analyze();
+  expect(
+    withToast.violations
+      .filter((v) => v.impact === "critical")
+      .map((v) => v.id),
+    "Expected no CRITICAL a11y violations with a toast shown",
+  ).toEqual([]);
 });
 
 test.describe("Keyboard on the controls of a tree row", () => {

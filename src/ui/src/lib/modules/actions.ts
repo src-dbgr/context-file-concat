@@ -1,7 +1,6 @@
 import { editorInstance } from "../stores/app.js";
 import type { FocusContext } from "../types.js";
 import { get } from "svelte/store";
-import * as monaco from "monaco-editor";
 
 function findWordBoundary(
   value: string,
@@ -158,14 +157,14 @@ export function selectAll(context: FocusContext) {
     if (!editor) return;
     const model = editor.getModel();
     if (model) {
-      editor.setSelection(
-        new monaco.Selection(
-          1,
-          1,
-          model.getLineCount(),
-          model.getLineMaxColumn(model.getLineCount()),
-        ),
-      );
+      const lastLine = model.getLineCount();
+      // A plain range: no Monaco import needed on the initial path.
+      editor.setSelection({
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: lastLine,
+        endColumn: model.getLineMaxColumn(lastLine),
+      });
     }
   }
 }

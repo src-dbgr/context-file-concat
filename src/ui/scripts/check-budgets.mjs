@@ -27,11 +27,11 @@ const INDEX_HTML = path.join(DIST_DIR, "index.html");
 
 const INITIAL_LIMIT = num(process.env.INITIAL_BROTLI, 150_000);
 const LAZY_LIMIT = num(process.env.LAZY_TOTAL_BROTLI, 1_000_000);
-// The five Monaco workers weigh 1_456_760 bytes today (ts 992_686, css 173_929, html
-// 141_928, json 89_385, editor 58_264). The limit leaves about 10 % (143 kB) for Monaco
-// updates; a regression beyond that, e.g. one more worker the size of css, fails.
-// Lower it to about 110 % of the new total whenever workers are removed.
-const WORKER_LIMIT = num(process.env.WORKER_TOTAL_BROTLI, 1_600_000);
+// Only Monaco's base editor worker ships (about 58_300 bytes); the language workers
+// were dropped because the read-only viewer highlights with Monarch tokenizers. The
+// limit leaves about 20 % for Monaco updates; any language worker coming back (the
+// smallest, json, is about 89 kB) fails it.
+const WORKER_LIMIT = num(process.env.WORKER_TOTAL_BROTLI, 70_000);
 
 function num(v, d) {
   const n = Number(v);

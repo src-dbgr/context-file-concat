@@ -4,7 +4,12 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import PreviewPanel from "$lib/components/PreviewPanel.svelte";
 import { appState, editorInstance, previewedPath } from "$lib/stores/app";
-import { previewMode, generatedTokenCount } from "$lib/stores/preview";
+import {
+  previewMode,
+  generatedTokenCount,
+  flashCopyFeedback,
+} from "$lib/stores/preview";
+import { tick } from "svelte";
 import type * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 
 // Mock clearPreview so clicking the button doesn't pull Monaco
@@ -118,6 +123,39 @@ describe("PreviewPanel", () => {
     expect(clearBtn).toBeVisible();
     expect(copyBtn).not.toBeDisabled();
     expect(clearBtn).not.toBeDisabled();
+  });
+
+  it("shows the outcome of a copy on the Copy button, then the normal label again", async () => {
+    vi.useFakeTimers();
+    try {
+      editorInstance.set(makeFakeEditor("a b c"));
+      previewMode.set("generated");
+      render(PreviewPanel);
+      const copyBtn = document.getElementById("copy-btn") as HTMLButtonElement;
+      expect(copyBtn.textContent?.trim()).toBe("Copy");
+      expect(copyBtn.querySelector("svg")).not.toBeNull();
+
+      flashCopyFeedback("copied");
+      await tick();
+      expect(copyBtn.textContent?.trim()).toBe("Copied!");
+      expect(copyBtn).toHaveClass("button-cta");
+      expect(copyBtn).not.toHaveClass("button-cancel-action");
+
+      flashCopyFeedback("failed");
+      await tick();
+      expect(copyBtn.textContent?.trim()).toBe("Failed");
+      expect(copyBtn).toHaveClass("button-cancel-action");
+      expect(copyBtn).not.toHaveClass("button-cta");
+
+      vi.advanceTimersByTime(1100);
+      await tick();
+      expect(copyBtn.textContent?.trim()).toBe("Copy");
+      expect(copyBtn.querySelector("svg")).not.toBeNull();
+      expect(copyBtn).not.toHaveClass("button-cta");
+      expect(copyBtn).not.toHaveClass("button-cancel-action");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders File mode path + filename from previewedPath", () => {

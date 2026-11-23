@@ -1,5 +1,7 @@
-// Lightweight E2E bridge for deterministic UI testing.
-// Loads only when shouldInstallE2EBridge() in main.ts permits it.
+// E2E bridge for deterministic UI testing: `window.__e2e`.
+// Not part of production builds – main.ts installs it only when the build-time
+// constant `__CFC_TEST_HOOKS__` is set (dev server, e2e build). Keep this
+// module free of top-level side effects, so that it is tree-shaken otherwise.
 
 import { appState, getState } from "$lib/stores/app";
 import type { AppState } from "$lib/types";
@@ -46,7 +48,6 @@ export function installE2EBridge(): void {
   const api: E2EApi = {
     store: {
       setAppState: (s: AppState) => {
-        // Strict type: AppState from $lib/types
         appState.set(s);
       },
     },
@@ -68,5 +69,5 @@ export function installE2EBridge(): void {
   };
 
   // Expose under window.__e2e (idempotent)
-  (window as unknown as { __e2e?: E2EApi }).__e2e = api;
+  window.__e2e = api;
 }

@@ -1,9 +1,9 @@
 import { editorInstance } from "../stores/app.js";
 import { getUndoManagerForElement } from "./undo.js";
-import { elements } from "../dom.js";
 import type { FocusContext } from "../types.js";
 import { get } from "svelte/store";
 import { toast } from "../stores/toast.js";
+import { flashCopyFeedback } from "../stores/preview.js";
 
 async function readFromClipboardWithFallback(): Promise<string | null> {
   try {
@@ -87,30 +87,8 @@ export async function handleCopy(context: FocusContext) {
     toast.error("Failed to copy to clipboard");
   }
 
-  // Visual feedback on the Copy button (theme-safe)
-  if (isEditorFocused && elements.copyBtn) {
-    // Clear any inline overrides first
-    elements.copyBtn.style.backgroundColor = "";
-    elements.copyBtn.style.color = "";
-
-    if (success) {
-      elements.copyBtn.innerHTML = `... Copied!`;
-      elements.copyBtn.classList.add("button-cta");
-      elements.copyBtn.classList.remove("button-cancel-action");
-    } else {
-      elements.copyBtn.innerHTML = `... Failed`;
-      elements.copyBtn.classList.add("button-cancel-action");
-      elements.copyBtn.classList.remove("button-cta");
-    }
-
-    setTimeout(() => {
-      elements.copyBtn.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
-      elements.copyBtn.classList.remove("button-cta", "button-cancel-action");
-      // Ensure we leave styles to CSS variables (theme-safe)
-      elements.copyBtn.style.backgroundColor = "";
-      elements.copyBtn.style.color = "";
-    }, 1000);
-  }
+  // Visual feedback on the Copy button (rendered by PreviewPanel)
+  if (isEditorFocused) flashCopyFeedback(success ? "copied" : "failed");
 }
 
 export async function handlePaste(context: FocusContext) {
