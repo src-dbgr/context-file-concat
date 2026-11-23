@@ -3625,7 +3625,7 @@ mod tests {
         {
             // The state after a scan that was cancelled in its deep phase.
             let mut state = harness.state.lock();
-            state.config.ignore_patterns = HashSet::from(["src/generated/".to_string()]);
+            state.config.ignore_patterns = HashSet::from(["/src/generated/".to_string()]);
             state.replace_with_shallow_file_list(&root, vec![dir_item(&src, 1)]);
             filtering::apply_filters(&mut state);
         }
@@ -3654,7 +3654,7 @@ mod tests {
             loaded[0].depth, 2,
             "Depth must be relative to the project root"
         );
-        assert!(state.active_ignore_patterns.contains("src/generated/"));
+        assert!(state.active_ignore_patterns.contains("/src/generated/"));
     }
 
     /// A lazy load for a path that is not part of the loaded project is refused.
@@ -4217,7 +4217,7 @@ mod tests {
             state
                 .config
                 .ignore_patterns
-                .insert("src/generated/".to_string());
+                .insert("/src/generated/".to_string());
             state.apply_ignore_patterns();
         }
         lazy_load_task(

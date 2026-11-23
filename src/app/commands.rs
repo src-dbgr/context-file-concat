@@ -470,14 +470,16 @@ pub fn load_directory_level<P: EventProxy>(
 /// Adds an ignore pattern for a specific file or directory of the loaded tree (via
 /// the UI button of a tree row).
 ///
-/// The pattern is the path relative to the project root; directory patterns end with
-/// a slash. Whether the path is a directory is taken from the loaded file list, which
-/// is where the rows of the tree come from; the file system is not asked (this runs
-/// on the command lane). It is applied like any other added pattern, see
-/// [`change_config`].
+/// The pattern names exactly that entry ([`gitignore_pattern`]): the path relative to
+/// the project root, anchored there, with everything that has a meaning in a pattern
+/// escaped; directory patterns end with a slash. Whether the path is a directory is
+/// taken from the loaded file list, which is where the rows of the tree come from;
+/// the file system is not asked (this runs on the command lane). It is applied like
+/// any other added pattern, see [`change_config`].
 ///
-/// A path outside the loaded directory adds nothing, as does the command without a
-/// directory. Like every config command it is answered with a state update either way.
+/// A path that has no pattern adds nothing: one outside the loaded directory, one
+/// with a name that is not valid Unicode, or any path while no directory is loaded.
+/// Like every config command it is answered with a state update either way.
 pub async fn add_ignore_path<P: EventProxy>(
     payload: serde_json::Value,
     proxy: P,
@@ -510,31 +512,68 @@ fn ignore_pattern_for_path(state: &AppState, path: &Path) -> Option<String> {
     gitignore_pattern(relative_path, is_directory)
 }
 
-/// The gitignore pattern for the entry at `relative_path` (relative to the project
-/// root); the pattern of a directory ends with a slash.
+/// The gitignore pattern that hides the entry at `relative_path` (relative to the
+/// project root) and nothing else; the pattern of a directory ends with a slash.
 ///
-/// A gitignore pattern separates the names of a path with `/` on every platform (a
-/// backslash escapes the character after it), so the pattern is put together from the
-/// components of the path, not from its text: on Windows that text is `src\gen`.
+/// The pattern is made for one entry, the row whose button was pressed, so:
 ///
-/// `None` for a path that names no entry below the root: the root itself, or a path
-/// with anything but names in it (`..`, a drive).
+/// * It is **anchored** at the project root with a leading `/`. Without it a pattern
+///   without a slash in the middle (`README.md`, `docs/`) matches at any depth. The
+///   leading slash also keeps a name that begins with `!` or `#` from being read as
+///   a negation or a comment.
+/// * The names are joined with `/` on every platform (a backslash escapes the
+///   character after it), so the pattern is put together from the components of the
+///   path, not from its text: on Windows that text is `src\gen`.
+/// * Every character of a name that means something in a pattern is escaped with a
+///   backslash ([`escape_pattern_characters`]), and so are the spaces at the end of a
+///   file name, which would be dropped otherwise (the slash at the end of a
+///   directory pattern protects those of a directory).
+///
+/// `None` for a path that has no such pattern: the root itself, a path with anything
+/// but names in it (`..`, a drive), or a name that is not valid Unicode (a pattern is
+/// text; a lossy conversion would name some other entry, or none).
 fn gitignore_pattern(relative_path: &Path, is_directory: bool) -> Option<String> {
     let names = relative_path
         .components()
         .map(|component| match component {
-            std::path::Component::Normal(name) => Some(name.to_string_lossy()),
+            std::path::Component::Normal(name) => name.to_str().map(escape_pattern_characters),
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;
     if names.is_empty() {
         return None;
     }
-    let mut pattern = names.join("/");
+    let mut pattern = format!("/{}", names.join("/"));
     if is_directory {
+        // The matcher takes a backslash before the closing slash for an escape of
+        // that slash and drops it, so a name that ends with a backslash ends with
+        // a character class of it instead.
+        if let Some(without_backslash) = pattern.strip_suffix("\\\\") {
+            pattern = format!("{without_backslash}[\\\\]");
+        }
         pattern.push('/');
+    } else {
+        let name_end = pattern.trim_end_matches(' ').len();
+        let trailing_spaces = pattern.len() - name_end;
+        pattern.truncate(name_end);
+        pattern.push_str(&"\\ ".repeat(trailing_spaces));
     }
     Some(pattern)
+}
+
+/// `name` with a backslash before every character a gitignore pattern would not take
+/// literally: the backslash itself, the wildcards `*` and `?`, the brackets of a
+/// character class and the braces of alternatives (which the matcher of the `ignore`
+/// crate evaluates).
+fn escape_pattern_characters(name: &str) -> String {
+    let mut escaped = String::with_capacity(name.len());
+    for character in name.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[' | ']' | '{' | '}') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// Toggles the selection state of a single file.
@@ -1330,7 +1369,7 @@ mod tests {
         assert!(!final_state.tree.iter().any(|n| n.name == "docs"));
         let state = harness.state.lock();
         assert!(!state.is_scanning() && !state.is_fully_scanned);
-        assert!(state.config.ignore_patterns.contains("docs/"));
+        assert!(state.config.ignore_patterns.contains("/docs/"));
     }
 
     /// A configuration as somebody else exported it: other settings, and the geometry
@@ -1704,26 +1743,27 @@ mod tests {
     }
 
     /// The names of a nested path are joined with `/` whatever the separator of the
-    /// platform is. The paths are built with `join`, so on Windows they read
-    /// `src\gen\out`, which is not what a gitignore pattern looks like.
+    /// platform is, and the pattern is anchored at the root. The paths are built with
+    /// `join`, so on Windows they read `src\gen\out`, which is not what a gitignore
+    /// pattern looks like.
     #[test]
-    fn test_gitignore_pattern_joins_the_names_of_a_path_with_slashes() {
+    fn test_gitignore_pattern_is_anchored_and_joins_the_names_with_slashes() {
         let nested = Path::new("src").join("gen").join("out");
         assert_eq!(
             gitignore_pattern(&nested, true).as_deref(),
-            Some("src/gen/out/")
+            Some("/src/gen/out/")
         );
         assert_eq!(
             gitignore_pattern(&nested.join("a b.rs"), false).as_deref(),
-            Some("src/gen/out/a b.rs")
+            Some("/src/gen/out/a b.rs")
         );
         assert_eq!(
             gitignore_pattern(Path::new("docs"), true).as_deref(),
-            Some("docs/")
+            Some("/docs/")
         );
         assert_eq!(
             gitignore_pattern(Path::new("notes.txt"), false).as_deref(),
-            Some("notes.txt")
+            Some("/notes.txt")
         );
     }
 
@@ -1733,11 +1773,11 @@ mod tests {
     fn test_gitignore_pattern_of_a_path_with_backslashes() {
         assert_eq!(
             gitignore_pattern(Path::new(r"src\gen"), true).as_deref(),
-            Some("src/gen/")
+            Some("/src/gen/")
         );
         assert_eq!(
             gitignore_pattern(Path::new(r"src\gen\mod.rs"), false).as_deref(),
-            Some("src/gen/mod.rs")
+            Some("/src/gen/mod.rs")
         );
     }
 
@@ -1750,6 +1790,134 @@ mod tests {
             None
         );
         assert_eq!(gitignore_pattern(Path::new("/absolute"), false), None);
+    }
+
+    /// A name that is not valid Unicode has no pattern: a pattern is text.
+    #[cfg(unix)]
+    #[test]
+    fn test_gitignore_pattern_of_a_name_that_is_not_unicode_is_none() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let name = OsStr::from_bytes(b"bad\xff.txt");
+
+        assert_eq!(gitignore_pattern(Path::new(name), false), None);
+        assert_eq!(gitignore_pattern(&Path::new("src").join(name), true), None);
+    }
+
+    /// An entry of a project (path relative to the root, with `/`) and whether it is
+    /// a directory.
+    type Entry = (&'static str, bool);
+    const FILE: bool = false;
+    const DIR: bool = true;
+
+    /// Asserts that the pattern made for `entry` hides `entry` (and, for a directory,
+    /// what lies in it) and none of `others`, by the rules the application applies.
+    #[track_caller]
+    fn assert_pattern_hides_only(entry: Entry, others: &[Entry]) {
+        let root = Path::new("/project");
+        let path_of = |relative: &str| {
+            relative
+                .split('/')
+                .fold(root.to_path_buf(), |p, n| p.join(n))
+        };
+        let (relative, is_directory) = entry;
+        let pattern =
+            gitignore_pattern(path_of(relative).strip_prefix(root).unwrap(), is_directory)
+                .unwrap_or_else(|| panic!("{relative:?} has a pattern"));
+        let rules = crate::core::IgnoreRules::new(root, [&pattern]);
+
+        assert!(
+            rules.is_ignored(&path_of(relative), is_directory),
+            "{pattern:?} must hide {relative:?}"
+        );
+        if is_directory {
+            assert!(
+                rules.is_ignored(&path_of(relative).join("inside.txt"), false),
+                "{pattern:?} must hide what lies in {relative:?}"
+            );
+        }
+        for (other, other_is_directory) in others {
+            assert!(
+                !rules.is_ignored(&path_of(other), *other_is_directory),
+                "{pattern:?}, made for {relative:?}, must not hide {other:?}"
+            );
+        }
+    }
+
+    /// The pattern is anchored: it hides the entry whose button was pressed, not the
+    /// entries of the same name elsewhere in the project.
+    #[test]
+    fn test_pattern_of_an_entry_does_not_hide_its_namesakes() {
+        assert_pattern_hides_only(
+            ("README.md", FILE),
+            &[("sub/README.md", FILE), ("a/b/README.md", FILE)],
+        );
+        assert_pattern_hides_only(("docs", DIR), &[("src/docs", DIR), ("src/docs/x.md", FILE)]);
+        assert_pattern_hides_only(
+            ("src/gen", DIR),
+            &[("gen", DIR), ("other/src/gen", DIR), ("src/general", DIR)],
+        );
+    }
+
+    /// Wildcards in a name are taken literally.
+    #[test]
+    fn test_pattern_of_a_name_with_wildcards_hides_only_that_name() {
+        assert_pattern_hides_only(("a*b.txt", FILE), &[("aXb.txt", FILE), ("ab.txt", FILE)]);
+        assert_pattern_hides_only(("a?b.txt", FILE), &[("aXb.txt", FILE)]);
+        assert_pattern_hides_only(
+            ("**", FILE),
+            &[("other.txt", FILE), ("sub", DIR), ("sub/deep.txt", FILE)],
+        );
+        assert_pattern_hides_only(("**", DIR), &[("sub", DIR), ("sub/deep.txt", FILE)]);
+        assert_pattern_hides_only(
+            ("src/a*b/x?.rs", FILE),
+            &[("src/aXb/xy.rs", FILE), ("src/a*b/xy.rs", FILE)],
+        );
+    }
+
+    /// Brackets and braces in a name are neither a character class nor alternatives.
+    #[test]
+    fn test_pattern_of_a_name_with_brackets_or_braces_hides_only_that_name() {
+        assert_pattern_hides_only(("a[1].txt", FILE), &[("a1.txt", FILE)]);
+        assert_pattern_hides_only(("dir[x]", DIR), &[("dirx", DIR), ("dirx/f.txt", FILE)]);
+        assert_pattern_hides_only(("a]b", FILE), &[("ab", FILE)]);
+        assert_pattern_hides_only(("a{b,c}.txt", FILE), &[("ab.txt", FILE), ("ac.txt", FILE)]);
+        assert_pattern_hides_only(("{x}", DIR), &[("x", DIR)]);
+    }
+
+    /// A name that begins like a negation or a comment is a name.
+    #[test]
+    fn test_pattern_of_a_name_that_begins_with_a_bang_or_a_hash_hides_that_name() {
+        assert_pattern_hides_only(("!important", FILE), &[("important", FILE)]);
+        assert_pattern_hides_only(("!keep", DIR), &[("keep", DIR)]);
+        assert_pattern_hides_only(("#notes", FILE), &[("notes", FILE)]);
+        assert_pattern_hides_only(("src/!x", FILE), &[("src/x", FILE)]);
+    }
+
+    /// Spaces at the end of a name belong to the name.
+    #[test]
+    fn test_pattern_of_a_name_that_ends_with_spaces_hides_only_that_name() {
+        assert_pattern_hides_only(("trail ", FILE), &[("trail", FILE), ("trail  ", FILE)]);
+        assert_pattern_hides_only(("trail  ", FILE), &[("trail", FILE), ("trail ", FILE)]);
+        assert_pattern_hides_only(("dir ", DIR), &[("dir", DIR)]);
+        assert_pattern_hides_only(("sp /f.txt", FILE), &[("sp/f.txt", FILE)]);
+        assert_pattern_hides_only((" lead", FILE), &[("lead", FILE)]);
+        assert_eq!(
+            gitignore_pattern(Path::new("trail  "), false).as_deref(),
+            Some(r"/trail\ \ ")
+        );
+    }
+
+    /// A backslash in a name (not a separator on Unix) is that character, not an
+    /// escape of the one after it.
+    #[cfg(unix)]
+    #[test]
+    fn test_pattern_of_a_name_with_a_backslash_hides_only_that_name() {
+        assert_pattern_hides_only((r"back\slash", FILE), &[("backslash", FILE)]);
+        assert_pattern_hides_only((r"mid\dle/x", FILE), &[("middle/x", FILE)]);
+        assert_pattern_hides_only((r"end\", FILE), &[("end", FILE)]);
+        assert_pattern_hides_only((r"end\", DIR), &[("end", DIR)]);
+        assert_pattern_hides_only((r"a\*b", FILE), &[("a*b", FILE), (r"a\Xb", FILE)]);
     }
 
     /// The pattern of a nested directory removes that directory, and only it, from
@@ -1774,7 +1942,7 @@ mod tests {
 
         let state = harness.state.lock();
         assert!(
-            state.config.ignore_patterns.contains("src/gen/"),
+            state.config.ignore_patterns.contains("/src/gen/"),
             "{:?}",
             state.config.ignore_patterns
         );
@@ -1815,8 +1983,8 @@ mod tests {
 
         assert_eq!(harness.state_updates_sent(), 2);
         let state = harness.state.lock();
-        assert!(state.config.ignore_patterns.contains("build/"));
-        assert!(state.config.ignore_patterns.contains("notes"));
+        assert!(state.config.ignore_patterns.contains("/build/"));
+        assert!(state.config.ignore_patterns.contains("/notes"));
         assert!(state.full_file_list.is_empty());
     }
 

@@ -146,7 +146,9 @@ struct ListedEntry {
 /// the threads that look at the contents. The count keeps a batch small enough for
 /// those threads to start while the walk is still in its first directories and makes
 /// handing over cheap; the age makes sure that a slow walk (a network drive) delivers
-/// what it has found without waiting for a batch to fill up.
+/// what it has found without waiting for a batch to fill up. The age is watched by a
+/// thread of its own ([`hand_over_aged_batches`]), so a batch goes out in time even
+/// while the walk is stuck in a single slow directory listing.
 #[derive(Debug, Clone, Copy)]
 struct BatchLimits {
     max_items: usize,
@@ -267,7 +269,7 @@ fn classify_alongside<R>(
     cancel_flag: &AtomicBool,
     is_text: &(impl Fn(&Path) -> anyhow::Result<bool> + Sync),
     on_batch: &(dyn Fn(Vec<FileItem>) + Sync),
-    produce: impl FnOnce(&mut dyn FnMut(Vec<ListedEntry>)) -> R,
+    produce: impl FnOnce(&mut (dyn FnMut(Vec<ListedEntry>) + Send)) -> R,
 ) -> R {
     let in_order = InOrder::new(on_batch);
     // `in_place_scope`: `produce` stays on this thread, only the batches go to the pool.
@@ -288,7 +290,7 @@ fn hand_over_batches<'scope, R>(
     cancel_flag: &'scope AtomicBool,
     is_text: &'scope (impl Fn(&Path) -> anyhow::Result<bool> + Sync),
     in_order: &'scope InOrder<'scope>,
-    produce: impl FnOnce(&mut dyn FnMut(Vec<ListedEntry>)) -> R,
+    produce: impl FnOnce(&mut (dyn FnMut(Vec<ListedEntry>) + Send)) -> R,
 ) -> R {
     let mut handed_over = 0;
     produce(&mut |batch| {
@@ -385,26 +387,120 @@ fn stream_walker_results<F>(
 ) where
     F: Fn(ScanProgress),
 {
+    let max_age = settings.batch_limits.max_age;
     classify_alongside(settings.cancel_flag, &is_text_file, on_batch, |hand_over| {
-        walk_entries(walker, settings, progress_callback, hand_over)
+        let open_batch = Mutex::new(OpenBatch::new(settings.batch_limits, hand_over));
+        let walk_ended = WalkEnded::default();
+        std::thread::scope(|threads| {
+            // Signalled when the walk returns, also when it does so by panicking:
+            // the scope waits for the thread.
+            let _signal = walk_ended.signal_on_drop();
+            threads.spawn(|| hand_over_aged_batches(&open_batch, max_age, &walk_ended));
+            walk_entries(walker, settings, progress_callback, &open_batch);
+        });
     });
 }
 
+/// The batch the walk is filling, and where it goes when it is closed. Shared by the
+/// walk, which adds the entries, and the thread that watches the age of the batch.
+struct OpenBatch<'a> {
+    entries: Vec<ListedEntry>,
+    /// When the first entry of the batch was added.
+    opened: Instant,
+    limits: BatchLimits,
+    hand_over: &'a mut (dyn FnMut(Vec<ListedEntry>) + Send),
+}
+
+impl<'a> OpenBatch<'a> {
+    fn new(limits: BatchLimits, hand_over: &'a mut (dyn FnMut(Vec<ListedEntry>) + Send)) -> Self {
+        Self {
+            entries: Vec::with_capacity(limits.max_items),
+            opened: Instant::now(),
+            limits,
+            hand_over,
+        }
+    }
+
+    /// Adds an entry; a batch that is full by this is handed over.
+    fn push(&mut self, entry: ListedEntry) {
+        if self.entries.is_empty() {
+            self.opened = Instant::now();
+        }
+        self.entries.push(entry);
+        if self.entries.len() >= self.limits.max_items {
+            self.close();
+        }
+    }
+
+    /// Hands the batch over if it has been open for long enough.
+    fn close_if_aged(&mut self) {
+        if self.opened.elapsed() >= self.limits.max_age {
+            self.close();
+        }
+    }
+
+    /// Hands over what the batch holds (if anything) and starts the next one.
+    fn close(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let batch = std::mem::replace(&mut self.entries, Vec::with_capacity(self.limits.max_items));
+        (self.hand_over)(batch);
+    }
+}
+
+/// Tells the thread that watches the age of the open batch that the walk has ended.
+#[derive(Default)]
+struct WalkEnded {
+    ended: Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+impl WalkEnded {
+    /// A guard that raises the signal when it is dropped.
+    fn signal_on_drop(&self) -> impl Drop + '_ {
+        struct Signal<'a>(&'a WalkEnded);
+        impl Drop for Signal<'_> {
+            fn drop(&mut self) {
+                *lock(&self.0.ended) = true;
+                self.0.changed.notify_all();
+            }
+        }
+        Signal(self)
+    }
+}
+
+/// Hands over the open batch whenever it has reached `max_age`, until the walk has
+/// ended. Runs on a thread of its own beside the walk: the walk can only look at the
+/// age of its batch between two entries, and on a slow file system it may wait for a
+/// single directory listing for a long time with entries in hand.
+///
+/// It looks twice per `max_age`, so a batch leaves at most half of that late.
+fn hand_over_aged_batches(open_batch: &Mutex<OpenBatch>, max_age: Duration, walk: &WalkEnded) {
+    let mut ended = lock(&walk.ended);
+    while !*ended {
+        ended = walk
+            .changed
+            .wait_timeout(ended, max_age / 2)
+            .map_or_else(|poisoned| poisoned.into_inner().0, |(guard, _)| guard);
+        if !*ended {
+            lock(open_batch).close_if_aged();
+        }
+    }
+}
+
 /// The loop of a scan: lists the entries of `walker` in its order, reports the
-/// progress and stops when the scan is cancelled. The entries are passed to
-/// `hand_over` in batches (see [`BatchLimits`]); `FileItem::is_binary` is left
-/// `false` here.
+/// progress and stops when the scan is cancelled. The entries are added to
+/// `open_batch`, which hands them over in batches (see [`BatchLimits`]);
+/// `FileItem::is_binary` is left `false` here.
 fn walk_entries<F>(
     walker: impl Iterator<Item = Result<ignore::DirEntry, ignore::Error>>,
     settings: &WalkSettings,
     progress_callback: F,
-    hand_over: &mut dyn FnMut(Vec<ListedEntry>),
+    open_batch: &Mutex<OpenBatch>,
 ) where
     F: Fn(ScanProgress),
 {
-    let limits = settings.batch_limits;
-    let mut batch: Vec<ListedEntry> = Vec::with_capacity(limits.max_items);
-    let mut batch_opened = Instant::now();
     let mut large_files_skipped = 0;
     let mut files_scanned = 0;
     let mut last_update = Instant::now();
@@ -413,15 +509,6 @@ fn walk_entries<F>(
         if settings.cancel_flag.load(Ordering::SeqCst) {
             // What has not been handed over yet is not going to be looked at either.
             return;
-        }
-
-        // A batch that has been open for long enough goes out before the next entry
-        // is dealt with, however few entries it holds.
-        if !batch.is_empty() && batch_opened.elapsed() >= limits.max_age {
-            hand_over(std::mem::replace(
-                &mut batch,
-                Vec::with_capacity(limits.max_items),
-            ));
         }
 
         let entry = match result {
@@ -476,10 +563,7 @@ fn walk_entries<F>(
             continue;
         }
 
-        if batch.is_empty() {
-            batch_opened = Instant::now();
-        }
-        batch.push(ListedEntry {
+        lock(open_batch).push(ListedEntry {
             item: FileItem {
                 path: entry.path().to_path_buf(),
                 is_directory: metadata.is_dir(),
@@ -491,16 +575,8 @@ fn walk_entries<F>(
             },
             kind: ContentKind::of(&metadata),
         });
-        if batch.len() >= limits.max_items {
-            hand_over(std::mem::replace(
-                &mut batch,
-                Vec::with_capacity(limits.max_items),
-            ));
-        }
     }
-    if !batch.is_empty() {
-        hand_over(batch);
-    }
+    lock(open_batch).close();
 }
 
 impl DirectoryScanner {
@@ -1342,7 +1418,7 @@ mod tests {
     async fn lazy_level_of_subdirectory_equals_same_level_of_full_scan() {
         setup_test_logging();
         let (_temp_dir, root) = setup_project_with_ignored_entries_in_subdirectory();
-        let scanner = DirectoryScanner::new(HashSet::from(["src/generated/".to_string()]));
+        let scanner = DirectoryScanner::new(HashSet::from(["/src/generated/".to_string()]));
         let no_cancel = || Arc::new(AtomicBool::new(false));
 
         let (full, _) = scanner
@@ -1380,7 +1456,7 @@ mod tests {
     async fn lazy_level_hides_entries_ignored_relative_to_project_root() {
         setup_test_logging();
         let (_temp_dir, root) = setup_project_with_ignored_entries_in_subdirectory();
-        let pattern = "src/generated/".to_string();
+        let pattern = "/src/generated/".to_string();
         let scanner = DirectoryScanner::new(HashSet::from([pattern.clone()]));
 
         let (items, active_patterns) = scanner
@@ -1799,6 +1875,46 @@ mod tests {
             .collect();
         let expected: Vec<String> = (0..25).map(|file| format!("file_{file:03}.txt")).collect();
         assert_eq!(names, expected);
+    }
+
+    /// A batch that has reached the configured age is delivered while the walk is
+    /// still waiting for its next entry (a slow directory listing): the walk below
+    /// only goes on once the entries it has listed so far have arrived.
+    #[test]
+    fn test_an_aged_batch_is_delivered_while_the_walk_is_stuck() {
+        let project = flat_project(6);
+        let cancel_flag = AtomicBool::new(false);
+        let limits = BatchLimits {
+            max_items: 1000,
+            max_age: Duration::from_millis(20),
+        };
+        let (delivered_tx, delivered_rx) = std::sync::mpsc::channel();
+        let batches = Mutex::new(Vec::new());
+        // The walk hangs before its fourth file (the root comes first).
+        let mut seen = 0;
+        let mut delivered_while_stuck = None;
+        let walker = observing_each_entry(sorted_walk(project.path()), |_| {
+            seen += 1;
+            if seen == 5 {
+                delivered_while_stuck = delivered_rx.recv_timeout(Duration::from_secs(30)).ok();
+            }
+        });
+
+        stream_walker_results(
+            walker,
+            &walk_settings(&cancel_flag, limits),
+            |_| {},
+            &|batch: Vec<FileItem>| {
+                let _ = delivered_tx.send(batch.len());
+                batches.lock().unwrap().push(batch);
+            },
+        );
+
+        assert!(
+            delivered_while_stuck.is_some_and(|size| (1..=3).contains(&size)),
+            "{delivered_while_stuck:?}"
+        );
+        assert_eq!(batches.into_inner().unwrap().concat().len(), 6);
     }
 
     /// A batch that has been open for longer than the configured age is handed over

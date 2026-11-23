@@ -384,6 +384,12 @@ pub struct AppState {
     /// Set while the walk of the current scan fills the file list, see
     /// [`AppState::merge_scanned_items`].
     ahead_of_walk: Option<AheadOfWalk>,
+    /// The levels that were loaded lazily between the beginning of a re-scan and the
+    /// publication of its first level, which replaces the list they were merged
+    /// into. They belong to the list of the new scan and are entered into it again
+    /// ([`AppState::replace_with_shallow_file_list`]). `None` when no scan is in
+    /// that phase.
+    levels_before_walk: Option<Vec<(PathBuf, Vec<FileItem>)>>,
     /// Set while the current scan has not yet found the path it is to open.
     opening: Option<PendingOpen>,
     /// The content generation that is currently in progress, if any.
@@ -439,6 +445,7 @@ impl AppState {
             lazy_load_cancel_flag: Arc::new(AtomicBool::new(false)),
             scan: RunSlot::default(),
             ahead_of_walk: None,
+            levels_before_walk: None,
             opening: None,
             generation: RunSlot::default(),
             content_search: RunSlot::default(),
@@ -464,6 +471,7 @@ impl AppState {
         self.invalidate_file_list();
         self.opening = None;
         self.ahead_of_walk = None;
+        self.levels_before_walk = Some(Vec::new());
         self.scan_progress = no_scan_progress();
         ScanToken(self.scan.begin())
     }
@@ -492,6 +500,7 @@ impl AppState {
     fn register_open(&mut self, pending: PendingOpen) -> ScanToken {
         self.opening = Some(pending);
         self.ahead_of_walk = None;
+        self.levels_before_walk = None;
         self.scan_progress = no_scan_progress();
         ScanToken(self.scan.begin())
     }
@@ -594,6 +603,7 @@ impl AppState {
         }
         self.opening = None;
         self.ahead_of_walk = None;
+        self.levels_before_walk = None;
         // The counters stay as the result of the scan; it works on no path any more.
         self.scan_progress.current_scanning_path.clear();
         true
@@ -611,6 +621,7 @@ impl AppState {
 
         self.opening = None;
         self.ahead_of_walk = None;
+        self.levels_before_walk = None;
         self.scan_progress = no_scan_progress();
         self.status = StatusNotice::ScanCancelled;
         tracing::info!("Scan cancelled.");
@@ -857,7 +868,11 @@ impl AppState {
     /// The list then holds a single level, so `root` is the only directory whose
     /// children are loaded; whatever was loaded in the list before is forgotten.
     ///
-    /// The walk of the whole project that follows lists this level again; the items
+    /// The one exception are the levels the user asked for since this scan began
+    /// (a directory expanded right after a re-scan was started): they were listed
+    /// for the list of this scan and stay loaded.
+    ///
+    /// The walk of the whole project that follows lists all of this again; the items
     /// are remembered as being ahead of it, see [`AppState::merge_scanned_items`].
     pub fn replace_with_shallow_file_list(&mut self, root: &std::path::Path, files: Vec<FileItem>) {
         let mut ahead_of_walk = AheadOfWalk::default();
@@ -867,6 +882,9 @@ impl AppState {
         self.ahead_of_walk = Some(ahead_of_walk);
         self.full_file_list = files;
         self.loaded_dirs = HashSet::from([root.to_path_buf()]);
+        for (directory, items) in self.levels_before_walk.take().unwrap_or_default() {
+            self.add_directory_level(&directory, items);
+        }
     }
 
     /// Adds `items`, which the walk of the scan identified by `token` has listed, to
@@ -958,8 +976,20 @@ impl AppState {
         if !self.is_current_lazy_load(token) {
             return false;
         }
-        self.loaded_dirs.insert(directory.to_path_buf());
         self.active_ignore_patterns.extend(active_patterns);
+        // The list this goes into is about to be replaced by the first level of the
+        // scan that has begun; the level is entered into that list again.
+        if let Some(levels) = self.levels_before_walk.as_mut() {
+            levels.push((directory.to_path_buf(), items.clone()));
+        }
+        self.add_directory_level(directory, items);
+        true
+    }
+
+    /// Enters `items`, the content of `directory`, into the file list (unless they
+    /// are there) and marks the directory as loaded.
+    fn add_directory_level(&mut self, directory: &Path, items: Vec<FileItem>) {
+        self.loaded_dirs.insert(directory.to_path_buf());
 
         let new_paths: HashSet<&Path> = items.iter().map(|item| item.path.as_path()).collect();
         let already_listed: HashSet<PathBuf> = self
@@ -978,7 +1008,6 @@ impl AppState {
             }
             self.full_file_list.push(item);
         }
-        true
     }
 
     /// Makes `files` the complete content of the project: every directory in it is loaded.
@@ -1055,6 +1084,7 @@ impl AppState {
         self.cancel_current_generation();
         self.invalidate_file_list();
         self.ahead_of_walk = None;
+        self.levels_before_walk = None;
 
         self.current_path = String::new();
         self.full_file_list.clear();
@@ -1430,6 +1460,74 @@ mod tests {
             HashSet::from(["walk".to_string()])
         );
         assert!(state.is_fully_scanned);
+    }
+
+    /// A re-scan is started and the user expands a directory before the first level
+    /// of the scan is there: the level that was loaded for the new scan survives the
+    /// replacement of the list, and the walk does not list it twice.
+    #[test]
+    fn test_a_level_loaded_before_the_first_level_of_a_rescan_is_kept() {
+        let mut state = AppState {
+            current_path: "/p".to_string(),
+            ..AppState::default()
+        };
+        state.replace_with_complete_file_list(vec![
+            scanned_dir("/p/a"),
+            scanned_file("/p/a/old.txt"),
+        ]);
+        let before_the_rescan = state.begin_lazy_load();
+        let token = state.begin_scan();
+        let lazy = state.begin_lazy_load();
+        assert!(!state.merge_directory_level(
+            &before_the_rescan,
+            Path::new("/p/a"),
+            vec![scanned_file("/p/a/stale.txt")],
+            HashSet::new(),
+        ));
+        assert!(state.merge_directory_level(
+            &lazy,
+            Path::new("/p/a"),
+            vec![scanned_file("/p/a/x.txt")],
+            HashSet::new(),
+        ));
+
+        state.replace_with_shallow_file_list(Path::new("/p"), vec![scanned_dir("/p/a")]);
+
+        assert_eq!(listed_paths(&state), ["/p/a", "/p/a/x.txt"]);
+        assert!(state.loaded_dirs.contains(Path::new("/p/a")));
+
+        // The walk confirms the level; a level loaded from here on is merged directly.
+        state.merge_scanned_items(
+            &token,
+            vec![scanned_dir("/p/a"), scanned_file("/p/a/x.txt")],
+        );
+        state.complete_scanned_file_list(&token, HashSet::new());
+        assert_eq!(listed_paths(&state), ["/p/a", "/p/a/x.txt"]);
+    }
+
+    /// Only the scan that has begun keeps levels for its list: a cancelled scan, or
+    /// the opening of another directory, leaves nothing behind for a later scan.
+    #[test]
+    fn test_levels_are_not_kept_beyond_the_scan_they_were_loaded_for() {
+        let mut state = AppState {
+            current_path: "/p".to_string(),
+            ..AppState::default()
+        };
+        let _cancelled = state.begin_scan();
+        let lazy = state.begin_lazy_load();
+        state.merge_directory_level(
+            &lazy,
+            Path::new("/p/a"),
+            vec![scanned_file("/p/a/x.txt")],
+            HashSet::new(),
+        );
+        state.cancel_current_scan();
+
+        let _next = state.begin_scan();
+        state.replace_with_shallow_file_list(Path::new("/p"), vec![scanned_dir("/p/a")]);
+
+        assert_eq!(listed_paths(&state), ["/p/a"]);
+        assert!(!state.loaded_dirs.contains(Path::new("/p/a")));
     }
 
     #[test]
