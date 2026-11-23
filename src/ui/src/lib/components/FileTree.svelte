@@ -626,6 +626,9 @@
     e.preventDefault();
     if (focusLookupIsOpen()) {
       // The focus is about to move: the key belongs to where it will be.
+      // Not Delete: it acts on a row the user sees, and nobody has seen
+      // yet where the focus will be. It is dropped.
+      if (e.key === "Delete") return;
       if (keysAfterLookup.length < 8) {
         keysAfterLookup.push({ key: e.key, at: Date.now() });
       }

@@ -308,6 +308,25 @@ test.describe("with a host that takes its time to answer", () => {
     await expect(rowAt(page, LAST_ROW - 1)).toBeInViewport();
   });
 
+  test("typing, then Delete: nothing is ignored before the match is seen", async ({
+    page,
+  }) => {
+    // The host is held: the Delete comes while it is looking, for certain.
+    await holdHost(page);
+    await page.keyboard.type("ze");
+    await page.keyboard.press("Delete");
+    await releaseHost(page);
+
+    await expect(rowAt(page, LAST_ROW)).toBeFocused();
+    await expect(page.locator(".tree")).toHaveAttribute("aria-busy", "false");
+    expect(await posted(page, "addIgnorePath")).toEqual([]);
+
+    await page.keyboard.press("Delete");
+    expect(await posted(page, "addIgnorePath")).toEqual([
+      { command: "addIgnorePath", payload: "/repo/zebra.md" },
+    ]);
+  });
+
   test("placeholders take exactly the place of the rows", async ({ page }) => {
     const tree = page.locator(".tree");
     // The placeholders stay for as long as the host is held.

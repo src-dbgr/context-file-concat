@@ -541,6 +541,29 @@ describe("FileTree – keyboard across the edge of the window", () => {
     );
   });
 
+  it("Delete pressed while the host looks for a typed name is dropped", async () => {
+    const rows = rowsOf([
+      ...Array.from({ length: 400 }, (_, i) =>
+        file(`/repo/file-${String(i).padStart(5, "0")}.txt`),
+      ),
+      file("/repo/zebra.txt"),
+    ]);
+    const { host, tree, container } = await mountFocused(rows);
+
+    await fireEvent.keyDown(tree, { key: "z" });
+    await fireEvent.keyDown(tree, { key: "e" });
+    await fireEvent.keyDown(tree, { key: "Delete" });
+    await answerAll(host);
+
+    // The focus is on the match; neither it nor the row before is ignored.
+    expect(focusedRow(container)).toBe(400);
+    expect(host.posted("addIgnorePath")).toEqual([]);
+
+    // Now the row is seen and has the focus: the key acts.
+    await fireEvent.keyDown(rowEl(container, 400), { key: "Delete" });
+    expect(host.posted("addIgnorePath")).toEqual(["/repo/zebra.txt"]);
+  });
+
   describe("keys pressed while the host looks for a row", () => {
     const withZebra = () =>
       rowsOf([
